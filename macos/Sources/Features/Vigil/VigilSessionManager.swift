@@ -80,6 +80,9 @@ class VigilSessionManager {
         var layout: Layout?
         /// Manual overview ordering (drag & drop); lower first.
         var order: Int = 0
+        /// A buried ephemeral window (no session identity): exhumes to a
+        /// plain window, never persisted. Runtime-only.
+        var ephemeral: Bool = false
         /// Live for embedded (refreshed on overview open), frozen at the
         /// moment of detach for detached. Runtime-only.
         var thumbnail: NSImage?
@@ -689,9 +692,57 @@ class VigilSessionManager {
     func exhume(_ name: String) {
         guard let session = graveyard.removeValue(forKey: name) else { return }
         graveyardDeadlines[name] = nil
+        if session.ephemeral {
+            if case .detached(let tree) = session.state, let ghostty = ghosttyApp {
+                becomeRegular()
+                _ = TerminalController.newWindow(ghostty, tree: tree, confirmUndo: false)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            return
+        }
         sessions[name] = session
         persist()
         open(name: name)
+    }
+
+    /// Ephemeral windows get the same courtesy as sessions: kill holds the
+    /// live tree buried for the grace, undo brings the window back intact.
+    /// Runtime-only: an app death kills their processes regardless.
+    private var closedCounter = 0
+    func killEphemeral(_ controller: TerminalController) {
+        let tree = controller.surfaceTree
+        guard !tree.isEmpty else {
+            killController(controller)
+            return
+        }
+        let surface = controller.focusedSurface ?? tree.root?.leftmostLeaf()
+        let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
+        let cwd = surface?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+        closedCounter += 1
+        let name = "closed-\(closedCounter)"
+        killController(controller)
+
+        var session = Session(
+            name: name,
+            label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
+            cwd: cwd,
+            state: .detached(tree))
+        session.ephemeral = true
+        graveyard[name] = session
+        graveyardDeadlines[name] = Date().addingTimeInterval(Self.killGrace)
+
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.undoManager.registerUndo(
+                withTarget: self,
+                expiresAfter: .seconds(Int64(Self.killGrace))
+            ) { manager in
+                manager.exhume(name)
+            }
+            appDelegate.undoManager.setActionName("Close Window")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.killGrace + 1) { [weak self] in
+            self?.reapIfExpired(name)
+        }
     }
 
     /// The grace ran out: now the kill actually happens. Dropping the
@@ -876,7 +927,7 @@ class VigilSessionManager {
         var entries = sessions.values.map {
             PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order, buriedUntil: nil)
         }
-        entries += graveyard.values.map {
+        entries += graveyard.values.filter { !$0.ephemeral }.map {
             PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order, buriedUntil: graveyardDeadlines[$0.name])
         }
         entries.sort { $0.name < $1.name }

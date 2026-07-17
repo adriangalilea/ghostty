@@ -296,7 +296,7 @@ class VigilOverview: NSObject {
         if entry.persistent {
             manager.kill(name: entry.name)
         } else if case .embedded(let controller) = entry.state {
-            manager.killController(controller)
+            manager.killEphemeral(controller)
         }
         model.entries = buildEntries()
         guard !model.entries.isEmpty else { hide(); return }
