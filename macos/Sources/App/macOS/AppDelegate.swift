@@ -1162,6 +1162,7 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "close_all_windows", menuItem: self.menuCloseAllWindows)
         if let vigil = vigilStatusItem {
             syncMenuShortcut(config, action: "vigil_next", menuItem: vigil.menuNext)
+            syncMenuShortcut(config, action: "vigil_overview", menuItem: vigil.menuOverview)
             syncMenuShortcut(config, action: "vigil_new_session", menuItem: vigil.menuNewSession)
             syncMenuShortcut(config, action: "vigil_detach_window", menuItem: vigil.menuDetach)
         }

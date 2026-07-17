@@ -12,6 +12,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     /// `vigil_*` keybind actions) via AppDelegate.syncMenuShortcuts, never
     /// hardcoded: the user binds them, so conflicts are impossible here.
     let menuNext = NSMenuItem(title: "Next", action: #selector(nextSession(_:)), keyEquivalent: "")
+    let menuOverview = NSMenuItem(title: "Overview", action: #selector(overview(_:)), keyEquivalent: "")
     let menuNewSession = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
     let menuAdopt = NSMenuItem(title: "Adopt Front Window", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
     let menuDetach = NSMenuItem(title: "Detach Front Window", action: #selector(detachFrontWindow(_:)), keyEquivalent: "")
@@ -44,7 +45,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         guard let mainMenu = NSApp.mainMenu else { return }
 
         let menu = NSMenu(title: "Sessions")
-        for item in [menuNext, .separator(), menuNewSession, menuAdopt, menuDetach] {
+        for item in [menuNext, menuOverview, .separator(), menuNewSession, menuAdopt, menuDetach] {
             item.target = self
             menu.addItem(item)
         }
@@ -142,6 +143,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func nextSession(_ sender: NSMenuItem) {
         VigilSessionManager.shared.next()
+    }
+
+    @objc private func overview(_ sender: NSMenuItem) {
+        VigilOverview.shared.toggle()
     }
 
     @objc private func openSession(_ sender: NSMenuItem) {

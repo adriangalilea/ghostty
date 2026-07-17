@@ -727,6 +727,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Create a new named workspace session.",
         }},
 
+        .vigil_overview => comptime &.{.{
+            .action = .vigil_overview,
+            .title = "Sessions Overview",
+            .description = "Switcher with live thumbnails of every session.",
+        }},
+
         // No commands because I'm not sure they make sense in a command
         // palette context.
         .toggle_command_palette,

@@ -607,6 +607,9 @@ extension Ghostty {
                             ?? FileManager.default.homeDirectoryForCurrentUser.path)
                 }
 
+            case GHOSTTY_ACTION_VIGIL_OVERVIEW:
+                MainActor.assumeIsolated { VigilOverview.shared.toggle() }
+
             case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
                 toggleVisibility(app, target: target)
 

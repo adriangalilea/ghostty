@@ -431,6 +431,7 @@ pub fn performAction(
         .vigil_next => _ = try rt_app.performAction(.app, .vigil_next, {}),
         .vigil_detach_window => _ = try rt_app.performAction(.app, .vigil_detach_window, {}),
         .vigil_new_session => _ = try rt_app.performAction(.app, .vigil_new_session, {}),
+        .vigil_overview => _ = try rt_app.performAction(.app, .vigil_overview, {}),
         .toggle_visibility => _ = try rt_app.performAction(.app, .toggle_visibility, {}),
         .check_for_updates => _ = try rt_app.performAction(.app, .check_for_updates, {}),
         .show_gtk_inspector => _ = try rt_app.performAction(.app, .show_gtk_inspector, {}),

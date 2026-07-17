@@ -46,6 +46,9 @@ class VigilSessionManager {
         var state: State
         var attention: Attention = .none
         var attentionSince: Date?
+        /// Live for embedded (refreshed on overview open), frozen at the
+        /// moment of detach for detached. Runtime-only.
+        var thumbnail: NSImage?
     }
 
     private(set) var sessions: [String: Session] = [:]
@@ -228,9 +231,22 @@ class VigilSessionManager {
         guard let session = sessions[name], case .embedded(let controller) = session.state else { return }
         let tree = controller.surfaceTree
         if let pwd = controller.focusedSurface?.pwd { sessions[name]!.cwd = pwd }
+        // Freeze the visual: the overview shows what the workspace looked
+        // like at the moment it was released.
+        sessions[name]!.thumbnail = (controller.focusedSurface ?? tree.root?.leftmostLeaf())?.asImage
         sessions[name]!.state = .detached(tree)
         controller.surfaceTree = SplitTree()
         persist()
+    }
+
+    /// Refresh live thumbnails for embedded sessions (overview open path).
+    func refreshThumbnails() {
+        for (name, session) in sessions {
+            if case .embedded(let controller) = session.state {
+                let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
+                if let image = surface?.asImage { sessions[name]!.thumbnail = image }
+            }
+        }
     }
 
     /// Open: focus if embedded, re-embed if detached, resurrect if asleep.

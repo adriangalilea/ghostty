@@ -861,6 +861,10 @@ pub const Action = union(enum) {
     /// the session identity from birth).
     vigil_new_session,
 
+    /// vigil: toggle the sessions overview, a switcher with live thumbnails
+    /// of every session (embedded, detached and asleep).
+    vigil_overview,
+
     /// Show or hide all windows. If all windows become shown, we also ensure
     /// Ghostty becomes focused. When hiding all windows, focus is yielded
     /// to the next application as determined by the OS.
@@ -1356,6 +1360,7 @@ pub const Action = union(enum) {
             .vigil_next,
             .vigil_detach_window,
             .vigil_new_session,
+            .vigil_overview,
             .toggle_visibility,
             .check_for_updates,
             .show_gtk_inspector,
