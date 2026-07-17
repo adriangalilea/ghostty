@@ -246,8 +246,10 @@ class VigilSessionManager {
         let tree = controller.surfaceTree
         if let pwd = controller.focusedSurface?.pwd { sessions[name]!.cwd = pwd }
         // Freeze the visual: the overview shows what the workspace looked
-        // like at the moment it was released.
-        sessions[name]!.thumbnail = (controller.focusedSurface ?? tree.root?.leftmostLeaf())?.asImage
+        // like at the moment it was released. The WHOLE window content: a
+        // workspace is its splits, one pane is a lie.
+        sessions[name]!.thumbnail = Self.windowSnapshot(controller)
+            ?? (controller.focusedSurface ?? tree.root?.leftmostLeaf())?.asImage
         sessions[name]!.panes = capturePanes(tree)
         linkClaudes(name: name, tree: tree)
         sessions[name]!.state = .detached(tree)
@@ -319,10 +321,22 @@ class VigilSessionManager {
     func refreshThumbnails() {
         for (name, session) in sessions {
             if case .embedded(let controller) = session.state {
-                let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
-                if let image = surface?.asImage { sessions[name]!.thumbnail = image }
+                if let image = Self.windowSnapshot(controller) {
+                    sessions[name]!.thumbnail = image
+                }
             }
         }
+    }
+
+    /// The full window content composited (every split), not a single pane.
+    private static func windowSnapshot(_ controller: TerminalController) -> NSImage? {
+        guard let view = controller.window?.contentView else { return nil }
+        guard view.bounds.width > 0, view.bounds.height > 0 else { return nil }
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let image = NSImage(size: view.bounds.size)
+        image.addRepresentation(rep)
+        return image
     }
 
     /// Open: focus if embedded, re-embed if detached, resurrect if asleep.
