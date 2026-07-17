@@ -6,11 +6,13 @@ import SwiftUI
 /// state. Native titlebar accessory, so it composes with tabs and any
 /// titlebar theming instead of fighting it.
 ///
-/// The pill's COLOR is the survival class, mirrored by the window border:
+/// The pill's COLOR is the survival class, mirrored by the window border,
+/// and the palette is COLD ON PURPOSE (persisted = preserved, frozen):
 /// teal = every pane lives in a daemon, the session survives the app
-/// dying; orange = capture+resume class, processes die with the app
-/// (content and claude come back on resurrection). Clicking an orange
-/// pill upgrades the whole window into daemons in place.
+/// dying; icy cyan = capture+resume class, processes die with the app
+/// (content and claude come back on resurrection). Clicking an icy pill
+/// upgrades the whole window into daemons in place. Warm colors are for
+/// what actually dies: the overview marks ephemeral windows orange.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
 struct VigilWindowMark: View {
@@ -18,7 +20,7 @@ struct VigilWindowMark: View {
     let daemonBacked: Bool
     var onUpgrade: (() -> Void)?
 
-    private var color: Color { daemonBacked ? .teal : .orange }
+    private var color: Color { daemonBacked ? .teal : .cyan }
 
     var body: some View {
         HStack(spacing: 4) {

@@ -510,10 +510,10 @@ struct OverviewView: View {
                 chip(entry.stateWord, entry.stateColor)
                 if entry.persistent {
                     chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
-                         entry.daemonBacked ? .teal : .orange,
+                         entry.daemonBacked ? .teal : .cyan,
                          icon: entry.daemonBacked ? "eye.fill" : "eye")
                 } else {
-                    chip("ephemeral", .secondary)
+                    chip("ephemeral", .orange)
                 }
             }
         }
@@ -575,10 +575,10 @@ struct OverviewView: View {
                         chip(entry.stateWord, entry.stateColor)
                         if entry.persistent {
                             chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
-                                 entry.daemonBacked ? .teal : .orange,
+                                 entry.daemonBacked ? .teal : .cyan,
                                  icon: entry.daemonBacked ? "eye.fill" : "eye")
                         } else {
-                            chip("ephemeral", .secondary)
+                            chip("ephemeral", .orange)
                         }
                     }
                 }

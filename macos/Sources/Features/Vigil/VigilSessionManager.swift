@@ -1340,8 +1340,8 @@ class VigilSessionManager {
     }
 
     /// The survival class on the window itself: a thin content border in
-    /// the pill's color (teal = daemon-backed, orange = capture+resume),
-    /// none for ephemeral windows (absence is the state).
+    /// the pill's color (teal = daemon-backed, icy cyan = capture+resume;
+    /// cold = preserved), none for ephemeral windows (absence is the state).
     private func syncBorder(_ window: NSWindow, daemonBacked: Bool?) {
         guard let content = window.contentView else { return }
         content.wantsLayer = true
@@ -1351,7 +1351,7 @@ class VigilSessionManager {
             return
         }
         layer.borderWidth = 2
-        layer.borderColor = (daemonBacked ? NSColor.systemTeal : NSColor.systemOrange)
+        layer.borderColor = (daemonBacked ? NSColor.systemTeal : NSColor.systemCyan)
             .withAlphaComponent(0.55).cgColor
     }
 
