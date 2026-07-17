@@ -248,6 +248,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func adoptFrontWindow(_ sender: NSMenuItem) {
         guard let controller = TerminalController.preferredParent else { return }
-        VigilSessionManager.shared.adopt(controller: controller)
+        VigilSessionManager.shared.persistFully(controller: controller)
     }
 }

@@ -1166,10 +1166,22 @@ class VigilSessionManager {
         }
     }
 
-    /// One-gesture detach for any window: adopts first when needed.
+    /// Persistent MEANS survives everything: adopt + move every pane into
+    /// daemons, one gesture. Two modes only (Adrian 2026-07-18): ephemeral
+    /// or persistent, and persistent always reboots; the capture+resume
+    /// middle class survives only as a fallback state (legacy sessions, a
+    /// pane whose upgrade failed), never as a destination.
+    @discardableResult
+    func persistFully(controller: TerminalController) -> String {
+        let name = adopt(controller: controller)
+        upgrade(name: name)
+        return name
+    }
+
+    /// One-gesture detach for any window: persists first when needed.
     func detachFrontWindow() {
         guard let controller = TerminalController.preferredParent else { return }
-        let name = sessionName(of: controller) ?? adopt(controller: controller)
+        let name = sessionName(of: controller) ?? persistFully(controller: controller)
         detach(name: name)
     }
 

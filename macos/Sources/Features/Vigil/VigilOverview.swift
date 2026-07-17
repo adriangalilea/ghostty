@@ -94,7 +94,8 @@ class VigilOverview: NSObject {
             model: model,
             cardSize: cardSize,
             peekSize: peekSize,
-            onReorder: { [weak self] in self?.persistOrder() }
+            onReorder: { [weak self] in self?.persistOrder() },
+            onClose: { [weak self] in self?.hide() }
         ) { [weak self] entry in
             self?.openAndHide(entry)
         }
@@ -187,25 +188,6 @@ class VigilOverview: NSObject {
                     VigilSessionManager.shared.create(cwd: cwd)
                     return nil
                 case 35: self.togglePersistSelected(); return nil // p
-                case 32: // u: move every pane into a daemon, in place
-                    if let entry = self.model.selected, entry.upgradable {
-                        VigilSessionManager.shared.upgrade(name: entry.name)
-                        let keep = self.model.selection
-                        self.model.entries = self.buildEntries()
-                        self.model.selection = min(keep, self.model.entries.count - 1)
-                        self.refit()
-                        // The fresh daemon panes are still booting; snapshot
-                        // again once they have replayed their content.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                            MainActor.assumeIsolated {
-                                guard self.panel != nil, !self.modalActive else { return }
-                                let selection = self.model.selection
-                                self.model.entries = self.buildEntries()
-                                self.model.selection = min(selection, max(self.model.entries.count - 1, 0))
-                            }
-                        }
-                    }
-                    return nil
                 case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
                 case 51: self.removeSelected(); return nil // backspace
                 case 53: // esc: leave the peek first, close second
@@ -268,9 +250,10 @@ class VigilOverview: NSObject {
         }
     }
 
-    /// p on a live window flips ephemeral <-> persistent in place. Detached
-    /// and asleep are persistent by definition (there is no window to hand
-    /// back); removing them is backspace's job.
+    /// p on a live window flips ephemeral <-> persistent in place, and
+    /// persistent MEANS survives everything: the panes move into daemons
+    /// on the spot. Detached and asleep are persistent by definition
+    /// (there is no window to hand back); removing them is backspace's job.
     private func togglePersistSelected() {
         guard let entry = model.selected else { return }
         guard case .embedded(let controller) = entry.state else { return }
@@ -278,7 +261,17 @@ class VigilOverview: NSObject {
         if entry.persistent {
             manager.forget(name: entry.name)
         } else {
-            manager.adopt(controller: controller)
+            manager.persistFully(controller: controller)
+            // The fresh daemon panes are still booting; snapshot again once
+            // they have replayed their content.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                MainActor.assumeIsolated {
+                    guard self.panel != nil, !self.modalActive else { return }
+                    let selection = self.model.selection
+                    self.model.entries = self.buildEntries()
+                    self.model.selection = min(selection, max(self.model.entries.count - 1, 0))
+                }
+            }
         }
         let keep = model.selection
         model.entries = buildEntries()
@@ -377,13 +370,10 @@ struct OverviewEntry: Identifiable {
 
     var id: String { name }
 
-    /// A live persistent window whose panes can move into daemons now.
-    var upgradable: Bool {
-        guard persistent, !daemonBacked, case .embedded = state else { return false }
-        return true
-    }
-
     /// Words, not glyphs: the overview must be readable with zero vocabulary.
+    /// State-dependent verbs live in the kill CONFIRMATION, never in the
+    /// hint bar: the bar is constant so the layout never shifts under the
+    /// moving selection.
     var stateWord: String {
         switch state {
         case .embedded: return "live"
@@ -402,15 +392,7 @@ struct OverviewEntry: Identifiable {
         }
     }
 
-    /// State-honest verbs for the hint bar and the confirmation.
-    var openVerb: String {
-        switch state {
-        case .embedded, .floating: return "focus"
-        case .detached: return "open"
-        case .asleep: return "resurrect"
-        }
-    }
-
+    /// State-honest verb for the kill confirmation.
     var removeVerb: String {
         switch state {
         case .embedded: return persistent ? "kill" : "close"
@@ -419,10 +401,6 @@ struct OverviewEntry: Identifiable {
         }
     }
 
-    var persistVerb: String? {
-        guard case .embedded = state else { return nil }
-        return persistent ? "make ephemeral" : "make persistent"
-    }
 }
 
 @MainActor
@@ -457,6 +435,7 @@ struct OverviewView: View {
     let cardSize: CGSize
     let peekSize: CGSize
     let onReorder: () -> Void
+    let onClose: () -> Void
     let onOpen: (OverviewEntry) -> Void
 
     var body: some View {
@@ -466,25 +445,16 @@ struct OverviewView: View {
             } else {
                 grid
             }
-            // Affordances always on view: the verbs are state-honest for the
-            // selected card, so the bar doubles as a state readout.
-            if let selected = model.selected {
-                HStack(spacing: 18) {
-                    hint("←→↑↓", "move")
-                    hint("⏎", selected.openVerb)
-                    hint("space", model.zoomed ? "grid" : "peek")
-                    hint("n", "new session")
-                    if let verb = selected.persistVerb {
-                        hint("p", verb)
-                    }
-                    if selected.upgradable {
-                        hint("u", "upgrade: survive quit")
-                    }
-                    hint("⌫", selected.removeVerb)
-                    if let undoKey = model.undoKey {
-                        hint(undoKey, "undo kill")
-                    }
-                    hint("esc", model.zoomed ? "grid" : "close")
+            // Constant affordances: nothing here depends on the selection,
+            // so the bar never shifts the layout while you move. The
+            // state-honest verbs live in the kill confirmation.
+            HStack(spacing: 18) {
+                hint("space", "peek")
+                hint("n", "new session")
+                hint("p", "toggle persist")
+                hint("⌫", "kill")
+                if let undoKey = model.undoKey {
+                    hint(undoKey, "undo")
                 }
             }
         }
@@ -492,6 +462,23 @@ struct OverviewView: View {
         .background(
             RoundedRectangle(cornerRadius: 14)
                 .fill(.ultraThinMaterial))
+        .overlay(alignment: .topTrailing) {
+            HStack(spacing: 6) {
+                Text("esc")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.12)))
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(12)
+        }
         .fixedSize()
     }
 
