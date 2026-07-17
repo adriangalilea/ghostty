@@ -87,6 +87,16 @@ class VigilSessionManager {
 
     private(set) var sessions: [String: Session] = [:]
 
+    /// Killed sessions rest here for a grace period before their daemons
+    /// actually die. Undo (ghostty's native `undo` action; bind cmd+shift+T
+    /// to it) exhumes the session intact: kill was a detach + a deadline,
+    /// nothing had died yet. Ghostty's own ExpiringUndoManager drives the
+    /// expiry. 120s: long enough for regret, short enough that hidden
+    /// daemons never linger (config key candidate if it feels wrong).
+    private var graveyard: [String: Session] = [:]
+    private var graveyardDeadlines: [String: Date] = [:]
+    static let killGrace: TimeInterval = 120
+
     /// Set once at app launch by VigilStatusItem; needed to spawn windows.
     weak var ghosttyApp: Ghostty.App?
 
@@ -641,17 +651,57 @@ class VigilSessionManager {
         onAttentionChange?()
     }
 
-    /// The full kill: whatever the state, after this the session and its
-    /// processes are gone. Forget FIRST so nothing intercepts into a detach.
-    /// The caller already confirmed; this path must never prompt again.
+    /// Kill with a grace period: detach silently (window closes, every
+    /// process keeps running), bury the session, and only when the grace
+    /// expires do the daemons actually die. Undo within the grace exhumes
+    /// everything intact. The caller already confirmed; no prompts here.
     func kill(name: String) {
-        guard let session = sessions[name] else { return }
-        forget(name: name)
-        if case .embedded(let controller) = session.state {
-            killController(controller)
+        guard sessions[name] != nil else { return }
+        if case .embedded = sessions[name]!.state {
+            detach(name: name)
         }
-        // Daemon-backed sessions keep their processes alive past any window;
-        // kill means every pane daemon too. No-op for sessions without one.
+        var session = sessions[name]!
+        // A detached tree in the graveyard keeps its surfaces (and for
+        // recreation panes, their processes) alive until expiry or exhume.
+        sessions[name] = nil
+        session.attention = .none
+        graveyard[name] = session
+        graveyardDeadlines[name] = Date().addingTimeInterval(Self.killGrace)
+        persist()
+        onAttentionChange?()
+
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.undoManager.registerUndo(
+                withTarget: self,
+                expiresAfter: .seconds(Int64(Self.killGrace))
+            ) { manager in
+                manager.exhume(name)
+            }
+            appDelegate.undoManager.setActionName("Kill Session")
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.killGrace + 1) { [weak self] in
+            self?.reapIfExpired(name)
+        }
+    }
+
+    /// Undo of a kill: back from the graveyard, everything still running.
+    func exhume(_ name: String) {
+        guard let session = graveyard.removeValue(forKey: name) else { return }
+        graveyardDeadlines[name] = nil
+        sessions[name] = session
+        persist()
+        open(name: name)
+    }
+
+    /// The grace ran out: now the kill actually happens. Dropping the
+    /// buried tree releases surfaces (recreation processes die) and every
+    /// pane daemon is killed.
+    private func reapIfExpired(_ name: String) {
+        guard let deadline = graveyardDeadlines[name], Date() >= deadline else { return }
+        graveyard[name] = nil
+        graveyardDeadlines[name] = nil
+        try? FileManager.default.removeItem(at: dumpsDir(name))
         let vigildBin = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/bin/vigild").path
         let stateDir = FileManager.default.homeDirectoryForCurrentUser
@@ -661,6 +711,7 @@ class VigilSessionManager {
         where entry.hasPrefix(prefix) && entry.hasSuffix(".pid") {
             runFireAndForget(vigildBin, ["kill", String(entry.dropLast(4))])
         }
+        persist()
     }
 
     /// Silent, total window kill: emptying the tree closes the window without
@@ -771,9 +822,10 @@ class VigilSessionManager {
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         if slug.count > 24 { slug = String(slug.prefix(24)) }
         if slug.isEmpty { slug = "session" }
-        if sessions[slug] == nil { return slug }
+        func taken(_ s: String) -> Bool { sessions[s] != nil || graveyard[s] != nil }
+        if !taken(slug) { return slug }
         var n = 2
-        while sessions["\(slug)-\(n)"] != nil { n += 1 }
+        while taken("\(slug)-\(n)") { n += 1 }
         return "\(slug)-\(n)"
     }
 
@@ -817,12 +869,17 @@ class VigilSessionManager {
         let panes: [Pane]?
         let layout: Layout?
         let order: Int?
+        let buriedUntil: Date?
     }
 
     private func persist() {
-        let entries = sessions.values.map {
-            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order)
-        }.sorted { $0.name < $1.name }
+        var entries = sessions.values.map {
+            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order, buriedUntil: nil)
+        }
+        entries += graveyard.values.map {
+            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order, buriedUntil: graveyardDeadlines[$0.name])
+        }
+        entries.sort { $0.name < $1.name }
         let data = try! JSONEncoder().encode(entries)
         try? FileManager.default.createDirectory(
             at: persistURL.deletingLastPathComponent(),
@@ -870,7 +927,18 @@ class VigilSessionManager {
                 order: entry.order ?? 0)
             session.thumbnail = NSImage(
                 contentsOfFile: dumpsDir(entry.name).appendingPathComponent("thumb.png").path)
-            sessions[entry.name] = session
+            if let deadline = entry.buriedUntil {
+                // Buried across a relaunch: honor the remaining grace (the
+                // daemons are still out there), reap immediately if spent.
+                graveyard[entry.name] = session
+                graveyardDeadlines[entry.name] = deadline
+                let wait = max(deadline.timeIntervalSinceNow, 0) + 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+                    self?.reapIfExpired(entry.name)
+                }
+            } else {
+                sessions[entry.name] = session
+            }
         }
     }
 }
