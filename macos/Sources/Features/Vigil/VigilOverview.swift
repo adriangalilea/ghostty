@@ -18,8 +18,11 @@ class VigilOverview: NSObject {
     private var panel: NSPanel?
     private var keyMonitor: Any?
     private var resignObserver: Any?
-    /// The kill confirmation steals key status; that is not a dismissal.
-    private var suppressResignHide = false
+    /// The kill confirmation owns the keyboard while it runs: the overview
+    /// must neither treat losing key status as a dismissal nor keep eating
+    /// keystrokes through its local monitor (Enter was firing open-session
+    /// under the alert).
+    private var modalActive = false
     private let model = OverviewModel()
 
     func toggle() {
@@ -117,7 +120,7 @@ class VigilOverview: NSObject {
         ) { [weak self] _ in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, !self.suppressResignHide else { return }
+                    guard let self, !self.modalActive else { return }
                     self.hide()
                 }
             }
@@ -128,6 +131,10 @@ class VigilOverview: NSObject {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             return MainActor.assumeIsolated {
+                // The kill confirmation owns the keyboard: pass everything
+                // through so Enter/esc hit the alert's buttons, not us.
+                if self.modalActive { return event }
+
                 // The toggle shortcut closes from inside: while this panel is
                 // key there is no surface to run the keybind, so the monitor
                 // is the only one who can honor it. Read from config, never
@@ -221,9 +228,9 @@ class VigilOverview: NSObject {
         alert.addButton(withTitle: entry.removeVerb.capitalized)
         alert.addButton(withTitle: "Cancel")
 
-        suppressResignHide = true
+        modalActive = true
         let confirmed = alert.runModal() == .alertFirstButtonReturn
-        suppressResignHide = false
+        modalActive = false
         panel?.makeKeyAndOrderFront(nil)
         guard confirmed else { return }
 
