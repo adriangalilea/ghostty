@@ -95,34 +95,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         let manager = VigilSessionManager.shared
         manager.reconcile()
 
-        // The front window's own toggles, top of the menu: the eye on/off
-        // (persist) and the pin-on-top, so the two per-window acts are one
-        // reach from the menu bar.
-        if let front = TerminalController.preferredParent {
-            let persistent = manager.frontWindowPersistent
-            let persistItem = NSMenuItem(
-                title: persistent ? "Persistent window (survives quit)" : "Ephemeral window",
-                action: #selector(togglePersistFront(_:)), keyEquivalent: "")
-            persistItem.target = self
-            persistItem.image = NSImage(
-                systemSymbolName: persistent ? "eye.fill" : "eye.slash",
-                accessibilityDescription: nil)
-            persistItem.state = persistent ? .on : .off
-            menu.addItem(persistItem)
-
-            let pinned = manager.isPinned(front)
-            let pinItem = NSMenuItem(
-                title: pinned ? "Pinned on top" : "Pin on top",
-                action: #selector(togglePinFront(_:)), keyEquivalent: "")
-            pinItem.target = self
-            pinItem.image = NSImage(
-                systemSymbolName: pinned ? "pin.fill" : "pin",
-                accessibilityDescription: nil)
-            pinItem.state = pinned ? .on : .off
-            menu.addItem(pinItem)
-            menu.addItem(.separator())
-        }
-
         if manager.pendingCount > 0 {
             let next = NSMenuItem(title: "Next (\(manager.pendingCount) pending)", action: #selector(nextSession(_:)), keyEquivalent: "")
             next.target = self
@@ -206,14 +178,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         item.target = self
         item.representedObject = name
         return item
-    }
-
-    @objc private func togglePersistFront(_ sender: NSMenuItem) {
-        VigilSessionManager.shared.toggleFrontPersist()
-    }
-
-    @objc private func togglePinFront(_ sender: NSMenuItem) {
-        VigilSessionManager.shared.togglePinFront()
     }
 
     @objc private func nextSession(_ sender: NSMenuItem) {

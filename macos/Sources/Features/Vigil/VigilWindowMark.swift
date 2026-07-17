@@ -1,18 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// The mark of vigilance: persistent session windows carry an eye + label
-/// pill in the titlebar; ephemeral windows carry nothing, absence IS the
-/// state. Native titlebar accessory, so it composes with tabs and any
-/// titlebar theming instead of fighting it.
-///
-/// The pill's COLOR is the survival class, mirrored by the window border,
-/// and the palette is COLD ON PURPOSE (persisted = preserved, frozen):
-/// teal = every pane lives in a daemon, the session survives the app
-/// dying; icy cyan = capture+resume class, processes die with the app
-/// (content and claude come back on resurrection). Clicking an icy pill
-/// upgrades the whole window into daemons in place. Warm colors are for
-/// what actually dies: ephemeral windows wear yellow.
+/// Per-window controls in the titlebar: the survival eye ON/OFF (click to
+/// flip ephemeral <-> persistent) and the pin-on-top, on EVERY window. The
+/// eye's color is the survival class, cold on purpose (persisted =
+/// preserved): teal = daemon-backed (survives quit), icy cyan =
+/// capture+resume fallback, yellow = ephemeral (the class that just dies).
+/// Native titlebar accessory, composes with tabs and titlebar theming.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
 /// The survival ring: a click-through overlay whose layer border traces
@@ -22,34 +16,50 @@ final class VigilBorderView: NSView {
 }
 
 struct VigilWindowMark: View {
-    let label: String
+    /// nil for an ephemeral window (no session label yet).
+    let label: String?
+    let persistent: Bool
     let daemonBacked: Bool
-    var onUpgrade: (() -> Void)?
+    let pinned: Bool
+    var onTogglePersist: () -> Void
+    var onTogglePin: () -> Void
 
-    private var color: Color { daemonBacked ? .teal : .cyan }
+    private var eyeColor: Color {
+        guard persistent else { return .yellow }
+        return daemonBacked ? .teal : .cyan
+    }
+    private var eyeIcon: String { persistent ? "eye.fill" : "eye.slash" }
 
     var body: some View {
-        HStack(spacing: 4) {
-            // Eye on/off (same footprint): on = survives quit, slashed =
-            // resumes after quit and can be upgraded.
-            Image(systemName: daemonBacked ? "eye.fill" : "eye.slash")
-                .font(.system(size: 9, weight: .bold))
-            Text(label)
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-            if !daemonBacked {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 10, weight: .bold))
+        HStack(spacing: 6) {
+            // Pin on top.
+            Button(action: onTogglePin) {
+                Image(systemName: pinned ? "pin.fill" : "pin")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(pinned ? .accentColor : .secondary)
             }
+            .buttonStyle(.plain)
+            .help(pinned ? "Pinned above other windows. Click to unpin."
+                         : "Pin this window above the others.")
+
+            // Survival eye ON/OFF: click to flip persistent <-> ephemeral.
+            Button(action: onTogglePersist) {
+                HStack(spacing: 4) {
+                    Image(systemName: eyeIcon).font(.system(size: 9, weight: .bold))
+                    if let label {
+                        Text(label).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                    }
+                }
+                .foregroundColor(eyeColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(eyeColor.opacity(0.16)))
+            }
+            .buttonStyle(.plain)
+            .help(persistent
+                ? "Persistent: survives closing the window and quitting the app. Click to make ephemeral."
+                : "Ephemeral: dies when the window closes. Click to make it survive quit.")
         }
-        .foregroundColor(color)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Capsule().fill(color.opacity(0.16)))
         .padding(.trailing, 8)
-        .help(daemonBacked
-            ? "Every pane lives in a daemon: this session survives closing the window, quitting the app, crashes and reboots."
-            : "Capture+resume class: these processes die with the app (content and claude resume afterwards). Click to move every pane into a daemon now.")
-        .onTapGesture { onUpgrade?() }
     }
 }

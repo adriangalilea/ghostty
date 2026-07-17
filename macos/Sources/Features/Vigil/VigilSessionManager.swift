@@ -1403,30 +1403,45 @@ class VigilSessionManager {
     private func syncWindowMarks() {
         for controller in TerminalController.all {
             guard let window = controller.window else { continue }
+            // Real terminal windows only (skip corpses without a tree).
+            guard window.isVisible || window.isMiniaturized else { continue }
+            guard !controller.surfaceTree.isEmpty else { continue }
+
             let existing = window.titlebarAccessoryViewControllers.enumerated()
                 .first { $0.element is VigilTitlebarAccessory }
-            if let name = sessionName(of: controller), let session = sessions[name] {
-                let daemonBacked = Self.daemonBacked(controller.surfaceTree)
-                let mark = VigilWindowMark(
-                    label: session.label,
-                    daemonBacked: daemonBacked,
-                    onUpgrade: daemonBacked ? nil : { [weak self] in self?.upgrade(name: name) })
-                if let hosting = existing?.element.view as? NSHostingView<VigilWindowMark> {
-                    hosting.rootView = mark
-                } else {
-                    let accessory = VigilTitlebarAccessory()
-                    accessory.view = NSHostingView(rootView: mark)
-                    accessory.layoutAttribute = .right
-                    window.addTitlebarAccessoryViewController(accessory)
-                }
-                syncBorder(window, color: daemonBacked ? .systemTeal : .systemCyan)
+
+            let name = sessionName(of: controller)
+            let persistent = name != nil
+            let daemonBacked = persistent && Self.daemonBacked(controller.surfaceTree)
+
+            let mark = VigilWindowMark(
+                label: name.flatMap { sessions[$0]?.label },
+                persistent: persistent,
+                daemonBacked: daemonBacked,
+                pinned: isPinned(controller),
+                onTogglePersist: { [weak self] in
+                    guard let self else { return }
+                    if let name { self.forget(name: name) }
+                    else { self.persistFully(controller: controller) }
+                },
+                onTogglePin: { [weak self] in
+                    self?.togglePin(controller)
+                    self?.persist() // re-sync the pin badge
+                })
+
+            if let hosting = existing?.element.view as? NSHostingView<VigilWindowMark> {
+                hosting.rootView = mark
             } else {
-                if let existing {
-                    window.removeTitlebarAccessoryViewController(at: existing.offset)
-                }
-                // Warm for what dies: ephemeral windows wear yellow.
-                syncBorder(window, color: .systemYellow)
+                let accessory = VigilTitlebarAccessory()
+                accessory.view = NSHostingView(rootView: mark)
+                accessory.layoutAttribute = .right
+                window.addTitlebarAccessoryViewController(accessory)
             }
+
+            // Warm for what dies (yellow ephemeral), cold for preserved.
+            let color: NSColor = !persistent ? .systemYellow
+                : (daemonBacked ? .systemTeal : .systemCyan)
+            syncBorder(window, color: color)
         }
     }
 
