@@ -331,7 +331,10 @@ class VigilSessionManager {
             // Claude pads its prompt with non-breaking spaces; normalize or
             // the marker never matches (bug: draft persisted empty).
             .replacingOccurrences(of: "\u{a0}", with: " ")
-        let lines = plain.split(separator: "\n", omittingEmptySubsequences: false).suffix(15)
+        // NOT split(separator: "\n"): the dump's \r\n is a single grapheme
+        // cluster in Swift, so "\n" matches nothing and the whole dump reads
+        // as one line (bug: draft persisted empty, second act).
+        let lines = plain.components(separatedBy: .newlines).suffix(15)
         for line in lines.reversed() {
             let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: " \r│╭╮╰╯─"))
             for marker in ["❯ ", "> ", ") "] where trimmed.hasPrefix(marker) {
