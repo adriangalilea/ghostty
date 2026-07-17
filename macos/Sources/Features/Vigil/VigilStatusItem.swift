@@ -18,15 +18,38 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         statusItem.button?.image = NSImage(
             systemSymbolName: "eye",
             accessibilityDescription: "vigil sessions")
+        statusItem.button?.imagePosition = .imageLeading
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+
+        VigilSessionManager.shared.onAttentionChange = { [weak self] in
+            self?.updateBadge()
+        }
+        updateBadge()
+    }
+
+    /// The eye opens when sessions want you: count as badge, filled symbol.
+    private func updateBadge() {
+        let count = VigilSessionManager.shared.pendingCount
+        statusItem.length = count > 0 ? NSStatusItem.variableLength : NSStatusItem.squareLength
+        statusItem.button?.title = count > 0 ? " \(count)" : ""
+        statusItem.button?.image = NSImage(
+            systemSymbolName: count > 0 ? "eye.fill" : "eye",
+            accessibilityDescription: "vigil sessions")
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let manager = VigilSessionManager.shared
         manager.reconcile()
+
+        if manager.pendingCount > 0 {
+            let next = NSMenuItem(title: "Next (\(manager.pendingCount) pending)", action: #selector(nextSession(_:)), keyEquivalent: "")
+            next.target = self
+            menu.addItem(next)
+            menu.addItem(.separator())
+        }
 
         if manager.sessions.isEmpty {
             let item = NSMenuItem(title: "No sessions", action: nil, keyEquivalent: "")
@@ -35,7 +58,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
 
         for session in manager.sessions.values.sorted(by: { $0.label < $1.label }) {
-            let glyph: String
+            var glyph: String
             let verb: String
             switch session.state {
             case .embedded:
@@ -47,6 +70,11 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             case .asleep:
                 glyph = "○"
                 verb = "Open (resurrect)"
+            }
+            switch session.attention {
+            case .input: glyph = "🔔 \(glyph)"
+            case .done: glyph = "✓ \(glyph)"
+            case .none: break
             }
 
             // A parent item with a submenu never fires its own action on click,
@@ -75,6 +103,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         item.target = self
         item.representedObject = name
         return item
+    }
+
+    @objc private func nextSession(_ sender: NSMenuItem) {
+        VigilSessionManager.shared.next()
     }
 
     @objc private func openSession(_ sender: NSMenuItem) {

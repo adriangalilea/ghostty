@@ -1169,6 +1169,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     lazy private(set) var tabGroupCloseCoordinator = TabGroupCloseCoordinator()
 
     override func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // vigil: closing an adopted session's window detaches it (ptys keep
+        // running, manager owns the tree). Kill is explicit via Forget.
+        if VigilSessionManager.shared.handleWindowClose(controller: self) {
+            return false
+        }
+
         tabGroupCloseCoordinator.windowShouldClose(sender) { [weak self] scope in
             guard let self else { return }
             switch scope {

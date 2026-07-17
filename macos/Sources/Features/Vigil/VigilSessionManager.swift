@@ -30,17 +30,35 @@ class VigilSessionManager {
         case asleep
     }
 
+    /// Why a session wants Adrian. `input` (claude Notification: permission or
+    /// question) outranks `done` (turn finished); FIFO within a rank. Cleared
+    /// on open/next, never on mere glancing.
+    enum Attention: Int {
+        case none = 0
+        case done = 1
+        case input = 2
+    }
+
     struct Session {
         let name: String
         var label: String
         var cwd: String
         var state: State
+        var attention: Attention = .none
+        var attentionSince: Date?
     }
 
     private(set) var sessions: [String: Session] = [:]
 
     /// Set once at app launch by VigilStatusItem; needed to spawn windows.
     weak var ghosttyApp: Ghostty.App?
+
+    /// Status item hook: called whenever attention state changes.
+    var onAttentionChange: (() -> Void)?
+
+    var pendingCount: Int {
+        sessions.values.filter { $0.attention != .none }.count
+    }
 
     private var persistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -49,6 +67,94 @@ class VigilSessionManager {
 
     private init() {
         load()
+        startEventWatcher()
+    }
+
+    // MARK: Attention (fed by claude hooks through the wake events log)
+
+    private var eventsURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/wake/events.jsonl")
+    }
+
+    private var eventsOffset: UInt64 = 0
+    private var eventsTimer: Timer?
+
+    private struct WakeEvent: Decodable {
+        let container: String
+        let event: String
+    }
+
+    /// Tail the events log the claude hooks append to. A 1s poll is honest
+    /// enough for human attention; the log is small and offset-read.
+    private func startEventWatcher() {
+        // Start at end of file: history is not pending attention.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: eventsURL.path),
+           let size = attrs[.size] as? UInt64 {
+            eventsOffset = size
+        }
+        eventsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    VigilSessionManager.shared.drainEvents()
+                }
+            }
+        }
+    }
+
+    private func drainEvents() {
+        guard let handle = try? FileHandle(forReadingFrom: eventsURL) else { return }
+        defer { try? handle.close() }
+        let size = handle.seekToEndOfFile()
+        if size < eventsOffset { eventsOffset = 0 } // log was pruned/rotated
+        guard size > eventsOffset else { return }
+        handle.seek(toFileOffset: eventsOffset)
+        let data = handle.readDataToEndOfFile()
+        eventsOffset = size
+
+        var changed = false
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            guard let event = try? JSONDecoder().decode(WakeEvent.self, from: Data(line.utf8)) else { continue }
+            guard sessions[event.container] != nil else { continue }
+            let attention: Attention = event.event == "Notification" ? .input : .done
+            // Escalate only: an input request is not downgraded by a later Stop.
+            if attention.rawValue > sessions[event.container]!.attention.rawValue {
+                sessions[event.container]!.attention = attention
+                sessions[event.container]!.attentionSince = Date()
+                changed = true
+            }
+        }
+        if changed { onAttentionChange?() }
+    }
+
+    /// The attention FIFO: open the most urgent session (input beats done,
+    /// oldest first within a rank).
+    func next() {
+        let pending = sessions.values
+            .filter { $0.attention != .none }
+            .sorted {
+                if $0.attention.rawValue != $1.attention.rawValue {
+                    return $0.attention.rawValue > $1.attention.rawValue
+                }
+                return ($0.attentionSince ?? .distantPast) < ($1.attentionSince ?? .distantPast)
+            }
+        guard let session = pending.first else { return }
+        open(name: session.name)
+    }
+
+    /// Closing an adopted session's window means detach, not kill. Returns
+    /// true when handled (the close must be swallowed by the caller).
+    func handleWindowClose(controller: TerminalController) -> Bool {
+        guard let name = sessionName(of: controller) else { return false }
+        detach(name: name)
+        return true
+    }
+
+    func sessionName(of controller: TerminalController) -> String? {
+        sessions.values.first {
+            if case .embedded(let c) = $0.state { return c === controller }
+            return false
+        }?.name
     }
 
     // MARK: Lifecycle
@@ -88,6 +194,11 @@ class VigilSessionManager {
     func open(name: String) {
         guard let session = sessions[name] else { return }
         guard let ghostty = ghosttyApp else { return }
+
+        // Opening is the acknowledge: attention clears here and only here.
+        sessions[name]!.attention = .none
+        sessions[name]!.attentionSince = nil
+        onAttentionChange?()
 
         switch session.state {
         case .embedded(let controller):
