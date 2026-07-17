@@ -126,6 +126,19 @@ class VigilSessionManager {
     private init() {
         load()
         startEventWatcher()
+        // Fresh ephemeral windows must wear their ring without waiting for
+        // a session state change: any window becoming key re-syncs marks
+        // (idempotent, walks a handful of windows).
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            MainActor.assumeIsolated {
+                guard notification.object is NSWindow else { return }
+                VigilSessionManager.shared.syncWindowMarks()
+            }
+        }
         // The quick terminal dismissing (any way: toggle, esc-out, focus
         // loss) is the moment a floating session returns to detached.
         NotificationCenter.default.addObserver(
@@ -1309,7 +1322,8 @@ class VigilSessionManager {
     /// mark (eye + label titlebar pill, colored by survival class) and a
     /// matching content border; every other window carries none. One sync
     /// walks all windows; called from persist(), the chokepoint every
-    /// state change already flows through.
+    /// state change already flows through (plus any window becoming key,
+    /// for fresh ephemeral windows).
     private func syncWindowMarks() {
         for controller in TerminalController.all {
             guard let window = controller.window else { continue }
@@ -1329,30 +1343,40 @@ class VigilSessionManager {
                     accessory.layoutAttribute = .right
                     window.addTitlebarAccessoryViewController(accessory)
                 }
-                syncBorder(window, daemonBacked: daemonBacked)
+                syncBorder(window, color: daemonBacked ? .systemTeal : .systemCyan)
             } else {
                 if let existing {
                     window.removeTitlebarAccessoryViewController(at: existing.offset)
                 }
-                syncBorder(window, daemonBacked: nil)
+                // Warm for what dies: ephemeral windows wear orange.
+                syncBorder(window, color: .systemOrange)
             }
         }
     }
 
-    /// The survival class on the window itself: a thin content border in
-    /// the pill's color (teal = daemon-backed, icy cyan = capture+resume;
-    /// cold = preserved), none for ephemeral windows (absence is the state).
-    private func syncBorder(_ window: NSWindow, daemonBacked: Bool?) {
-        guard let content = window.contentView else { return }
-        content.wantsLayer = true
-        guard let layer = content.layer else { return }
-        guard let daemonBacked else {
-            layer.borderWidth = 0
-            return
+    /// The survival class drawn on the window itself: a thin ring in the
+    /// class color (teal = daemon-backed, icy cyan = capture+resume,
+    /// orange = ephemeral). An overlay on the window's FRAME view, with
+    /// the frame's own corner radius, so the ring follows the real window
+    /// shape (a contentView layer border drew a square over rounded
+    /// corners); hit testing passes through.
+    private func syncBorder(_ window: NSWindow, color: NSColor) {
+        guard let frameView = window.contentView?.superview else { return }
+        let border: VigilBorderView
+        if let existing = frameView.subviews.first(where: { $0 is VigilBorderView }) as? VigilBorderView {
+            border = existing
+        } else {
+            border = VigilBorderView(frame: frameView.bounds)
+            border.autoresizingMask = [.width, .height]
+            border.wantsLayer = true
+            frameView.addSubview(border, positioned: .above, relativeTo: nil)
         }
-        layer.borderWidth = 2
-        layer.borderColor = (daemonBacked ? NSColor.systemTeal : NSColor.systemCyan)
-            .withAlphaComponent(0.55).cgColor
+        border.frame = frameView.bounds
+        let radius = frameView.layer?.cornerRadius ?? 0
+        border.layer?.cornerRadius = radius > 0 ? radius : 10
+        border.layer?.cornerCurve = .continuous
+        border.layer?.borderWidth = 2
+        border.layer?.borderColor = color.withAlphaComponent(0.55).cgColor
     }
 
     private func load() {

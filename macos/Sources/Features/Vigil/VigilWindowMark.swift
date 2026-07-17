@@ -15,6 +15,12 @@ import SwiftUI
 /// what actually dies: the overview marks ephemeral windows orange.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
+/// The survival ring: a click-through overlay whose layer border traces
+/// the window frame's own rounded shape.
+final class VigilBorderView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 struct VigilWindowMark: View {
     let label: String
     let daemonBacked: Bool
