@@ -41,7 +41,18 @@ class VigilOverview: NSObject {
         model.selection = 0
         guard !model.entries.isEmpty else { return }
 
-        let view = OverviewView(model: model) { [weak self] name in
+        // Real estate: the switcher is the moment of visual triage, cards
+        // scale to the screen instead of postage stamps. Up to 4 per row,
+        // rows wrap; on a big display two sessions get two huge cards.
+        let screen = NSScreen.main?.visibleFrame ?? .zero
+        let count = model.entries.count
+        let columns = min(count, 4)
+        let usable = screen.width * 0.88 - CGFloat(columns - 1) * 18 - 48
+        let width = min(560, max(300, usable / CGFloat(columns)))
+        model.columns = columns
+        let cardSize = CGSize(width: width, height: width * 0.625)
+
+        let view = OverviewView(model: model, cardSize: cardSize) { [weak self] name in
             self?.openAndHide(name)
         }
         let hosting = NSHostingView(rootView: view)
@@ -59,7 +70,6 @@ class VigilOverview: NSObject {
         panel.contentView = hosting
 
         let size = hosting.fittingSize
-        let screen = NSScreen.main?.visibleFrame ?? .zero
         panel.setFrame(
             NSRect(
                 x: screen.midX - size.width / 2,
@@ -92,6 +102,8 @@ class VigilOverview: NSObject {
                 switch event.keyCode {
                 case 123: self.model.move(-1); return nil // left
                 case 124: self.model.move(1); return nil // right
+                case 126: self.model.move(-self.model.columns); return nil // up
+                case 125: self.model.move(self.model.columns); return nil // down
                 case 53: self.hide(); return nil // esc
                 case 36, 76: // return, keypad enter
                     if let entry = self.model.selected { self.openAndHide(entry.name) }
@@ -152,6 +164,8 @@ struct OverviewEntry: Identifiable {
 class OverviewModel: ObservableObject {
     @Published var entries: [OverviewEntry] = []
     @Published var selection: Int = 0
+    /// Cards per row; up/down arrows jump a whole row.
+    var columns: Int = 4
 
     var selected: OverviewEntry? {
         entries.indices.contains(selection) ? entries[selection] : nil
@@ -167,10 +181,16 @@ class OverviewModel: ObservableObject {
 
 struct OverviewView: View {
     @ObservedObject var model: OverviewModel
+    let cardSize: CGSize
     let onOpen: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 14) {
+        LazyVGrid(
+            columns: Array(
+                repeating: GridItem(.fixed(cardSize.width), spacing: 18),
+                count: model.columns),
+            spacing: 18
+        ) {
             ForEach(Array(model.entries.enumerated()), id: \.element.id) { index, entry in
                 VStack(spacing: 8) {
                     ZStack {
@@ -183,7 +203,7 @@ struct OverviewView: View {
                             Image(nsImage: thumbnail)
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
-                                .frame(maxWidth: 252, maxHeight: 162)
+                                .frame(maxWidth: cardSize.width - 8, maxHeight: cardSize.height - 8)
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
                         } else {
                             Text(entry.stateGlyph)
@@ -202,7 +222,7 @@ struct OverviewView: View {
                             }
                         }
                     }
-                    .frame(width: 260, height: 170)
+                    .frame(width: cardSize.width, height: cardSize.height)
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
                             .stroke(
@@ -210,14 +230,14 @@ struct OverviewView: View {
                                 lineWidth: index == model.selection ? 3 : 1))
 
                     Text("\(entry.stateGlyph) \(entry.label)")
-                        .font(.system(size: 13, weight: index == model.selection ? .bold : .regular))
+                        .font(.system(size: 14, weight: index == model.selection ? .bold : .regular))
                         .lineLimit(1)
-                        .frame(maxWidth: 260)
+                        .frame(maxWidth: cardSize.width)
                 }
                 .onTapGesture { onOpen(entry.name) }
             }
         }
-        .padding(20)
+        .padding(24)
         .background(
             RoundedRectangle(cornerRadius: 14)
                 .fill(.ultraThinMaterial))
