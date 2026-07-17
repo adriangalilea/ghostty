@@ -78,6 +78,17 @@ class VigilOverview: NSObject {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             return MainActor.assumeIsolated {
+                // The toggle shortcut closes from inside: while this panel is
+                // key there is no surface to run the keybind, so the monitor
+                // is the only one who can honor it. Read from config, never
+                // hardcoded.
+                if let config = VigilSessionManager.shared.ghosttyApp?.config,
+                   let shortcut = config.keyboardShortcut(for: "vigil_overview"),
+                   Self.eventMatches(event, shortcut) {
+                    self.hide()
+                    return nil
+                }
+
                 switch event.keyCode {
                 case 123: self.model.move(-1); return nil // left
                 case 124: self.model.move(1); return nil // right
@@ -90,6 +101,18 @@ class VigilOverview: NSObject {
                 }
             }
         }
+    }
+
+    private static func eventMatches(_ event: NSEvent, _ shortcut: KeyboardShortcut) -> Bool {
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        var want: NSEvent.ModifierFlags = []
+        if shortcut.modifiers.contains(.command) { want.insert(.command) }
+        if shortcut.modifiers.contains(.shift) { want.insert(.shift) }
+        if shortcut.modifiers.contains(.option) { want.insert(.option) }
+        if shortcut.modifiers.contains(.control) { want.insert(.control) }
+        guard mods == want else { return false }
+        return (event.charactersIgnoringModifiers ?? "").lowercased()
+            == String(shortcut.key.character).lowercased()
     }
 
     private func openAndHide(_ name: String) {
