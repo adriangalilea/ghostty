@@ -17,6 +17,9 @@ class VigilOverview: NSObject {
 
     private var panel: NSPanel?
     private var keyMonitor: Any?
+    private var resignObserver: Any?
+    /// The kill confirmation steals key status; that is not a dismissal.
+    private var suppressResignHide = false
     private let model = OverviewModel()
 
     func toggle() {
@@ -104,6 +107,21 @@ class VigilOverview: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         self.panel = panel
+
+        // A switcher is a moment, not a window: clicking anywhere else
+        // dismisses it exactly like esc.
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, !self.suppressResignHide else { return }
+                    self.hide()
+                }
+            }
+        }
 
         // Switcher semantics: while the overview is up, arrows/enter/esc are
         // ours app-wide. The monitor dies with the panel.
@@ -203,7 +221,9 @@ class VigilOverview: NSObject {
         alert.addButton(withTitle: entry.removeVerb.capitalized)
         alert.addButton(withTitle: "Cancel")
 
+        suppressResignHide = true
         let confirmed = alert.runModal() == .alertFirstButtonReturn
+        suppressResignHide = false
         panel?.makeKeyAndOrderFront(nil)
         guard confirmed else { return }
 
@@ -220,6 +240,8 @@ class VigilOverview: NSObject {
     private func hide() {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        resignObserver = nil
         panel?.orderOut(nil)
         panel = nil
     }
@@ -239,11 +261,20 @@ struct OverviewEntry: Identifiable {
 
     var id: String { name }
 
-    var stateGlyph: String {
+    /// Words, not glyphs: the overview must be readable with zero vocabulary.
+    var stateWord: String {
         switch state {
-        case .embedded: return "●"
-        case .detached: return "◌"
-        case .asleep: return "○"
+        case .embedded: return "live"
+        case .detached: return "detached"
+        case .asleep: return "asleep"
+        }
+    }
+
+    var stateColor: Color {
+        switch state {
+        case .embedded: return .green
+        case .detached: return .orange
+        case .asleep: return .secondary
         }
     }
 
@@ -300,10 +331,15 @@ struct OverviewView: View {
             // Affordances always on view: the verbs are state-honest for the
             // selected card, so the bar doubles as a state readout.
             if let selected = model.selected {
-                let persist = selected.persistVerb.map { "    p \($0)" } ?? ""
-                Text("←→↑↓ move    ⏎ \(selected.openVerb)\(persist)    ⌫ \(selected.removeVerb)    esc")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary)
+                HStack(spacing: 18) {
+                    hint("←→↑↓", "move")
+                    hint("⏎", selected.openVerb)
+                    if let verb = selected.persistVerb {
+                        hint("p", verb)
+                    }
+                    hint("⌫", selected.removeVerb)
+                    hint("esc", "close")
+                }
             }
         }
         .padding(24)
@@ -335,16 +371,18 @@ struct OverviewView: View {
                                 .frame(maxWidth: cardSize.width - 8, maxHeight: cardSize.height - 8)
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
                         } else {
-                            Text(entry.stateGlyph)
-                                .font(.system(size: 42))
+                            Text("no preview")
+                                .font(.system(size: 14))
                                 .foregroundColor(.secondary)
                         }
                         if entry.attention != .none {
                             VStack {
                                 HStack {
                                     Spacer()
-                                    Text(entry.attention == .input ? "🔔" : "✓")
-                                        .font(.system(size: 20))
+                                    chip(
+                                        entry.attention == .input ? "needs you" : "done",
+                                        entry.attention == .input ? .red : .green,
+                                        filled: true)
                                         .padding(6)
                                 }
                                 Spacer()
@@ -358,20 +396,54 @@ struct OverviewView: View {
                                 index == model.selection ? Color.accentColor : Color.white.opacity(0.15),
                                 lineWidth: index == model.selection ? 3 : 1))
 
-                    HStack(spacing: 5) {
+                    Text(entry.label)
+                        .font(.system(size: 15, weight: index == model.selection ? .bold : .medium))
+                        .lineLimit(1)
+                        .frame(maxWidth: cardSize.width)
+
+                    HStack(spacing: 6) {
+                        chip(entry.stateWord, entry.stateColor)
                         if entry.persistent {
-                            Image(systemName: "eye.fill")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(.accentColor)
+                            chip("persistent", .accentColor, icon: "eye.fill")
+                        } else {
+                            chip("ephemeral", .secondary)
                         }
-                        Text("\(entry.stateGlyph) \(entry.label)")
-                            .font(.system(size: 14, weight: index == model.selection ? .bold : .regular))
-                            .lineLimit(1)
                     }
-                    .frame(maxWidth: cardSize.width)
                 }
                 .onTapGesture { onOpen(entry) }
+                .onHover { hovering in
+                    if hovering { model.selection = index }
+                }
             }
+        }
+    }
+
+    /// Small labeled capsule: state and kind are words anyone can read, color
+    /// is reinforcement, never the only carrier.
+    private func chip(_ text: String, _ color: Color, icon: String? = nil, filled: Bool = false) -> some View {
+        HStack(spacing: 3) {
+            if let icon {
+                Image(systemName: icon).font(.system(size: 9, weight: .bold))
+            }
+            Text(text).font(.system(size: 11, weight: .semibold))
+        }
+        .foregroundColor(filled ? .white : color)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(filled ? color : color.opacity(0.18)))
+    }
+
+    /// Key cap + verb, spelled out.
+    private func hint(_ key: String, _ verb: String) -> some View {
+        HStack(spacing: 5) {
+            Text(key)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.12)))
+            Text(verb)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
         }
     }
 }
