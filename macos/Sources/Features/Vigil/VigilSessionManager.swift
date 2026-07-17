@@ -513,6 +513,17 @@ class VigilSessionManager {
         }
     }
 
+    /// Presence checks ignore ALL whitespace: the input box line-wraps the
+    /// draft at pane width, so a contiguous substring match false-negatives
+    /// and the guard would retype forever (observed: draft typed repeatedly).
+    private static func normalized(_ s: String) -> String { s.filter { !$0.isWhitespace } }
+
+    private static func draftOnScreen(_ view: Ghostty.SurfaceView, _ draft: String) -> Bool {
+        let needle = normalized(String(draft.prefix(24)))
+        guard !needle.isEmpty else { return true }
+        return normalized(view.cachedScreenContents.get()).contains(needle)
+    }
+
     /// Two identical screen samples a second apart = claude stopped painting
     /// startup; the input box is finally safe to type into.
     private func typeWhenQuiet(_ view: Ghostty.SurfaceView, _ draft: String, samples: Int, last: String?) {
@@ -524,7 +535,9 @@ class VigilSessionManager {
                 self.typeWhenQuiet(view, draft, samples: samples - 1, last: now)
                 return
             }
-            view.surfaceModel?.sendText(draft)
+            if !Self.draftOnScreen(view, draft) {
+                view.surfaceModel?.sendText(draft)
+            }
             self.watchDraft(view, draft, checks: 6)
         }
     }
@@ -536,8 +549,7 @@ class VigilSessionManager {
         guard checks > 0 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self else { return }
-            let needle = String(draft.prefix(24))
-            if view.cachedScreenContents.get().contains(needle) {
+            if Self.draftOnScreen(view, draft) {
                 self.watchDraft(view, draft, checks: checks - 1)
             } else {
                 self.typeWhenQuiet(view, draft, samples: 30, last: nil)
