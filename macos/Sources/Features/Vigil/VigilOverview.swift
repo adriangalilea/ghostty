@@ -35,6 +35,10 @@ class VigilOverview: NSObject {
     /// boundary of what the switcher can see.
     private func buildEntries() -> [OverviewEntry] {
         let manager = VigilSessionManager.shared
+        // Every rebuild refreshes live thumbnails: p/u/undo change what a
+        // card IS mid-showing, and a session touched for the first time
+        // (adopt, upgrade) has no frozen snapshot to fall back on.
+        manager.refreshThumbnails()
         var entries = manager.sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
             .map { session in
@@ -66,7 +70,6 @@ class VigilOverview: NSObject {
     private func show() {
         let manager = VigilSessionManager.shared
         manager.reconcile()
-        manager.refreshThumbnails()
 
         model.entries = buildEntries()
         model.selection = 0
@@ -191,6 +194,16 @@ class VigilOverview: NSObject {
                         self.model.entries = self.buildEntries()
                         self.model.selection = min(keep, self.model.entries.count - 1)
                         self.refit()
+                        // The fresh daemon panes are still booting; snapshot
+                        // again once they have replayed their content.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            MainActor.assumeIsolated {
+                                guard self.panel != nil, !self.modalActive else { return }
+                                let selection = self.model.selection
+                                self.model.entries = self.buildEntries()
+                                self.model.selection = min(selection, max(self.model.entries.count - 1, 0))
+                            }
+                        }
                     }
                     return nil
                 case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
