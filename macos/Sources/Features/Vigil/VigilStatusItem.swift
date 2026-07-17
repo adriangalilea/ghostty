@@ -1,8 +1,8 @@
 import AppKit
 
 /// Menu bar presence for vigil: list sessions with their state, open/detach/
-/// forget them, adopt the front window. The menu is rebuilt on every open so
-/// it never shows stale state.
+/// rename/forget them, adopt the front window (zero friction, auto-named).
+/// The menu is rebuilt on every open so it never shows stale state.
 @MainActor
 class VigilStatusItem: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
@@ -34,40 +34,47 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             menu.addItem(item)
         }
 
-        for session in manager.sessions.values.sorted(by: { $0.name < $1.name }) {
-            let label: String
+        for session in manager.sessions.values.sorted(by: { $0.label < $1.label }) {
+            let glyph: String
+            let verb: String
             switch session.state {
-            case .embedded: label = "● \(session.name)"
-            case .detached: label = "◌ \(session.name)"
-            case .asleep: label = "○ \(session.name)"
+            case .embedded:
+                glyph = "●"
+                verb = "Focus"
+            case .detached:
+                glyph = "◌"
+                verb = "Open (re-embed, still running)"
+            case .asleep:
+                glyph = "○"
+                verb = "Open (resurrect)"
             }
+
             // A parent item with a submenu never fires its own action on click,
             // so every verb lives in the submenu.
-            let item = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: "\(glyph) \(session.label)", action: nil, keyEquivalent: "")
             let submenu = NSMenu()
-            let open = NSMenuItem(title: "Open", action: #selector(openSession(_:)), keyEquivalent: "")
-            open.target = self
-            open.representedObject = session.name
-            submenu.addItem(open)
+            submenu.addItem(sessionItem(verb, #selector(openSession(_:)), session.name))
             if case .embedded = session.state {
-                let detach = NSMenuItem(title: "Detach (keep running)", action: #selector(detachSession(_:)), keyEquivalent: "")
-                detach.target = self
-                detach.representedObject = session.name
-                submenu.addItem(detach)
+                submenu.addItem(sessionItem("Detach (keep running)", #selector(detachSession(_:)), session.name))
             }
-            let forget = NSMenuItem(title: "Forget (kill if alive)", action: #selector(forgetSession(_:)), keyEquivalent: "")
-            forget.target = self
-            forget.representedObject = session.name
-            submenu.addItem(forget)
+            submenu.addItem(sessionItem("Rename…", #selector(renameSession(_:)), session.name))
+            submenu.addItem(.separator())
+            submenu.addItem(sessionItem("Forget (kill if alive)", #selector(forgetSession(_:)), session.name))
             item.submenu = submenu
-
             menu.addItem(item)
         }
 
         menu.addItem(.separator())
-        let adopt = NSMenuItem(title: "Adopt Front Window…", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
+        let adopt = NSMenuItem(title: "Adopt Front Window", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
         adopt.target = self
         menu.addItem(adopt)
+    }
+
+    private func sessionItem(_ title: String, _ action: Selector, _ name: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.representedObject = name
+        return item
     }
 
     @objc private func openSession(_ sender: NSMenuItem) {
@@ -85,23 +92,28 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         VigilSessionManager.shared.forget(name: name)
     }
 
-    @objc private func adoptFrontWindow(_ sender: NSMenuItem) {
-        guard let controller = TerminalController.preferredParent else { return }
+    @objc private func renameSession(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        guard let session = VigilSessionManager.shared.sessions[name] else { return }
 
         let alert = NSAlert()
-        alert.messageText = "Adopt window as vigil session"
-        alert.informativeText = "Name this workspace. It becomes detachable and survives restarts."
+        alert.messageText = "Rename session"
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
-        field.placeholderString = "session name"
+        field.stringValue = session.label
         alert.accessoryView = field
-        alert.addButton(withTitle: "Adopt")
+        alert.addButton(withTitle: "Rename")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
 
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
-        VigilSessionManager.shared.adopt(controller: controller, name: name)
+        let label = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !label.isEmpty else { return }
+        VigilSessionManager.shared.rename(name: name, label: label)
+    }
+
+    @objc private func adoptFrontWindow(_ sender: NSMenuItem) {
+        guard let controller = TerminalController.preferredParent else { return }
+        VigilSessionManager.shared.adopt(controller: controller)
     }
 }
