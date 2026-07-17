@@ -486,8 +486,10 @@ class VigilSessionManager {
 
     /// Type the rescued draft back into claude's input box, no newline (the
     /// human submits, never us). Typing early would feed the shell, so poll
-    /// until claude IS the foreground process, then give its TUI a beat to
-    /// paint before sending.
+    /// until claude IS the foreground process. Claude's TUI also WIPES its
+    /// input when startup finishes (the draft flashed and vanished), so
+    /// sending once is not enough: send, verify it stuck on screen, resend
+    /// until it survives a full second.
     private func injectDraft(_ controller: TerminalController, _ draft: String, attempts: Int = 60) {
         guard attempts > 0 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -498,11 +500,30 @@ class VigilSessionManager {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard URL(fileURLWithPath: comm).lastPathComponent == "claude" else { continue }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    view.surfaceModel?.sendText(draft)
+                    self.typeUntilItSticks(view, draft, tries: 8)
                 }
                 return
             }
             self.injectDraft(controller, draft, attempts: attempts - 1)
+        }
+    }
+
+    private func typeUntilItSticks(_ view: Ghostty.SurfaceView, _ draft: String, tries: Int) {
+        guard tries > 0 else { return }
+        let needle = String(draft.prefix(24))
+        let screen = view.cachedScreenContents.get()
+        if screen.contains(needle) {
+            // On screen; confirm it survives claude's late init wipe.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                if !view.cachedScreenContents.get().contains(needle) {
+                    self.typeUntilItSticks(view, draft, tries: tries - 1)
+                }
+            }
+            return
+        }
+        view.surfaceModel?.sendText(draft)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.typeUntilItSticks(view, draft, tries: tries - 1)
         }
     }
 
