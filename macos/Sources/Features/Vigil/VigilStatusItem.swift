@@ -93,6 +93,9 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        let create = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
+        create.target = self
+        menu.addItem(create)
         let adopt = NSMenuItem(title: "Adopt Front Window", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
         adopt.target = self
         menu.addItem(adopt)
@@ -142,6 +145,12 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         let label = field.stringValue.trimmingCharacters(in: .whitespaces)
         guard !label.isEmpty else { return }
         VigilSessionManager.shared.rename(name: name, label: label)
+    }
+
+    @objc private func newSession(_ sender: NSMenuItem) {
+        let cwd = TerminalController.preferredParent?.focusedSurface?.pwd
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        VigilSessionManager.shared.create(cwd: cwd)
     }
 
     @objc private func adoptFrontWindow(_ sender: NSMenuItem) {

@@ -178,6 +178,22 @@ class VigilSessionManager {
         return name
     }
 
+    /// A session born in vigil: the window spawns with VIGIL_SESSION in the
+    /// shell env, so every claude launched inside inherits the identity and
+    /// its hook events feed the attention queue from birth.
+    func create(cwd: String) {
+        guard let ghostty = ghosttyApp else { return }
+        let seed = URL(fileURLWithPath: cwd).lastPathComponent
+        let name = uniqueName(from: seed)
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = cwd
+        config.environmentVariables["VIGIL_SESSION"] = name
+        let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
+        persist()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     /// Detach: the tree (ptys running) moves from the window to this manager.
     /// Emptying the controller's tree closes its window; our strong reference
     /// keeps every surface alive.
