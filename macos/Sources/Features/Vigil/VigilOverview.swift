@@ -145,11 +145,14 @@ struct OverviewView: View {
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color.black.opacity(0.6))
                         if let thumbnail = entry.thumbnail {
+                            // The whole window, scaled (Mission Control style):
+                            // fill would center-crop away the edges of a wide
+                            // terminal, which is exactly what you peek at.
                             Image(nsImage: thumbnail)
                                 .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .frame(width: 260, height: 170)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .aspectRatio(contentMode: .fit)
+                                .frame(maxWidth: 252, maxHeight: 162)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
                         } else {
                             Text(entry.stateGlyph)
                                 .font(.system(size: 42))
