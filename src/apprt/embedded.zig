@@ -2001,6 +2001,20 @@ pub const CAPI = struct {
         };
     }
 
+    /// Vigil: dump full terminal content (scrollback + screen) as a VT
+    /// stream to the given absolute path. Returns false on failure.
+    export fn ghostty_surface_vigil_dump(
+        ptr: *Surface,
+        path_ptr: [*]const u8,
+        path_len: usize,
+    ) bool {
+        ptr.core_surface.vigilDumpVt(path_ptr[0..path_len]) catch |err| {
+            log.err("vigil dump failed err={}", .{err});
+            return false;
+        };
+        return true;
+    }
+
     /// Complete a clipboard read request started via the read callback.
     /// This can only be called once for a given request. Once it is called
     /// with a request the request pointer will be invalidated.

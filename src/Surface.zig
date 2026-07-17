@@ -5776,6 +5776,48 @@ fn writeScreenFile(
     }
 }
 
+/// Vigil: dump the entire terminal content (scrollback + written screen,
+/// the `.screen` point tag spans both) as a VT stream to an absolute path
+/// the caller owns. Replayed into a fresh terminal this reproduces content
+/// and attributes: sessions preserve their state instead of recreating it.
+/// An empty terminal writes an empty file; that is a real state, not an error.
+pub fn vigilDumpVt(self: *Surface, path: []const u8) !void {
+    var file = try std.fs.createFileAbsolute(path, .{ .mode = 0o600 });
+    defer file.close();
+
+    var buf: [4096]u8 = undefined;
+    var file_writer = file.writer(&buf);
+    const buf_writer = &file_writer.interface;
+
+    {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+
+        const pages = &self.io.terminal.screens.active.pages;
+        const sel = terminal.Selection.init(
+            pages.getTopLeft(.screen),
+            pages.getBottomRight(.screen) orelse return,
+            false,
+        );
+
+        const ScreenFormatter = terminal.formatter.ScreenFormatter;
+        var formatter: ScreenFormatter = .init(self.io.terminal.screens.active, .{
+            .emit = .vt,
+            .unwrap = true,
+            .trim = false,
+            .background = self.io.terminal.colors.background.get(),
+            .foreground = self.io.terminal.colors.foreground.get(),
+            .palette = &self.io.terminal.colors.palette.current,
+        });
+        formatter.content = .{ .selection = sel.ordered(
+            self.io.terminal.screens.active,
+            .forward,
+        ) };
+        try formatter.format(buf_writer);
+    }
+    try buf_writer.flush();
+}
+
 /// Call this to complete a clipboard request sent to apprt. This should
 /// only be called once for each request. The data is immediately copied so
 /// it is safe to free the data after this call.

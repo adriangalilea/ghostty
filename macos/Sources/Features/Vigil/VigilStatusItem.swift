@@ -19,7 +19,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
-        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        // variableLength always: flipping square<->variable on badge changes
+        // makes menu bar managers (thaw) re-slot the item and its click
+        // tracking goes dead. The button hugs its content either way.
+        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
         VigilSessionManager.shared.ghosttyApp = ghostty
@@ -75,7 +78,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     /// The eye opens when sessions want you: count as badge, filled symbol.
     private func updateBadge() {
         let count = VigilSessionManager.shared.pendingCount
-        statusItem.length = count > 0 ? NSStatusItem.variableLength : NSStatusItem.squareLength
         statusItem.button?.title = count > 0 ? " \(count)" : ""
         statusItem.button?.image = NSImage(
             systemSymbolName: count > 0 ? "eye.fill" : "eye",

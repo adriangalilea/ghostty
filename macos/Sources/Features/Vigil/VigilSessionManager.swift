@@ -46,6 +46,9 @@ class VigilSessionManager {
     struct Pane: Codable {
         let cwd: String
         let command: String?
+        /// VT dump (scrollback + screen) frozen at capture; replayed with
+        /// `cat` on resurrection so the content survives, not just the shape.
+        var dump: String?
     }
 
     struct Session {
@@ -214,7 +217,7 @@ class VigilSessionManager {
         let name = uniqueName(from: seed)
 
         sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
-        sessions[name]!.panes = capturePanes(controller.surfaceTree)
+        sessions[name]!.panes = capturePanes(name: name, controller.surfaceTree)
         linkClaudes(name: name, tree: controller.surfaceTree)
         persist()
         refineLabel(name: name, screen: surface?.cachedScreenContents.get() ?? "")
@@ -250,18 +253,35 @@ class VigilSessionManager {
         // workspace is its splits, one pane is a lie.
         sessions[name]!.thumbnail = Self.windowSnapshot(controller)
             ?? (controller.focusedSurface ?? tree.root?.leftmostLeaf())?.asImage
-        sessions[name]!.panes = capturePanes(tree)
+        sessions[name]!.panes = capturePanes(name: name, tree)
         linkClaudes(name: name, tree: tree)
         sessions[name]!.state = .detached(tree)
         controller.surfaceTree = SplitTree()
+        // The frozen visual survives relaunch too: asleep sessions keep their
+        // face in the overview.
+        if let thumb = sessions[name]!.thumbnail,
+           let tiff = thumb.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: dumpsDir(name).appendingPathComponent("thumb.png"))
+        }
         persist()
     }
 
-    /// What is running where, for resurrection. The foreground process of a
-    /// pane is its command; a bare shell reads as nil.
-    private func capturePanes(_ tree: SplitTree<Ghostty.SurfaceView>) -> [Pane] {
+    /// Per-session state directory: VT dumps + frozen thumbnail.
+    private func dumpsDir(_ name: String) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/wake/dumps/\(name)")
+    }
+
+    /// What is running where, plus what was on screen, for resurrection. The
+    /// foreground process of a pane is its command; a bare shell reads as nil.
+    /// Every pane's content (scrollback + screen) is frozen as a VT dump.
+    private func capturePanes(name: String, _ tree: SplitTree<Ghostty.SurfaceView>) -> [Pane] {
+        let dir = dumpsDir(name)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var panes: [Pane] = []
-        for view in tree {
+        for (index, view) in tree.enumerated() {
             let cwd = view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
             var command: String?
             if let pid = view.surfaceModel?.foregroundPID {
@@ -274,7 +294,12 @@ class VigilSessionManager {
                     command = args
                 }
             }
-            panes.append(Pane(cwd: cwd, command: command))
+            var dump: String?
+            let dumpPath = dir.appendingPathComponent("\(index).vt").path
+            if view.surfaceModel?.vigilDump(to: dumpPath) == true {
+                dump = dumpPath
+            }
+            panes.append(Pane(cwd: cwd, command: command, dump: dump))
         }
         return panes
     }
@@ -378,13 +403,23 @@ class VigilSessionManager {
                 var config = Ghostty.SurfaceConfiguration()
                 config.workingDirectory = pane.cwd
                 config.environmentVariables["VIGIL_SESSION"] = name
+                // State first, program second: replay the frozen content into
+                // the fresh terminal, then bring the program back. The dump
+                // path is our own slug-derived state dir, shell-safe.
+                var parts: [String] = []
+                if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
+                    parts.append("cat '\(dump)'")
+                }
                 if let command = pane.command {
                     if command.contains("claude"), !claudeAssigned {
                         claudeAssigned = true
-                        config.initialInput = "wake pane \(name)\n"
+                        parts.append("wake pane \(name)")
                     } else {
-                        config.initialInput = "\(command)\n"
+                        parts.append(command)
                     }
+                }
+                if !parts.isEmpty {
+                    config.initialInput = parts.joined(separator: "; ") + "\n"
                 }
                 return config
             }
@@ -421,6 +456,7 @@ class VigilSessionManager {
     /// wake's own registry is never touched.
     func forget(name: String) {
         sessions[name] = nil
+        try? FileManager.default.removeItem(at: dumpsDir(name))
         persist()
         onAttentionChange?()
     }
@@ -562,12 +598,15 @@ class VigilSessionManager {
         guard let data = try? Data(contentsOf: persistURL) else { return }
         guard let entries = try? JSONDecoder().decode([PersistedSession].self, from: data) else { return }
         for entry in entries {
-            sessions[entry.name] = Session(
+            var session = Session(
                 name: entry.name,
                 label: entry.label,
                 cwd: entry.cwd,
                 state: .asleep,
                 panes: entry.panes ?? [])
+            session.thumbnail = NSImage(
+                contentsOfFile: dumpsDir(entry.name).appendingPathComponent("thumb.png").path)
+            sessions[entry.name] = session
         }
     }
 }
