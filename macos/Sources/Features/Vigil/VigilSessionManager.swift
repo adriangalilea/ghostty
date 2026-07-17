@@ -830,34 +830,41 @@ class VigilSessionManager {
         persist()
     }
 
-    /// Modal-less session cycling (cmd+backtick for sessions): walk the same
-    /// order the overview shows (manual order then label, ephemeral windows
-    /// last) and open whatever follows the front window. Detached sessions
-    /// re-embed, asleep ones resurrect; wraps around.
+    /// Modal-less cycling, cmd+backtick with the overview's order: focus
+    /// moves through LIVE windows only (embedded sessions by manual order,
+    /// ephemeral windows last), wrapping. Opening a detached or asleep
+    /// session is a deliberate act (overview, Next, the menu); a focus
+    /// cycle key must never resurrect windows as a side effect (shipped
+    /// that way first; every press materialized another sleeping session).
     func cycle() {
         reconcile()
-        let ordered = sessions.values.sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-        let ephemerals = ephemeralControllers()
-        guard !ordered.isEmpty || !ephemerals.isEmpty else { return }
+        let sessionWindows = sessions.values
+            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
+            .compactMap { session -> TerminalController? in
+                if case .embedded(let controller) = session.state,
+                   controller.window != nil { return controller }
+                return nil
+            }
+        let ring = sessionWindows + ephemeralControllers()
+        guard !ring.isEmpty else { return }
 
         var current = -1
-        if let front = TerminalController.preferredParent {
-            if let name = sessionName(of: front) {
-                current = ordered.firstIndex { $0.name == name } ?? -1
-            } else if let index = ephemerals.firstIndex(where: { $0 === front }) {
-                current = ordered.count + index
-            }
+        if let key = NSApp.keyWindow {
+            current = ring.firstIndex { $0.window === key } ?? -1
+        }
+        if current == -1, let front = TerminalController.preferredParent {
+            current = ring.firstIndex { $0 === front } ?? -1
         }
 
-        let count = ordered.count + ephemerals.count
-        let next = (current + 1) % count
-        if next < ordered.count {
-            open(name: ordered[next].name)
-        } else {
-            becomeRegular()
-            ephemerals[next - ordered.count].window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        let target = ring[(current + 1) % ring.count]
+        guard let window = target.window else { return }
+        NSLog("vigil: cycle %d -> %d of %d (%@)",
+              current, (current + 1) % ring.count, ring.count,
+              sessionName(of: target) ?? "ephemeral")
+        becomeRegular()
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// Manual overview ordering (drag & drop).

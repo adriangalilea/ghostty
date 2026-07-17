@@ -865,9 +865,9 @@ pub const Action = union(enum) {
     /// of every session (embedded, detached and asleep).
     vigil_overview,
 
-    /// vigil: cycle to the next session, modal-less (cmd+backtick for
-    /// sessions). Follows the overview's manual order, ephemeral windows
-    /// last; detached sessions re-embed, asleep ones resurrect; wraps.
+    /// vigil: cycle focus through live windows, modal-less (cmd+backtick
+    /// with the overview's manual order, ephemeral windows last; wraps).
+    /// Never opens detached or asleep sessions; that is a deliberate act.
     vigil_cycle,
 
     /// vigil: drop the most urgent session into the quick terminal
