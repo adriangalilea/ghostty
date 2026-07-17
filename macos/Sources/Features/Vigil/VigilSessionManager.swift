@@ -328,9 +328,12 @@ class VigilSessionManager {
         let plain = String(decoding: data, as: UTF8.self)
             .replacingOccurrences(of: "\u{1b}\\[[0-9;:?]*[A-Za-z]", with: "", options: .regularExpression)
             .replacingOccurrences(of: "\u{1b}\\][^\u{7}\u{1b}]*(\u{7}|\u{1b}\\\\)", with: "", options: .regularExpression)
+            // Claude pads its prompt with non-breaking spaces; normalize or
+            // the marker never matches (bug: draft persisted empty).
+            .replacingOccurrences(of: "\u{a0}", with: " ")
         let lines = plain.split(separator: "\n", omittingEmptySubsequences: false).suffix(15)
         for line in lines.reversed() {
-            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: " │╭╮╰╯─"))
+            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: " \r│╭╮╰╯─"))
             for marker in ["❯ ", "> ", ") "] where trimmed.hasPrefix(marker) {
                 let draft = String(trimmed.dropFirst(marker.count))
                     .trimmingCharacters(in: .whitespaces)
