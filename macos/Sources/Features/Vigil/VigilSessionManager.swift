@@ -441,7 +441,6 @@ class VigilSessionManager {
             var panes = session.panes
             if panes.isEmpty { panes = [Pane(cwd: session.cwd, command: "claude")] }
             var claudeAssigned = false
-            var claudeDraft: String?
             func configFor(_ pane: Pane) -> Ghostty.SurfaceConfiguration {
                 var config = Ghostty.SurfaceConfiguration()
                 config.workingDirectory = pane.cwd
@@ -456,7 +455,6 @@ class VigilSessionManager {
                 if let command = pane.command {
                     if command.contains("claude"), !claudeAssigned {
                         claudeAssigned = true
-                        claudeDraft = pane.draft
                         parts.append("wake pane \(name)")
                     } else {
                         parts.append(command)
@@ -482,70 +480,16 @@ class VigilSessionManager {
                     }
                 }
             }
-            if let draft = claudeDraft {
-                injectDraft(controller, draft)
-            }
             NSApp.activate(ignoringOtherApps: true)
         }
         persist()
     }
 
-    /// Type the rescued draft back into claude's input box, no newline (the
-    /// human submits, never us). Claude wipes typed input at every startup
-    /// stage until it is FULLY loaded (MCPs included), so timing guesses
-    /// lose: wait for claude to be the foreground process, then for the
-    /// screen to go quiet (startup spinners stopped = load finished), type,
-    /// and keep watching; if a late wipe still eats it, wait for calm and
-    /// retype.
-    private func injectDraft(_ controller: TerminalController, _ draft: String, attempts: Int = 120) {
-        guard attempts > 0 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self else { return }
-            for view in controller.surfaceTree {
-                guard let pid = view.surfaceModel?.foregroundPID else { continue }
-                let comm = self.runCapture("/bin/ps", ["-o", "comm=", "-p", String(pid)])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard URL(fileURLWithPath: comm).lastPathComponent == "claude" else { continue }
-                // No grace: type NOW (claude resumes in ~2s, waiting loses;
-                // frame-analyzed 2026-07-17). A startup wipe just gets
-                // corrected on the next beat.
-                view.surfaceModel?.sendText(draft)
-                self.enforceDraft(view, draft, beats: 40)
-                return
-            }
-            self.injectDraft(controller, draft, attempts: attempts - 1)
-        }
-    }
-
-    /// Presence checks ignore ALL whitespace: the input box line-wraps the
-    /// draft at pane width, so a contiguous substring match false-negatives.
-    /// Claude runs on the alternate screen (its frozen frame dumps 22 lines,
-    /// no shell scrollback), so the replayed cat content can never
-    /// false-positive this check.
-    private static func normalized(_ s: String) -> String { s.filter { !$0.isWhitespace } }
-
-    private static func draftOnScreen(_ view: Ghostty.SurfaceView, _ draft: String) -> Bool {
-        let needle = normalized(String(draft.prefix(24)))
-        guard !needle.isEmpty else { return true }
-        return normalized(view.cachedScreenContents.get()).contains(needle)
-    }
-
-    /// No waiting for a quiet screen: an animated footer (background agents
-    /// spinner) means quiet NEVER comes and the draft is never typed
-    /// (observed). Instead enforce: every beat for ~40s, type the draft if
-    /// it is not on screen, do nothing if it is. Startup wipes just get
-    /// corrected on the next beat; a submitted or present draft is left
-    /// alone, so doubling is impossible by construction.
-    private func enforceDraft(_ view: Ghostty.SurfaceView, _ draft: String, beats: Int) {
-        guard beats > 0 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self else { return }
-            if !Self.draftOnScreen(view, draft) {
-                view.surfaceModel?.sendText(draft)
-            }
-            self.enforceDraft(view, draft, beats: beats - 1)
-        }
-    }
+    // Draft REINJECTION is deferred (branch vigil-draft-injection): typing
+    // into claude's startup is a timing war we lost repeatedly. The draft is
+    // still CAPTURED above (scrapeDraft -> Pane.draft, cheap and verified);
+    // the daemon obsoletes reinjection entirely, since claude never dies the
+    // input box is never lost. See CLAUDE.md "Deferred".
 
     func rename(name: String, label: String) {
         guard sessions[name] != nil else { return }
