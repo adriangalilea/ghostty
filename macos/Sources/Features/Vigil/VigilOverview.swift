@@ -513,7 +513,7 @@ struct OverviewView: View {
                          entry.daemonBacked ? .teal : .cyan,
                          icon: entry.daemonBacked ? "eye.fill" : "eye")
                 } else {
-                    chip("ephemeral", .orange)
+                    chip("ephemeral", .yellow)
                 }
             }
         }
@@ -578,7 +578,7 @@ struct OverviewView: View {
                                  entry.daemonBacked ? .teal : .cyan,
                                  icon: entry.daemonBacked ? "eye.fill" : "eye")
                         } else {
-                            chip("ephemeral", .orange)
+                            chip("ephemeral", .yellow)
                         }
                     }
                 }

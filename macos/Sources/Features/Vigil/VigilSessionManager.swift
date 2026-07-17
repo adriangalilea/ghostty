@@ -1360,15 +1360,15 @@ class VigilSessionManager {
                 if let existing {
                     window.removeTitlebarAccessoryViewController(at: existing.offset)
                 }
-                // Warm for what dies: ephemeral windows wear orange.
-                syncBorder(window, color: .systemOrange)
+                // Warm for what dies: ephemeral windows wear yellow.
+                syncBorder(window, color: .systemYellow)
             }
         }
     }
 
     /// The survival class drawn on the window itself: a thin ring in the
     /// class color (teal = daemon-backed, icy cyan = capture+resume,
-    /// orange = ephemeral). An overlay on the window's FRAME view, with
+    /// yellow = ephemeral). An overlay on the window's FRAME view, with
     /// the frame's own corner radius, so the ring follows the real window
     /// shape (a contentView layer border drew a square over rounded
     /// corners); hit testing passes through.

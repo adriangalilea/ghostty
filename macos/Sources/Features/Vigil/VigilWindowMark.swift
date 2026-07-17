@@ -12,7 +12,7 @@ import SwiftUI
 /// dying; icy cyan = capture+resume class, processes die with the app
 /// (content and claude come back on resurrection). Clicking an icy pill
 /// upgrades the whole window into daemons in place. Warm colors are for
-/// what actually dies: the overview marks ephemeral windows orange.
+/// what actually dies: ephemeral windows wear yellow.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
 /// The survival ring: a click-through overlay whose layer border traces
