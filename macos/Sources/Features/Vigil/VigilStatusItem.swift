@@ -44,8 +44,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
             queue: .main
-        ) { _ in
+        ) { notification in
             MainActor.assumeIsolated {
+                // The overview panel is a peek, not a return from service mode.
+                if notification.object is VigilOverviewPanel { return }
                 if NSApp.activationPolicy() != .regular {
                     NSApp.setActivationPolicy(.regular)
                 }

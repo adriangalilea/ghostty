@@ -5,6 +5,12 @@ import SwiftUI
 /// driven like any tab switcher (arrows to move, enter to open, esc to close,
 /// click works too). Thumbnails are live for embedded sessions, captured at
 /// detach for detached ones, absent for asleep (their card shows state only).
+/// Borderless panels refuse key status by default; the switcher needs it so
+/// arrows/enter work end to end, shortcut in, shortcut out.
+final class VigilOverviewPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
 @MainActor
 class VigilOverview: NSObject {
     static let shared = VigilOverview()
@@ -41,7 +47,7 @@ class VigilOverview: NSObject {
         let hosting = NSHostingView(rootView: view)
         hosting.frame = NSRect(x: 0, y: 0, width: 1, height: 1)
 
-        let panel = NSPanel(
+        let panel = VigilOverviewPanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -61,7 +67,10 @@ class VigilOverview: NSObject {
                 width: size.width,
                 height: size.height),
             display: true)
-        panel.orderFrontRegardless()
+        // Key + active so the keyboard reaches us even when summoned via the
+        // global shortcut with the app in service mode.
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
         self.panel = panel
 
         // Switcher semantics: while the overview is up, arrows/enter/esc are
