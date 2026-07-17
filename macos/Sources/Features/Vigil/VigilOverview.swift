@@ -275,6 +275,7 @@ class VigilOverview: NSObject {
         var info: String
         switch entry.state {
         case .embedded: info = "The window closes and its processes die."
+        case .floating: info = "Floating in the quick terminal; this is the kill. Its processes die."
         case .detached: info = "Detached but alive; this is the kill. Its processes die."
         case .asleep: info = "Only the registry entry and its frozen state are dropped."
         }
@@ -353,6 +354,7 @@ struct OverviewEntry: Identifiable {
     var stateWord: String {
         switch state {
         case .embedded: return "live"
+        case .floating: return "floating"
         case .detached: return "detached"
         case .asleep: return "asleep"
         }
@@ -361,6 +363,7 @@ struct OverviewEntry: Identifiable {
     var stateColor: Color {
         switch state {
         case .embedded: return .green
+        case .floating: return .cyan
         case .detached: return .orange
         case .asleep: return .secondary
         }
@@ -369,7 +372,7 @@ struct OverviewEntry: Identifiable {
     /// State-honest verbs for the hint bar and the confirmation.
     var openVerb: String {
         switch state {
-        case .embedded: return "focus"
+        case .embedded, .floating: return "focus"
         case .detached: return "open"
         case .asleep: return "resurrect"
         }
@@ -378,7 +381,7 @@ struct OverviewEntry: Identifiable {
     var removeVerb: String {
         switch state {
         case .embedded: return persistent ? "kill" : "close"
-        case .detached: return "kill"
+        case .floating, .detached: return "kill"
         case .asleep: return "forget"
         }
     }

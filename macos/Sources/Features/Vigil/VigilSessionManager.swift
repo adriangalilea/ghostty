@@ -27,6 +27,9 @@ class VigilSessionManager {
 
     enum State {
         case embedded(TerminalController)
+        /// Hosted by the quick terminal (Quake-style peek); the quick
+        /// terminal owns the tree while it floats.
+        case floating
         case detached(SplitTree<Ghostty.SurfaceView>)
         case asleep
     }
@@ -47,6 +50,11 @@ class VigilSessionManager {
     struct Pane: Codable {
         let cwd: String
         let command: String?
+        /// The command's exact argv from the kernel (KERN_PROCARGS2), never
+        /// ps text: resurrection execs it directly, no shell ever parses it,
+        /// so a process styling its title with metacharacters can misparse
+        /// but never execute.
+        var argv: [String]?
         /// VT dump (scrollback + screen) frozen at capture; replayed with
         /// `cat` on resurrection so the content survives, not just the shape.
         var dump: String?
@@ -118,6 +126,21 @@ class VigilSessionManager {
     private init() {
         load()
         startEventWatcher()
+        // The quick terminal dismissing (any way: toggle, esc-out, focus
+        // loss) is the moment a floating session returns to detached.
+        NotificationCenter.default.addObserver(
+            forName: .quickTerminalDidChangeVisibility,
+            object: nil,
+            queue: .main
+        ) { notification in
+            MainActor.assumeIsolated {
+                let manager = VigilSessionManager.shared
+                guard let quick = notification.object as? QuickTerminalController,
+                      !quick.visible,
+                      let name = manager.floatingName else { return }
+                manager.reclaim(name, from: quick)
+            }
+        }
     }
 
     // MARK: Attention (fed by claude hooks through the wake events log)
@@ -144,6 +167,7 @@ class VigilSessionManager {
             let tree: SplitTree<Ghostty.SurfaceView>?
             switch session.state {
             case .embedded(let controller): tree = controller.surfaceTree
+            case .floating: tree = quickController(create: false)?.surfaceTree
             case .detached(let detachedTree): tree = detachedTree
             case .asleep: tree = nil
             }
@@ -219,10 +243,10 @@ class VigilSessionManager {
         if changed { onAttentionChange?() }
     }
 
-    /// The attention FIFO: open the most urgent session (input beats done,
-    /// oldest first within a rank).
-    func next() {
-        let pending = sessions.values
+    /// The head of the attention FIFO: input beats done, oldest first
+    /// within a rank.
+    private var mostUrgent: Session? {
+        sessions.values
             .filter { $0.attention != .none }
             .sorted {
                 if $0.attention.rawValue != $1.attention.rawValue {
@@ -230,8 +254,114 @@ class VigilSessionManager {
                 }
                 return ($0.attentionSince ?? .distantPast) < ($1.attentionSince ?? .distantPast)
             }
-        guard let session = pending.first else { return }
+            .first
+    }
+
+    /// The attention FIFO: open the most urgent session.
+    func next() {
+        guard let session = mostUrgent else { return }
         open(name: session.name)
+    }
+
+    // MARK: Floating (the quick terminal hosts a session)
+
+    /// Name of the session currently hosted by the quick terminal.
+    private(set) var floatingName: String?
+    /// The quick terminal's own workspace, stashed while a session floats
+    /// in it; restored when the session leaves.
+    private var stashedQuickTree: SplitTree<Ghostty.SurfaceView>?
+    /// True while vigil swaps trees in/out of the quick terminal, so its
+    /// tree-change observer must not auto-animate the window in.
+    private(set) var quickTreeSwap = false
+
+    private func quickController(create: Bool) -> QuickTerminalController? {
+        guard let delegate = NSApp.delegate as? AppDelegate else { return nil }
+        if !create && !delegate.quickControllerInitialized { return nil }
+        return delegate.quickController
+    }
+
+    /// The most urgent session drops into the quick terminal: answer it and
+    /// dismiss, never leaving what you were doing. With nothing pending,
+    /// the same key dismisses whatever is floating.
+    func nextFloating() {
+        guard let session = mostUrgent else {
+            if floatingName != nil { quickController(create: false)?.animateOut() }
+            return
+        }
+        float(name: session.name)
+    }
+
+    /// Host a session in the quick terminal. Embedded sessions surrender
+    /// their window first (a detach, capture included); asleep ones
+    /// resurrect into a real window instead (a rebuild belongs in a
+    /// workspace, not a peek).
+    func float(name: String) {
+        guard let session = sessions[name] else { return }
+        guard let quick = quickController(create: true) else { return }
+
+        let tree: SplitTree<Ghostty.SurfaceView>
+        switch session.state {
+        case .embedded:
+            detach(name: name)
+            guard case .detached(let detachedTree) = sessions[name]!.state else { return }
+            tree = detachedTree
+        case .floating:
+            sessions[name]!.attention = .none
+            sessions[name]!.attentionSince = nil
+            onAttentionChange?()
+            quick.animateIn()
+            return
+        case .detached(let detachedTree):
+            tree = detachedTree
+        case .asleep:
+            open(name: name)
+            return
+        }
+
+        // Whoever floats now leaves first; a native quick terminal
+        // workspace is stashed, not destroyed.
+        if let current = floatingName {
+            reclaim(current, from: quick)
+        } else if !quick.surfaceTree.isEmpty {
+            stashedQuickTree = quick.surfaceTree
+        }
+
+        sessions[name]!.state = .floating
+        sessions[name]!.attention = .none
+        sessions[name]!.attentionSince = nil
+        onAttentionChange?()
+        floatingName = name
+        quickTreeSwap = true
+        quick.surfaceTree = tree
+        quickTreeSwap = false
+        quick.animateIn()
+        if let view = tree.root?.leftmostLeaf() {
+            DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
+        }
+        persist()
+    }
+
+    /// The floating session leaves the quick terminal: back to detached
+    /// with whatever its tree is NOW (splits made while floating survive),
+    /// and the quick terminal gets its own stashed workspace back.
+    func reclaim(_ name: String, from quick: QuickTerminalController) {
+        guard floatingName == name else { return }
+        floatingName = nil
+        let tree = quick.surfaceTree
+        if sessions[name] != nil {
+            if tree.isEmpty {
+                sessions[name]!.state = .asleep
+            } else {
+                sessions[name]!.panes = capturePanes(name: name, tree)
+                sessions[name]!.layout = Self.captureLayout(tree)
+                sessions[name]!.state = .detached(tree)
+            }
+        }
+        quickTreeSwap = true
+        quick.surfaceTree = stashedQuickTree ?? SplitTree()
+        quickTreeSwap = false
+        stashedQuickTree = nil
+        persist()
     }
 
     /// Closing an adopted session's window means detach, not kill. Returns
@@ -381,6 +511,34 @@ class VigilSessionManager {
         persist()
     }
 
+    /// Captured ratios onto a freshly materialized tree. Structural walk:
+    /// wherever the realized node and the layout agree (same split kind),
+    /// the captured ratio replaces the 0.5 the split was born with; any
+    /// divergence (a split that failed to materialize) passes through.
+    static func applyRatios(
+        _ node: SplitTree<Ghostty.SurfaceView>.Node,
+        _ layout: Layout
+    ) -> SplitTree<Ghostty.SurfaceView>.Node {
+        guard case .split(let split) = node else { return node }
+        let ratio: Double
+        let l: Layout
+        let r: Layout
+        switch layout {
+        case .leaf: return node
+        case .h(let captured, let left, let right):
+            guard split.direction == .horizontal else { return node }
+            ratio = captured; l = left; r = right
+        case .v(let captured, let left, let right):
+            guard split.direction == .vertical else { return node }
+            ratio = captured; l = left; r = right
+        }
+        return .split(.init(
+            direction: split.direction,
+            ratio: ratio,
+            left: applyRatios(split.left, l),
+            right: applyRatios(split.right, r)))
+    }
+
     /// The workspace's split shape, pane indices in DFS leaf order (the
     /// same order capturePanes walks).
     static func captureLayout(_ tree: SplitTree<Ghostty.SurfaceView>) -> Layout? {
@@ -433,14 +591,14 @@ class VigilSessionManager {
             }
 
             var command: String?
-            if let pid = view.surfaceModel?.foregroundPID {
-                let args = runCapture("/bin/ps", ["-o", "args=", "-p", String(pid)])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let first = args.split(separator: " ").first.map(String.init) ?? ""
+            var argv: [String]?
+            if let pid = view.surfaceModel?.foregroundPID,
+               let args = Self.processArgv(pid: pid_t(pid)), let first = args.first {
                 let base = URL(fileURLWithPath: first).lastPathComponent
                 let shells = ["fish", "bash", "zsh", "sh", "login"]
-                if !args.isEmpty, !shells.contains(base), !base.hasPrefix("-") {
-                    command = args
+                if !shells.contains(base), !base.hasPrefix("-") {
+                    command = args.joined(separator: " ")
+                    argv = args
                 }
             }
             var dump: String?
@@ -448,9 +606,38 @@ class VigilSessionManager {
             if view.surfaceModel?.vigilDump(to: dumpPath) == true {
                 dump = dumpPath
             }
-            panes.append(Pane(cwd: cwd, command: command, dump: dump))
+            panes.append(Pane(cwd: cwd, command: command, argv: argv, dump: dump))
         }
         return panes
+    }
+
+    /// The real argv of a process straight from the kernel. ps renders argv
+    /// as one space-joined string, which destroys argument boundaries and
+    /// makes replay a quoting problem; the kernel buffer has the exact
+    /// NUL-separated array.
+    static func processArgv(pid: pid_t) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0,
+              size > MemoryLayout<Int32>.size else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return nil }
+        let argc = buffer.withUnsafeBytes { $0.load(as: Int32.self) }
+        guard argc > 0 else { return nil }
+        // Layout: argc, exec path, NUL padding, then argc NUL-terminated args.
+        var index = MemoryLayout<Int32>.size
+        while index < size, buffer[index] != 0 { index += 1 }
+        while index < size, buffer[index] == 0 { index += 1 }
+        var args: [String] = []
+        var start = index
+        while index < size, args.count < Int(argc) {
+            if buffer[index] == 0 {
+                args.append(String(decoding: buffer[start..<index], as: UTF8.self))
+                start = index + 1
+            }
+            index += 1
+        }
+        return args.isEmpty ? nil : args
     }
 
     /// Adopted claudes were born without identity: recover it forensically via
@@ -525,6 +712,9 @@ class VigilSessionManager {
         becomeRegular()
 
         switch session.state {
+        case .floating:
+            quickController(create: false)?.animateIn()
+
         case .embedded(let controller):
             guard let window = controller.window else {
                 // The window died without us noticing (closed by hand). Treat as asleep.
@@ -560,19 +750,23 @@ class VigilSessionManager {
                     return config
                 }
 
-                // Recreation path (pre-daemon panes): replay the frozen
-                // content, then bring the program back.
+                // Recreation path (adopted, pre-daemon panes). Command panes
+                // exec their captured argv directly: no shell parses it, and
+                // the program repaints its own screen (no dump replay). The
+                // claude pane resumes via wake; shell panes replay their
+                // frozen content. Every typed string here is vigil's own
+                // (dump paths, slugs), never captured process text.
+                if let argv = pane.argv, pane.command?.contains("claude") != true {
+                    config.command = "direct:" + argv.joined(separator: " ")
+                    return config
+                }
                 var parts: [String] = []
                 if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
                     parts.append("cat '\(dump)'")
                 }
-                if let command = pane.command {
-                    if command.contains("claude"), !claudeAssigned {
-                        claudeAssigned = true
-                        parts.append("wake pane \(name)")
-                    } else {
-                        parts.append(command)
-                    }
+                if pane.command?.contains("claude") == true, !claudeAssigned {
+                    claudeAssigned = true
+                    parts.append("wake pane \(name)")
                 }
                 if !parts.isEmpty {
                     config.initialInput = parts.joined(separator: "; ") + "\n"
@@ -591,7 +785,7 @@ class VigilSessionManager {
                     guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else { return }
                     if let layout {
                         // Real shape: split the region first (preorder), then
-                        // recurse into each side. Ratios are not restored yet.
+                        // recurse into each side.
                         @MainActor
                         func materialize(_ node: Layout, anchor: Ghostty.SurfaceView) {
                             let direction: SplitTree<Ghostty.SurfaceView>.NewDirection
@@ -615,6 +809,13 @@ class VigilSessionManager {
                             materialize(r, anchor: rightView)
                         }
                         materialize(layout, anchor: anchor)
+                        // Splits are born 0.5; re-shape to the captured ratios
+                        // wherever the realized tree matches the layout.
+                        if let root = controller.surfaceTree.root {
+                            controller.surfaceTree = SplitTree(
+                                root: Self.applyRatios(root, layout),
+                                zoomed: nil)
+                        }
                     } else {
                         var at: Ghostty.SurfaceView? = anchor
                         for pane in panes.dropFirst() {
@@ -627,6 +828,36 @@ class VigilSessionManager {
             NSApp.activate(ignoringOtherApps: true)
         }
         persist()
+    }
+
+    /// Modal-less session cycling (cmd+backtick for sessions): walk the same
+    /// order the overview shows (manual order then label, ephemeral windows
+    /// last) and open whatever follows the front window. Detached sessions
+    /// re-embed, asleep ones resurrect; wraps around.
+    func cycle() {
+        reconcile()
+        let ordered = sessions.values.sorted { ($0.order, $0.label) < ($1.order, $1.label) }
+        let ephemerals = ephemeralControllers()
+        guard !ordered.isEmpty || !ephemerals.isEmpty else { return }
+
+        var current = -1
+        if let front = TerminalController.preferredParent {
+            if let name = sessionName(of: front) {
+                current = ordered.firstIndex { $0.name == name } ?? -1
+            } else if let index = ephemerals.firstIndex(where: { $0 === front }) {
+                current = ordered.count + index
+            }
+        }
+
+        let count = ordered.count + ephemerals.count
+        let next = (current + 1) % count
+        if next < ordered.count {
+            open(name: ordered[next].name)
+        } else {
+            becomeRegular()
+            ephemerals[next - ordered.count].window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     /// Manual overview ordering (drag & drop).
@@ -660,6 +891,10 @@ class VigilSessionManager {
     /// everything intact. The caller already confirmed; no prompts here.
     func kill(name: String) {
         guard sessions[name] != nil else { return }
+        if case .floating = sessions[name]!.state, let quick = quickController(create: false) {
+            quick.animateOut()
+            reclaim(name, from: quick)
+        }
         if case .embedded = sessions[name]!.state {
             detach(name: name)
         }
@@ -810,12 +1045,15 @@ class VigilSessionManager {
         reconcile()
         let hasLive = sessions.values.contains {
             switch $0.state {
-            case .embedded, .detached: return true
+            case .embedded, .floating, .detached: return true
             case .asleep: return false
             }
         }
         guard hasLive else { return false }
 
+        if let name = floatingName, let quick = quickController(create: false) {
+            reclaim(name, from: quick)
+        }
         for (name, session) in sessions {
             if case .embedded = session.state { detach(name: name) }
         }

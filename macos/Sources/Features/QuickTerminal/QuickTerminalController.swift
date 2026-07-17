@@ -281,6 +281,10 @@ class QuickTerminalController: BaseTerminalController {
         // If we're not empty (e.g. this isn't the first set) and we're
         // not visible, then we animate in. This allows us to show the quick
         // terminal when things such as undo/redo are done.
+        // vigil swapping a floating session's tree in or out drives the
+        // animation itself; auto-animating here would pop the window open
+        // while handing the stashed workspace back.
+        if VigilSessionManager.shared.quickTreeSwap { return }
         if !from.isEmpty && !visible {
             animateIn()
             return
