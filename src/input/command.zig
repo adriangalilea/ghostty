@@ -708,6 +708,25 @@ fn actionCommands(action: Action.Key) []const Command {
         .crash,
         => comptime &.{},
 
+        // vigil session verbs, first-class palette citizens.
+        .vigil_next => comptime &.{.{
+            .action = .vigil_next,
+            .title = "Next Session",
+            .description = "Open the most urgent session in the attention queue.",
+        }},
+
+        .vigil_detach_window => comptime &.{.{
+            .action = .vigil_detach_window,
+            .title = "Detach Session",
+            .description = "Detach this window's session; it keeps running with no window.",
+        }},
+
+        .vigil_new_session => comptime &.{.{
+            .action = .vigil_new_session,
+            .title = "New Session",
+            .description = "Create a new named workspace session.",
+        }},
+
         // No commands because I'm not sure they make sense in a command
         // palette context.
         .toggle_command_palette,

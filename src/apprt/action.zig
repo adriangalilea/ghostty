@@ -347,6 +347,16 @@ pub const Action = union(Key) {
     /// otherwise the terminal-set title.
     copy_title_to_clipboard,
 
+    /// vigil: open the most urgent session in the attention queue.
+    vigil_next,
+
+    /// vigil: detach the focused window's session (adopting it first if
+    /// needed). The workspace keeps running with no window.
+    vigil_detach_window,
+
+    /// vigil: create a new named session.
+    vigil_new_session,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -415,6 +425,9 @@ pub const Action = union(Key) {
         search_selected,
         readonly,
         copy_title_to_clipboard,
+        vigil_next,
+        vigil_detach_window,
+        vigil_new_session,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");

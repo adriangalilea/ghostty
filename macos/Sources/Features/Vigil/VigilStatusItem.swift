@@ -8,6 +8,14 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let ghostty: Ghostty.App
 
+    /// Sessions menu items. Shortcuts come from the ghostty config (the
+    /// `vigil_*` keybind actions) via AppDelegate.syncMenuShortcuts, never
+    /// hardcoded: the user binds them, so conflicts are impossible here.
+    let menuNext = NSMenuItem(title: "Next", action: #selector(nextSession(_:)), keyEquivalent: "")
+    let menuNewSession = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
+    let menuAdopt = NSMenuItem(title: "Adopt Front Window", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
+    let menuDetach = NSMenuItem(title: "Detach Front Window", action: #selector(detachFrontWindow(_:)), keyEquivalent: "")
+
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -30,23 +38,16 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         installMainMenu()
     }
 
-    /// Native "Sessions" menu in the menu bar: the verbs get real macOS
-    /// shortcuts (remappable in System Settings, zero settings UI of our own).
+    /// Native "Sessions" menu in the menu bar. Shortcuts are synced from the
+    /// ghostty config exactly like every other menu item.
     private func installMainMenu() {
         guard let mainMenu = NSApp.mainMenu else { return }
 
         let menu = NSMenu(title: "Sessions")
-        func item(_ title: String, _ action: Selector, _ key: String) {
-            let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
-            i.keyEquivalentModifierMask = [.command, .option]
-            i.target = self
-            menu.addItem(i)
+        for item in [menuNext, .separator(), menuNewSession, menuAdopt, menuDetach] {
+            item.target = self
+            menu.addItem(item)
         }
-        item("Next", #selector(nextSession(_:)), "n")
-        menu.addItem(.separator())
-        item("New Session", #selector(newSession(_:)), "t")
-        item("Adopt Front Window", #selector(adoptFrontWindow(_:)), "a")
-        item("Detach Front Window", #selector(detachFrontWindow(_:)), "d")
 
         let holder = NSMenuItem(title: "Sessions", action: nil, keyEquivalent: "")
         holder.submenu = menu

@@ -83,6 +83,26 @@ class VigilSessionManager {
     private struct WakeEvent: Decodable {
         let container: String
         let event: String
+        let tty: String?
+    }
+
+    /// Join key for claudes born without a container env (adopted windows):
+    /// the event's tty against every session surface's ttyName.
+    private func sessionMatching(tty: String) -> String? {
+        guard tty.count > 2, tty != "??" else { return nil }
+        for (name, session) in sessions {
+            let tree: SplitTree<Ghostty.SurfaceView>?
+            switch session.state {
+            case .embedded(let controller): tree = controller.surfaceTree
+            case .detached(let detachedTree): tree = detachedTree
+            case .asleep: tree = nil
+            }
+            guard let tree else { continue }
+            for view in tree where view.surfaceModel?.ttyName?.hasSuffix(tty) == true {
+                return name
+            }
+        }
+        return nil
     }
 
     /// Tail the events log the claude hooks append to. A 1s poll is honest
@@ -115,12 +135,19 @@ class VigilSessionManager {
         var changed = false
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
             guard let event = try? JSONDecoder().decode(WakeEvent.self, from: Data(line.utf8)) else { continue }
-            guard sessions[event.container] != nil else { continue }
+            let name: String
+            if sessions[event.container] != nil {
+                name = event.container
+            } else if let tty = event.tty, let matched = sessionMatching(tty: tty) {
+                name = matched
+            } else {
+                continue
+            }
             let attention: Attention = event.event == "Notification" ? .input : .done
             // Escalate only: an input request is not downgraded by a later Stop.
-            if attention.rawValue > sessions[event.container]!.attention.rawValue {
-                sessions[event.container]!.attention = attention
-                sessions[event.container]!.attentionSince = Date()
+            if attention.rawValue > sessions[name]!.attention.rawValue {
+                sessions[name]!.attention = attention
+                sessions[name]!.attentionSince = Date()
                 changed = true
             }
         }

@@ -845,6 +845,22 @@ pub const Action = union(enum) {
     /// configuration file to customize its behavior.
     toggle_quick_terminal,
 
+    /// vigil: open the most urgent session in the attention queue (input
+    /// requests outrank finished turns, oldest first within a rank).
+    /// No default binding; bind it yourself, e.g.:
+    ///
+    ///   keybind = cmd+shift+j=vigil_next
+    vigil_next,
+
+    /// vigil: detach the focused window's session. The workspace keeps
+    /// running with no window and is reopened from the sessions menu or
+    /// `vigil_next`. Adopts the window first when it has no session yet.
+    vigil_detach_window,
+
+    /// vigil: create a new session (a named workspace whose shell carries
+    /// the session identity from birth).
+    vigil_new_session,
+
     /// Show or hide all windows. If all windows become shown, we also ensure
     /// Ghostty becomes focused. When hiding all windows, focus is yielded
     /// to the next application as determined by the OS.
@@ -1337,6 +1353,9 @@ pub const Action = union(enum) {
             .close_all_windows,
             .quit,
             .toggle_quick_terminal,
+            .vigil_next,
+            .vigil_detach_window,
+            .vigil_new_session,
             .toggle_visibility,
             .check_for_updates,
             .show_gtk_inspector,

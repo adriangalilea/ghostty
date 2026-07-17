@@ -593,6 +593,20 @@ extension Ghostty {
             case GHOSTTY_ACTION_TOGGLE_QUICK_TERMINAL:
                 toggleQuickTerminal(app, target: target)
 
+            case GHOSTTY_ACTION_VIGIL_NEXT:
+                // Action callbacks arrive on the main thread (app tick).
+                MainActor.assumeIsolated { VigilSessionManager.shared.next() }
+
+            case GHOSTTY_ACTION_VIGIL_DETACH_WINDOW:
+                MainActor.assumeIsolated { VigilSessionManager.shared.detachFrontWindow() }
+
+            case GHOSTTY_ACTION_VIGIL_NEW_SESSION:
+                MainActor.assumeIsolated {
+                    VigilSessionManager.shared.create(
+                        cwd: TerminalController.preferredParent?.focusedSurface?.pwd
+                            ?? FileManager.default.homeDirectoryForCurrentUser.path)
+                }
+
             case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
                 toggleVisibility(app, target: target)
 

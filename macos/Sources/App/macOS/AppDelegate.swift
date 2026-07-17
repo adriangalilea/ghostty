@@ -220,11 +220,12 @@ class AppDelegate: NSObject,
             toggleSecureInput(self)
         }
 
+        // vigil session manager in the menu bar. Before initial config load so
+        // its menu items are present for the first syncMenuShortcuts pass.
+        vigilStatusItem = VigilStatusItem(ghostty: ghostty)
+
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
-
-        // vigil session manager in the menu bar
-        vigilStatusItem = VigilStatusItem(ghostty: ghostty)
 
         // Start our update checker.
         updateController.startUpdater()
@@ -1159,6 +1160,11 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "close_tab", menuItem: self.menuCloseTab)
         syncMenuShortcut(config, action: "close_window", menuItem: self.menuCloseWindow)
         syncMenuShortcut(config, action: "close_all_windows", menuItem: self.menuCloseAllWindows)
+        if let vigil = vigilStatusItem {
+            syncMenuShortcut(config, action: "vigil_next", menuItem: vigil.menuNext)
+            syncMenuShortcut(config, action: "vigil_new_session", menuItem: vigil.menuNewSession)
+            syncMenuShortcut(config, action: "vigil_detach_window", menuItem: vigil.menuDetach)
+        }
         syncMenuShortcut(config, action: "new_split:right", menuItem: self.menuSplitRight)
         syncMenuShortcut(config, action: "new_split:left", menuItem: self.menuSplitLeft)
         syncMenuShortcut(config, action: "new_split:down", menuItem: self.menuSplitDown)
