@@ -39,6 +39,15 @@ class VigilSessionManager {
         case input = 2
     }
 
+    /// One leaf of the workspace, enough to rebuild it: where it was and what
+    /// ran in it. A claude pane resurrects via `wake pane` (resume); stateless
+    /// tools (lazygit, logs) resurrect by re-running their command; a bare
+    /// shell resurrects as a bare shell.
+    struct Pane: Codable {
+        let cwd: String
+        let command: String?
+    }
+
     struct Session {
         let name: String
         var label: String
@@ -46,6 +55,8 @@ class VigilSessionManager {
         var state: State
         var attention: Attention = .none
         var attentionSince: Date?
+        /// Captured at detach; what resurrection rebuilds.
+        var panes: [Pane] = []
         /// Live for embedded (refreshed on overview open), frozen at the
         /// moment of detach for detached. Runtime-only.
         var thumbnail: NSImage?
@@ -203,6 +214,8 @@ class VigilSessionManager {
         let name = uniqueName(from: seed)
 
         sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
+        sessions[name]!.panes = capturePanes(controller.surfaceTree)
+        linkClaudes(name: name, tree: controller.surfaceTree)
         persist()
         refineLabel(name: name, screen: surface?.cachedScreenContents.get() ?? "")
         return name
@@ -235,9 +248,71 @@ class VigilSessionManager {
         // Freeze the visual: the overview shows what the workspace looked
         // like at the moment it was released.
         sessions[name]!.thumbnail = (controller.focusedSurface ?? tree.root?.leftmostLeaf())?.asImage
+        sessions[name]!.panes = capturePanes(tree)
+        linkClaudes(name: name, tree: tree)
         sessions[name]!.state = .detached(tree)
         controller.surfaceTree = SplitTree()
         persist()
+    }
+
+    /// What is running where, for resurrection. The foreground process of a
+    /// pane is its command; a bare shell reads as nil.
+    private func capturePanes(_ tree: SplitTree<Ghostty.SurfaceView>) -> [Pane] {
+        var panes: [Pane] = []
+        for view in tree {
+            let cwd = view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+            var command: String?
+            if let pid = view.surfaceModel?.foregroundPID {
+                let args = runCapture("/bin/ps", ["-o", "args=", "-p", String(pid)])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let first = args.split(separator: " ").first.map(String.init) ?? ""
+                let base = URL(fileURLWithPath: first).lastPathComponent
+                let shells = ["fish", "bash", "zsh", "sh", "login"]
+                if !args.isEmpty, !shells.contains(base), !base.hasPrefix("-") {
+                    command = args
+                }
+            }
+            panes.append(Pane(cwd: cwd, command: command))
+        }
+        return panes
+    }
+
+    /// Adopted claudes were born without identity: recover it forensically via
+    /// `wake link` (process on the pane's tty -> its newest transcript) so
+    /// resurrection resumes the conversation.
+    private func linkClaudes(name: String, tree: SplitTree<Ghostty.SurfaceView>) {
+        for view in tree {
+            guard let tty = view.surfaceModel?.ttyName else { continue }
+            let suffix = URL(fileURLWithPath: tty).lastPathComponent
+            runFireAndForget(wakeBin, ["link", name, suffix])
+        }
+    }
+
+    private var wakeBin: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/wake").path
+    }
+
+    private func runCapture(_ bin: String, _ args: [String]) -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return "" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func runFireAndForget(_ bin: String, _ args: [String]) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.arguments = args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
     }
 
     /// Refresh live thumbnails for embedded sessions (overview open path).
@@ -278,12 +353,42 @@ class VigilSessionManager {
             NSApp.activate(ignoringOtherApps: true)
 
         case .asleep:
-            var config = Ghostty.SurfaceConfiguration()
-            config.workingDirectory = session.cwd
-            config.environmentVariables["VIGIL_SESSION"] = name
-            config.initialInput = "wake pane \(name)\n"
-            let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
+            // Rebuild the whole workspace: every captured pane comes back in
+            // its cwd. The claude pane resumes via wake pane; other commands
+            // re-run (stateless tools ARE their command); shells come back
+            // bare. One claude resume per session, the registry has one uuid.
+            var panes = session.panes
+            if panes.isEmpty { panes = [Pane(cwd: session.cwd, command: "claude")] }
+            var claudeAssigned = false
+            func configFor(_ pane: Pane) -> Ghostty.SurfaceConfiguration {
+                var config = Ghostty.SurfaceConfiguration()
+                config.workingDirectory = pane.cwd
+                config.environmentVariables["VIGIL_SESSION"] = name
+                if let command = pane.command {
+                    if command.contains("claude"), !claudeAssigned {
+                        claudeAssigned = true
+                        config.initialInput = "wake pane \(name)\n"
+                    } else {
+                        config.initialInput = "\(command)\n"
+                    }
+                }
+                return config
+            }
+
+            let controller = TerminalController.newWindow(ghostty, withBaseConfig: configFor(panes[0]))
             sessions[name]!.state = .embedded(controller)
+            if panes.count > 1 {
+                // Splits wait a beat: the window presents async and a split
+                // against an unhosted surface is dropped.
+                let rest = Array(panes.dropFirst())
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                    var anchor = controller.surfaceTree.root?.leftmostLeaf()
+                    for pane in rest {
+                        guard let at = anchor else { break }
+                        anchor = controller.newSplit(at: at, direction: .right, baseConfig: configFor(pane)) ?? anchor
+                    }
+                }
+            }
             NSApp.activate(ignoringOtherApps: true)
         }
         persist()
@@ -426,10 +531,11 @@ class VigilSessionManager {
         let name: String
         let label: String
         let cwd: String
+        let panes: [Pane]?
     }
 
     private func persist() {
-        let entries = sessions.values.map { PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd) }
+        let entries = sessions.values.map { PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes) }
             .sorted { $0.name < $1.name }
         let data = try! JSONEncoder().encode(entries)
         try? FileManager.default.createDirectory(
@@ -442,7 +548,12 @@ class VigilSessionManager {
         guard let data = try? Data(contentsOf: persistURL) else { return }
         guard let entries = try? JSONDecoder().decode([PersistedSession].self, from: data) else { return }
         for entry in entries {
-            sessions[entry.name] = Session(name: entry.name, label: entry.label, cwd: entry.cwd, state: .asleep)
+            sessions[entry.name] = Session(
+                name: entry.name,
+                label: entry.label,
+                cwd: entry.cwd,
+                state: .asleep,
+                panes: entry.panes ?? [])
         }
     }
 }
