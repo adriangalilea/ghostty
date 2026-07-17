@@ -360,6 +360,12 @@ pub const Action = union(Key) {
     /// vigil: toggle the sessions overview switcher.
     vigil_overview,
 
+    /// vigil: cycle to the next session in overview order.
+    vigil_cycle,
+
+    /// vigil: open the most urgent session in the quick terminal.
+    vigil_next_floating,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -432,6 +438,8 @@ pub const Action = union(Key) {
         vigil_detach_window,
         vigil_new_session,
         vigil_overview,
+        vigil_cycle,
+        vigil_next_floating,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");

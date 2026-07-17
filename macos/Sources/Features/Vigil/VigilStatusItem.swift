@@ -12,6 +12,8 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     /// `vigil_*` keybind actions) via AppDelegate.syncMenuShortcuts, never
     /// hardcoded: the user binds them, so conflicts are impossible here.
     let menuNext = NSMenuItem(title: "Next", action: #selector(nextSession(_:)), keyEquivalent: "")
+    let menuCycle = NSMenuItem(title: "Cycle", action: #selector(cycleSession(_:)), keyEquivalent: "")
+    let menuNextFloating = NSMenuItem(title: "Next Floating", action: #selector(nextFloating(_:)), keyEquivalent: "")
     let menuOverview = NSMenuItem(title: "Overview", action: #selector(overview(_:)), keyEquivalent: "")
     let menuNewSession = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
     let menuAdopt = NSMenuItem(title: "Adopt Front Window", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
@@ -67,7 +69,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         guard !mainMenu.items.contains(where: { $0.title == "Sessions" }) else { return }
 
         let menu = NSMenu(title: "Sessions")
-        for item in [menuNext, menuOverview, .separator(), menuNewSession, menuAdopt, menuDetach] {
+        for item in [menuNext, menuNextFloating, menuCycle, menuOverview, .separator(), menuNewSession, menuAdopt, menuDetach] {
             item.target = self
             item.menu?.removeItem(item)
             menu.addItem(item)
@@ -113,6 +115,9 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             case .embedded:
                 glyph = "●"
                 verb = "Focus"
+            case .floating:
+                glyph = "◍"
+                verb = "Focus (in the quick terminal)"
             case .detached:
                 glyph = "◌"
                 verb = "Open (re-embed, still running)"
@@ -139,7 +144,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             let removal: String
             switch session.state {
             case .embedded: removal = "Unadopt (window stays)"
-            case .detached: removal = "Kill (processes die)"
+            case .floating, .detached: removal = "Kill (processes die)"
             case .asleep: removal = "Forget"
             }
             submenu.addItem(sessionItem(removal, #selector(forgetSession(_:)), session.name))
@@ -174,6 +179,14 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func nextSession(_ sender: NSMenuItem) {
         VigilSessionManager.shared.next()
+    }
+
+    @objc private func cycleSession(_ sender: NSMenuItem) {
+        VigilSessionManager.shared.cycle()
+    }
+
+    @objc private func nextFloating(_ sender: NSMenuItem) {
+        VigilSessionManager.shared.nextFloating()
     }
 
     @objc private func overview(_ sender: NSMenuItem) {

@@ -610,6 +610,12 @@ extension Ghostty {
             case GHOSTTY_ACTION_VIGIL_OVERVIEW:
                 MainActor.assumeIsolated { VigilOverview.shared.toggle() }
 
+            case GHOSTTY_ACTION_VIGIL_CYCLE:
+                MainActor.assumeIsolated { VigilSessionManager.shared.cycle() }
+
+            case GHOSTTY_ACTION_VIGIL_NEXT_FLOATING:
+                MainActor.assumeIsolated { VigilSessionManager.shared.nextFloating() }
+
             case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
                 toggleVisibility(app, target: target)
 

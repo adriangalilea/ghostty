@@ -1173,6 +1173,8 @@ extension AppDelegate {
             // reinstall is idempotent and this sync runs on every rebuild.
             vigil.installMainMenu()
             syncMenuShortcut(config, action: "vigil_next", menuItem: vigil.menuNext)
+            syncMenuShortcut(config, action: "vigil_cycle", menuItem: vigil.menuCycle)
+            syncMenuShortcut(config, action: "vigil_next_floating", menuItem: vigil.menuNextFloating)
             syncMenuShortcut(config, action: "vigil_overview", menuItem: vigil.menuOverview)
             syncMenuShortcut(config, action: "vigil_new_session", menuItem: vigil.menuNewSession)
             syncMenuShortcut(config, action: "vigil_detach_window", menuItem: vigil.menuDetach)

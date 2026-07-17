@@ -865,6 +865,17 @@ pub const Action = union(enum) {
     /// of every session (embedded, detached and asleep).
     vigil_overview,
 
+    /// vigil: cycle to the next session, modal-less (cmd+backtick for
+    /// sessions). Follows the overview's manual order, ephemeral windows
+    /// last; detached sessions re-embed, asleep ones resurrect; wraps.
+    vigil_cycle,
+
+    /// vigil: drop the most urgent session into the quick terminal
+    /// (Quake-style peek): answer it and dismiss without leaving what you
+    /// were doing. Dismissing returns the session to detached, intact.
+    /// With nothing pending, dismisses whatever is floating.
+    vigil_next_floating,
+
     /// Show or hide all windows. If all windows become shown, we also ensure
     /// Ghostty becomes focused. When hiding all windows, focus is yielded
     /// to the next application as determined by the OS.
@@ -1361,6 +1372,8 @@ pub const Action = union(enum) {
             .vigil_detach_window,
             .vigil_new_session,
             .vigil_overview,
+            .vigil_cycle,
+            .vigil_next_floating,
             .toggle_visibility,
             .check_for_updates,
             .show_gtk_inspector,

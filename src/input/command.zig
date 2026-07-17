@@ -733,6 +733,18 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Switcher with live thumbnails of every session.",
         }},
 
+        .vigil_cycle => comptime &.{.{
+            .action = .vigil_cycle,
+            .title = "Cycle Session",
+            .description = "Go to the next session in overview order.",
+        }},
+
+        .vigil_next_floating => comptime &.{.{
+            .action = .vigil_next_floating,
+            .title = "Next Session Floating",
+            .description = "Drop the most urgent session into the quick terminal.",
+        }},
+
         // No commands because I'm not sure they make sense in a command
         // palette context.
         .toggle_command_palette,
