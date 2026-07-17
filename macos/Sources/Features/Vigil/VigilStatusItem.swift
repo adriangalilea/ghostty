@@ -138,6 +138,9 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             submenu.addItem(sessionItem(verb, #selector(openSession(_:)), session.name))
             if case .embedded = session.state {
                 submenu.addItem(sessionItem("Detach (keep running)", #selector(detachSession(_:)), session.name))
+                if !manager.daemonBacked(session: session) {
+                    submenu.addItem(sessionItem("Upgrade (survive quit)", #selector(upgradeSession(_:)), session.name))
+                }
             }
             submenu.addItem(sessionItem("Rename…", #selector(renameSession(_:)), session.name))
             submenu.addItem(.separator())
@@ -201,6 +204,11 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     @objc private func detachSession(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         VigilSessionManager.shared.detach(name: name)
+    }
+
+    @objc private func upgradeSession(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        VigilSessionManager.shared.upgrade(name: name)
     }
 
     @objc private func forgetSession(_ sender: NSMenuItem) {

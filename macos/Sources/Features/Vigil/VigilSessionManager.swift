@@ -461,11 +461,23 @@ class VigilSessionManager {
         var config = base ?? Ghostty.SurfaceConfiguration()
         guard config.vigilAttach == nil else { return config }
 
+        config.vigilAttach = "vigil-\(name)-\(nextPaneIndex(name: name, tree: terminal.surfaceTree))"
+        config.environmentVariables["VIGIL_SESSION"] = name
+        if config.workingDirectory == nil {
+            config.workingDirectory = oldView.pwd
+        }
+        return config
+    }
+
+    /// The next free daemon pane index for a session: max over live attach
+    /// ids and captured attach sentinels, plus one. Collision-free across
+    /// resurrections and upgrades.
+    private func nextPaneIndex(name: String, tree: SplitTree<Ghostty.SurfaceView>) -> Int {
         func paneIndex(_ id: String) -> Int? {
             id.split(separator: "-").last.flatMap { Int($0) }
         }
         var maxIndex = 0
-        for view in terminal.surfaceTree {
+        for view in tree {
             if let id = view.vigilAttachId, let n = paneIndex(id) { maxIndex = max(maxIndex, n) }
         }
         for pane in sessions[name]?.panes ?? [] {
@@ -474,13 +486,7 @@ class VigilSessionManager {
                 maxIndex = max(maxIndex, n)
             }
         }
-
-        config.vigilAttach = "vigil-\(name)-\(maxIndex + 1)"
-        config.environmentVariables["VIGIL_SESSION"] = name
-        if config.workingDirectory == nil {
-            config.workingDirectory = oldView.pwd
-        }
-        return config
+        return maxIndex + 1
     }
 
     /// Detach: the tree (ptys running) moves from the window to this manager.
@@ -547,6 +553,101 @@ class VigilSessionManager {
         return command.contains("claude")
             || command.contains("wake.ts")
             || command.contains("wake pane")
+    }
+
+    // MARK: Survival class
+
+    /// True when every pane of the tree lives in a daemon: the session
+    /// survives the app dying. Any plain pane makes the whole window
+    /// capture+resume class; the weakest link is the honest answer.
+    static func daemonBacked(_ tree: SplitTree<Ghostty.SurfaceView>) -> Bool {
+        var any = false
+        for view in tree {
+            any = true
+            if view.vigilAttachId == nil { return false }
+        }
+        return any
+    }
+
+    /// The session's survival class across all states (asleep judges by
+    /// its captured panes: all attach sentinels = daemons waiting).
+    func daemonBacked(session: Session) -> Bool {
+        switch session.state {
+        case .embedded(let controller):
+            return Self.daemonBacked(controller.surfaceTree)
+        case .floating:
+            guard let quick = quickController(create: false) else { return false }
+            return Self.daemonBacked(quick.surfaceTree)
+        case .detached(let tree):
+            return Self.daemonBacked(tree)
+        case .asleep:
+            return !session.panes.isEmpty && session.panes.allSatisfy {
+                $0.command?.hasPrefix(Self.attachSentinel) == true
+            }
+        }
+    }
+
+    /// Argv that survives being typed into a shell verbatim: plain
+    /// path/word characters only, nothing a shell reinterprets.
+    static func shellSafe(_ arg: String) -> Bool {
+        !arg.isEmpty && arg.allSatisfy {
+            $0.isLetter || $0.isNumber || "@%+=:,./-_".contains($0)
+        }
+    }
+
+    /// Move every capture+resume pane of a live session into its own
+    /// daemon, IN PLACE: freeze content now, put a fresh daemon pane in
+    /// the same spot (same cwd), and let the daemon type the restore line
+    /// (content replay + program resume) once its shell truly booted (the
+    /// daemon's own first-attach quiescence mechanism, via VIGILD_RESUME).
+    /// The old processes die exactly as an app quit would have killed
+    /// them; the difference is the resume happens here and now, and from
+    /// then on the window survives everything.
+    func upgrade(name: String) {
+        guard let ghostty = ghosttyApp, let app = ghostty.app else { return }
+        guard let session = sessions[name],
+              case .embedded(let controller) = session.state else { return }
+        let tree = controller.surfaceTree
+        guard !Self.daemonBacked(tree) else { return }
+
+        sessions[name]!.panes = capturePanes(name: name, tree)
+        let panes = sessions[name]!.panes
+        var claudeAssigned = false
+        var nextIndex = nextPaneIndex(name: name, tree: tree)
+
+        for (index, view) in tree.enumerated() {
+            guard view.vigilAttachId == nil, index < panes.count else { continue }
+            let pane = panes[index]
+
+            var config = Ghostty.SurfaceConfiguration()
+            config.workingDirectory = pane.cwd
+            config.environmentVariables["VIGIL_SESSION"] = name
+            config.vigilAttach = "vigil-\(name)-\(nextIndex)"
+            nextIndex += 1
+
+            var parts: [String] = []
+            if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
+                parts.append("cat '\(dump)'")
+            }
+            if Self.isClaudePane(pane.command) {
+                if !claudeAssigned {
+                    claudeAssigned = true
+                    parts.append("wake pane \(name)")
+                }
+            } else if let argv = pane.argv, argv.allSatisfy(Self.shellSafe) {
+                parts.append(argv.joined(separator: " "))
+            }
+            if !parts.isEmpty {
+                config.environmentVariables["VIGILD_RESUME"] = parts.joined(separator: "; ")
+            }
+
+            let newView = Ghostty.SurfaceView(app, baseConfig: config)
+            guard let node = controller.surfaceTree.root?.node(view: view),
+                  let newTree = try? controller.surfaceTree.replacing(node: node, with: .leaf(view: newView))
+            else { continue }
+            controller.surfaceTree = newTree
+        }
+        persist()
     }
 
     /// The workspace's split shape, pane indices in DFS leaf order (the
@@ -1205,16 +1306,21 @@ class VigilSessionManager {
     }
 
     /// Idempotent: every persistent embedded window carries the vigilance
-    /// mark (eye + label titlebar pill), every other window carries none.
-    /// One sync walks all windows; called from persist(), the chokepoint
-    /// every state change already flows through.
+    /// mark (eye + label titlebar pill, colored by survival class) and a
+    /// matching content border; every other window carries none. One sync
+    /// walks all windows; called from persist(), the chokepoint every
+    /// state change already flows through.
     private func syncWindowMarks() {
         for controller in TerminalController.all {
             guard let window = controller.window else { continue }
             let existing = window.titlebarAccessoryViewControllers.enumerated()
                 .first { $0.element is VigilTitlebarAccessory }
             if let name = sessionName(of: controller), let session = sessions[name] {
-                let mark = VigilWindowMark(label: session.label)
+                let daemonBacked = Self.daemonBacked(controller.surfaceTree)
+                let mark = VigilWindowMark(
+                    label: session.label,
+                    daemonBacked: daemonBacked,
+                    onUpgrade: daemonBacked ? nil : { [weak self] in self?.upgrade(name: name) })
                 if let hosting = existing?.element.view as? NSHostingView<VigilWindowMark> {
                     hosting.rootView = mark
                 } else {
@@ -1223,10 +1329,30 @@ class VigilSessionManager {
                     accessory.layoutAttribute = .right
                     window.addTitlebarAccessoryViewController(accessory)
                 }
-            } else if let existing {
-                window.removeTitlebarAccessoryViewController(at: existing.offset)
+                syncBorder(window, daemonBacked: daemonBacked)
+            } else {
+                if let existing {
+                    window.removeTitlebarAccessoryViewController(at: existing.offset)
+                }
+                syncBorder(window, daemonBacked: nil)
             }
         }
+    }
+
+    /// The survival class on the window itself: a thin content border in
+    /// the pill's color (teal = daemon-backed, orange = capture+resume),
+    /// none for ephemeral windows (absence is the state).
+    private func syncBorder(_ window: NSWindow, daemonBacked: Bool?) {
+        guard let content = window.contentView else { return }
+        content.wantsLayer = true
+        guard let layer = content.layer else { return }
+        guard let daemonBacked else {
+            layer.borderWidth = 0
+            return
+        }
+        layer.borderWidth = 2
+        layer.borderColor = (daemonBacked ? NSColor.systemTeal : NSColor.systemOrange)
+            .withAlphaComponent(0.55).cgColor
     }
 
     private func load() {

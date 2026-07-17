@@ -44,7 +44,8 @@ class VigilOverview: NSObject {
                     state: session.state,
                     attention: session.attention,
                     thumbnail: session.thumbnail,
-                    persistent: true)
+                    persistent: true,
+                    daemonBacked: manager.daemonBacked(session: session))
             }
         for controller in manager.ephemeralControllers() {
             let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
@@ -56,7 +57,8 @@ class VigilOverview: NSObject {
                 state: .embedded(controller),
                 attention: .none,
                 thumbnail: VigilSessionManager.windowSnapshot(controller),
-                persistent: false))
+                persistent: false,
+                daemonBacked: false))
         }
         return entries
     }
@@ -182,6 +184,15 @@ class VigilOverview: NSObject {
                     VigilSessionManager.shared.create(cwd: cwd)
                     return nil
                 case 35: self.togglePersistSelected(); return nil // p
+                case 32: // u: move every pane into a daemon, in place
+                    if let entry = self.model.selected, entry.upgradable {
+                        VigilSessionManager.shared.upgrade(name: entry.name)
+                        let keep = self.model.selection
+                        self.model.entries = self.buildEntries()
+                        self.model.selection = min(keep, self.model.entries.count - 1)
+                        self.refit()
+                    }
+                    return nil
                 case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
                 case 51: self.removeSelected(); return nil // backspace
                 case 53: // esc: leave the peek first, close second
@@ -347,8 +358,17 @@ struct OverviewEntry: Identifiable {
     /// Persistent = vigil session (survives detach/quit/reboot). Ephemeral =
     /// a plain window, dies on close. A toggle, not a boundary.
     let persistent: Bool
+    /// Survival class: true = every pane in a daemon (survives the app
+    /// dying), false = capture+resume (processes die with the app).
+    let daemonBacked: Bool
 
     var id: String { name }
+
+    /// A live persistent window whose panes can move into daemons now.
+    var upgradable: Bool {
+        guard persistent, !daemonBacked, case .embedded = state else { return false }
+        return true
+    }
 
     /// Words, not glyphs: the overview must be readable with zero vocabulary.
     var stateWord: String {
@@ -444,6 +464,9 @@ struct OverviewView: View {
                     if let verb = selected.persistVerb {
                         hint("p", verb)
                     }
+                    if selected.upgradable {
+                        hint("u", "upgrade: survive quit")
+                    }
                     hint("⌫", selected.removeVerb)
                     if let undoKey = model.undoKey {
                         hint(undoKey, "undo kill")
@@ -486,7 +509,9 @@ struct OverviewView: View {
                     .lineLimit(1)
                 chip(entry.stateWord, entry.stateColor)
                 if entry.persistent {
-                    chip("persistent", .accentColor, icon: "eye.fill")
+                    chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
+                         entry.daemonBacked ? .teal : .orange,
+                         icon: entry.daemonBacked ? "eye.fill" : "eye")
                 } else {
                     chip("ephemeral", .secondary)
                 }
@@ -549,7 +574,9 @@ struct OverviewView: View {
                     HStack(spacing: 6) {
                         chip(entry.stateWord, entry.stateColor)
                         if entry.persistent {
-                            chip("persistent", .accentColor, icon: "eye.fill")
+                            chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
+                                 entry.daemonBacked ? .teal : .orange,
+                                 icon: entry.daemonBacked ? "eye.fill" : "eye")
                         } else {
                             chip("ephemeral", .secondary)
                         }
