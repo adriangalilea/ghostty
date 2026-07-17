@@ -1168,6 +1168,10 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "close_window", menuItem: self.menuCloseWindow)
         syncMenuShortcut(config, action: "close_all_windows", menuItem: self.menuCloseAllWindows)
         if let vigil = vigilStatusItem {
+            // The main menu can be rebuilt after launch, wiping our Sessions
+            // menu (observed: present in one instance, gone in the next);
+            // reinstall is idempotent and this sync runs on every rebuild.
+            vigil.installMainMenu()
             syncMenuShortcut(config, action: "vigil_next", menuItem: vigil.menuNext)
             syncMenuShortcut(config, action: "vigil_overview", menuItem: vigil.menuOverview)
             syncMenuShortcut(config, action: "vigil_new_session", menuItem: vigil.menuNewSession)

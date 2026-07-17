@@ -255,6 +255,15 @@ class VigilSessionManager {
         becomeRegular()
         let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
         sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
+        // The resurrect command is known from birth: even a crash (no detach,
+        // no capture) resurrects by reattach while the daemon lives.
+        sessions[name]!.panes = [
+            Pane(
+                cwd: cwd,
+                command: "vigild attach --create vigil-\(name) -- $SHELL -l",
+                dump: nil,
+                draft: nil)
+        ]
         persist()
         NSApp.activate(ignoringOtherApps: true)
     }

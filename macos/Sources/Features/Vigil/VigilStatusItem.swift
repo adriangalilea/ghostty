@@ -59,13 +59,17 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     }
 
     /// Native "Sessions" menu in the menu bar. Shortcuts are synced from the
-    /// ghostty config exactly like every other menu item.
-    private func installMainMenu() {
+    /// ghostty config exactly like every other menu item. Idempotent and
+    /// re-callable: the app's main menu can be rebuilt after launch, wiping
+    /// a menu installed at init.
+    func installMainMenu() {
         guard let mainMenu = NSApp.mainMenu else { return }
+        guard !mainMenu.items.contains(where: { $0.title == "Sessions" }) else { return }
 
         let menu = NSMenu(title: "Sessions")
         for item in [menuNext, menuOverview, .separator(), menuNewSession, menuAdopt, menuDetach] {
             item.target = self
+            item.menu?.removeItem(item)
             menu.addItem(item)
         }
 
