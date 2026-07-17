@@ -471,9 +471,15 @@ struct OverviewView: View {
                     .padding(.vertical, 2)
                     .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.12)))
                 Button(action: onClose) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(.secondary)
+                    ZStack {
+                        // The macOS traffic-light red, in its corner.
+                        Circle()
+                            .fill(Color(red: 1.0, green: 0.373, blue: 0.341))
+                            .frame(width: 14, height: 14)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(.black.opacity(0.5))
+                    }
                 }
                 .buttonStyle(.plain)
             }
