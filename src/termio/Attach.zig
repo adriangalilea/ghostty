@@ -284,9 +284,10 @@ pub fn childExitedAbnormally(
     _ = runtime_ms;
 }
 
-/// Answered from the daemon's pidfile: "<daemon> <child>\n<ttyname>".
-/// foreground_pid is the session leader (the daemon's direct child); the
-/// true foreground process lives on the daemon's pty, out of reach here.
+/// Answered from the daemon's pidfile:
+/// "<daemon> <child>\n<ttyname>\n<foreground pid>". Line 3 is the DEEP
+/// foreground process (the daemon tcgetpgrp's its own pty and rewrites the
+/// line on change); the session leader on line 1 is the fallback.
 pub fn getProcessInfo(self: *Attach, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     switch (info) {
         .foreground_pid => {
@@ -294,6 +295,11 @@ pub fn getProcessInfo(self: *Attach, comptime info: ProcessInfo) ?ProcessInfo.Ty
             defer self.alloc.free(data);
             var lines = std.mem.splitScalar(u8, data, '\n');
             const first = lines.next() orelse return null;
+            _ = lines.next(); // tty
+            if (lines.next()) |fg_line| {
+                const trimmed = std.mem.trim(u8, fg_line, " \r");
+                if (std.fmt.parseInt(u64, trimmed, 10) catch null) |fg| return fg;
+            }
             var toks = std.mem.tokenizeScalar(u8, first, ' ');
             _ = toks.next() orelse return null;
             const child = toks.next() orelse return null;
