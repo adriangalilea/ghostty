@@ -50,6 +50,10 @@ class VigilSessionManager {
         /// VT dump (scrollback + screen) frozen at capture; replayed with
         /// `cat` on resurrection so the content survives, not just the shape.
         var dump: String?
+        /// Text sitting unsent in the program's input box at capture (claude
+        /// panes), scraped from the frozen frame; typed back after the
+        /// program relaunches so a half-written prompt survives.
+        var draft: String?
     }
 
     struct Session {
@@ -307,9 +311,33 @@ class VigilSessionManager {
             if view.surfaceModel?.vigilDump(to: dumpPath) == true {
                 dump = dumpPath
             }
-            panes.append(Pane(cwd: cwd, command: command, dump: dump))
+            var draft: String?
+            if let dump, command?.contains("claude") == true {
+                draft = Self.scrapeDraft(dumpPath: dump)
+            }
+            panes.append(Pane(cwd: cwd, command: command, dump: dump, draft: draft))
         }
         return panes
+    }
+
+    /// The unsent input in claude's box, scraped from the frozen frame: the
+    /// last prompt-marker line near the bottom of the dump. Screen scraping
+    /// is honest here; claude persists conversations, never drafts.
+    static func scrapeDraft(dumpPath: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: dumpPath) else { return nil }
+        let plain = String(decoding: data, as: UTF8.self)
+            .replacingOccurrences(of: "\u{1b}\\[[0-9;:?]*[A-Za-z]", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\u{1b}\\][^\u{7}\u{1b}]*(\u{7}|\u{1b}\\\\)", with: "", options: .regularExpression)
+        let lines = plain.split(separator: "\n", omittingEmptySubsequences: false).suffix(15)
+        for line in lines.reversed() {
+            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: " │╭╮╰╯─"))
+            for marker in ["❯ ", "> ", ") "] where trimmed.hasPrefix(marker) {
+                let draft = String(trimmed.dropFirst(marker.count))
+                    .trimmingCharacters(in: .whitespaces)
+                if !draft.isEmpty { return draft }
+            }
+        }
+        return nil
     }
 
     /// Adopted claudes were born without identity: recover it forensically via
@@ -407,6 +435,7 @@ class VigilSessionManager {
             var panes = session.panes
             if panes.isEmpty { panes = [Pane(cwd: session.cwd, command: "claude")] }
             var claudeAssigned = false
+            var claudeDraft: String?
             func configFor(_ pane: Pane) -> Ghostty.SurfaceConfiguration {
                 var config = Ghostty.SurfaceConfiguration()
                 config.workingDirectory = pane.cwd
@@ -421,6 +450,7 @@ class VigilSessionManager {
                 if let command = pane.command {
                     if command.contains("claude"), !claudeAssigned {
                         claudeAssigned = true
+                        claudeDraft = pane.draft
                         parts.append("wake pane \(name)")
                     } else {
                         parts.append(command)
@@ -446,9 +476,34 @@ class VigilSessionManager {
                     }
                 }
             }
+            if let draft = claudeDraft {
+                injectDraft(controller, draft)
+            }
             NSApp.activate(ignoringOtherApps: true)
         }
         persist()
+    }
+
+    /// Type the rescued draft back into claude's input box, no newline (the
+    /// human submits, never us). Typing early would feed the shell, so poll
+    /// until claude IS the foreground process, then give its TUI a beat to
+    /// paint before sending.
+    private func injectDraft(_ controller: TerminalController, _ draft: String, attempts: Int = 60) {
+        guard attempts > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            for view in controller.surfaceTree {
+                guard let pid = view.surfaceModel?.foregroundPID else { continue }
+                let comm = self.runCapture("/bin/ps", ["-o", "comm=", "-p", String(pid)])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard URL(fileURLWithPath: comm).lastPathComponent == "claude" else { continue }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    view.surfaceModel?.sendText(draft)
+                }
+                return
+            }
+            self.injectDraft(controller, draft, attempts: attempts - 1)
+        }
     }
 
     func rename(name: String, label: String) {
