@@ -38,6 +38,9 @@ alloc: Allocator,
 /// Connected socket; -1 until threadEnter.
 sock_fd: posix.fd_t = -1,
 
+/// Cached tty name of the daemon's pty (from its pidfile).
+cached_tty: ?[:0]const u8 = null,
+
 /// Last known size, sent on connect and on change.
 grid_size: renderer.GridSize = .{ .columns = 80, .rows = 24 },
 
@@ -60,6 +63,7 @@ pub fn deinit(self: *Attach) void {
     self.alloc.free(self.id);
     if (self.cwd) |v| self.alloc.free(v);
     if (self.session) |v| self.alloc.free(v);
+    if (self.cached_tty) |v| self.alloc.free(v);
 }
 
 pub fn initTerminal(self: *Attach, term: *terminal.Terminal) void {
@@ -135,10 +139,16 @@ pub fn threadEnter(
     errdefer posix.close(pipe[0]);
     errdefer posix.close(pipe[1]);
 
+    const closing = try alloc_state: {
+        break :alloc_state self.alloc.create(std.atomic.Value(bool));
+    };
+    closing.* = .init(false);
+    errdefer self.alloc.destroy(closing);
+
     const read_thread = try std.Thread.spawn(
         .{},
-        termio.Exec.ReadThread.threadMainPosix,
-        .{ fd, io, pipe[0] },
+        readThreadMain,
+        .{ fd, io, pipe[0], closing },
     );
     read_thread.setName("io-reader") catch {};
 
@@ -146,12 +156,17 @@ pub fn threadEnter(
         .sock_fd = fd,
         .read_thread = read_thread,
         .read_thread_pipe = pipe[1],
+        .closing = closing,
     } };
 }
 
 pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
     assert(td.backend == .attach);
     const attach = &td.backend.attach;
+
+    // Deliberate teardown: the EOF the read thread is about to see is not
+    // a session death.
+    attach.closing.store(true, .release);
 
     _ = posix.write(attach.read_thread_pipe, "x") catch |err| switch (err) {
         error.BrokenPipe => {},
@@ -269,9 +284,57 @@ pub fn childExitedAbnormally(
     _ = runtime_ms;
 }
 
+/// Answered from the daemon's pidfile: "<daemon> <child>\n<ttyname>".
+/// foreground_pid is the session leader (the daemon's direct child); the
+/// true foreground process lives on the daemon's pty, out of reach here.
 pub fn getProcessInfo(self: *Attach, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
-    _ = self;
-    return null;
+    switch (info) {
+        .foreground_pid => {
+            const data = self.readPidfile() orelse return null;
+            defer self.alloc.free(data);
+            var lines = std.mem.splitScalar(u8, data, '\n');
+            const first = lines.next() orelse return null;
+            var toks = std.mem.tokenizeScalar(u8, first, ' ');
+            _ = toks.next() orelse return null;
+            const child = toks.next() orelse return null;
+            return std.fmt.parseInt(u64, child, 10) catch null;
+        },
+        .tty_name => {
+            if (self.cached_tty) |v| return v;
+            const data = self.readPidfile() orelse return null;
+            defer self.alloc.free(data);
+            var lines = std.mem.splitScalar(u8, data, '\n');
+            _ = lines.next() orelse return null;
+            const tty = lines.next() orelse return null;
+            if (tty.len == 0) return null;
+            self.cached_tty = self.alloc.dupeZ(u8, tty) catch return null;
+            return self.cached_tty;
+        },
+    }
+}
+
+fn readPidfile(self: *Attach) ?[]u8 {
+    const home = posix.getenv("HOME") orelse return null;
+    var buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/.local/state/vigild/{s}.pid", .{ home, self.id }) catch return null;
+    return std.fs.cwd().readFileAlloc(self.alloc, path, 256) catch null;
+}
+
+/// The read thread body: Exec's loop over the socket fd, plus a death
+/// notice. Reaching EOF WITHOUT a deliberate teardown means the daemon
+/// died under us (external `vigild kill`, crash): tell the surface so it
+/// shows the session ended instead of freezing mute.
+fn readThreadMain(
+    fd: posix.fd_t,
+    io: *termio.Termio,
+    quit: posix.fd_t,
+    closing: *std.atomic.Value(bool),
+) void {
+    termio.Exec.ReadThread.threadMainPosix(fd, io, quit);
+    if (closing.load(.acquire)) return;
+    _ = io.surface_mailbox.push(.{
+        .child_exited = .{ .exit_code = 1, .runtime_ms = 0 },
+    }, .{ .forever = {} });
 }
 
 /// Thread-local state: the socket and the reader.
@@ -279,9 +342,10 @@ pub const ThreadData = struct {
     sock_fd: posix.fd_t,
     read_thread: std.Thread,
     read_thread_pipe: posix.fd_t,
+    closing: *std.atomic.Value(bool),
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
-        _ = alloc;
         posix.close(self.read_thread_pipe);
+        alloc.destroy(self.closing);
     }
 };
