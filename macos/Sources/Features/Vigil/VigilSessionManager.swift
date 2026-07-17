@@ -539,6 +539,16 @@ class VigilSessionManager {
             right: applyRatios(split.right, r)))
     }
 
+    /// A pane the claude adapter owns: claude itself, or vigil's own
+    /// resume wrapper (a re-captured resurrected pane's foreground is the
+    /// `wake pane` node process, not claude).
+    static func isClaudePane(_ command: String?) -> Bool {
+        guard let command else { return false }
+        return command.contains("claude")
+            || command.contains("wake.ts")
+            || command.contains("wake pane")
+    }
+
     /// The workspace's split shape, pane indices in DFS leaf order (the
     /// same order capturePanes walks).
     static func captureLayout(_ tree: SplitTree<Ghostty.SurfaceView>) -> Layout? {
@@ -753,10 +763,13 @@ class VigilSessionManager {
                 // Recreation path (adopted, pre-daemon panes). Command panes
                 // exec their captured argv directly: no shell parses it, and
                 // the program repaints its own screen (no dump replay). The
-                // claude pane resumes via wake; shell panes replay their
-                // frozen content. Every typed string here is vigil's own
-                // (dump paths, slugs), never captured process text.
-                if let argv = pane.argv, pane.command?.contains("claude") != true {
+                // claude pane resumes via wake TYPED INTO A SHELL: the
+                // adapter needs the login environment (a direct: spawn under
+                // the app's launchd env has no user PATH; found live, the
+                // wrapper died instantly and the pane came back blank).
+                // Every typed string here is vigil's own (dump paths,
+                // slugs), never captured process text.
+                if let argv = pane.argv, !Self.isClaudePane(pane.command) {
                     config.command = "direct:" + argv.joined(separator: " ")
                     return config
                 }
@@ -764,7 +777,7 @@ class VigilSessionManager {
                 if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
                     parts.append("cat '\(dump)'")
                 }
-                if pane.command?.contains("claude") == true, !claudeAssigned {
+                if Self.isClaudePane(pane.command), !claudeAssigned {
                     claudeAssigned = true
                     parts.append("wake pane \(name)")
                 }
@@ -999,10 +1012,17 @@ class VigilSessionManager {
             .appendingPathComponent(".local/bin/vigild").path
         let stateDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/vigild")
+        // Boundary-safe match: pane ids are vigil-<name>-<index>, and a bare
+        // prefix test murders innocent neighbors (vigil-2026- matched
+        // vigil-2026-2-0, session "2026-2"'s live daemon; found live).
         let prefix = "vigil-\(name)-"
         for entry in (try? FileManager.default.contentsOfDirectory(atPath: stateDir.path)) ?? []
-        where entry.hasPrefix(prefix) && entry.hasSuffix(".pid") {
-            runFireAndForget(vigildBin, ["kill", String(entry.dropLast(4))])
+        where entry.hasSuffix(".pid") {
+            let stem = String(entry.dropLast(4))
+            guard stem.hasPrefix(prefix),
+                  stem.dropFirst(prefix.count).allSatisfy({ $0.isNumber })
+            else { continue }
+            runFireAndForget(vigildBin, ["kill", stem])
         }
         persist()
     }
