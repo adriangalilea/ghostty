@@ -477,6 +477,9 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+  // Vigil: non-NULL/non-empty makes this surface attach to (or create) the
+  // vigild session daemon with this id instead of spawning a subprocess.
+  const char* vigil_attach;
 } ghostty_surface_config_s;
 
 typedef struct {

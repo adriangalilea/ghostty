@@ -647,6 +647,11 @@ extension Ghostty {
         /// Extra input to send as stdin
         var initialInput: String?
 
+        /// Vigil: attach to (or create) this vigild session daemon instead
+        /// of spawning a subprocess. The surface becomes a disposable client
+        /// of processes that survive it.
+        var vigilAttach: String?
+
         /// Wait after the command
         var waitAfterCommand: Bool = false
 
@@ -721,6 +726,9 @@ extension Ghostty {
                     return try initialInput.withCString { cInput in
                         config.initial_input = cInput
 
+                        return try vigilAttach.withCString { cAttach in
+                        config.vigil_attach = cAttach
+
                         // Convert dictionary to arrays for easier processing
                         let keys = Array(environmentVariables.keys)
                         let values = Array(environmentVariables.values)
@@ -744,6 +752,7 @@ extension Ghostty {
                                     return try body(&config)
                                 }
                             }
+                        }
                         }
                     }
                 }

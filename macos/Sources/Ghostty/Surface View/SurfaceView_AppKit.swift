@@ -219,7 +219,12 @@ extension Ghostty {
         // We need to support being a first responder so that we can get input events
         override var acceptsFirstResponder: Bool { return true }
 
+        /// Vigil: the daemon attach id this surface was created with, if
+        /// any. Session capture preserves it so resurrection reattaches.
+        private(set) var vigilAttachId: String?
+
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
+            self.vigilAttachId = baseConfig?.vigilAttach
             self.markedText = NSMutableAttributedString()
 
             // Our initial config always is our application wide config.

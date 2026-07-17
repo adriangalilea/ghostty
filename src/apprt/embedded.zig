@@ -462,6 +462,10 @@ pub const Surface = struct {
 
         /// Context for the new surface
         context: apprt.surface.NewSurfaceContext = .window,
+
+        /// Vigil: attach to (or create) the vigild session daemon with this
+        /// id instead of spawning a subprocess.
+        vigil_attach: ?[*:0]const u8 = null,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -573,6 +577,14 @@ pub const Surface = struct {
         // Wait after command
         if (opts.wait_after_command) {
             config.@"wait-after-command" = true;
+        }
+
+        // Vigil: daemon-backed surface.
+        if (opts.vigil_attach) |c_id| {
+            const id = std.mem.sliceTo(c_id, 0);
+            if (id.len > 0) {
+                config.@"vigil-attach" = try config.arenaAlloc().dupeZ(u8, id);
+            }
         }
 
         // Initialize our surface right away. We're given a view that is

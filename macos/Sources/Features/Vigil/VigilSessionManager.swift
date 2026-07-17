@@ -251,21 +251,62 @@ class VigilSessionManager {
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = cwd
         config.environmentVariables["VIGIL_SESSION"] = name
-        config.initialInput = "exec vigild attach --create vigil-\(name) -- $SHELL -l\n"
+        // NATIVE: the surface's termio backend attaches to the daemon; no
+        // shell trickery, no typed exec. The Zig core spawns the daemon on
+        // first contact.
+        config.vigilAttach = "vigil-\(name)-0"
         becomeRegular()
         let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
         sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
-        // The resurrect command is known from birth: even a crash (no detach,
-        // no capture) resurrects by reattach while the daemon lives.
+        // The resurrect identity is known from birth: even a crash (no
+        // detach, no capture) resurrects by reattach while the daemon lives.
         sessions[name]!.panes = [
-            Pane(
-                cwd: cwd,
-                command: "vigild attach --create vigil-\(name) -- $SHELL -l",
-                dump: nil,
-                draft: nil)
+            Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0", dump: nil, draft: nil)
         ]
         persist()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Pane commands with this prefix are daemon attach ids, not shell
+    /// commands; resurrection sets the surface's native attach config.
+    static let attachSentinel = "vigil-attach:"
+
+    /// Splits inside a persistent session are daemon-backed: called by the
+    /// split path for EVERY split; passes through untouched unless this
+    /// controller is a persistent session. The pane id derives from the
+    /// highest existing id (live tree + persisted panes), so it never
+    /// collides across resurrections. cwd inherits from the split's origin
+    /// pane so the daemon shell starts where you were.
+    func configForNewSplit(
+        in controller: BaseTerminalController,
+        from oldView: Ghostty.SurfaceView,
+        base: Ghostty.SurfaceConfiguration?
+    ) -> Ghostty.SurfaceConfiguration? {
+        guard let terminal = controller as? TerminalController,
+              let name = sessionName(of: terminal) else { return base }
+        var config = base ?? Ghostty.SurfaceConfiguration()
+        guard config.vigilAttach == nil else { return config }
+
+        func paneIndex(_ id: String) -> Int? {
+            id.split(separator: "-").last.flatMap { Int($0) }
+        }
+        var maxIndex = 0
+        for view in terminal.surfaceTree {
+            if let id = view.vigilAttachId, let n = paneIndex(id) { maxIndex = max(maxIndex, n) }
+        }
+        for pane in sessions[name]?.panes ?? [] {
+            if let cmd = pane.command, cmd.hasPrefix(Self.attachSentinel),
+               let n = paneIndex(String(cmd.dropFirst(Self.attachSentinel.count))) {
+                maxIndex = max(maxIndex, n)
+            }
+        }
+
+        config.vigilAttach = "vigil-\(name)-\(maxIndex + 1)"
+        config.environmentVariables["VIGIL_SESSION"] = name
+        if config.workingDirectory == nil {
+            config.workingDirectory = oldView.pwd
+        }
+        return config
     }
 
     /// Detach: the tree (ptys running) moves from the window to this manager.
@@ -310,6 +351,20 @@ class VigilSessionManager {
         var panes: [Pane] = []
         for (index, view) in tree.enumerated() {
             let cwd = view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+
+            // Daemon panes: identity IS the attach id; the daemon holds the
+            // live state, nothing else needs capturing for resurrection.
+            if let attachId = view.vigilAttachId {
+                let dumpPath = dir.appendingPathComponent("\(index).vt").path
+                let dumped = view.surfaceModel?.vigilDump(to: dumpPath) == true
+                panes.append(Pane(
+                    cwd: cwd,
+                    command: "\(Self.attachSentinel)\(attachId)",
+                    dump: dumped ? dumpPath : nil,
+                    draft: nil))
+                continue
+            }
+
             var command: String?
             if let pid = view.surfaceModel?.foregroundPID {
                 let args = runCapture("/bin/ps", ["-o", "args=", "-p", String(pid)])
@@ -460,9 +515,16 @@ class VigilSessionManager {
                 var config = Ghostty.SurfaceConfiguration()
                 config.workingDirectory = pane.cwd
                 config.environmentVariables["VIGIL_SESSION"] = name
-                // State first, program second: replay the frozen content into
-                // the fresh terminal, then bring the program back. The dump
-                // path is our own slug-derived state dir, shell-safe.
+
+                // Daemon panes resurrect by NATIVE reattach: living daemon
+                // means living processes, nothing recreated.
+                if let command = pane.command, command.hasPrefix(Self.attachSentinel) {
+                    config.vigilAttach = String(command.dropFirst(Self.attachSentinel.count))
+                    return config
+                }
+
+                // Recreation path (pre-daemon panes): replay the frozen
+                // content, then bring the program back.
                 var parts: [String] = []
                 if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
                     parts.append("cat '\(dump)'")
@@ -534,11 +596,16 @@ class VigilSessionManager {
             killController(controller)
         }
         // Daemon-backed sessions keep their processes alive past any window;
-        // kill means the daemon too. No-op for sessions without one.
-        runFireAndForget(
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/bin/vigild").path,
-            ["kill", "vigil-\(name)"])
+        // kill means every pane daemon too. No-op for sessions without one.
+        let vigildBin = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/vigild").path
+        let stateDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/vigild")
+        let prefix = "vigil-\(name)-"
+        for entry in (try? FileManager.default.contentsOfDirectory(atPath: stateDir.path)) ?? []
+        where entry.hasPrefix(prefix) && entry.hasSuffix(".pid") {
+            runFireAndForget(vigildBin, ["kill", String(entry.dropLast(4))])
+        }
     }
 
     /// Silent, total window kill: emptying the tree closes the window without

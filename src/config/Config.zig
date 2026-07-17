@@ -1161,6 +1161,11 @@ palette: Palette = .{},
 /// information.
 command: ?Command = null,
 
+/// Vigil: when set, this surface does not spawn a subprocess; it attaches
+/// to (or creates) the vigild session daemon with this id. Set per-surface
+/// through the embedding API, never in a config file.
+@"vigil-attach": ?[:0]const u8 = null,
+
 /// This is the same as "command", but only applies to the first terminal
 /// surface created when Ghostty starts. Subsequent terminal surfaces will use
 /// the `command` configuration.

@@ -241,8 +241,14 @@ class BaseTerminalController: NSWindowController,
         // We can only create new splits for surfaces in our tree.
         guard surfaceTree.root?.node(view: oldView) != nil else { return nil }
 
-        // Create a new surface view
+        // Create a new surface view. Splits inside a persistent vigil
+        // session are daemon-backed like every other pane of it: the whole
+        // workspace survives, not just the first pane.
         guard let ghostty_app = ghostty.app else { return nil }
+        let config = VigilSessionManager.shared.configForNewSplit(
+            in: self,
+            from: oldView,
+            base: config)
         let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
 
         // Do the split
