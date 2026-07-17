@@ -201,6 +201,7 @@ class VigilOverview: NSObject {
         let keep = model.selection
         model.entries = buildEntries()
         model.selection = min(keep, model.entries.count - 1)
+        refit()
     }
 
     /// Backspace kills for real, whatever the card is: window + processes for
@@ -242,6 +243,28 @@ class VigilOverview: NSObject {
         model.entries = buildEntries()
         guard !model.entries.isEmpty else { hide(); return }
         model.selection = min(model.selection, model.entries.count - 1)
+        refit()
+    }
+
+    /// The panel is sized for its content at show(); after a card leaves,
+    /// content shrinks and the frame must follow or the survivor floats in
+    /// dead space. Columns re-derive from the new count, then the frame
+    /// animates to the new fit, recentered.
+    private func refit() {
+        model.columns = min(model.entries.count, 4)
+        guard let panel, let hosting = panel.contentView else { return }
+        DispatchQueue.main.async {
+            let size = hosting.fittingSize
+            let screen = NSScreen.main?.visibleFrame ?? .zero
+            panel.setFrame(
+                NSRect(
+                    x: screen.midX - size.width / 2,
+                    y: screen.midY - size.height / 2,
+                    width: size.width,
+                    height: size.height),
+                display: true,
+                animate: true)
+        }
     }
 
     private func hide() {
