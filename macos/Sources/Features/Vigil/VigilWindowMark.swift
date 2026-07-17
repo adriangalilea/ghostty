@@ -30,7 +30,9 @@ struct VigilWindowMark: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: daemonBacked ? "eye.fill" : "eye")
+            // Eye on/off (same footprint): on = survives quit, slashed =
+            // resumes after quit and can be upgraded.
+            Image(systemName: daemonBacked ? "eye.fill" : "eye.slash")
                 .font(.system(size: 9, weight: .bold))
             Text(label)
                 .font(.system(size: 11, weight: .semibold))

@@ -41,8 +41,12 @@ class VigilOverview: NSObject {
         manager.refreshThumbnails()
         var entries = manager.sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .map { session in
-                OverviewEntry(
+            .map { session -> OverviewEntry in
+                let controller: TerminalController? = {
+                    if case .embedded(let c) = session.state { return c }
+                    return nil
+                }()
+                return OverviewEntry(
                     kind: .window,
                     name: session.name,
                     label: session.label,
@@ -50,7 +54,8 @@ class VigilOverview: NSObject {
                     attention: session.attention,
                     thumbnail: session.thumbnail,
                     persistent: true,
-                    daemonBacked: manager.daemonBacked(session: session))
+                    daemonBacked: manager.daemonBacked(session: session),
+                    pinned: controller.map(manager.isPinned) ?? false)
             }
         for controller in manager.ephemeralControllers() {
             let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
@@ -64,7 +69,8 @@ class VigilOverview: NSObject {
                 attention: .none,
                 thumbnail: VigilSessionManager.windowSnapshot(controller),
                 persistent: false,
-                daemonBacked: false))
+                daemonBacked: false,
+                pinned: manager.isPinned(controller)))
         }
         // Killed sessions linger dimmed through their grace: the countdown
         // and the recover act live ON the card, where the loss is.
@@ -77,7 +83,8 @@ class VigilOverview: NSObject {
                 attention: .none,
                 thumbnail: burial.thumbnail,
                 persistent: !burial.ephemeral,
-                daemonBacked: false))
+                daemonBacked: false,
+                pinned: false))
         }
         // The new-session act is a card too, right where you are looking.
         entries.append(OverviewEntry(
@@ -88,7 +95,8 @@ class VigilOverview: NSObject {
             attention: .none,
             thumbnail: nil,
             persistent: false,
-            daemonBacked: false))
+            daemonBacked: false,
+            pinned: false))
         return entries
     }
 
@@ -129,6 +137,10 @@ class VigilOverview: NSObject {
             onPersist: { [weak self] entry in
                 self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
                 self?.togglePersistSelected()
+            },
+            onPin: { [weak self] entry in
+                self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
+                self?.togglePinSelected()
             },
             onRecover: { [weak self] entry in self?.recover(entry) })
         let hosting = NSHostingView(rootView: view)
@@ -214,6 +226,7 @@ class VigilOverview: NSObject {
                 case 125: self.model.move(self.model.columns); return nil // down
                 case 45: self.createSession(); return nil // n
                 case 35: self.togglePersistSelected(); return nil // p
+                case 3: self.togglePinSelected(); return nil // f: pin on top
                 case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
                 case 51: self.removeSelected(); return nil // backspace
                 case 53: // esc: leave the peek first, close second
@@ -293,6 +306,15 @@ class VigilOverview: NSObject {
             ?? FileManager.default.homeDirectoryForCurrentUser.path
         hide()
         VigilSessionManager.shared.create(cwd: cwd)
+    }
+
+    /// Pin/unpin the selected live window on top.
+    private func togglePinSelected() {
+        guard let entry = model.selected, let controller = entry.controller else { return }
+        VigilSessionManager.shared.togglePin(controller)
+        let keep = model.selection
+        model.entries = buildEntries()
+        model.selection = min(keep, max(model.entries.count - 1, 0))
     }
 
     /// Pull a killed session back out of its grace period, intact.
@@ -429,12 +451,20 @@ struct OverviewEntry: Identifiable {
     /// Survival class: true = every pane in a daemon (survives the app
     /// dying), false = capture+resume (processes die with the app).
     let daemonBacked: Bool
+    /// Pinned on top (Antinote-style); only meaningful for live windows.
+    let pinned: Bool
 
     var id: String { name }
 
     var isWindow: Bool {
         if case .window = kind { return true }
         return false
+    }
+
+    /// The live controller behind this card, if any (embedded window).
+    var controller: TerminalController? {
+        if case .embedded(let c) = state { return c }
+        return nil
     }
 
     /// Words, not glyphs: the overview must be readable with zero vocabulary.
@@ -506,6 +536,7 @@ struct OverviewView: View {
     let onActivate: (OverviewEntry) -> Void
     let onKill: (OverviewEntry) -> Void
     let onPersist: (OverviewEntry) -> Void
+    let onPin: (OverviewEntry) -> Void
     let onRecover: (OverviewEntry) -> Void
 
     var body: some View {
@@ -692,16 +723,24 @@ struct OverviewView: View {
                 } else {
                     Text("no preview").font(.system(size: 14)).foregroundColor(.secondary)
                 }
-                if entry.attention != .none {
-                    VStack {
-                        HStack {
-                            Spacer()
+                VStack {
+                    HStack {
+                        if entry.pinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(5)
+                                .background(Circle().fill(Color.accentColor))
+                                .padding(6)
+                        }
+                        Spacer()
+                        if entry.attention != .none {
                             chip(entry.attention == .input ? "needs you" : "done",
                                  entry.attention == .input ? .red : .green, filled: true)
                                 .padding(6)
                         }
-                        Spacer()
                     }
+                    Spacer()
                 }
             }
         }
@@ -722,6 +761,17 @@ struct OverviewView: View {
                     keycap("p")
                 }
                 Spacer(minLength: 8)
+                if entry.controller != nil {
+                    Button(action: { onPin(entry) }) {
+                        HStack(spacing: 4) {
+                            if focused { keycap("f") }
+                            Image(systemName: entry.pinned ? "pin.fill" : "pin")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(entry.pinned ? .accentColor : .secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
                 Button(action: { onKill(entry) }) {
                     HStack(spacing: 4) {
                         if focused { keycap("⌫") }
@@ -753,9 +803,11 @@ struct OverviewView: View {
     @ViewBuilder
     private func survivalChip(_ entry: OverviewEntry) -> some View {
         if entry.persistent {
+            // Eye on/off, same footprint either way: on = survives quit,
+            // off (slashed) = will need resurrection after quit.
             chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
                  entry.daemonBacked ? .teal : .cyan,
-                 icon: entry.daemonBacked ? "eye.fill" : "eye")
+                 icon: entry.daemonBacked ? "eye.fill" : "eye.slash")
         } else {
             chip("ephemeral", .yellow, icon: "bolt")
         }

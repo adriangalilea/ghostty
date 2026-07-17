@@ -1208,6 +1208,47 @@ class VigilSessionManager {
         detach(name: name)
     }
 
+    /// The eye on/off toggle: flip the front window between persistent
+    /// (survives quit) and ephemeral (dies on close), in place.
+    func toggleFrontPersist() {
+        guard let controller = TerminalController.preferredParent else { return }
+        if let name = sessionName(of: controller) {
+            forget(name: name)
+        } else {
+            persistFully(controller: controller)
+        }
+    }
+
+    /// True when the front window is a persistent session.
+    var frontWindowPersistent: Bool {
+        guard let controller = TerminalController.preferredParent else { return false }
+        return sessionName(of: controller) != nil
+    }
+
+    // MARK: Pin on top
+
+    /// Keep a window above the others (Antinote-style), toggled per window.
+    /// Pure window level, orthogonal to sessions: any window can pin.
+    func togglePin(_ controller: TerminalController) {
+        guard let window = controller.window else { return }
+        let pin = !isPinned(controller)
+        window.level = pin ? .floating : .normal
+        // A pinned window follows you across spaces; a normal one does not.
+        window.collectionBehavior = pin
+            ? [.canJoinAllSpaces, .fullScreenAuxiliary]
+            : [.managed]
+    }
+
+    func isPinned(_ controller: TerminalController) -> Bool {
+        controller.window?.level == .floating
+    }
+
+    /// Pin/unpin the front window (menu + keybind entry point).
+    func togglePinFront() {
+        guard let controller = TerminalController.preferredParent else { return }
+        togglePin(controller)
+    }
+
     /// True while quitting should mean "become a menu bar service" instead of
     /// dying. Flipped by quitForReal (the eye menu's explicit kill).
     private var reallyQuit = false
