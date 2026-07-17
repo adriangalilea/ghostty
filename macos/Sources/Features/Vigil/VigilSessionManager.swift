@@ -506,7 +506,10 @@ class VigilSessionManager {
                 let comm = self.runCapture("/bin/ps", ["-o", "comm=", "-p", String(pid)])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard URL(fileURLWithPath: comm).lastPathComponent == "claude" else { continue }
-                self.typeWhenQuiet(view, draft, samples: 40, last: nil)
+                // 3s grace for the first paint, then enforce.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    self.enforceDraft(view, draft, beats: 25)
+                }
                 return
             }
             self.injectDraft(controller, draft, attempts: attempts - 1)
@@ -514,8 +517,10 @@ class VigilSessionManager {
     }
 
     /// Presence checks ignore ALL whitespace: the input box line-wraps the
-    /// draft at pane width, so a contiguous substring match false-negatives
-    /// and the guard would retype forever (observed: draft typed repeatedly).
+    /// draft at pane width, so a contiguous substring match false-negatives.
+    /// Claude runs on the alternate screen (its frozen frame dumps 22 lines,
+    /// no shell scrollback), so the replayed cat content can never
+    /// false-positive this check.
     private static func normalized(_ s: String) -> String { s.filter { !$0.isWhitespace } }
 
     private static func draftOnScreen(_ view: Ghostty.SurfaceView, _ draft: String) -> Bool {
@@ -524,36 +529,20 @@ class VigilSessionManager {
         return normalized(view.cachedScreenContents.get()).contains(needle)
     }
 
-    /// Two identical screen samples a second apart = claude stopped painting
-    /// startup; the input box is finally safe to type into.
-    private func typeWhenQuiet(_ view: Ghostty.SurfaceView, _ draft: String, samples: Int, last: String?) {
-        guard samples > 0 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+    /// No waiting for a quiet screen: an animated footer (background agents
+    /// spinner) means quiet NEVER comes and the draft is never typed
+    /// (observed). Instead enforce: every beat for ~40s, type the draft if
+    /// it is not on screen, do nothing if it is. Startup wipes just get
+    /// corrected on the next beat; a submitted or present draft is left
+    /// alone, so doubling is impossible by construction.
+    private func enforceDraft(_ view: Ghostty.SurfaceView, _ draft: String, beats: Int) {
+        guard beats > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self else { return }
-            let now = view.cachedScreenContents.get()
-            guard !now.isEmpty, now == last else {
-                self.typeWhenQuiet(view, draft, samples: samples - 1, last: now)
-                return
-            }
             if !Self.draftOnScreen(view, draft) {
                 view.surfaceModel?.sendText(draft)
             }
-            self.watchDraft(view, draft, checks: 6)
-        }
-    }
-
-    /// After typing, stand guard: a late wipe sends us back to waiting for
-    /// calm and retyping. Once the user edits (screen differs but the draft
-    /// prefix is still there), stand down.
-    private func watchDraft(_ view: Ghostty.SurfaceView, _ draft: String, checks: Int) {
-        guard checks > 0 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self else { return }
-            if Self.draftOnScreen(view, draft) {
-                self.watchDraft(view, draft, checks: checks - 1)
-            } else {
-                self.typeWhenQuiet(view, draft, samples: 30, last: nil)
-            }
+            self.enforceDraft(view, draft, beats: beats - 1)
         }
     }
 
