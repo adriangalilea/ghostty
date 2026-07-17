@@ -16,7 +16,8 @@ final class VigilBorderView: NSView {
 }
 
 struct VigilWindowMark: View {
-    /// nil for an ephemeral window (no session label yet).
+    /// The session label; shown only on hover (help), never inline. What
+    /// the titlebar shows is one thing: is this window persistent or not.
     let label: String?
     let persistent: Bool
     let daemonBacked: Bool
@@ -28,38 +29,52 @@ struct VigilWindowMark: View {
         guard persistent else { return .yellow }
         return daemonBacked ? .teal : .cyan
     }
-    private var eyeIcon: String { persistent ? "eye.fill" : "eye.slash" }
 
     var body: some View {
-        HStack(spacing: 6) {
-            // Pin on top.
-            Button(action: onTogglePin) {
-                Image(systemName: pinned ? "pin.fill" : "pin")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(pinned ? .accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help(pinned ? "Pinned above other windows. Click to unpin."
-                         : "Pin this window above the others.")
+        HStack(spacing: 7) {
+            roundButton(
+                icon: pinned ? "pin.fill" : "pin",
+                on: pinned,
+                color: .accentColor,
+                action: onTogglePin,
+                help: pinned ? "Pinned above other windows. Click to unpin."
+                             : "Pin this window above the others.")
 
-            // Survival eye ON/OFF: click to flip persistent <-> ephemeral.
-            Button(action: onTogglePersist) {
-                HStack(spacing: 4) {
-                    Image(systemName: eyeIcon).font(.system(size: 9, weight: .bold))
-                    if let label {
-                        Text(label).font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                    }
-                }
-                .foregroundColor(eyeColor)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(eyeColor.opacity(0.16)))
-            }
-            .buttonStyle(.plain)
-            .help(persistent
-                ? "Persistent: survives closing the window and quitting the app. Click to make ephemeral."
-                : "Ephemeral: dies when the window closes. Click to make it survive quit.")
+            roundButton(
+                icon: persistent ? "eye.fill" : "eye.slash.fill",
+                on: persistent,
+                color: eyeColor,
+                action: onTogglePersist,
+                help: persistHelp)
         }
         .padding(.trailing, 8)
+    }
+
+    private var persistHelp: String {
+        let name = label.map { "“\($0)” " } ?? ""
+        return persistent
+            ? "\(name)persistent: survives closing the window and quitting the app. Click to make ephemeral."
+            : "Ephemeral: dies when the window closes. Click to make it survive quit."
+    }
+
+    /// A real, round, high-contrast button: filled in its color when ON,
+    /// an outlined neutral disc when OFF. No washed-out tints.
+    private func roundButton(
+        icon: String, on: Bool, color: Color, action: @escaping () -> Void, help: String
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(on ? .white : .secondary)
+                .frame(width: 20, height: 20)
+                .background(
+                    Circle().fill(on ? color : Color.primary.opacity(0.08)))
+                .overlay(
+                    Circle().strokeBorder(
+                        on ? Color.white.opacity(0.25) : Color.primary.opacity(0.2),
+                        lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
