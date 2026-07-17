@@ -1,5 +1,6 @@
 import AppKit
 import FoundationModels
+import SwiftUI
 
 /// vigil: sessions as a first-class native concept.
 ///
@@ -190,6 +191,13 @@ class VigilSessionManager {
     /// true when handled (the close must be swallowed by the caller).
     func handleWindowClose(controller: TerminalController) -> Bool {
         guard let name = sessionName(of: controller) else { return false }
+        // An empty tree has nothing to detach; let the corpse close and the
+        // session sleeps on its captured panes.
+        if controller.surfaceTree.isEmpty {
+            sessions[name]!.state = .asleep
+            persist()
+            return false
+        }
         detach(name: name)
         return true
     }
@@ -354,7 +362,7 @@ class VigilSessionManager {
     }
 
     /// The full window content composited (every split), not a single pane.
-    private static func windowSnapshot(_ controller: TerminalController) -> NSImage? {
+    static func windowSnapshot(_ controller: TerminalController) -> NSImage? {
         guard let view = controller.window?.contentView else { return nil }
         guard view.bounds.width > 0, view.bounds.height > 0 else { return nil }
         guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
@@ -450,15 +458,39 @@ class VigilSessionManager {
     }
 
     /// State-honest removal. embedded: unadopt, the window returns to being a
-    /// normal window (nothing dies; closing it later kills normally).
-    /// detached: kill, dropping the only reference releases the surfaces and
-    /// the processes die. asleep: forget the registry entry.
+    /// normal (ephemeral) window (nothing dies; closing it later kills
+    /// normally). detached: kill, dropping the only reference releases the
+    /// surfaces and the processes die. asleep: forget the registry entry.
     /// wake's own registry is never touched.
     func forget(name: String) {
         sessions[name] = nil
         try? FileManager.default.removeItem(at: dumpsDir(name))
         persist()
         onAttentionChange?()
+    }
+
+    /// The full kill: whatever the state, after this the session and its
+    /// processes are gone. Forget FIRST so the close is not intercepted
+    /// into a detach.
+    func kill(name: String) {
+        guard let session = sessions[name] else { return }
+        forget(name: name)
+        if case .embedded(let controller) = session.state {
+            controller.window?.close()
+        }
+    }
+
+    /// Every terminal window NOT adopted as a session: the ephemeral ones.
+    /// The overview shows all of ghostty, not just what vigil owns; ephemeral
+    /// vs persistent is a toggle, not a boundary.
+    func ephemeralControllers() -> [TerminalController] {
+        let adopted = sessions.values.compactMap { session -> TerminalController? in
+            if case .embedded(let controller) = session.state { return controller }
+            return nil
+        }
+        return TerminalController.all.filter { controller in
+            controller.window != nil && !adopted.contains { $0 === controller }
+        }
     }
 
     /// One-gesture detach for any window: adopts first when needed.
@@ -516,12 +548,18 @@ class VigilSessionManager {
     }
 
     /// Sessions whose embedded window silently died collapse to asleep so the
-    /// menu never lies about state.
+    /// menu never lies about state. Windows left with an EMPTY tree (observed
+    /// zombie: blank window, no surfaces, 2026-07-17) are corpses; close them.
     func reconcile() {
         for (name, session) in sessions {
             if case .embedded(let controller) = session.state, controller.window == nil {
                 sessions[name]!.state = .asleep
             }
+        }
+        for controller in TerminalController.all
+        where controller.surfaceTree.isEmpty && controller.window?.isVisible == true {
+            NSLog("vigil: closing zombie window (empty surface tree)")
+            controller.window?.close()
         }
     }
 
@@ -592,6 +630,32 @@ class VigilSessionManager {
             at: persistURL.deletingLastPathComponent(),
             withIntermediateDirectories: true)
         try! data.write(to: persistURL)
+        syncWindowMarks()
+    }
+
+    /// Idempotent: every persistent embedded window carries the vigilance
+    /// mark (eye + label titlebar pill), every other window carries none.
+    /// One sync walks all windows; called from persist(), the chokepoint
+    /// every state change already flows through.
+    private func syncWindowMarks() {
+        for controller in TerminalController.all {
+            guard let window = controller.window else { continue }
+            let existing = window.titlebarAccessoryViewControllers.enumerated()
+                .first { $0.element is VigilTitlebarAccessory }
+            if let name = sessionName(of: controller), let session = sessions[name] {
+                let mark = VigilWindowMark(label: session.label)
+                if let hosting = existing?.element.view as? NSHostingView<VigilWindowMark> {
+                    hosting.rootView = mark
+                } else {
+                    let accessory = VigilTitlebarAccessory()
+                    accessory.view = NSHostingView(rootView: mark)
+                    accessory.layoutAttribute = .right
+                    window.addTitlebarAccessoryViewController(accessory)
+                }
+            } else if let existing {
+                window.removeTitlebarAccessoryViewController(at: existing.offset)
+            }
+        }
     }
 
     private func load() {

@@ -23,12 +23,12 @@ class VigilOverview: NSObject {
         if panel != nil { hide() } else { show() }
     }
 
-    private func show() {
+    /// All of ghostty, one grid: persistent sessions (any state) plus every
+    /// ephemeral window. Ephemeral vs persistent is a per-card toggle, not a
+    /// boundary of what the switcher can see.
+    private func buildEntries() -> [OverviewEntry] {
         let manager = VigilSessionManager.shared
-        manager.reconcile()
-        manager.refreshThumbnails()
-
-        model.entries = manager.sessions.values
+        var entries = manager.sessions.values
             .sorted { $0.label < $1.label }
             .map { session in
                 OverviewEntry(
@@ -36,8 +36,30 @@ class VigilOverview: NSObject {
                     label: session.label,
                     state: session.state,
                     attention: session.attention,
-                    thumbnail: session.thumbnail)
+                    thumbnail: session.thumbnail,
+                    persistent: true)
             }
+        for controller in manager.ephemeralControllers() {
+            let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
+            let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
+            let cwd = surface?.pwd ?? "~"
+            entries.append(OverviewEntry(
+                name: "ephemeral-\(UInt(bitPattern: ObjectIdentifier(controller).hashValue))",
+                label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
+                state: .embedded(controller),
+                attention: .none,
+                thumbnail: VigilSessionManager.windowSnapshot(controller),
+                persistent: false))
+        }
+        return entries
+    }
+
+    private func show() {
+        let manager = VigilSessionManager.shared
+        manager.reconcile()
+        manager.refreshThumbnails()
+
+        model.entries = buildEntries()
         model.selection = 0
         guard !model.entries.isEmpty else { return }
 
@@ -52,8 +74,8 @@ class VigilOverview: NSObject {
         model.columns = columns
         let cardSize = CGSize(width: width, height: width * 0.625)
 
-        let view = OverviewView(model: model, cardSize: cardSize) { [weak self] name in
-            self?.openAndHide(name)
+        let view = OverviewView(model: model, cardSize: cardSize) { [weak self] entry in
+            self?.openAndHide(entry)
         }
         let hosting = NSHostingView(rootView: view)
         hosting.frame = NSRect(x: 0, y: 0, width: 1, height: 1)
@@ -104,10 +126,11 @@ class VigilOverview: NSObject {
                 case 124: self.model.move(1); return nil // right
                 case 126: self.model.move(-self.model.columns); return nil // up
                 case 125: self.model.move(self.model.columns); return nil // down
+                case 35: self.togglePersistSelected(); return nil // p
                 case 51: self.removeSelected(); return nil // backspace
                 case 53: self.hide(); return nil // esc
                 case 36, 76: // return, keypad enter
-                    if let entry = self.model.selected { self.openAndHide(entry.name) }
+                    if let entry = self.model.selected { self.openAndHide(entry) }
                     return nil
                 default:
                     return event
@@ -128,31 +151,55 @@ class VigilOverview: NSObject {
             == String(shortcut.key.character).lowercased()
     }
 
-    private func openAndHide(_ name: String) {
+    private func openAndHide(_ entry: OverviewEntry) {
         hide()
-        VigilSessionManager.shared.open(name: name)
+        if entry.persistent {
+            VigilSessionManager.shared.open(name: entry.name)
+        } else if case .embedded(let controller) = entry.state {
+            controller.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
-    /// Backspace on a card: state-honest removal with confirmation. The alert
-    /// shows what dies (or does not): the thumbnail as icon plus cwd/panes,
-    /// so you never kill blind.
+    /// p on a live window flips ephemeral <-> persistent in place. Detached
+    /// and asleep are persistent by definition (there is no window to hand
+    /// back); removing them is backspace's job.
+    private func togglePersistSelected() {
+        guard let entry = model.selected else { return }
+        guard case .embedded(let controller) = entry.state else { return }
+        let manager = VigilSessionManager.shared
+        if entry.persistent {
+            manager.forget(name: entry.name)
+        } else {
+            manager.adopt(controller: controller)
+        }
+        let keep = model.selection
+        model.entries = buildEntries()
+        model.selection = min(keep, model.entries.count - 1)
+    }
+
+    /// Backspace kills for real, whatever the card is: window + processes for
+    /// live ones, tree release for detached, registry drop for asleep. The
+    /// confirmation shows the thumbnail and the exact consequence, so you
+    /// never kill blind.
     private func removeSelected() {
         guard let entry = model.selected else { return }
         let manager = VigilSessionManager.shared
-        let session = manager.sessions[entry.name]
 
         let alert = NSAlert()
         alert.messageText = "\(entry.removeVerb.capitalized) \(entry.label)?"
-        var info = "cwd: \(session?.cwd ?? "?")"
-        if let panes = session?.panes.count, panes > 0 { info += "\npanes: \(panes)" }
+        var info: String
         switch entry.state {
-        case .embedded: info += "\nNothing dies: the window returns to being a normal window."
-        case .detached: info += "\nIts processes DIE. Detached is alive; this is the kill."
-        case .asleep: info += "\nOnly the registry entry and its frozen state are dropped."
+        case .embedded: info = "The window closes and its processes die."
+        case .detached: info = "Detached but alive; this is the kill. Its processes die."
+        case .asleep: info = "Only the registry entry and its frozen state are dropped."
+        }
+        if entry.persistent, let session = manager.sessions[entry.name] {
+            info = "cwd: \(session.cwd)\npanes: \(max(session.panes.count, 1))\n" + info
         }
         alert.informativeText = info
         if let thumb = entry.thumbnail { alert.icon = thumb }
-        alert.alertStyle = entry.removeVerb == "kill" ? .critical : .warning
+        alert.alertStyle = entry.removeVerb == "forget" ? .warning : .critical
         alert.addButton(withTitle: entry.removeVerb.capitalized)
         alert.addButton(withTitle: "Cancel")
 
@@ -160,8 +207,12 @@ class VigilOverview: NSObject {
         panel?.makeKeyAndOrderFront(nil)
         guard confirmed else { return }
 
-        manager.forget(name: entry.name)
-        model.entries.removeAll { $0.name == entry.name }
+        if entry.persistent {
+            manager.kill(name: entry.name)
+        } else if case .embedded(let controller) = entry.state {
+            controller.window?.close()
+        }
+        model.entries = buildEntries()
         guard !model.entries.isEmpty else { hide(); return }
         model.selection = min(model.selection, model.entries.count - 1)
     }
@@ -182,6 +233,9 @@ struct OverviewEntry: Identifiable {
     let state: VigilSessionManager.State
     let attention: VigilSessionManager.Attention
     let thumbnail: NSImage?
+    /// Persistent = vigil session (survives detach/quit/reboot). Ephemeral =
+    /// a plain window, dies on close. A toggle, not a boundary.
+    let persistent: Bool
 
     var id: String { name }
 
@@ -204,10 +258,15 @@ struct OverviewEntry: Identifiable {
 
     var removeVerb: String {
         switch state {
-        case .embedded: return "unadopt"
+        case .embedded: return persistent ? "kill" : "close"
         case .detached: return "kill"
         case .asleep: return "forget"
         }
+    }
+
+    var persistVerb: String? {
+        guard case .embedded = state else { return nil }
+        return persistent ? "make ephemeral" : "make persistent"
     }
 }
 
@@ -233,7 +292,7 @@ class OverviewModel: ObservableObject {
 struct OverviewView: View {
     @ObservedObject var model: OverviewModel
     let cardSize: CGSize
-    let onOpen: (String) -> Void
+    let onOpen: (OverviewEntry) -> Void
 
     var body: some View {
         VStack(spacing: 14) {
@@ -241,7 +300,8 @@ struct OverviewView: View {
             // Affordances always on view: the verbs are state-honest for the
             // selected card, so the bar doubles as a state readout.
             if let selected = model.selected {
-                Text("←→↑↓ move    ⏎ \(selected.openVerb)    ⌫ \(selected.removeVerb)    esc close")
+                let persist = selected.persistVerb.map { "    p \($0)" } ?? ""
+                Text("←→↑↓ move    ⏎ \(selected.openVerb)\(persist)    ⌫ \(selected.removeVerb)    esc")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.secondary)
             }
@@ -298,12 +358,19 @@ struct OverviewView: View {
                                 index == model.selection ? Color.accentColor : Color.white.opacity(0.15),
                                 lineWidth: index == model.selection ? 3 : 1))
 
-                    Text("\(entry.stateGlyph) \(entry.label)")
-                        .font(.system(size: 14, weight: index == model.selection ? .bold : .regular))
-                        .lineLimit(1)
-                        .frame(maxWidth: cardSize.width)
+                    HStack(spacing: 5) {
+                        if entry.persistent {
+                            Image(systemName: "eye.fill")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.accentColor)
+                        }
+                        Text("\(entry.stateGlyph) \(entry.label)")
+                            .font(.system(size: 14, weight: index == model.selection ? .bold : .regular))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: cardSize.width)
                 }
-                .onTapGesture { onOpen(entry.name) }
+                .onTapGesture { onOpen(entry) }
             }
         }
     }
