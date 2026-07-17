@@ -497,19 +497,20 @@ class VigilSessionManager {
     /// screen to go quiet (startup spinners stopped = load finished), type,
     /// and keep watching; if a late wipe still eats it, wait for calm and
     /// retype.
-    private func injectDraft(_ controller: TerminalController, _ draft: String, attempts: Int = 60) {
+    private func injectDraft(_ controller: TerminalController, _ draft: String, attempts: Int = 120) {
         guard attempts > 0 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
             for view in controller.surfaceTree {
                 guard let pid = view.surfaceModel?.foregroundPID else { continue }
                 let comm = self.runCapture("/bin/ps", ["-o", "comm=", "-p", String(pid)])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard URL(fileURLWithPath: comm).lastPathComponent == "claude" else { continue }
-                // 3s grace for the first paint, then enforce.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                    self.enforceDraft(view, draft, beats: 25)
-                }
+                // No grace: type NOW (claude resumes in ~2s, waiting loses;
+                // frame-analyzed 2026-07-17). A startup wipe just gets
+                // corrected on the next beat.
+                view.surfaceModel?.sendText(draft)
+                self.enforceDraft(view, draft, beats: 40)
                 return
             }
             self.injectDraft(controller, draft, attempts: attempts - 1)
@@ -537,7 +538,7 @@ class VigilSessionManager {
     /// alone, so doubling is impossible by construction.
     private func enforceDraft(_ view: Ghostty.SurfaceView, _ draft: String, beats: Int) {
         guard beats > 0 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self else { return }
             if !Self.draftOnScreen(view, draft) {
                 view.surfaceModel?.sendText(draft)
