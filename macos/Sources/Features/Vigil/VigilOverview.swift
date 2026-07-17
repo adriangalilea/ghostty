@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The sessions overview: a switcher panel with thumbnails of every session,
 /// driven like any tab switcher (arrows to move, enter to open, esc to close,
@@ -35,7 +36,7 @@ class VigilOverview: NSObject {
     private func buildEntries() -> [OverviewEntry] {
         let manager = VigilSessionManager.shared
         var entries = manager.sessions.values
-            .sorted { $0.label < $1.label }
+            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
             .map { session in
                 OverviewEntry(
                     name: session.name,
@@ -67,6 +68,7 @@ class VigilOverview: NSObject {
 
         model.entries = buildEntries()
         model.selection = 0
+        model.zoomed = false
         guard !model.entries.isEmpty else { return }
 
         // Real estate: the switcher is the moment of visual triage, cards
@@ -79,8 +81,14 @@ class VigilOverview: NSObject {
         let width = min(560, max(300, usable / CGFloat(columns)))
         model.columns = columns
         let cardSize = CGSize(width: width, height: width * 0.625)
+        let peekSize = CGSize(width: screen.width * 0.82, height: screen.height * 0.78)
 
-        let view = OverviewView(model: model, cardSize: cardSize) { [weak self] entry in
+        let view = OverviewView(
+            model: model,
+            cardSize: cardSize,
+            peekSize: peekSize,
+            onReorder: { [weak self] in self?.persistOrder() }
+        ) { [weak self] entry in
             self?.openAndHide(entry)
         }
         let hosting = NSHostingView(rootView: view)
@@ -152,8 +160,16 @@ class VigilOverview: NSObject {
                 case 126: self.model.move(-self.model.columns); return nil // up
                 case 125: self.model.move(self.model.columns); return nil // down
                 case 35: self.togglePersistSelected(); return nil // p
+                case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
                 case 51: self.removeSelected(); return nil // backspace
-                case 53: self.hide(); return nil // esc
+                case 53: // esc: leave the peek first, close second
+                    if self.model.zoomed {
+                        self.model.zoomed = false
+                        self.refit()
+                    } else {
+                        self.hide()
+                    }
+                    return nil
                 case 36, 76: // return, keypad enter
                     if let entry = self.model.selected { self.openAndHide(entry) }
                     return nil
@@ -174,6 +190,16 @@ class VigilOverview: NSObject {
         guard mods == want else { return false }
         return (event.charactersIgnoringModifiers ?? "").lowercased()
             == String(shortcut.key.character).lowercased()
+    }
+
+    /// Drag & drop wrote a new entries order; mirror it into the sessions'
+    /// order fields so it survives restarts. Ephemeral windows keep their
+    /// relative place only for this showing.
+    private func persistOrder() {
+        let manager = VigilSessionManager.shared
+        for (index, entry) in model.entries.enumerated() where entry.persistent {
+            manager.setOrder(name: entry.name, order: index)
+        }
     }
 
     private func openAndHide(_ entry: OverviewEntry) {
@@ -335,6 +361,11 @@ struct OverviewEntry: Identifiable {
 class OverviewModel: ObservableObject {
     @Published var entries: [OverviewEntry] = []
     @Published var selection: Int = 0
+    /// Peek-zoom (space): the selected card fills the panel, Quick Look
+    /// style. Arrows keep working; space or esc returns to the grid.
+    @Published var zoomed: Bool = false
+    /// Name of the entry being dragged for reorder, while a drag is live.
+    var dragging: String?
     /// Cards per row; up/down arrows jump a whole row.
     var columns: Int = 4
 
@@ -353,22 +384,29 @@ class OverviewModel: ObservableObject {
 struct OverviewView: View {
     @ObservedObject var model: OverviewModel
     let cardSize: CGSize
+    let peekSize: CGSize
+    let onReorder: () -> Void
     let onOpen: (OverviewEntry) -> Void
 
     var body: some View {
         VStack(spacing: 14) {
-            grid
+            if model.zoomed, let selected = model.selected {
+                peek(selected)
+            } else {
+                grid
+            }
             // Affordances always on view: the verbs are state-honest for the
             // selected card, so the bar doubles as a state readout.
             if let selected = model.selected {
                 HStack(spacing: 18) {
                     hint("←→↑↓", "move")
                     hint("⏎", selected.openVerb)
+                    hint("space", model.zoomed ? "grid" : "peek")
                     if let verb = selected.persistVerb {
                         hint("p", verb)
                     }
                     hint("⌫", selected.removeVerb)
-                    hint("esc", "close")
+                    hint("esc", model.zoomed ? "grid" : "close")
                 }
             }
         }
@@ -377,6 +415,41 @@ struct OverviewView: View {
             RoundedRectangle(cornerRadius: 14)
                 .fill(.ultraThinMaterial))
         .fixedSize()
+    }
+
+    /// Quick Look-style peek: the selected session near-fullscreen. Arrows
+    /// still move the selection, so triage happens without leaving the peek.
+    private func peek(_ entry: OverviewEntry) -> some View {
+        VStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.black.opacity(0.6))
+                if let thumbnail = entry.thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: peekSize.width - 12, maxHeight: peekSize.height - 90)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                } else {
+                    Text("no preview")
+                        .font(.system(size: 18))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .frame(width: peekSize.width, height: peekSize.height - 80)
+
+            HStack(spacing: 10) {
+                Text(entry.label)
+                    .font(.system(size: 18, weight: .bold))
+                    .lineLimit(1)
+                chip(entry.stateWord, entry.stateColor)
+                if entry.persistent {
+                    chip("persistent", .accentColor, icon: "eye.fill")
+                } else {
+                    chip("ephemeral", .secondary)
+                }
+            }
+        }
     }
 
     private var grid: some View {
@@ -444,6 +517,14 @@ struct OverviewView: View {
                 .onHover { hovering in
                     if hovering { model.selection = index }
                 }
+                .onDrag {
+                    model.dragging = entry.name
+                    return NSItemProvider(object: entry.name as NSString)
+                }
+                .onDrop(of: [UTType.text], delegate: CardDrop(
+                    target: entry.name,
+                    model: model,
+                    onReorder: onReorder))
             }
         }
     }
@@ -475,5 +556,41 @@ struct OverviewView: View {
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
         }
+    }
+}
+
+
+/// Live drag & drop reordering: cards shift while hovering (dropEntered)
+/// and the final order persists on drop.
+struct CardDrop: DropDelegate {
+    let target: String
+    let model: OverviewModel
+    let onReorder: () -> Void
+
+    func dropEntered(info: DropInfo) {
+        MainActor.assumeIsolated {
+            guard let dragging = model.dragging, dragging != target,
+                  let from = model.entries.firstIndex(where: { $0.name == dragging }),
+                  let to = model.entries.firstIndex(where: { $0.name == target })
+            else { return }
+            withAnimation {
+                model.entries.move(
+                    fromOffsets: IndexSet(integer: from),
+                    toOffset: to > from ? to + 1 : to)
+            }
+            model.selection = min(model.selection, model.entries.count - 1)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        MainActor.assumeIsolated {
+            model.dragging = nil
+            onReorder()
+        }
+        return true
     }
 }

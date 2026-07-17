@@ -52,6 +52,21 @@ class VigilSessionManager {
         var dump: String?
     }
 
+    /// Recursive shape of a workspace. Pane indices refer to Session.panes,
+    /// whose order is the tree's DFS leaf order (SplitTree iteration order).
+    indirect enum Layout: Codable {
+        case leaf(Int)
+        case h(Double, Layout, Layout) // left | right, ratio = left share
+        case v(Double, Layout, Layout) // top / bottom
+
+        var firstLeaf: Int {
+            switch self {
+            case .leaf(let i): return i
+            case .h(_, let l, _), .v(_, let l, _): return l.firstLeaf
+            }
+        }
+    }
+
     struct Session {
         let name: String
         var label: String
@@ -61,6 +76,10 @@ class VigilSessionManager {
         var attentionSince: Date?
         /// Captured at detach; what resurrection rebuilds.
         var panes: [Pane] = []
+        /// The split shape of those panes; nil = single pane or legacy entry.
+        var layout: Layout?
+        /// Manual overview ordering (drag & drop); lower first.
+        var order: Int = 0
         /// Live for embedded (refreshed on overview open), frozen at the
         /// moment of detach for detached. Runtime-only.
         var thumbnail: NSImage?
@@ -126,6 +145,21 @@ class VigilSessionManager {
     /// Tail the events log the claude hooks append to. A 1s poll is honest
     /// enough for human attention; the log is small and offset-read.
     private func startEventWatcher() {
+        // Bound the attention log: it is append-only and offset-tailed, so
+        // launch (offset resets anyway) is the one safe moment to truncate.
+        // The ms-wide race with a concurrent hook append is accepted.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: eventsURL.path),
+           let size = attrs[.size] as? UInt64, size > 1024 * 1024,
+           let handle = try? FileHandle(forReadingFrom: eventsURL) {
+            handle.seek(toFileOffset: size - 128 * 1024)
+            let tail = handle.readDataToEndOfFile()
+            try? handle.close()
+            // Cut at a line boundary so the first record parses.
+            if let nl = tail.firstIndex(of: 0x0a) {
+                try? tail.suffix(from: tail.index(after: nl)).write(to: eventsURL, options: .atomic)
+            }
+        }
+
         // Start at end of file: history is not pending attention.
         if let attrs = try? FileManager.default.attributesOfItem(atPath: eventsURL.path),
            let size = attrs[.size] as? UInt64 {
@@ -226,6 +260,7 @@ class VigilSessionManager {
 
         sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
         sessions[name]!.panes = capturePanes(name: name, controller.surfaceTree)
+        sessions[name]!.layout = Self.captureLayout(controller.surfaceTree)
         linkClaudes(name: name, tree: controller.surfaceTree)
         persist()
         refineLabel(name: name, screen: surface?.cachedScreenContents.get() ?? "")
@@ -318,6 +353,7 @@ class VigilSessionManager {
         sessions[name]!.thumbnail = Self.windowSnapshot(controller)
             ?? (controller.focusedSurface ?? tree.root?.leftmostLeaf())?.asImage
         sessions[name]!.panes = capturePanes(name: name, tree)
+        sessions[name]!.layout = Self.captureLayout(tree)
         linkClaudes(name: name, tree: tree)
         sessions[name]!.state = .detached(tree)
         controller.surfaceTree = SplitTree()
@@ -330,6 +366,29 @@ class VigilSessionManager {
             try? png.write(to: dumpsDir(name).appendingPathComponent("thumb.png"))
         }
         persist()
+    }
+
+    /// The workspace's split shape, pane indices in DFS leaf order (the
+    /// same order capturePanes walks).
+    static func captureLayout(_ tree: SplitTree<Ghostty.SurfaceView>) -> Layout? {
+        guard let root = tree.root else { return nil }
+        var counter = 0
+        func walk(_ node: SplitTree<Ghostty.SurfaceView>.Node) -> Layout {
+            switch node {
+            case .leaf:
+                defer { counter += 1 }
+                return .leaf(counter)
+            case .split(let split):
+                let l = walk(split.left)
+                let r = walk(split.right)
+                return split.direction == .horizontal
+                    ? .h(split.ratio, l, r)
+                    : .v(split.ratio, l, r)
+            }
+        }
+        let layout = walk(root)
+        if case .leaf = layout { return nil } // single pane: no shape to keep
+        return layout
     }
 
     /// Per-session state directory: VT dumps + frozen thumbnail.
@@ -508,22 +567,59 @@ class VigilSessionManager {
                 return config
             }
 
-            let controller = TerminalController.newWindow(ghostty, withBaseConfig: configFor(panes[0]))
+            let firstIndex = session.layout?.firstLeaf ?? 0
+            let controller = TerminalController.newWindow(ghostty, withBaseConfig: configFor(panes[firstIndex]))
             sessions[name]!.state = .embedded(controller)
             if panes.count > 1 {
                 // Splits wait a beat: the window presents async and a split
                 // against an unhosted surface is dropped.
-                let rest = Array(panes.dropFirst())
+                let layout = session.layout
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                    var anchor = controller.surfaceTree.root?.leftmostLeaf()
-                    for pane in rest {
-                        guard let at = anchor else { break }
-                        anchor = controller.newSplit(at: at, direction: .right, baseConfig: configFor(pane)) ?? anchor
+                    guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else { return }
+                    if let layout {
+                        // Real shape: split the region first (preorder), then
+                        // recurse into each side. Ratios are not restored yet.
+                        @MainActor
+                        func materialize(_ node: Layout, anchor: Ghostty.SurfaceView) {
+                            let direction: SplitTree<Ghostty.SurfaceView>.NewDirection
+                            let l: Layout, r: Layout
+                            switch node {
+                            case .leaf: return
+                            case .h(_, let left, let right):
+                                direction = .right
+                                l = left; r = right
+                            case .v(_, let left, let right):
+                                direction = .down
+                                l = left; r = right
+                            }
+                            guard r.firstLeaf < panes.count,
+                                  let rightView = controller.newSplit(
+                                      at: anchor,
+                                      direction: direction,
+                                      baseConfig: configFor(panes[r.firstLeaf]))
+                            else { return }
+                            materialize(l, anchor: anchor)
+                            materialize(r, anchor: rightView)
+                        }
+                        materialize(layout, anchor: anchor)
+                    } else {
+                        var at: Ghostty.SurfaceView? = anchor
+                        for pane in panes.dropFirst() {
+                            guard let anchorView = at else { break }
+                            at = controller.newSplit(at: anchorView, direction: .right, baseConfig: configFor(pane)) ?? at
+                        }
                     }
                 }
             }
             NSApp.activate(ignoringOtherApps: true)
         }
+        persist()
+    }
+
+    /// Manual overview ordering (drag & drop).
+    func setOrder(name: String, order: Int) {
+        guard sessions[name] != nil else { return }
+        sessions[name]!.order = order
         persist()
     }
 
@@ -719,11 +815,14 @@ class VigilSessionManager {
         let label: String
         let cwd: String
         let panes: [Pane]?
+        let layout: Layout?
+        let order: Int?
     }
 
     private func persist() {
-        let entries = sessions.values.map { PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes) }
-            .sorted { $0.name < $1.name }
+        let entries = sessions.values.map {
+            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order)
+        }.sorted { $0.name < $1.name }
         let data = try! JSONEncoder().encode(entries)
         try? FileManager.default.createDirectory(
             at: persistURL.deletingLastPathComponent(),
@@ -766,7 +865,9 @@ class VigilSessionManager {
                 label: entry.label,
                 cwd: entry.cwd,
                 state: .asleep,
-                panes: entry.panes ?? [])
+                panes: entry.panes ?? [],
+                layout: entry.layout,
+                order: entry.order ?? 0)
             session.thumbnail = NSImage(
                 contentsOfFile: dumpsDir(entry.name).appendingPathComponent("thumb.png").path)
             sessions[entry.name] = session
