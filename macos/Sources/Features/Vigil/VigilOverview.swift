@@ -69,6 +69,8 @@ class VigilOverview: NSObject {
         model.entries = buildEntries()
         model.selection = 0
         model.zoomed = false
+        model.undoKey = manager.ghosttyApp?.config.keyboardShortcut(for: "undo")
+            .map(Self.displayShortcut)
         guard !model.entries.isEmpty else { return }
 
         // Real estate: the switcher is the moment of visual triage, cards
@@ -154,11 +156,31 @@ class VigilOverview: NSObject {
                     return nil
                 }
 
+                // The configured undo shortcut works from inside the panel
+                // (no surface here to run the keybind): exhume the last
+                // kill and refresh the grid so it reappears in place.
+                if let config = VigilSessionManager.shared.ghosttyApp?.config,
+                   let shortcut = config.keyboardShortcut(for: "undo"),
+                   Self.eventMatches(event, shortcut) {
+                    (NSApp.delegate as? AppDelegate)?.undoManager.undo()
+                    self.model.entries = self.buildEntries()
+                    self.model.selection = min(self.model.selection, max(self.model.entries.count - 1, 0))
+                    self.refit()
+                    return nil
+                }
+
                 switch event.keyCode {
                 case 123: self.model.move(-1); return nil // left
                 case 124: self.model.move(1); return nil // right
                 case 126: self.model.move(-self.model.columns); return nil // up
                 case 125: self.model.move(self.model.columns); return nil // down
+                case 45: // n: spawn a new session, rooted where you look
+                    let cwd = self.model.selected.flatMap {
+                        VigilSessionManager.shared.sessions[$0.name]?.cwd
+                    } ?? FileManager.default.homeDirectoryForCurrentUser.path
+                    self.hide()
+                    VigilSessionManager.shared.create(cwd: cwd)
+                    return nil
                 case 35: self.togglePersistSelected(); return nil // p
                 case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
                 case 51: self.removeSelected(); return nil // backspace
@@ -178,6 +200,16 @@ class VigilOverview: NSObject {
                 }
             }
         }
+    }
+
+    /// Human form of a config shortcut for the hint bar.
+    static func displayShortcut(_ shortcut: KeyboardShortcut) -> String {
+        var out = ""
+        if shortcut.modifiers.contains(.control) { out += "⌃" }
+        if shortcut.modifiers.contains(.option) { out += "⌥" }
+        if shortcut.modifiers.contains(.shift) { out += "⇧" }
+        if shortcut.modifiers.contains(.command) { out += "⌘" }
+        return out + String(shortcut.key.character).uppercased()
     }
 
     private static func eventMatches(_ event: NSEvent, _ shortcut: KeyboardShortcut) -> Bool {
@@ -368,6 +400,9 @@ class OverviewModel: ObservableObject {
     var dragging: String?
     /// Cards per row; up/down arrows jump a whole row.
     var columns: Int = 4
+    /// Display form of the configured `undo` shortcut (config-driven, shown
+    /// only when one is bound).
+    @Published var undoKey: String?
 
     var selected: OverviewEntry? {
         entries.indices.contains(selection) ? entries[selection] : nil
@@ -402,10 +437,14 @@ struct OverviewView: View {
                     hint("←→↑↓", "move")
                     hint("⏎", selected.openVerb)
                     hint("space", model.zoomed ? "grid" : "peek")
+                    hint("n", "new session")
                     if let verb = selected.persistVerb {
                         hint("p", verb)
                     }
                     hint("⌫", selected.removeVerb)
+                    if let undoKey = model.undoKey {
+                        hint(undoKey, "undo kill")
+                    }
                     hint("esc", model.zoomed ? "grid" : "close")
                 }
             }
