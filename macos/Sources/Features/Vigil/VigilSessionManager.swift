@@ -1057,6 +1057,29 @@ class VigilSessionManager {
         }
     }
 
+    /// A killed session resting in its grace period, for the overview:
+    /// lingers dimmed with a countdown and a recover act.
+    struct Burial {
+        let name: String
+        let label: String
+        let deadline: Date
+        let thumbnail: NSImage?
+        let ephemeral: Bool
+    }
+
+    func burials() -> [Burial] {
+        graveyard.values.compactMap { session in
+            guard let deadline = graveyardDeadlines[session.name] else { return nil }
+            return Burial(
+                name: session.name,
+                label: session.label,
+                deadline: deadline,
+                thumbnail: session.thumbnail,
+                ephemeral: session.ephemeral)
+        }
+        .sorted { $0.deadline < $1.deadline }
+    }
+
     /// Undo of a kill: back from the graveyard, everything still running.
     func exhume(_ name: String) {
         guard let session = graveyard.removeValue(forKey: name) else { return }

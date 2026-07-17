@@ -43,6 +43,7 @@ class VigilOverview: NSObject {
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
             .map { session in
                 OverviewEntry(
+                    kind: .window,
                     name: session.name,
                     label: session.label,
                     state: session.state,
@@ -56,6 +57,7 @@ class VigilOverview: NSObject {
             let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
             let cwd = surface?.pwd ?? "~"
             entries.append(OverviewEntry(
+                kind: .window,
                 name: "ephemeral-\(UInt(bitPattern: ObjectIdentifier(controller).hashValue))",
                 label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
                 state: .embedded(controller),
@@ -64,6 +66,29 @@ class VigilOverview: NSObject {
                 persistent: false,
                 daemonBacked: false))
         }
+        // Killed sessions linger dimmed through their grace: the countdown
+        // and the recover act live ON the card, where the loss is.
+        for burial in manager.burials() {
+            entries.append(OverviewEntry(
+                kind: .buried(burial.deadline),
+                name: burial.name,
+                label: burial.label,
+                state: .asleep,
+                attention: .none,
+                thumbnail: burial.thumbnail,
+                persistent: !burial.ephemeral,
+                daemonBacked: false))
+        }
+        // The new-session act is a card too, right where you are looking.
+        entries.append(OverviewEntry(
+            kind: .create,
+            name: "vigil-create-tile",
+            label: "new session",
+            state: .asleep,
+            attention: .none,
+            thumbnail: nil,
+            persistent: false,
+            daemonBacked: false))
         return entries
     }
 
@@ -95,10 +120,17 @@ class VigilOverview: NSObject {
             cardSize: cardSize,
             peekSize: peekSize,
             onReorder: { [weak self] in self?.persistOrder() },
-            onClose: { [weak self] in self?.hide() }
-        ) { [weak self] entry in
-            self?.openAndHide(entry)
-        }
+            onClose: { [weak self] in self?.hide() },
+            onActivate: { [weak self] entry in self?.activate(entry) },
+            onKill: { [weak self] entry in
+                self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
+                self?.removeSelected()
+            },
+            onPersist: { [weak self] entry in
+                self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
+                self?.togglePersistSelected()
+            },
+            onRecover: { [weak self] entry in self?.recover(entry) })
         let hosting = NSHostingView(rootView: view)
         hosting.frame = NSRect(x: 0, y: 0, width: 1, height: 1)
 
@@ -180,13 +212,7 @@ class VigilOverview: NSObject {
                 case 124: self.model.move(1); return nil // right
                 case 126: self.model.move(-self.model.columns); return nil // up
                 case 125: self.model.move(self.model.columns); return nil // down
-                case 45: // n: spawn a new session, rooted where you look
-                    let cwd = self.model.selected.flatMap {
-                        VigilSessionManager.shared.sessions[$0.name]?.cwd
-                    } ?? FileManager.default.homeDirectoryForCurrentUser.path
-                    self.hide()
-                    VigilSessionManager.shared.create(cwd: cwd)
-                    return nil
+                case 45: self.createSession(); return nil // n
                 case 35: self.togglePersistSelected(); return nil // p
                 case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
                 case 51: self.removeSelected(); return nil // backspace
@@ -199,7 +225,7 @@ class VigilOverview: NSObject {
                     }
                     return nil
                 case 36, 76: // return, keypad enter
-                    if let entry = self.model.selected { self.openAndHide(entry) }
+                    if let entry = self.model.selected { self.activate(entry) }
                     return nil
                 default:
                     return event
@@ -240,6 +266,15 @@ class VigilOverview: NSObject {
         }
     }
 
+    /// Enter/click on a card: what it does depends on what the card IS.
+    private func activate(_ entry: OverviewEntry) {
+        switch entry.kind {
+        case .window: openAndHide(entry)
+        case .buried: recover(entry)
+        case .create: createSession()
+        }
+    }
+
     private func openAndHide(_ entry: OverviewEntry) {
         hide()
         if entry.persistent {
@@ -250,12 +285,30 @@ class VigilOverview: NSObject {
         }
     }
 
+    /// New session rooted where you are looking (the selected window's cwd),
+    /// or HOME if the selection is the create tile itself.
+    private func createSession() {
+        let cwd = model.selected
+            .flatMap { $0.isWindow ? VigilSessionManager.shared.sessions[$0.name]?.cwd : nil }
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        hide()
+        VigilSessionManager.shared.create(cwd: cwd)
+    }
+
+    /// Pull a killed session back out of its grace period, intact.
+    private func recover(_ entry: OverviewEntry) {
+        VigilSessionManager.shared.exhume(entry.name)
+        model.entries = buildEntries()
+        model.selection = min(model.selection, max(model.entries.count - 1, 0))
+        refit()
+    }
+
     /// p on a live window flips ephemeral <-> persistent in place, and
     /// persistent MEANS survives everything: the panes move into daemons
     /// on the spot. Detached and asleep are persistent by definition
     /// (there is no window to hand back); removing them is backspace's job.
     private func togglePersistSelected() {
-        guard let entry = model.selected else { return }
+        guard let entry = model.selected, entry.isWindow else { return }
         guard case .embedded(let controller) = entry.state else { return }
         let manager = VigilSessionManager.shared
         if entry.persistent {
@@ -284,7 +337,7 @@ class VigilOverview: NSObject {
     /// confirmation shows the thumbnail and the exact consequence, so you
     /// never kill blind.
     private func removeSelected() {
-        guard let entry = model.selected else { return }
+        guard let entry = model.selected, entry.isWindow else { return }
         let manager = VigilSessionManager.shared
 
         let alert = NSAlert()
@@ -356,6 +409,15 @@ class VigilOverview: NSObject {
 // MARK: Model
 
 struct OverviewEntry: Identifiable {
+    /// What the card IS: a window/session, a killed session resting in its
+    /// grace (dimmed, countdown, recoverable), or the new-session tile.
+    enum Kind {
+        case window
+        case buried(Date)
+        case create
+    }
+
+    let kind: Kind
     let name: String
     let label: String
     let state: VigilSessionManager.State
@@ -369,6 +431,11 @@ struct OverviewEntry: Identifiable {
     let daemonBacked: Bool
 
     var id: String { name }
+
+    var isWindow: Bool {
+        if case .window = kind { return true }
+        return false
+    }
 
     /// Words, not glyphs: the overview must be readable with zero vocabulary.
     /// State-dependent verbs live in the kill CONFIRMATION, never in the
@@ -436,55 +503,41 @@ struct OverviewView: View {
     let peekSize: CGSize
     let onReorder: () -> Void
     let onClose: () -> Void
-    let onOpen: (OverviewEntry) -> Void
+    let onActivate: (OverviewEntry) -> Void
+    let onKill: (OverviewEntry) -> Void
+    let onPersist: (OverviewEntry) -> Void
+    let onRecover: (OverviewEntry) -> Void
 
     var body: some View {
         VStack(spacing: 14) {
-            if model.zoomed, let selected = model.selected {
-                peek(selected)
-            } else {
-                grid
-            }
-            // Constant affordances: nothing here depends on the selection,
-            // so the bar never shifts the layout while you move. The
-            // state-honest verbs live in the kill confirmation.
-            HStack(spacing: 18) {
-                hint("space", "peek")
-                hint("n", "new session")
-                hint("p", "toggle persist")
-                hint("⌫", "kill")
-                if let undoKey = model.undoKey {
-                    hint(undoKey, "undo")
-                }
-            }
-        }
-        .padding(24)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(.ultraThinMaterial))
-        .overlay(alignment: .topTrailing) {
-            HStack(spacing: 6) {
-                Text("esc")
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.12)))
+            // Close controls top-LEFT, macOS convention: the traffic-light
+            // red X with an esc keycap beside it, clear of the content.
+            HStack(spacing: 8) {
                 Button(action: onClose) {
                     ZStack {
-                        // The macOS traffic-light red, in its corner.
                         Circle()
                             .fill(Color(red: 1.0, green: 0.373, blue: 0.341))
-                            .frame(width: 14, height: 14)
+                            .frame(width: 15, height: 15)
                         Image(systemName: "xmark")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundColor(.black.opacity(0.5))
                     }
                 }
                 .buttonStyle(.plain)
+                keycap("esc")
+                Spacer()
             }
-            .padding(12)
+
+            if model.zoomed, let selected = model.selected {
+                peek(selected)
+            } else {
+                grid
+            }
         }
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.ultraThinMaterial))
         .fixedSize()
     }
 
@@ -513,14 +566,7 @@ struct OverviewView: View {
                 Text(entry.label)
                     .font(.system(size: 18, weight: .bold))
                     .lineLimit(1)
-                chip(entry.stateWord, entry.stateColor)
-                if entry.persistent {
-                    chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
-                         entry.daemonBacked ? .teal : .cyan,
-                         icon: entry.daemonBacked ? "eye.fill" : "eye")
-                } else {
-                    chip("ephemeral", .yellow)
-                }
+                survivalChip(entry)
             }
         }
     }
@@ -533,75 +579,194 @@ struct OverviewView: View {
             spacing: 18
         ) {
             ForEach(Array(model.entries.enumerated()), id: \.element.id) { index, entry in
-                VStack(spacing: 8) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.black.opacity(0.6))
-                        if let thumbnail = entry.thumbnail {
-                            // The whole window, scaled (Mission Control style):
-                            // fill would center-crop away the edges of a wide
-                            // terminal, which is exactly what you peek at.
-                            Image(nsImage: thumbnail)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(maxWidth: cardSize.width - 8, maxHeight: cardSize.height - 8)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        } else {
-                            Text("no preview")
-                                .font(.system(size: 14))
-                                .foregroundColor(.secondary)
-                        }
-                        if entry.attention != .none {
-                            VStack {
-                                HStack {
-                                    Spacer()
-                                    chip(
-                                        entry.attention == .input ? "needs you" : "done",
-                                        entry.attention == .input ? .red : .green,
-                                        filled: true)
-                                        .padding(6)
-                                }
-                                Spacer()
-                            }
-                        }
-                    }
-                    .frame(width: cardSize.width, height: cardSize.height)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(
-                                index == model.selection ? Color.accentColor : Color.white.opacity(0.15),
-                                lineWidth: index == model.selection ? 3 : 1))
-
-                    Text(entry.label)
-                        .font(.system(size: 15, weight: index == model.selection ? .bold : .medium))
-                        .lineLimit(1)
-                        .frame(maxWidth: cardSize.width)
-
-                    HStack(spacing: 6) {
-                        chip(entry.stateWord, entry.stateColor)
-                        if entry.persistent {
-                            chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
-                                 entry.daemonBacked ? .teal : .cyan,
-                                 icon: entry.daemonBacked ? "eye.fill" : "eye")
-                        } else {
-                            chip("ephemeral", .yellow)
-                        }
-                    }
-                }
-                .onTapGesture { onOpen(entry) }
-                .onHover { hovering in
-                    if hovering { model.selection = index }
-                }
-                .onDrag {
-                    model.dragging = entry.name
-                    return NSItemProvider(object: entry.name as NSString)
-                }
-                .onDrop(of: [UTType.text], delegate: CardDrop(
-                    target: entry.name,
-                    model: model,
-                    onReorder: onReorder))
+                card(index: index, entry: entry)
             }
         }
+    }
+
+    // MARK: One card
+
+    @ViewBuilder
+    private func card(index: Int, entry: OverviewEntry) -> some View {
+        let focused = index == model.selection
+        VStack(spacing: 8) {
+            thumbnail(entry, focused: focused)
+                .frame(width: cardSize.width, height: cardSize.height)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(
+                            focused ? Color.accentColor : Color.white.opacity(0.15),
+                            lineWidth: focused ? 3 : 1))
+                // Peek lives under the focused card: the space keycap sits
+                // right where the eye already is.
+                .overlay(alignment: .bottom) {
+                    if focused && entry.isWindow {
+                        HStack(spacing: 5) { keycap("space"); Text("peek").font(.system(size: 11)) }
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(Capsule().fill(.ultraThinMaterial))
+                            .padding(.bottom, 8)
+                    }
+                }
+
+            Text(entry.label)
+                .font(.system(size: 15, weight: focused ? .bold : .medium))
+                .lineLimit(1)
+                .frame(maxWidth: cardSize.width)
+
+            actionRow(entry, focused: focused)
+        }
+        .onTapGesture { onActivate(entry) }
+        .onHover { hovering in if hovering { model.selection = index } }
+        .modifier(DragReorder(entry: entry, model: model, onReorder: onReorder))
+    }
+
+    /// The card's picture: a live thumbnail, the countdown over a dimmed
+    /// snapshot for a buried session, or the new-session tile.
+    @ViewBuilder
+    private func thumbnail(_ entry: OverviewEntry, focused: Bool) -> some View {
+        switch entry.kind {
+        case .create:
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.accentColor.opacity(focused ? 0.14 : 0.07))
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
+                    .foregroundColor(.accentColor.opacity(0.6))
+                VStack(spacing: 8) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 34, weight: .medium))
+                        .foregroundColor(.accentColor)
+                    HStack(spacing: 5) {
+                        keycap("n"); Text("new session").font(.system(size: 12))
+                    }
+                    .foregroundColor(.secondary)
+                }
+            }
+
+        case .buried(let deadline):
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.6))
+                if let thumb = entry.thumbnail {
+                    Image(nsImage: thumb)
+                        .resizable().aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: cardSize.width - 8, maxHeight: cardSize.height - 8)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .opacity(0.28)
+                }
+                Rectangle().fill(Color.black.opacity(0.35))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                VStack(spacing: 10) {
+                    // Ticks every second without a manual timer.
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let left = max(0, Int(deadline.timeIntervalSince(context.date).rounded()))
+                        Text("killed · \(left)s")
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .foregroundColor(.orange)
+                    }
+                    Button(action: { onRecover(entry) }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.uturn.backward")
+                            Text("recover").font(.system(size: 13, weight: .semibold))
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Capsule().fill(Color.orange.opacity(0.9)))
+                        .foregroundColor(.black)
+                    }
+                    .buttonStyle(.plain)
+                    if let undo = model.undoKey {
+                        HStack(spacing: 5) { keycap(undo); Text("undo kill").font(.system(size: 11)) }
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+
+        case .window:
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.6))
+                if let thumb = entry.thumbnail {
+                    Image(nsImage: thumb)
+                        .resizable().aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: cardSize.width - 8, maxHeight: cardSize.height - 8)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                } else {
+                    Text("no preview").font(.system(size: 14)).foregroundColor(.secondary)
+                }
+                if entry.attention != .none {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            chip(entry.attention == .input ? "needs you" : "done",
+                                 entry.attention == .input ? .red : .green, filled: true)
+                                .padding(6)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Under-card controls. Only windows carry them; the create tile and
+    /// buried cards own their own affordances in the picture. The row is
+    /// always the survival chip (state readout) plus, on the focused card,
+    /// a persist toggle beside its own signal and a kill button, each with
+    /// its keycap. The keycaps appear only on focus but the row keeps its
+    /// height, so nothing shifts as the selection moves.
+    @ViewBuilder
+    private func actionRow(_ entry: OverviewEntry, focused: Bool) -> some View {
+        if entry.isWindow {
+            HStack(spacing: 6) {
+                survivalChip(entry)
+                if focused {
+                    keycap("p")
+                }
+                Spacer(minLength: 8)
+                Button(action: { onKill(entry) }) {
+                    HStack(spacing: 4) {
+                        if focused { keycap("⌫") }
+                        Image(systemName: "trash")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.red)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(width: cardSize.width, height: 22)
+            .contentShape(Rectangle())
+            // The persist toggle is the survival chip's own click; keep the
+            // whole left cluster tappable so p and the chip agree.
+            .overlay(
+                Color.clear
+                    .frame(width: cardSize.width * 0.5, height: 22)
+                    .contentShape(Rectangle())
+                    .onTapGesture { onPersist(entry) },
+                alignment: .leading)
+        } else {
+            // Keep every card the same height whatever its kind.
+            Color.clear.frame(width: cardSize.width, height: 22)
+        }
+    }
+
+    /// The survival readout, one chip: teal = survives quit, icy cyan =
+    /// resumes on quit, yellow = ephemeral (the class that just dies).
+    @ViewBuilder
+    private func survivalChip(_ entry: OverviewEntry) -> some View {
+        if entry.persistent {
+            chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
+                 entry.daemonBacked ? .teal : .cyan,
+                 icon: entry.daemonBacked ? "eye.fill" : "eye")
+        } else {
+            chip("ephemeral", .yellow, icon: "bolt")
+        }
+    }
+
+    private func keycap(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 11, weight: .bold, design: .monospaced))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.12)))
     }
 
     /// Small labeled capsule: state and kind are words anyone can read, color
@@ -618,18 +783,26 @@ struct OverviewView: View {
         .padding(.vertical, 2)
         .background(Capsule().fill(filled ? color : color.opacity(0.18)))
     }
+}
 
-    /// Key cap + verb, spelled out.
-    private func hint(_ key: String, _ verb: String) -> some View {
-        HStack(spacing: 5) {
-            Text(key)
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.12)))
-            Text(verb)
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
+/// Drag-to-reorder, but only for real windows: the create tile and buried
+/// cards are not reorderable, so the modifier passes them through untouched.
+private struct DragReorder: ViewModifier {
+    let entry: OverviewEntry
+    let model: OverviewModel
+    let onReorder: () -> Void
+
+    func body(content: Content) -> some View {
+        if entry.isWindow {
+            content
+                .onDrag {
+                    model.dragging = entry.name
+                    return NSItemProvider(object: entry.name as NSString)
+                }
+                .onDrop(of: [UTType.text], delegate: CardDrop(
+                    target: entry.name, model: model, onReorder: onReorder))
+        } else {
+            content
         }
     }
 }
