@@ -239,6 +239,11 @@ class VigilSessionManager {
     /// A session born in vigil: the window spawns with VIGIL_SESSION in the
     /// shell env, so every claude launched inside inherits the identity and
     /// its hook events feed the attention queue from birth.
+    ///
+    /// Daemon-backed from birth: the shell (and everything launched in it)
+    /// lives in a vigild daemon; the window is a disposable client. Close
+    /// the window, quit the app, crash: the processes never notice, and the
+    /// next attach replays the backlog. State preserved, not recreated.
     func create(cwd: String) {
         guard let ghostty = ghosttyApp else { return }
         let seed = URL(fileURLWithPath: cwd).lastPathComponent
@@ -246,6 +251,7 @@ class VigilSessionManager {
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = cwd
         config.environmentVariables["VIGIL_SESSION"] = name
+        config.initialInput = "exec vigild attach --create vigil-\(name) -- $SHELL -l\n"
         becomeRegular()
         let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
         sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
@@ -518,6 +524,12 @@ class VigilSessionManager {
         if case .embedded(let controller) = session.state {
             killController(controller)
         }
+        // Daemon-backed sessions keep their processes alive past any window;
+        // kill means the daemon too. No-op for sessions without one.
+        runFireAndForget(
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".local/bin/vigild").path,
+            ["kill", "vigil-\(name)"])
     }
 
     /// Silent, total window kill: emptying the tree closes the window without
