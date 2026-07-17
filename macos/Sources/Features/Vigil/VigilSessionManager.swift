@@ -218,6 +218,7 @@ class VigilSessionManager {
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = cwd
         config.environmentVariables["VIGIL_SESSION"] = name
+        becomeRegular()
         let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
         sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
         persist()
@@ -258,6 +259,7 @@ class VigilSessionManager {
         sessions[name]!.attention = .none
         sessions[name]!.attentionSince = nil
         onAttentionChange?()
+        becomeRegular()
 
         switch session.state {
         case .embedded(let controller):
@@ -309,6 +311,48 @@ class VigilSessionManager {
         guard let controller = TerminalController.preferredParent else { return }
         let name = sessionName(of: controller) ?? adopt(controller: controller)
         detach(name: name)
+    }
+
+    /// True while quitting should mean "become a menu bar service" instead of
+    /// dying. Flipped by quitForReal (the eye menu's explicit kill).
+    private var reallyQuit = false
+
+    /// Cmd+Q with sessions alive: detach every embedded session, close every
+    /// other window (those processes die exactly as a normal quit would have
+    /// killed them), vanish from the dock. Returns true when the termination
+    /// must be cancelled.
+    func interceptTermination() -> Bool {
+        guard !reallyQuit else { return false }
+        reconcile()
+        let hasLive = sessions.values.contains {
+            switch $0.state {
+            case .embedded, .detached: return true
+            case .asleep: return false
+            }
+        }
+        guard hasLive else { return false }
+
+        for (name, session) in sessions {
+            if case .embedded = session.state { detach(name: name) }
+        }
+        for window in NSApp.windows where window.isVisible {
+            window.close()
+        }
+        NSApp.setActivationPolicy(.accessory)
+        return true
+    }
+
+    func quitForReal() {
+        reallyQuit = true
+        NSApp.terminate(nil)
+    }
+
+    /// Returning from service mode: any opened window brings back the dock
+    /// presence.
+    private func becomeRegular() {
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
     }
 
     /// Sessions whose embedded window silently died collapse to asleep so the

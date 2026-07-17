@@ -132,6 +132,15 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         let adopt = NSMenuItem(title: "Adopt Front Window", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
         adopt.target = self
         menu.addItem(adopt)
+
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit Ghostty (kill all sessions)", action: #selector(quitForReal(_:)), keyEquivalent: "")
+        quit.target = self
+        menu.addItem(quit)
+    }
+
+    @objc private func quitForReal(_ sender: NSMenuItem) {
+        VigilSessionManager.shared.quitForReal()
     }
 
     private func sessionItem(_ title: String, _ action: Selector, _ name: String) -> NSMenuItem {

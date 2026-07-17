@@ -378,6 +378,13 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // vigil: while sessions exist, quit means "detach everything and keep
+        // living as a menu bar service" (no dock, no windows, ptys alive).
+        // Killing for real is the explicit Quit in the eye menu.
+        if VigilSessionManager.shared.interceptTermination() {
+            return .terminateCancel
+        }
+
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
 
