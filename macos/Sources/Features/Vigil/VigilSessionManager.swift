@@ -338,7 +338,12 @@ class VigilSessionManager {
         for window in NSApp.windows where window.isVisible {
             window.close()
         }
-        NSApp.setActivationPolicy(.accessory)
+        // Policy switch deferred a tick: flipping to accessory in the same
+        // runloop pass as the window teardown left the status item deaf
+        // (observed 2026-07-17, AppKit event routing quirk).
+        DispatchQueue.main.async {
+            NSApp.setActivationPolicy(.accessory)
+        }
         return true
     }
 

@@ -37,6 +37,20 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
         updateBadge()
         installMainMenu()
+
+        // Any window becoming key while in service mode (AppleScript, dock,
+        // whatever) brings back the regular app presence.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                if NSApp.activationPolicy() != .regular {
+                    NSApp.setActivationPolicy(.regular)
+                }
+            }
+        }
     }
 
     /// Native "Sessions" menu in the menu bar. Shortcuts are synced from the
