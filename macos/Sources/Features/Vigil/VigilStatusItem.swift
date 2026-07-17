@@ -27,6 +27,31 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             self?.updateBadge()
         }
         updateBadge()
+        installMainMenu()
+    }
+
+    /// Native "Sessions" menu in the menu bar: the verbs get real macOS
+    /// shortcuts (remappable in System Settings, zero settings UI of our own).
+    private func installMainMenu() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+
+        let menu = NSMenu(title: "Sessions")
+        func item(_ title: String, _ action: Selector, _ key: String) {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            i.keyEquivalentModifierMask = [.command, .option]
+            i.target = self
+            menu.addItem(i)
+        }
+        item("Next", #selector(nextSession(_:)), "n")
+        menu.addItem(.separator())
+        item("New Session", #selector(newSession(_:)), "t")
+        item("Adopt Front Window", #selector(adoptFrontWindow(_:)), "a")
+        item("Detach Front Window", #selector(detachFrontWindow(_:)), "d")
+
+        let holder = NSMenuItem(title: "Sessions", action: nil, keyEquivalent: "")
+        holder.submenu = menu
+        // Before the Help menu, the conventional spot for app-domain menus.
+        mainMenu.insertItem(holder, at: max(0, mainMenu.items.count - 1))
     }
 
     /// The eye opens when sessions want you: count as badge, filled symbol.
@@ -87,7 +112,13 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             }
             submenu.addItem(sessionItem("Rename…", #selector(renameSession(_:)), session.name))
             submenu.addItem(.separator())
-            submenu.addItem(sessionItem("Forget (kill if alive)", #selector(forgetSession(_:)), session.name))
+            let removal: String
+            switch session.state {
+            case .embedded: removal = "Unadopt (window stays)"
+            case .detached: removal = "Kill (processes die)"
+            case .asleep: removal = "Forget"
+            }
+            submenu.addItem(sessionItem(removal, #selector(forgetSession(_:)), session.name))
             item.submenu = submenu
             menu.addItem(item)
         }
@@ -145,6 +176,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         let label = field.stringValue.trimmingCharacters(in: .whitespaces)
         guard !label.isEmpty else { return }
         VigilSessionManager.shared.rename(name: name, label: label)
+    }
+
+    @objc private func detachFrontWindow(_ sender: NSMenuItem) {
+        VigilSessionManager.shared.detachFrontWindow()
     }
 
     @objc private func newSession(_ sender: NSMenuItem) {

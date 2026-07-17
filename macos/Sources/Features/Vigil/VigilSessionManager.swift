@@ -250,11 +250,22 @@ class VigilSessionManager {
         persist()
     }
 
+    /// State-honest removal. embedded: unadopt, the window returns to being a
+    /// normal window (nothing dies; closing it later kills normally).
+    /// detached: kill, dropping the only reference releases the surfaces and
+    /// the processes die. asleep: forget the registry entry.
+    /// wake's own registry is never touched.
     func forget(name: String) {
-        // A detached tree dropped here releases its surfaces: processes die.
-        // That is what forget means; wake's registry entry is not touched.
         sessions[name] = nil
         persist()
+        onAttentionChange?()
+    }
+
+    /// One-gesture detach for any window: adopts first when needed.
+    func detachFrontWindow() {
+        guard let controller = TerminalController.preferredParent else { return }
+        let name = sessionName(of: controller) ?? adopt(controller: controller)
+        detach(name: name)
     }
 
     /// Sessions whose embedded window silently died collapse to asleep so the
