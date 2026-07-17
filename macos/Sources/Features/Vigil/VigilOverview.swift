@@ -104,6 +104,7 @@ class VigilOverview: NSObject {
                 case 124: self.model.move(1); return nil // right
                 case 126: self.model.move(-self.model.columns); return nil // up
                 case 125: self.model.move(self.model.columns); return nil // down
+                case 51: self.removeSelected(); return nil // backspace
                 case 53: self.hide(); return nil // esc
                 case 36, 76: // return, keypad enter
                     if let entry = self.model.selected { self.openAndHide(entry.name) }
@@ -132,6 +133,39 @@ class VigilOverview: NSObject {
         VigilSessionManager.shared.open(name: name)
     }
 
+    /// Backspace on a card: state-honest removal with confirmation. The alert
+    /// shows what dies (or does not): the thumbnail as icon plus cwd/panes,
+    /// so you never kill blind.
+    private func removeSelected() {
+        guard let entry = model.selected else { return }
+        let manager = VigilSessionManager.shared
+        let session = manager.sessions[entry.name]
+
+        let alert = NSAlert()
+        alert.messageText = "\(entry.removeVerb.capitalized) \(entry.label)?"
+        var info = "cwd: \(session?.cwd ?? "?")"
+        if let panes = session?.panes.count, panes > 0 { info += "\npanes: \(panes)" }
+        switch entry.state {
+        case .embedded: info += "\nNothing dies: the window returns to being a normal window."
+        case .detached: info += "\nIts processes DIE. Detached is alive; this is the kill."
+        case .asleep: info += "\nOnly the registry entry and its frozen state are dropped."
+        }
+        alert.informativeText = info
+        if let thumb = entry.thumbnail { alert.icon = thumb }
+        alert.alertStyle = entry.removeVerb == "kill" ? .critical : .warning
+        alert.addButton(withTitle: entry.removeVerb.capitalized)
+        alert.addButton(withTitle: "Cancel")
+
+        let confirmed = alert.runModal() == .alertFirstButtonReturn
+        panel?.makeKeyAndOrderFront(nil)
+        guard confirmed else { return }
+
+        manager.forget(name: entry.name)
+        model.entries.removeAll { $0.name == entry.name }
+        guard !model.entries.isEmpty else { hide(); return }
+        model.selection = min(model.selection, model.entries.count - 1)
+    }
+
     private func hide() {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
@@ -156,6 +190,23 @@ struct OverviewEntry: Identifiable {
         case .embedded: return "●"
         case .detached: return "◌"
         case .asleep: return "○"
+        }
+    }
+
+    /// State-honest verbs for the hint bar and the confirmation.
+    var openVerb: String {
+        switch state {
+        case .embedded: return "focus"
+        case .detached: return "open"
+        case .asleep: return "resurrect"
+        }
+    }
+
+    var removeVerb: String {
+        switch state {
+        case .embedded: return "unadopt"
+        case .detached: return "kill"
+        case .asleep: return "forget"
         }
     }
 }
@@ -185,6 +236,24 @@ struct OverviewView: View {
     let onOpen: (String) -> Void
 
     var body: some View {
+        VStack(spacing: 14) {
+            grid
+            // Affordances always on view: the verbs are state-honest for the
+            // selected card, so the bar doubles as a state readout.
+            if let selected = model.selected {
+                Text("←→↑↓ move    ⏎ \(selected.openVerb)    ⌫ \(selected.removeVerb)    esc close")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(24)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.ultraThinMaterial))
+        .fixedSize()
+    }
+
+    private var grid: some View {
         LazyVGrid(
             columns: Array(
                 repeating: GridItem(.fixed(cardSize.width), spacing: 18),
@@ -237,10 +306,5 @@ struct OverviewView: View {
                 .onTapGesture { onOpen(entry.name) }
             }
         }
-        .padding(24)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(.ultraThinMaterial))
-        .fixedSize()
     }
 }
