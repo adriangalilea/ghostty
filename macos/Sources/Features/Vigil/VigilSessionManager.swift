@@ -470,26 +470,38 @@ class VigilSessionManager {
     }
 
     /// The full kill: whatever the state, after this the session and its
-    /// processes are gone. Forget FIRST so the close is not intercepted
-    /// into a detach.
+    /// processes are gone. Forget FIRST so nothing intercepts into a detach.
+    /// The caller already confirmed; this path must never prompt again.
     func kill(name: String) {
         guard let session = sessions[name] else { return }
         forget(name: name)
         if case .embedded(let controller) = session.state {
-            controller.window?.close()
+            killController(controller)
         }
+    }
+
+    /// Silent, total window kill: emptying the tree closes the window without
+    /// ghostty's own close confirmation (same mechanism detach uses), and with
+    /// no reference kept the surfaces free and the processes die.
+    func killController(_ controller: TerminalController) {
+        controller.surfaceTree = SplitTree()
     }
 
     /// Every terminal window NOT adopted as a session: the ephemeral ones.
     /// The overview shows all of ghostty, not just what vigil owns; ephemeral
-    /// vs persistent is a toggle, not a boundary.
+    /// vs persistent is a toggle, not a boundary. On-screen windows only:
+    /// ghostty retains closed windows for undo-close, and those corpses must
+    /// not haunt the overview (observed: closed-via-X window as a card).
     func ephemeralControllers() -> [TerminalController] {
         let adopted = sessions.values.compactMap { session -> TerminalController? in
             if case .embedded(let controller) = session.state { return controller }
             return nil
         }
         return TerminalController.all.filter { controller in
-            controller.window != nil && !adopted.contains { $0 === controller }
+            guard let window = controller.window else { return false }
+            guard window.isVisible || window.isMiniaturized else { return false }
+            guard !controller.surfaceTree.isEmpty else { return false }
+            return !adopted.contains { $0 === controller }
         }
     }
 
