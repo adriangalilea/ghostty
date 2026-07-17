@@ -488,11 +488,12 @@ class VigilSessionManager {
     }
 
     /// Type the rescued draft back into claude's input box, no newline (the
-    /// human submits, never us). Typing early would feed the shell, so poll
-    /// until claude IS the foreground process. Claude's TUI also WIPES its
-    /// input when startup finishes (the draft flashed and vanished), so
-    /// sending once is not enough: send, verify it stuck on screen, resend
-    /// until it survives a full second.
+    /// human submits, never us). Claude wipes typed input at every startup
+    /// stage until it is FULLY loaded (MCPs included), so timing guesses
+    /// lose: wait for claude to be the foreground process, then for the
+    /// screen to go quiet (startup spinners stopped = load finished), type,
+    /// and keep watching; if a late wipe still eats it, wait for calm and
+    /// retype.
     private func injectDraft(_ controller: TerminalController, _ draft: String, attempts: Int = 60) {
         guard attempts > 0 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -502,31 +503,42 @@ class VigilSessionManager {
                 let comm = self.runCapture("/bin/ps", ["-o", "comm=", "-p", String(pid)])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard URL(fileURLWithPath: comm).lastPathComponent == "claude" else { continue }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    self.typeUntilItSticks(view, draft, tries: 8)
-                }
+                self.typeWhenQuiet(view, draft, samples: 40, last: nil)
                 return
             }
             self.injectDraft(controller, draft, attempts: attempts - 1)
         }
     }
 
-    private func typeUntilItSticks(_ view: Ghostty.SurfaceView, _ draft: String, tries: Int) {
-        guard tries > 0 else { return }
-        let needle = String(draft.prefix(24))
-        let screen = view.cachedScreenContents.get()
-        if screen.contains(needle) {
-            // On screen; confirm it survives claude's late init wipe.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                if !view.cachedScreenContents.get().contains(needle) {
-                    self.typeUntilItSticks(view, draft, tries: tries - 1)
-                }
+    /// Two identical screen samples a second apart = claude stopped painting
+    /// startup; the input box is finally safe to type into.
+    private func typeWhenQuiet(_ view: Ghostty.SurfaceView, _ draft: String, samples: Int, last: String?) {
+        guard samples > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            let now = view.cachedScreenContents.get()
+            guard !now.isEmpty, now == last else {
+                self.typeWhenQuiet(view, draft, samples: samples - 1, last: now)
+                return
             }
-            return
+            view.surfaceModel?.sendText(draft)
+            self.watchDraft(view, draft, checks: 6)
         }
-        view.surfaceModel?.sendText(draft)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.typeUntilItSticks(view, draft, tries: tries - 1)
+    }
+
+    /// After typing, stand guard: a late wipe sends us back to waiting for
+    /// calm and retyping. Once the user edits (screen differs but the draft
+    /// prefix is still there), stand down.
+    private func watchDraft(_ view: Ghostty.SurfaceView, _ draft: String, checks: Int) {
+        guard checks > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            let needle = String(draft.prefix(24))
+            if view.cachedScreenContents.get().contains(needle) {
+                self.watchDraft(view, draft, checks: checks - 1)
+            } else {
+                self.typeWhenQuiet(view, draft, samples: 30, last: nil)
+            }
         }
     }
 
