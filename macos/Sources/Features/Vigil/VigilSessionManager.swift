@@ -1431,9 +1431,15 @@ class VigilSessionManager {
 
             if let hosting = existing?.element.view as? NSHostingView<VigilWindowMark> {
                 hosting.rootView = mark
+                hosting.setFrameSize(hosting.fittingSize)
             } else {
+                let hosting = NSHostingView(rootView: mark)
+                // A titlebar accessory does not lay out from SwiftUI intrinsic
+                // size on its own; give the hosting view a concrete frame or
+                // it collapses to zero width and shows nothing.
+                hosting.setFrameSize(hosting.fittingSize)
                 let accessory = VigilTitlebarAccessory()
-                accessory.view = NSHostingView(rootView: mark)
+                accessory.view = hosting
                 accessory.layoutAttribute = .right
                 window.addTitlebarAccessoryViewController(accessory)
             }
