@@ -50,10 +50,6 @@ class VigilSessionManager {
         /// VT dump (scrollback + screen) frozen at capture; replayed with
         /// `cat` on resurrection so the content survives, not just the shape.
         var dump: String?
-        /// Text sitting unsent in the program's input box at capture (claude
-        /// panes), scraped from the frozen frame; typed back after the
-        /// program relaunches so a half-written prompt survives.
-        var draft: String?
     }
 
     struct Session {
@@ -261,7 +257,7 @@ class VigilSessionManager {
         // The resurrect identity is known from birth: even a crash (no
         // detach, no capture) resurrects by reattach while the daemon lives.
         sessions[name]!.panes = [
-            Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0", dump: nil, draft: nil)
+            Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0", dump: nil)
         ]
         persist()
         NSApp.activate(ignoringOtherApps: true)
@@ -360,8 +356,7 @@ class VigilSessionManager {
                 panes.append(Pane(
                     cwd: cwd,
                     command: "\(Self.attachSentinel)\(attachId)",
-                    dump: dumped ? dumpPath : nil,
-                    draft: nil))
+                    dump: dumped ? dumpPath : nil))
                 continue
             }
 
@@ -381,39 +376,9 @@ class VigilSessionManager {
             if view.surfaceModel?.vigilDump(to: dumpPath) == true {
                 dump = dumpPath
             }
-            var draft: String?
-            if let dump, command?.contains("claude") == true {
-                draft = Self.scrapeDraft(dumpPath: dump)
-            }
-            panes.append(Pane(cwd: cwd, command: command, dump: dump, draft: draft))
+            panes.append(Pane(cwd: cwd, command: command, dump: dump))
         }
         return panes
-    }
-
-    /// The unsent input in claude's box, scraped from the frozen frame: the
-    /// last prompt-marker line near the bottom of the dump. Screen scraping
-    /// is honest here; claude persists conversations, never drafts.
-    static func scrapeDraft(dumpPath: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: dumpPath) else { return nil }
-        let plain = String(decoding: data, as: UTF8.self)
-            .replacingOccurrences(of: "\u{1b}\\[[0-9;:?]*[A-Za-z]", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "\u{1b}\\][^\u{7}\u{1b}]*(\u{7}|\u{1b}\\\\)", with: "", options: .regularExpression)
-            // Claude pads its prompt with non-breaking spaces; normalize or
-            // the marker never matches (bug: draft persisted empty).
-            .replacingOccurrences(of: "\u{a0}", with: " ")
-        // NOT split(separator: "\n"): the dump's \r\n is a single grapheme
-        // cluster in Swift, so "\n" matches nothing and the whole dump reads
-        // as one line (bug: draft persisted empty, second act).
-        let lines = plain.components(separatedBy: .newlines).suffix(15)
-        for line in lines.reversed() {
-            let trimmed = line.trimmingCharacters(in: CharacterSet(charactersIn: " \r│╭╮╰╯─"))
-            for marker in ["❯ ", "> ", ") "] where trimmed.hasPrefix(marker) {
-                let draft = String(trimmed.dropFirst(marker.count))
-                    .trimmingCharacters(in: .whitespaces)
-                if !draft.isEmpty { return draft }
-            }
-        }
-        return nil
     }
 
     /// Adopted claudes were born without identity: recover it forensically via
@@ -561,12 +526,6 @@ class VigilSessionManager {
         }
         persist()
     }
-
-    // Draft REINJECTION is deferred (branch vigil-draft-injection): typing
-    // into claude's startup is a timing war we lost repeatedly. The draft is
-    // still CAPTURED above (scrapeDraft -> Pane.draft, cheap and verified);
-    // the daemon obsoletes reinjection entirely, since claude never dies the
-    // input box is never lost. See CLAUDE.md "Deferred".
 
     func rename(name: String, label: String) {
         guard sessions[name] != nil else { return }
