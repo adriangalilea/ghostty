@@ -98,6 +98,9 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
+    /// vigil: menu bar session manager.
+    private var vigilStatusItem: VigilStatusItem?
+
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
 
@@ -219,6 +222,9 @@ class AppDelegate: NSObject,
 
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
+
+        // vigil session manager in the menu bar
+        vigilStatusItem = VigilStatusItem(ghostty: ghostty)
 
         // Start our update checker.
         updateController.startUpdater()
