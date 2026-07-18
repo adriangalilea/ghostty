@@ -98,6 +98,9 @@ class VigilOverview: NSObject {
             ?? TerminalController.preferredParent
         model.selection = front
             .flatMap { f in model.entries.firstIndex { $0.controller === f } } ?? 0
+        // Seed the hover anchor at the current cursor so the grid appearing
+        // under a stationary mouse doesn't hijack the initial selection.
+        model.lastHoverLocation = NSEvent.mouseLocation
         model.zoomed = false
         model.undoKey = manager.ghosttyApp?.config.keyboardShortcut(for: "undo")
             .map(Self.displayShortcut)
@@ -512,6 +515,20 @@ struct OverviewEntry: Identifiable {
 class OverviewModel: ObservableObject {
     @Published var entries: [OverviewEntry] = []
     @Published var selection: Int = 0
+    /// Mouse location at the last hover-driven selection. Hover only steals
+    /// the selection when the pointer actually MOVED, not when a card
+    /// appears under a stationary cursor (leaving the peek, or the grid
+    /// first showing): that was hijacking keyboard focus back to wherever
+    /// the mouse happened to sit.
+    var lastHoverLocation: NSPoint?
+
+    /// True when the cursor genuinely moved since the last hover selection.
+    func mouseMoved() -> Bool {
+        let loc = NSEvent.mouseLocation
+        defer { lastHoverLocation = loc }
+        guard let last = lastHoverLocation else { return true }
+        return abs(last.x - loc.x) > 1 || abs(last.y - loc.y) > 1
+    }
     /// Peek-zoom (space): the selected card fills the panel, Quick Look
     /// style. Arrows keep working; space or esc returns to the grid.
     @Published var zoomed: Bool = false
@@ -723,7 +740,7 @@ struct OverviewView: View {
             actionRow(entry, focused: focused)
         }
         .onTapGesture { onActivate(entry) }
-        .onHover { hovering in if hovering { model.selection = index } }
+        .onHover { hovering in if hovering && model.mouseMoved() { model.selection = index } }
         .modifier(DragReorder(entry: entry, model: model, onReorder: onReorder))
     }
 
