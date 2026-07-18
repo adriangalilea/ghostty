@@ -652,19 +652,25 @@ class VigilSessionManager {
             config.vigilAttach = "vigil-\(name)-\(nextIndex)"
             nextIndex += 1
 
-            var parts: [String] = []
-            if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
-                parts.append("cat '\(dump)'")
-            }
+            // What program (if any) is worth bringing back. A bare shell has
+            // none: upgrading it is just a fresh daemon shell, NO dump replay
+            // (catting a shell's frozen screen prints the raw `cat` command
+            // and junk into the new prompt, found live).
+            var program: String?
             if Self.isClaudePane(pane.command) {
                 if !claudeAssigned {
                     claudeAssigned = true
-                    parts.append("wake pane \(name)")
+                    program = "wake pane \(name)"
                 }
             } else if let argv = pane.argv, argv.allSatisfy(Self.shellSafe) {
-                parts.append(argv.joined(separator: " "))
+                program = argv.joined(separator: " ")
             }
-            if !parts.isEmpty {
+            if let program {
+                var parts: [String] = []
+                if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
+                    parts.append("cat '\(dump)'")
+                }
+                parts.append(program)
                 config.environmentVariables["VIGILD_RESUME"] = parts.joined(separator: "; ")
             }
 
@@ -1655,11 +1661,22 @@ class VigilSessionManager {
                 accessory.layoutAttribute = .right
                 window.addTitlebarAccessoryViewController(accessory)
             }
-            // Survival class lives on the titlebar pill's color only. NO
-            // window border: injecting a subview into the private frame view
-            // (NSThemeFrame) destabilized window teardown (cmd+W left blank
-            // zombie windows, 2026-07-18). The pill is a native accessory,
-            // safe; the ring was a hack, gone.
+
+            // Survival class as a full-width colour strip under the titlebar:
+            // teal daemon / cyan resume / yellow ephemeral. A native `.bottom`
+            // accessory, NOT a subview of the private frame view (that broke
+            // window teardown, 2026-07-18).
+            let color: NSColor = !persistent ? .systemYellow
+                : (daemonBacked ? .systemTeal : .systemCyan)
+            let strip = window.titlebarAccessoryViewControllers
+                .compactMap { $0 as? VigilTitlebarStrip }.first
+                ?? {
+                    let s = VigilTitlebarStrip()
+                    s.layoutAttribute = .bottom
+                    window.addTitlebarAccessoryViewController(s)
+                    return s
+                }()
+            strip.setColor(color)
         }
     }
 

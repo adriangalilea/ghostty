@@ -9,6 +9,26 @@ import SwiftUI
 /// Native titlebar accessory, composes with tabs and titlebar theming.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
+/// A full-width class-colour strip under the titlebar: the window's
+/// survival colour back as a signal, native and safe (a `.bottom` titlebar
+/// accessory), NOT a subview of the private frame view (that broke window
+/// teardown, 2026-07-18).
+final class VigilTitlebarStrip: NSTitlebarAccessoryViewController {
+    private let strip = NSView()
+
+    override func loadView() {
+        strip.wantsLayer = true
+        strip.frame = NSRect(x: 0, y: 0, width: 100, height: 3)
+        strip.autoresizingMask = [.width]
+        view = strip
+    }
+
+    func setColor(_ color: NSColor) {
+        strip.wantsLayer = true
+        strip.layer?.backgroundColor = color.withAlphaComponent(0.7).cgColor
+    }
+}
+
 struct VigilWindowMark: View {
     /// The session label; shown only on hover (help), never inline. What
     /// the titlebar shows is one thing: is this window persistent or not.
@@ -25,6 +45,13 @@ struct VigilWindowMark: View {
     }
 
     var body: some View {
+        content
+            // Match the titlebar height and centre, so the buttons line up
+            // with the native traffic lights instead of floating above them.
+            .frame(height: 28)
+    }
+
+    private var content: some View {
         HStack(spacing: 7) {
             roundButton(
                 icon: pinned ? "pin.fill" : "pin",
@@ -53,22 +80,19 @@ struct VigilWindowMark: View {
             : "Ephemeral: dies when the window closes. Click to make it survive quit."
     }
 
-    /// A real, round, high-contrast button: filled in its color when ON,
-    /// an outlined neutral disc when OFF. No washed-out tints.
+    /// A subtle round button, glyph always in its class colour (so the
+    /// class reads at a glance) on a faint disc: a touch stronger when ON,
+    /// fainter when OFF. No harsh fills or borders; sized like the native
+    /// traffic lights next to it.
     private func roundButton(
         icon: String, on: Bool, color: Color, action: @escaping () -> Void, help: String
     ) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(on ? .white : .secondary)
-                .frame(width: 20, height: 20)
-                .background(
-                    Circle().fill(on ? color : Color.primary.opacity(0.08)))
-                .overlay(
-                    Circle().strokeBorder(
-                        on ? Color.white.opacity(0.25) : Color.primary.opacity(0.2),
-                        lineWidth: 1))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(color)
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(color.opacity(on ? 0.20 : 0.10)))
         }
         .buttonStyle(.plain)
         .help(help)
