@@ -802,7 +802,9 @@ struct OverviewView: View {
                 Text(entry.label)
                     .font(.system(size: 15, weight: focused ? .bold : .medium))
                     .lineLimit(1)
-                iconButton("r", "pencil", tint: .secondary, focused: focused) { onRename(entry) }
+                if entry.isWindow {
+                    iconButton("r", "pencil", tint: .secondary, focused: focused) { onRename(entry) }
+                }
             }
             .frame(maxWidth: cardSize.width)
 
@@ -884,11 +886,11 @@ struct OverviewView: View {
     /// the state word, its eye, and `p` inside it. Clicking flips the whole
     /// window persistent <-> ephemeral.
     private func persistButton(_ entry: OverviewEntry, focused: Bool) -> some View {
-        // Anchor conveys persistence (anchored, stays); bolt = fleeting.
+        // Snowflake = persistent (frozen/preserved, cold palette); bolt = fleeting.
         let (word, color, icon): (String, Color, String) = entry.persistent
             ? (entry.daemonBacked ? "survives quit" : "resumes on quit",
                entry.daemonBacked ? .teal : .cyan,
-               "anchor")
+               "snowflake")
             : ("ephemeral", .yellow, "bolt.fill")
         return Button(action: { onPersist(entry) }) {
             HStack(spacing: 4) {
@@ -952,7 +954,7 @@ struct OverviewView: View {
         if entry.persistent {
             chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
                  entry.daemonBacked ? .teal : .cyan,
-                 icon: "anchor")
+                 icon: "snowflake")
         } else {
             chip("ephemeral", .yellow, icon: "bolt.fill")
         }
