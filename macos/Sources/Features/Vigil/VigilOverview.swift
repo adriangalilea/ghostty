@@ -92,7 +92,12 @@ class VigilOverview: NSObject {
         manager.reconcile()
 
         model.entries = buildEntries()
-        model.selection = 0
+        // Start on the window you were just in (the active/front one), not
+        // always the first card: the overview opens where you left off.
+        let front = (NSApp.keyWindow?.windowController as? TerminalController)
+            ?? TerminalController.preferredParent
+        model.selection = front
+            .flatMap { f in model.entries.firstIndex { $0.controller === f } } ?? 0
         model.zoomed = false
         model.undoKey = manager.ghosttyApp?.config.keyboardShortcut(for: "undo")
             .map(Self.displayShortcut)
