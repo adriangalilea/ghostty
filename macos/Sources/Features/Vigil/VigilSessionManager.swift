@@ -1038,6 +1038,19 @@ class VigilSessionManager {
         persist()
     }
 
+    /// Ephemeral windows have no registry entry, so their overview name is
+    /// a runtime override keyed by the controller (lost on close, like the
+    /// window itself). Lets the default launch window be named too.
+    private var ephemeralLabels: [ObjectIdentifier: String] = [:]
+
+    func ephemeralLabel(_ controller: TerminalController) -> String? {
+        ephemeralLabels[ObjectIdentifier(controller)]
+    }
+
+    func renameEphemeral(_ controller: TerminalController, _ label: String) {
+        ephemeralLabels[ObjectIdentifier(controller)] = label
+    }
+
     /// State-honest removal. embedded: unadopt, the window returns to being a
     /// normal (ephemeral) window (nothing dies; closing it later kills
     /// normally). detached: kill, dropping the only reference releases the

@@ -35,7 +35,9 @@ struct VigilWindowMark: View {
                              : "Pin this window above the others.")
 
             roundButton(
-                icon: persistent ? "eye.fill" : "eye.slash.fill",
+                // Anchor = persistent (anchored, stays through quit/reboot);
+                // bolt = ephemeral (fleeting, dies on close).
+                icon: persistent ? "anchor" : "bolt.fill",
                 on: persistent,
                 color: eyeColor,
                 action: onTogglePersist,

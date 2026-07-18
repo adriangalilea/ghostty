@@ -57,10 +57,12 @@ class VigilOverview: NSObject {
             let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
             let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
             let cwd = surface?.pwd ?? "~"
+            let label = manager.ephemeralLabel(controller)
+                ?? (title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title)
             entries.append(OverviewEntry(
                 kind: .window,
                 name: "ephemeral-\(UInt(bitPattern: ObjectIdentifier(controller).hashValue))",
-                label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
+                label: label,
                 state: .embedded(controller),
                 attention: .none,
                 thumbnail: VigilSessionManager.windowSnapshot(controller),
@@ -310,14 +312,13 @@ class VigilOverview: NSObject {
     /// owns the keyboard while it runs, same modal handling as the kill
     /// confirmation.
     private func renameSelected() {
-        guard let entry = model.selected, entry.isWindow, entry.persistent else { return }
+        guard let entry = model.selected, entry.isWindow else { return }
         let manager = VigilSessionManager.shared
-        guard let session = manager.sessions[entry.name] else { return }
 
         let alert = NSAlert()
-        alert.messageText = "Rename session"
+        alert.messageText = "Rename"
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        field.stringValue = session.label
+        field.stringValue = entry.label
         alert.accessoryView = field
         alert.addButton(withTitle: "Rename")
         alert.addButton(withTitle: "Cancel")
@@ -332,7 +333,11 @@ class VigilOverview: NSObject {
 
         let label = field.stringValue.trimmingCharacters(in: .whitespaces)
         guard !label.isEmpty else { return }
-        manager.rename(name: entry.name, label: label)
+        if entry.persistent {
+            manager.rename(name: entry.name, label: label)
+        } else if let controller = entry.controller {
+            manager.renameEphemeral(controller, label)
+        }
         let keep = model.selection
         model.entries = buildEntries()
         model.selection = min(keep, max(model.entries.count - 1, 0))
@@ -797,9 +802,7 @@ struct OverviewView: View {
                 Text(entry.label)
                     .font(.system(size: 15, weight: focused ? .bold : .medium))
                     .lineLimit(1)
-                if entry.persistent {
-                    iconButton("r", "pencil", tint: .secondary, focused: focused) { onRename(entry) }
-                }
+                iconButton("r", "pencil", tint: .secondary, focused: focused) { onRename(entry) }
             }
             .frame(maxWidth: cardSize.width)
 
@@ -881,55 +884,63 @@ struct OverviewView: View {
     /// the state word, its eye, and `p` inside it. Clicking flips the whole
     /// window persistent <-> ephemeral.
     private func persistButton(_ entry: OverviewEntry, focused: Bool) -> some View {
+        // Anchor conveys persistence (anchored, stays); bolt = fleeting.
         let (word, color, icon): (String, Color, String) = entry.persistent
             ? (entry.daemonBacked ? "survives quit" : "resumes on quit",
                entry.daemonBacked ? .teal : .cyan,
-               entry.daemonBacked ? "eye.fill" : "eye.slash")
-            : ("ephemeral", .yellow, "bolt")
+               "anchor")
+            : ("ephemeral", .yellow, "bolt.fill")
         return Button(action: { onPersist(entry) }) {
             HStack(spacing: 4) {
                 Image(systemName: icon).font(.system(size: 10, weight: .bold))
                 Text(word).font(.system(size: 11, weight: .semibold))
-                if focused { keycap("p") }
+                keycap("p").opacity(focused ? 1 : 0) // space reserved, no shift
             }
             .foregroundColor(color)
             .padding(.horizontal, 8).padding(.vertical, 4)
             .background(Capsule().fill(color.opacity(0.18)))
+            .opacity(focused ? 1 : 0.5) // enabled on the active card, dim on the rest
         }
         .buttonStyle(.plain)
     }
 
-    /// One icon action as a real button: ICON first, then its keycap hint
-    /// (on focus), inside a bordered rounded rect.
+    /// One icon action as a real button: ICON then its keycap hint. The
+    /// keycap ALWAYS reserves its space (no layout shift on focus) and only
+    /// shows on the active card; the whole button is bright when the card
+    /// is focused (enabled) and dimmed otherwise (disabled), so which card's
+    /// keys are live is obvious.
     private func iconButton(
         _ key: String, _ icon: String, tint: Color, focused: Bool, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundColor(tint)
-                if focused { keycap(key) }
+                keycap(key).opacity(focused ? 1 : 0)
             }
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(
                 RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
             .overlay(
                 RoundedRectangle(cornerRadius: 7).strokeBorder(Color.primary.opacity(0.14)))
+            .opacity(focused ? 1 : 0.5)
         }
         .buttonStyle(.plain)
     }
 
     /// A control that sits ON the thumbnail corner (kill, pin): icon then
-    /// keycap, on a dark translucent chip so it reads over the preview.
+    /// keycap (space reserved), enabled on the focused card, dimmed on the
+    /// rest, on a dark translucent chip so it reads over the preview.
     private func cornerButton(
         _ key: String, _ icon: String, tint: Color, focused: Bool, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 3) {
                 Image(systemName: icon).font(.system(size: 11, weight: .bold)).foregroundColor(tint)
-                if focused { keycap(key) }
+                keycap(key).opacity(focused ? 1 : 0)
             }
             .padding(.horizontal, 6).padding(.vertical, 4)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.55)))
+            .opacity(focused ? 1 : 0.6)
         }
         .buttonStyle(.plain)
     }
@@ -939,13 +950,11 @@ struct OverviewView: View {
     @ViewBuilder
     private func survivalChip(_ entry: OverviewEntry) -> some View {
         if entry.persistent {
-            // Eye on/off, same footprint either way: on = survives quit,
-            // off (slashed) = will need resurrection after quit.
             chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
                  entry.daemonBacked ? .teal : .cyan,
-                 icon: entry.daemonBacked ? "eye.fill" : "eye.slash")
+                 icon: "anchor")
         } else {
-            chip("ephemeral", .yellow, icon: "bolt")
+            chip("ephemeral", .yellow, icon: "bolt.fill")
         }
     }
 
