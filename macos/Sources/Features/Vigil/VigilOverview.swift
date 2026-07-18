@@ -760,6 +760,22 @@ struct OverviewView: View {
                         .stroke(
                             focused ? Color.accentColor : Color.white.opacity(0.15),
                             lineWidth: focused ? 3 : 1))
+                // Destructive + pin controls live in the thumbnail's TOP-
+                // RIGHT corner (kill in the very corner, macOS convention
+                // for a card's close), where they belong on the picture.
+                .overlay(alignment: .topTrailing) {
+                    if entry.isWindow {
+                        HStack(spacing: 6) {
+                            if entry.controller != nil {
+                                cornerButton("f", entry.pinned ? "pin.fill" : "pin",
+                                             tint: entry.pinned ? .accentColor : .white,
+                                             focused: focused) { onPin(entry) }
+                            }
+                            cornerButton("⌫", "trash", tint: .red, focused: focused) { onKill(entry) }
+                        }
+                        .padding(8)
+                    }
+                }
                 // Peek lives under the focused card: the space keycap sits
                 // right where the eye already is.
                 .overlay(alignment: .bottom) {
@@ -772,10 +788,16 @@ struct OverviewView: View {
                     }
                 }
 
-            Text(entry.label)
-                .font(.system(size: 15, weight: focused ? .bold : .medium))
-                .lineLimit(1)
-                .frame(maxWidth: cardSize.width)
+            // Name + rename, co-located: the pencil sits right by the label.
+            HStack(spacing: 6) {
+                Text(entry.label)
+                    .font(.system(size: 15, weight: focused ? .bold : .medium))
+                    .lineLimit(1)
+                if entry.persistent {
+                    iconButton("r", "pencil", tint: .secondary, focused: focused) { onRename(entry) }
+                }
+            }
+            .frame(maxWidth: cardSize.width)
 
             actionRow(entry, focused: focused)
         }
@@ -818,24 +840,18 @@ struct OverviewView: View {
                 } else {
                     Text("no preview").font(.system(size: 14)).foregroundColor(.secondary)
                 }
-                VStack {
-                    HStack {
-                        if entry.pinned {
-                            Image(systemName: "pin.fill")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(.white)
-                                .padding(5)
-                                .background(Circle().fill(Color.accentColor))
-                                .padding(6)
-                        }
-                        Spacer()
-                        if entry.attention != .none {
+                // Attention lives top-LEFT; the controls (pin, kill) own the
+                // top-right corner (added by card()).
+                if entry.attention != .none {
+                    VStack {
+                        HStack {
                             chip(entry.attention == .input ? "needs you" : "done",
                                  entry.attention == .input ? .red : .green, filled: true)
                                 .padding(6)
+                            Spacer()
                         }
+                        Spacer()
                     }
-                    Spacer()
                 }
             }
         }
@@ -850,20 +866,8 @@ struct OverviewView: View {
     @ViewBuilder
     private func actionRow(_ entry: OverviewEntry, focused: Bool) -> some View {
         if entry.isWindow {
-            HStack(spacing: 6) {
-                persistButton(entry, focused: focused)
-                Spacer(minLength: 8)
-                if entry.persistent {
-                    iconButton("r", "pencil", tint: .secondary, focused: focused) { onRename(entry) }
-                }
-                if entry.controller != nil {
-                    iconButton("f", entry.pinned ? "pin.fill" : "pin",
-                               tint: entry.pinned ? .accentColor : .secondary,
-                               focused: focused) { onPin(entry) }
-                }
-                iconButton("⌫", "trash", tint: .red, focused: focused) { onKill(entry) }
-            }
-            .frame(width: cardSize.width, height: 26)
+            persistButton(entry, focused: focused)
+                .frame(height: 26)
         } else {
             Color.clear.frame(width: cardSize.width, height: 26)
         }
@@ -891,21 +895,37 @@ struct OverviewView: View {
         .buttonStyle(.plain)
     }
 
-    /// One icon action as a real button: keycap (on focus) + icon inside a
-    /// bordered rounded rect.
+    /// One icon action as a real button: ICON first, then its keycap hint
+    /// (on focus), inside a bordered rounded rect.
     private func iconButton(
         _ key: String, _ icon: String, tint: Color, focused: Bool, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                if focused { keycap(key) }
                 Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundColor(tint)
+                if focused { keycap(key) }
             }
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(
                 RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
             .overlay(
                 RoundedRectangle(cornerRadius: 7).strokeBorder(Color.primary.opacity(0.14)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// A control that sits ON the thumbnail corner (kill, pin): icon then
+    /// keycap, on a dark translucent chip so it reads over the preview.
+    private func cornerButton(
+        _ key: String, _ icon: String, tint: Color, focused: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: icon).font(.system(size: 11, weight: .bold)).foregroundColor(tint)
+                if focused { keycap(key) }
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.55)))
         }
         .buttonStyle(.plain)
     }
