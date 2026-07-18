@@ -1218,11 +1218,82 @@ class VigilSessionManager {
         return name
     }
 
-    /// One-gesture detach for any window: persists first when needed.
+    // MARK: Window scope = the whole tabGroup
+
+    /// Every tab-controller sharing a window (tabGroup) with this one, this
+    /// one included. A session's scope is the WINDOW: what you do to one tab
+    /// applies to all (Adrian 2026-07-18, the tab data-loss bug).
+    private func tabSiblings(_ controller: TerminalController) -> [TerminalController] {
+        guard let group = controller.window?.tabGroup?.windows, !group.isEmpty else {
+            return [controller]
+        }
+        let siblings = group.compactMap { $0.windowController as? TerminalController }
+        return siblings.isEmpty ? [controller] : siblings
+    }
+
+    /// True when ANY tab in the window is a persistent session.
+    func windowPersistent(_ controller: TerminalController) -> Bool {
+        tabSiblings(controller).contains { sessionName(of: $0) != nil }
+    }
+
+    /// The eye toggle at window scope: if the window has any persistent tab,
+    /// make the WHOLE window ephemeral (forget every tab); otherwise persist
+    /// every tab. Everything in the window moves as one unit.
+    func toggleWindowPersist(_ controller: TerminalController) {
+        let siblings = tabSiblings(controller)
+        if windowPersistent(controller) {
+            for tab in siblings {
+                if let name = sessionName(of: tab) { forget(name: name) }
+            }
+        } else {
+            for tab in siblings where sessionName(of: tab) == nil {
+                persistFully(controller: tab)
+            }
+        }
+    }
+
+    /// A new tab born in a persistent window inherits persistence from
+    /// birth: this augments its surface config with a daemon attach id +
+    /// VIGIL_SESSION so it comes up daemon-backed, and returns the session
+    /// name to register once the controller exists. Returns nil when the
+    /// parent window is ephemeral (the new tab stays ephemeral too).
+    func newTabConfig(
+        parent: TerminalController,
+        base: Ghostty.SurfaceConfiguration?
+    ) -> (config: Ghostty.SurfaceConfiguration, name: String)? {
+        guard windowPersistent(parent) else { return nil }
+        var config = base ?? Ghostty.SurfaceConfiguration()
+        let cwd = config.workingDirectory
+            ?? parent.focusedSurface?.pwd
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let seed = URL(fileURLWithPath: cwd).lastPathComponent
+        let name = uniqueName(from: seed)
+        config.workingDirectory = cwd
+        config.environmentVariables["VIGIL_SESSION"] = name
+        config.vigilAttach = "vigil-\(name)-0"
+        return (config, name)
+    }
+
+    /// Register a freshly-created tab controller as a daemon-backed session
+    /// (called by TerminalController.newTab right after it builds the tab
+    /// with the config from newTabConfig).
+    func registerTabSession(controller: TerminalController, name: String, cwd: String) {
+        let seed = URL(fileURLWithPath: cwd).lastPathComponent
+        sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
+        sessions[name]!.panes = [
+            Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0", dump: nil)
+        ]
+        persist()
+    }
+
+    /// One-gesture detach for any window: persists the whole window first
+    /// (every tab) when needed, then detaches every tab of the group.
     func detachFrontWindow() {
         guard let controller = TerminalController.preferredParent else { return }
-        let name = sessionName(of: controller) ?? persistFully(controller: controller)
-        detach(name: name)
+        if !windowPersistent(controller) { persistFully(controller: controller) }
+        for tab in tabSiblings(controller) {
+            if let name = sessionName(of: tab) { detach(name: name) }
+        }
     }
 
     /// The eye on/off toggle: flip the front window between persistent
@@ -1437,9 +1508,9 @@ class VigilSessionManager {
                 daemonBacked: daemonBacked,
                 pinned: isPinned(controller),
                 onTogglePersist: { [weak self] in
-                    guard let self else { return }
-                    if let name { self.forget(name: name) }
-                    else { self.persistFully(controller: controller) }
+                    // Window scope: the eye moves the WHOLE window (all its
+                    // tabs) between persistent and ephemeral as one unit.
+                    self?.toggleWindowPersist(controller)
                 },
                 onTogglePin: { [weak self] in
                     self?.togglePin(controller)

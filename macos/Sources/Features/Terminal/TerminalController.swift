@@ -429,9 +429,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return nil
         }
 
+        // vigil: a new tab in a persistent window inherits persistence from
+        // birth (daemon-backed), so everything in the window survives quit.
+        let vigilTab = VigilSessionManager.shared.newTabConfig(
+            parent: parentController, base: baseConfig)
+
         // Create a new window and add it to the parent
-        let controller = TerminalController.init(ghostty, withBaseConfig: baseConfig)
+        let controller = TerminalController.init(
+            ghostty, withBaseConfig: vigilTab?.config ?? baseConfig)
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
+        if let vigilTab {
+            VigilSessionManager.shared.registerTabSession(
+                controller: controller,
+                name: vigilTab.name,
+                cwd: vigilTab.config.workingDirectory
+                    ?? FileManager.default.homeDirectoryForCurrentUser.path)
+        }
         guard let window = controller.window else { return controller }
 
         // If the parent is miniaturized, then macOS exhibits really strange behaviors
