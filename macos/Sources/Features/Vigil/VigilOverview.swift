@@ -760,7 +760,7 @@ struct OverviewView: View {
     @ViewBuilder
     private func card(index: Int, entry: OverviewEntry) -> some View {
         let focused = index == model.selection
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             thumbnail(entry, focused: focused)
                 .frame(width: cardSize.width, height: cardSize.height)
                 .overlay(
@@ -768,51 +768,83 @@ struct OverviewView: View {
                         .stroke(
                             focused ? Color.accentColor : Color.white.opacity(0.15),
                             lineWidth: focused ? 3 : 1))
-                // Destructive + pin controls live in the thumbnail's TOP-
-                // RIGHT corner (kill in the very corner, macOS convention
-                // for a card's close), where they belong on the picture.
-                .overlay(alignment: .topTrailing) {
-                    if entry.isWindow {
-                        HStack(spacing: 6) {
-                            // Floating (on top) shows on EVERY session card: a
-                            // persistent session stores the intent even while
-                            // detached/asleep and applies it on open.
-                            cornerButton("f", entry.pinned ? "macwindow.on.rectangle" : "macwindow",
-                                         tint: .white, // neutral
-                                         focused: focused) { onPin(entry) }
-                            cornerButton("⌫", "trash", tint: .red, focused: focused) { onKill(entry) }
-                        }
-                        .padding(8)
-                    }
-                }
-                // Peek lives under the focused card: the space keycap sits
-                // right where the eye already is.
-                .overlay(alignment: .bottom) {
-                    if focused && entry.isWindow {
-                        HStack(spacing: 5) { keycap("space"); Text("peek").font(.system(size: 11)) }
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 8).padding(.vertical, 3)
-                            .background(Capsule().fill(.ultraThinMaterial))
-                            .padding(.bottom, 8)
-                    }
+                // Titlebar strip across the TOP of the thumbnail, like a real
+                // window: name (left), then the toggles and close on the
+                // right. Icon + key only, no words; the survival word lives
+                // in the hover tooltip.
+                .overlay(alignment: .top) {
+                    if entry.isWindow { titleStrip(entry, focused: focused) }
                 }
 
-            // Name + rename, co-located: the pencil sits right by the label.
-            HStack(spacing: 6) {
-                Text(entry.label)
-                    .font(.system(size: 15, weight: focused ? .bold : .medium))
-                    .lineLimit(1)
-                if entry.isWindow {
-                    iconButton("r", "pencil", tint: .secondary, focused: focused) { onRename(entry) }
-                }
+            // Peek sits BELOW the thumbnail, out of the picture. Height is
+            // always reserved (opacity toggles) so focus never shifts rows.
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 9, weight: .bold))
+                keycap("space")
+                Text("peek").font(.system(size: 11))
             }
-            .frame(maxWidth: cardSize.width)
-
-            actionRow(entry, focused: focused)
+            .foregroundColor(.secondary)
+            .opacity(focused && entry.isWindow ? 1 : 0)
+            .frame(height: 16)
         }
         .onTapGesture { onActivate(entry) }
         .onHover { hovering in if hovering && model.mouseMoved() { model.selection = index } }
         .modifier(DragReorder(entry: entry, model: model, onReorder: onReorder))
+    }
+
+    /// The thumbnail's top strip: name on the left, controls on the right,
+    /// over a subtle top-down gradient so text and glyphs read over the
+    /// terminal content. All buttons are always present (dim when the card
+    /// is not focused) with their keycap space reserved, so nothing shifts.
+    private func titleStrip(_ entry: OverviewEntry, focused: Bool) -> some View {
+        let (persistTint, persistIcon): (Color, String) = entry.persistent
+            ? (entry.daemonBacked ? .teal : .cyan, "infinity")
+            : (.secondary, "hourglass")
+        return HStack(spacing: 7) {
+            barButton("p", persistIcon, tint: persistTint, focused: focused,
+                      help: entry.persistent
+                        ? "Persistent: survives quit. Click to make ephemeral."
+                        : "Ephemeral: dies on close. Click to make persistent.") { onPersist(entry) }
+            Text(entry.label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+            barButton("r", "pencil", tint: .secondary, focused: focused,
+                      help: "Rename") { onRename(entry) }
+            Spacer(minLength: 4)
+            barButton("f", entry.pinned ? "macwindow.on.rectangle" : "macwindow",
+                      tint: .white, focused: focused,
+                      help: entry.pinned ? "Floating on top. Click to drop." : "Float on top") { onPin(entry) }
+            barButton("⌫", "trash", tint: .red, focused: focused,
+                      help: "Kill") { onKill(entry) }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 26)
+        .frame(maxWidth: .infinity)
+        .background(
+            LinearGradient(
+                colors: [.black.opacity(0.65), .black.opacity(0.0)],
+                startPoint: .top, endPoint: .bottom)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 8, topTrailingRadius: 8)))
+    }
+
+    /// A strip button: icon then its keycap (space reserved, shown on
+    /// focus), no per-button background (the strip gradient carries it),
+    /// dim when the card is not focused.
+    private func barButton(
+        _ key: String, _ icon: String, tint: Color, focused: Bool,
+        help: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: icon).font(.system(size: 11, weight: .bold)).foregroundColor(tint)
+                keycap(key).opacity(focused ? 1 : 0)
+            }
+            .opacity(focused ? 1 : 0.5)
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     /// The card's picture: a live thumbnail, the countdown over a dimmed
@@ -849,104 +881,20 @@ struct OverviewView: View {
                 } else {
                     Text("no preview").font(.system(size: 14)).foregroundColor(.secondary)
                 }
-                // Attention lives top-LEFT; the controls (pin, kill) own the
-                // top-right corner (added by card()).
+                // Attention lives BOTTOM-left; the titlebar strip owns the top.
                 if entry.attention != .none {
                     VStack {
+                        Spacer()
                         HStack {
                             chip(entry.attention == .input ? "needs you" : "done",
                                  entry.attention == .input ? .red : .green, filled: true)
                                 .padding(6)
                             Spacer()
                         }
-                        Spacer()
                     }
                 }
             }
         }
-    }
-
-    /// Under-card controls, each a REAL button (background + border) with
-    /// its keycap INSIDE it, co-located, so the hint plainly belongs to the
-    /// action. Left: the persist toggle, a pill in the survival colour that
-    /// reads its own state and carries `p`. Right: rename, pin, kill. Only
-    /// windows carry the row; the row keeps its height whatever the kind so
-    /// nothing shifts as the selection moves.
-    @ViewBuilder
-    private func actionRow(_ entry: OverviewEntry, focused: Bool) -> some View {
-        if entry.isWindow {
-            persistButton(entry, focused: focused)
-                .frame(height: 26)
-        } else {
-            Color.clear.frame(width: cardSize.width, height: 26)
-        }
-    }
-
-    /// The persist toggle AS a button: a pill in the survival colour with
-    /// the state word, its eye, and `p` inside it. Clicking flips the whole
-    /// window persistent <-> ephemeral.
-    private func persistButton(_ entry: OverviewEntry, focused: Bool) -> some View {
-        // Infinity = persistent (endures, keeps running); hourglass =
-        // ephemeral (time-limited, dies on close). Persistent wears the cold
-        // class colour; ephemeral is neutral (the default, undramatic state).
-        let (word, color, icon): (String, Color, String) = entry.persistent
-            ? (entry.daemonBacked ? "survives quit" : "resumes on quit",
-               entry.daemonBacked ? .teal : .cyan,
-               "infinity")
-            : ("ephemeral", .secondary, "hourglass")
-        return Button(action: { onPersist(entry) }) {
-            HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 10, weight: .bold))
-                Text(word).font(.system(size: 11, weight: .semibold))
-                keycap("p").opacity(focused ? 1 : 0) // p = persistent; space reserved
-            }
-            .foregroundColor(color)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Capsule().fill(color.opacity(0.18)))
-            .opacity(focused ? 1 : 0.5) // enabled on the active card, dim on the rest
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// One icon action as a real button: ICON then its keycap hint. The
-    /// keycap ALWAYS reserves its space (no layout shift on focus) and only
-    /// shows on the active card; the whole button is bright when the card
-    /// is focused (enabled) and dimmed otherwise (disabled), so which card's
-    /// keys are live is obvious.
-    private func iconButton(
-        _ key: String, _ icon: String, tint: Color, focused: Bool, action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundColor(tint)
-                keycap(key).opacity(focused ? 1 : 0)
-            }
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
-            .overlay(
-                RoundedRectangle(cornerRadius: 7).strokeBorder(Color.primary.opacity(0.14)))
-            .opacity(focused ? 1 : 0.5)
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// A control that sits ON the thumbnail corner (kill, pin): icon then
-    /// keycap (space reserved), enabled on the focused card, dimmed on the
-    /// rest, on a dark translucent chip so it reads over the preview.
-    private func cornerButton(
-        _ key: String, _ icon: String, tint: Color, focused: Bool, action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 3) {
-                Image(systemName: icon).font(.system(size: 11, weight: .bold)).foregroundColor(tint)
-                keycap(key).opacity(focused ? 1 : 0)
-            }
-            .padding(.horizontal, 6).padding(.vertical, 4)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.55)))
-            .opacity(focused ? 1 : 0.6)
-        }
-        .buttonStyle(.plain)
     }
 
     /// The survival readout, one chip: teal = survives quit, icy cyan =
