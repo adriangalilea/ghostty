@@ -841,67 +841,73 @@ struct OverviewView: View {
         }
     }
 
-    /// Under-card controls. Only windows carry them; the create tile and
-    /// buried cards own their own affordances in the picture. The row is
-    /// always the survival chip (state readout) plus, on the focused card,
-    /// a persist toggle beside its own signal and a kill button, each with
-    /// its keycap. The keycaps appear only on focus but the row keeps its
-    /// height, so nothing shifts as the selection moves.
+    /// Under-card controls, each a REAL button (background + border) with
+    /// its keycap INSIDE it, co-located, so the hint plainly belongs to the
+    /// action. Left: the persist toggle, a pill in the survival colour that
+    /// reads its own state and carries `p`. Right: rename, pin, kill. Only
+    /// windows carry the row; the row keeps its height whatever the kind so
+    /// nothing shifts as the selection moves.
     @ViewBuilder
     private func actionRow(_ entry: OverviewEntry, focused: Bool) -> some View {
         if entry.isWindow {
             HStack(spacing: 6) {
-                survivalChip(entry)
-                if focused {
-                    keycap("p")
-                }
+                persistButton(entry, focused: focused)
                 Spacer(minLength: 8)
                 if entry.persistent {
-                    Button(action: { onRename(entry) }) {
-                        HStack(spacing: 4) {
-                            if focused { keycap("r") }
-                            Image(systemName: "pencil")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .buttonStyle(.plain)
+                    iconButton("r", "pencil", tint: .secondary, focused: focused) { onRename(entry) }
                 }
                 if entry.controller != nil {
-                    Button(action: { onPin(entry) }) {
-                        HStack(spacing: 4) {
-                            if focused { keycap("f") }
-                            Image(systemName: entry.pinned ? "pin.fill" : "pin")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(entry.pinned ? .accentColor : .secondary)
-                        }
-                    }
-                    .buttonStyle(.plain)
+                    iconButton("f", entry.pinned ? "pin.fill" : "pin",
+                               tint: entry.pinned ? .accentColor : .secondary,
+                               focused: focused) { onPin(entry) }
                 }
-                Button(action: { onKill(entry) }) {
-                    HStack(spacing: 4) {
-                        if focused { keycap("⌫") }
-                        Image(systemName: "trash")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.red)
-                    }
-                }
-                .buttonStyle(.plain)
+                iconButton("⌫", "trash", tint: .red, focused: focused) { onKill(entry) }
             }
-            .frame(width: cardSize.width, height: 22)
-            .contentShape(Rectangle())
-            // The persist toggle is the survival chip's own click; keep the
-            // whole left cluster tappable so p and the chip agree.
-            .overlay(
-                Color.clear
-                    .frame(width: cardSize.width * 0.5, height: 22)
-                    .contentShape(Rectangle())
-                    .onTapGesture { onPersist(entry) },
-                alignment: .leading)
+            .frame(width: cardSize.width, height: 26)
         } else {
-            // Keep every card the same height whatever its kind.
-            Color.clear.frame(width: cardSize.width, height: 22)
+            Color.clear.frame(width: cardSize.width, height: 26)
         }
+    }
+
+    /// The persist toggle AS a button: a pill in the survival colour with
+    /// the state word, its eye, and `p` inside it. Clicking flips the whole
+    /// window persistent <-> ephemeral.
+    private func persistButton(_ entry: OverviewEntry, focused: Bool) -> some View {
+        let (word, color, icon): (String, Color, String) = entry.persistent
+            ? (entry.daemonBacked ? "survives quit" : "resumes on quit",
+               entry.daemonBacked ? .teal : .cyan,
+               entry.daemonBacked ? "eye.fill" : "eye.slash")
+            : ("ephemeral", .yellow, "bolt")
+        return Button(action: { onPersist(entry) }) {
+            HStack(spacing: 4) {
+                Image(systemName: icon).font(.system(size: 10, weight: .bold))
+                Text(word).font(.system(size: 11, weight: .semibold))
+                if focused { keycap("p") }
+            }
+            .foregroundColor(color)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Capsule().fill(color.opacity(0.18)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// One icon action as a real button: keycap (on focus) + icon inside a
+    /// bordered rounded rect.
+    private func iconButton(
+        _ key: String, _ icon: String, tint: Color, focused: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                if focused { keycap(key) }
+                Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundColor(tint)
+            }
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7).strokeBorder(Color.primary.opacity(0.14)))
+        }
+        .buttonStyle(.plain)
     }
 
     /// The survival readout, one chip: teal = survives quit, icy cyan =
