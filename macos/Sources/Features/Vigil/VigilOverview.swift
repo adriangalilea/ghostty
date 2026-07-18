@@ -137,6 +137,10 @@ class VigilOverview: NSObject {
                 self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
                 self?.togglePinSelected()
             },
+            onRename: { [weak self] entry in
+                self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
+                self?.renameSelected()
+            },
             onRecover: { [weak self] entry in self?.recover(entry) },
             onRecoverBurial: { [weak self] burial in self?.recoverBurial(burial) },
             onDismissBurial: { [weak self] burial in self?.dismissBurial(burial) })
@@ -224,6 +228,7 @@ class VigilOverview: NSObject {
                 case 45: self.createSession(); return nil // n
                 case 35: self.togglePersistSelected(); return nil // p
                 case 3: self.togglePinSelected(); return nil // f: pin on top
+                case 15: self.renameSelected(); return nil // r: rename session
                 case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
                 case 51: self.removeSelected(); return nil // backspace
                 case 53: // esc: leave the peek first, close second
@@ -302,6 +307,40 @@ class VigilOverview: NSObject {
             ?? FileManager.default.homeDirectoryForCurrentUser.path
         hide()
         VigilSessionManager.shared.create(cwd: cwd)
+    }
+
+    /// Rename the selected session (persistent windows only; the label is
+    /// the session's, ephemeral windows have no vigil label). The alert
+    /// owns the keyboard while it runs, same modal handling as the kill
+    /// confirmation.
+    private func renameSelected() {
+        guard let entry = model.selected, entry.isWindow, entry.persistent else { return }
+        let manager = VigilSessionManager.shared
+        guard let session = manager.sessions[entry.name] else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Rename session"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = session.label
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+
+        modalActive = true
+        NSApp.activate(ignoringOtherApps: true)
+        let confirmed = alert.runModal() == .alertFirstButtonReturn
+        modalActive = false
+        panel?.makeKeyAndOrderFront(nil)
+        guard confirmed else { return }
+
+        let label = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !label.isEmpty else { return }
+        manager.rename(name: entry.name, label: label)
+        let keep = model.selection
+        model.entries = buildEntries()
+        model.selection = min(keep, max(model.entries.count - 1, 0))
+        refit()
     }
 
     /// Pin/unpin the selected live window on top.
@@ -566,6 +605,7 @@ struct OverviewView: View {
     let onKill: (OverviewEntry) -> Void
     let onPersist: (OverviewEntry) -> Void
     let onPin: (OverviewEntry) -> Void
+    let onRename: (OverviewEntry) -> Void
     let onRecover: (OverviewEntry) -> Void
     let onRecoverBurial: (VigilSessionManager.Burial) -> Void
     let onDismissBurial: (VigilSessionManager.Burial) -> Void
@@ -816,6 +856,17 @@ struct OverviewView: View {
                     keycap("p")
                 }
                 Spacer(minLength: 8)
+                if entry.persistent {
+                    Button(action: { onRename(entry) }) {
+                        HStack(spacing: 4) {
+                            if focused { keycap("r") }
+                            Image(systemName: "pencil")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
                 if entry.controller != nil {
                     Button(action: { onPin(entry) }) {
                         HStack(spacing: 4) {
