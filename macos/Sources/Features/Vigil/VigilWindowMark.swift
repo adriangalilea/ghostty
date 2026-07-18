@@ -9,12 +9,6 @@ import SwiftUI
 /// Native titlebar accessory, composes with tabs and titlebar theming.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
-/// The survival ring: a click-through overlay whose layer border traces
-/// the window frame's own rounded shape.
-final class VigilBorderView: NSView {
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-}
-
 struct VigilWindowMark: View {
     /// The session label; shown only on hover (help), never inline. What
     /// the titlebar shows is one thing: is this window persistent or not.

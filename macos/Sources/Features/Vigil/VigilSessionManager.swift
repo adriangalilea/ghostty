@@ -803,14 +803,31 @@ class VigilSessionManager {
     }
 
     /// Refresh live thumbnails for embedded sessions (overview open path).
+    /// A successful snapshot is also persisted to thumb.png so the card
+    /// always has SOMETHING to show, even if a later snapshot fails (a
+    /// miniaturized/occluded window, a window mid-layout after re-embed);
+    /// on failure we fall back to the last persisted image rather than
+    /// blanking the card to "no preview" (the sparse-thumbnail bug).
     func refreshThumbnails() {
         for (name, session) in sessions {
-            if case .embedded(let controller) = session.state {
-                if let image = Self.windowSnapshot(controller) {
-                    sessions[name]!.thumbnail = image
-                }
+            guard case .embedded(let controller) = session.state else { continue }
+            if let image = Self.windowSnapshot(controller) {
+                sessions[name]!.thumbnail = image
+                persistThumb(name: name, image: image)
+            } else if sessions[name]!.thumbnail == nil {
+                sessions[name]!.thumbnail = NSImage(
+                    contentsOfFile: dumpsDir(name).appendingPathComponent("thumb.png").path)
             }
         }
+    }
+
+    /// Write a thumbnail to the session's thumb.png (survives relaunch).
+    private func persistThumb(name: String, image: NSImage) {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else { return }
+        try? FileManager.default.createDirectory(at: dumpsDir(name), withIntermediateDirectories: true)
+        try? png.write(to: dumpsDir(name).appendingPathComponent("thumb.png"))
     }
 
     /// The full window content composited (every split), not a single pane.
@@ -1443,37 +1460,12 @@ class VigilSessionManager {
                 accessory.layoutAttribute = .right
                 window.addTitlebarAccessoryViewController(accessory)
             }
-
-            // Warm for what dies (yellow ephemeral), cold for preserved.
-            let color: NSColor = !persistent ? .systemYellow
-                : (daemonBacked ? .systemTeal : .systemCyan)
-            syncBorder(window, color: color)
+            // Survival class lives on the titlebar pill's color only. NO
+            // window border: injecting a subview into the private frame view
+            // (NSThemeFrame) destabilized window teardown (cmd+W left blank
+            // zombie windows, 2026-07-18). The pill is a native accessory,
+            // safe; the ring was a hack, gone.
         }
-    }
-
-    /// The survival class drawn on the window itself: a thin ring in the
-    /// class color (teal = daemon-backed, icy cyan = capture+resume,
-    /// yellow = ephemeral). An overlay on the window's FRAME view, with
-    /// the frame's own corner radius, so the ring follows the real window
-    /// shape (a contentView layer border drew a square over rounded
-    /// corners); hit testing passes through.
-    private func syncBorder(_ window: NSWindow, color: NSColor) {
-        guard let frameView = window.contentView?.superview else { return }
-        let border: VigilBorderView
-        if let existing = frameView.subviews.first(where: { $0 is VigilBorderView }) as? VigilBorderView {
-            border = existing
-        } else {
-            border = VigilBorderView(frame: frameView.bounds)
-            border.autoresizingMask = [.width, .height]
-            border.wantsLayer = true
-            frameView.addSubview(border, positioned: .above, relativeTo: nil)
-        }
-        border.frame = frameView.bounds
-        let radius = frameView.layer?.cornerRadius ?? 0
-        border.layer?.cornerRadius = radius > 0 ? radius : 10
-        border.layer?.cornerCurve = .continuous
-        border.layer?.borderWidth = 2
-        border.layer?.borderColor = color.withAlphaComponent(0.55).cgColor
     }
 
     private func load() {
