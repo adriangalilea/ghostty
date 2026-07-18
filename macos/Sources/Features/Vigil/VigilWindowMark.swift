@@ -31,9 +31,10 @@ struct VigilWindowMark: View {
     var onTogglePersist: () -> Void
     var onTogglePin: () -> Void
 
+    /// The persistent class colour (cold = preserved). Only read when
+    /// persistent; ephemeral is neutral.
     private var eyeColor: Color {
-        guard persistent else { return .yellow }
-        return daemonBacked ? .teal : .cyan
+        daemonBacked ? .teal : .cyan
     }
 
     var body: some View {
@@ -46,19 +47,21 @@ struct VigilWindowMark: View {
     private var content: some View {
         HStack(spacing: 7) {
             roundButton(
-                icon: pinned ? "pin.fill" : "pin",
+                // Floating (on top): a window hovering over another. Neutral.
+                icon: pinned ? "macwindow.on.rectangle" : "macwindow",
                 on: pinned,
-                color: .primary, // neutral, not the accent blue
+                color: .primary,
                 action: onTogglePin,
-                help: pinned ? "Pinned above other windows. Click to unpin."
-                             : "Pin this window above the others.")
+                help: pinned ? "Floating above other windows. Click to drop it back."
+                             : "Float this window above the others.")
 
             roundButton(
-                // Snowflake = persistent (frozen/preserved, the cold palette);
-                // bolt = ephemeral (fleeting, dies on close).
-                icon: persistent ? "snowflake" : "bolt.fill",
+                // Persistent = infinity (endures, keeps running in the
+                // background); ephemeral = hourglass (time-limited, dies on
+                // close). Persistent in the cold class colour, ephemeral neutral.
+                icon: persistent ? "infinity" : "hourglass",
                 on: persistent,
-                color: eyeColor,
+                color: persistent ? eyeColor : .secondary,
                 action: onTogglePersist,
                 help: persistHelp)
         }

@@ -224,8 +224,8 @@ class VigilOverview: NSObject {
                 case 126: self.model.move(-self.model.columns); return nil // up
                 case 125: self.model.move(self.model.columns); return nil // down
                 case 45: self.createSession(); return nil // n
-                case 35: self.togglePersistSelected(); return nil // p
-                case 3: self.togglePinSelected(); return nil // f: pin on top
+                case 35: self.togglePersistSelected(); return nil // p: persistent
+                case 3: self.togglePinSelected(); return nil // f: floating (on top)
                 case 15: self.renameSelected(); return nil // r: rename session
                 case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
                 case 51: self.removeSelected(); return nil // backspace
@@ -774,11 +774,11 @@ struct OverviewView: View {
                 .overlay(alignment: .topTrailing) {
                     if entry.isWindow {
                         HStack(spacing: 6) {
-                            // Pin shows on EVERY session card: a persistent
-                            // session stores the pin intent even while
+                            // Floating (on top) shows on EVERY session card: a
+                            // persistent session stores the intent even while
                             // detached/asleep and applies it on open.
-                            cornerButton("f", entry.pinned ? "pin.fill" : "pin",
-                                         tint: .white, // neutral; fill vs outline shows state
+                            cornerButton("f", entry.pinned ? "macwindow.on.rectangle" : "macwindow",
+                                         tint: .white, // neutral
                                          focused: focused) { onPin(entry) }
                             cornerButton("⌫", "trash", tint: .red, focused: focused) { onKill(entry) }
                         }
@@ -886,17 +886,19 @@ struct OverviewView: View {
     /// the state word, its eye, and `p` inside it. Clicking flips the whole
     /// window persistent <-> ephemeral.
     private func persistButton(_ entry: OverviewEntry, focused: Bool) -> some View {
-        // Snowflake = persistent (frozen/preserved, cold palette); bolt = fleeting.
+        // Infinity = persistent (endures, keeps running); hourglass =
+        // ephemeral (time-limited, dies on close). Persistent wears the cold
+        // class colour; ephemeral is neutral (the default, undramatic state).
         let (word, color, icon): (String, Color, String) = entry.persistent
             ? (entry.daemonBacked ? "survives quit" : "resumes on quit",
                entry.daemonBacked ? .teal : .cyan,
-               "snowflake")
-            : ("ephemeral", .yellow, "bolt.fill")
+               "infinity")
+            : ("ephemeral", .secondary, "hourglass")
         return Button(action: { onPersist(entry) }) {
             HStack(spacing: 4) {
                 Image(systemName: icon).font(.system(size: 10, weight: .bold))
                 Text(word).font(.system(size: 11, weight: .semibold))
-                keycap("p").opacity(focused ? 1 : 0) // space reserved, no shift
+                keycap("p").opacity(focused ? 1 : 0) // p = persistent; space reserved
             }
             .foregroundColor(color)
             .padding(.horizontal, 8).padding(.vertical, 4)
@@ -954,9 +956,9 @@ struct OverviewView: View {
         if entry.persistent {
             chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
                  entry.daemonBacked ? .teal : .cyan,
-                 icon: "snowflake")
+                 icon: "infinity")
         } else {
-            chip("ephemeral", .yellow, icon: "bolt.fill")
+            chip("ephemeral", .secondary, icon: "hourglass")
         }
     }
 
