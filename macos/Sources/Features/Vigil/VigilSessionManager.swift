@@ -1662,11 +1662,36 @@ class VigilSessionManager {
                 window.addTitlebarAccessoryViewController(accessory)
             }
 
-            // Survival class colour on the window itself is TODO: the pill
-            // carries it for now. (A .bottom titlebar strip became a fat
-            // band; a frame-view subview broke teardown. Needs a proper
-            // window-border approach, see the fork lessons.)
+            // Survival class as a border on the window itself: teal daemon /
+            // cyan resume / yellow ephemeral, tracing the rounded corners.
+            let color: NSColor = !persistent ? .systemYellow
+                : (daemonBacked ? .systemTeal : .systemCyan)
+            syncBorder(window, color: color)
         }
+    }
+
+    /// A thin class-colour border around the window, drawn as a click-through
+    /// overlay INSIDE the contentView (safe surface, like the glass effect)
+    /// with the window's real corner radius so it hugs the rounded shape.
+    /// Never touches the private frame view (that broke teardown).
+    private func syncBorder(_ window: NSWindow, color: NSColor) {
+        guard let content = window.contentView else { return }
+        let overlay = content.subviews.compactMap({ $0 as? VigilBorderOverlay }).first
+            ?? {
+                let o = VigilBorderOverlay(frame: content.bounds)
+                o.autoresizingMask = [.width, .height]
+                o.wantsLayer = true
+                content.addSubview(o) // topmost; interior transparent, edges only
+                return o
+            }()
+        overlay.frame = content.bounds
+        let radius: CGFloat = (window.responds(to: Selector(("_cornerRadius")))
+            ? window.value(forKey: "_cornerRadius") as? CGFloat : nil) ?? 10
+        overlay.layer?.cornerRadius = radius
+        overlay.layer?.cornerCurve = .continuous
+        overlay.layer?.borderWidth = 2
+        overlay.layer?.borderColor = color.withAlphaComponent(0.6).cgColor
+        overlay.layer?.masksToBounds = false
     }
 
     private func load() {

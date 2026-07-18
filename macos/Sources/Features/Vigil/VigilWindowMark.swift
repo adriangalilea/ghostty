@@ -9,6 +9,17 @@ import SwiftUI
 /// Native titlebar accessory, composes with tabs and titlebar theming.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
+/// The survival-class border: a click-through overlay INSIDE the window's
+/// contentView (the same safe surface the glass effect uses), tracing the
+/// window's real rounded corners via `_cornerRadius`. NOT a subview of the
+/// private frame view (NSThemeFrame) — that destabilized window teardown
+/// and left zombie windows (2026-07-18). ARC-owned by contentView, so it
+/// tears down with the window and never touches close.
+final class VigilBorderOverlay: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 
 struct VigilWindowMark: View {
     /// The session label; shown only on hover (help), never inline. What
