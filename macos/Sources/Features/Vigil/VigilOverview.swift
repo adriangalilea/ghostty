@@ -641,23 +641,29 @@ struct OverviewView: View {
         }
     }
 
-    /// Quick Look-style peek: the selected session near-fullscreen. Arrows
-    /// still move the selection, so triage happens without leaving the peek.
+    /// Quick Look-style peek: the selected session near-fullscreen. For a
+    /// LIVE window the image re-captures a few times a second so the peek
+    /// tracks the terminal in near real time (a detached/asleep session has
+    /// no live window, so it stays its frozen snapshot). Arrows still move
+    /// the selection, so triage happens without leaving the peek.
     private func peek(_ entry: OverviewEntry) -> some View {
         VStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(0.6))
-                if let thumbnail = entry.thumbnail {
-                    Image(nsImage: thumbnail)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: peekSize.width - 12, maxHeight: peekSize.height - 90)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                } else {
-                    Text("no preview")
-                        .font(.system(size: 18))
-                        .foregroundColor(.secondary)
+                TimelineView(.periodic(from: .now, by: 0.3)) { _ in
+                    let live = entry.controller.flatMap(VigilSessionManager.windowSnapshot)
+                    if let image = live ?? entry.thumbnail {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: peekSize.width - 12, maxHeight: peekSize.height - 90)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    } else {
+                        Text("no preview")
+                            .font(.system(size: 18))
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
             .frame(width: peekSize.width, height: peekSize.height - 80)

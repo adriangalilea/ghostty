@@ -293,15 +293,24 @@ class VigilSessionManager {
         return delegate.quickController
     }
 
-    /// The most urgent session drops into the quick terminal: answer it and
-    /// dismiss, never leaving what you were doing. With nothing pending,
-    /// the same key dismisses whatever is floating.
+    /// Drop a session into the quick terminal (Quake-style peek). The key
+    /// always does something sensible: something floating -> dismiss it;
+    /// else the most urgent pending session; else the session of the window
+    /// you are in right now (persisting it first if it was ephemeral, since
+    /// only sessions can float). That last fallback is why the key felt
+    /// dead: with nothing pending it used to no-op.
     func nextFloating() {
-        guard let session = mostUrgent else {
-            if floatingName != nil { quickController(create: false)?.animateOut() }
+        if floatingName != nil {
+            quickController(create: false)?.animateOut()
             return
         }
-        float(name: session.name)
+        if let session = mostUrgent {
+            float(name: session.name)
+            return
+        }
+        guard let controller = TerminalController.preferredParent else { return }
+        let name = sessionName(of: controller) ?? persistFully(controller: controller)
+        float(name: name)
     }
 
     /// Host a session in the quick terminal. Embedded sessions surrender
