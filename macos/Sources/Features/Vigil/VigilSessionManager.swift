@@ -88,6 +88,11 @@ class VigilSessionManager {
         var layout: Layout?
         /// Manual overview ordering (drag & drop); lower first.
         var order: Int = 0
+        /// Pinned-on-top intent, persisted: applied to the window whenever
+        /// the session is embedded (open/re-embed/resurrect), so a pin
+        /// survives detach, quit and reboot, and a detached/asleep session
+        /// can be pinned before it even has a window.
+        var pinned: Bool = false
         /// A buried ephemeral window (no session identity): exhumes to a
         /// plain window, never persisted. Runtime-only.
         var ephemeral: Bool = false
@@ -1386,26 +1391,52 @@ class VigilSessionManager {
 
     // MARK: Pin on top
 
-    /// Keep a window above the others (Antinote-style), toggled per window.
-    /// Pure window level, orthogonal to sessions: any window can pin.
-    func togglePin(_ controller: TerminalController) {
-        guard let window = controller.window else { return }
-        let pin = !isPinned(controller)
+    /// Apply a pin state to a live window (Antinote-style float-on-top +
+    /// follow-across-spaces).
+    private func applyPin(_ window: NSWindow, _ pin: Bool) {
         window.level = pin ? .floating : .normal
-        // A pinned window follows you across spaces; a normal one does not.
         window.collectionBehavior = pin
             ? [.canJoinAllSpaces, .fullScreenAuxiliary]
             : [.managed]
+    }
+
+    /// Toggle pin for an ephemeral (session-less) window: pure window level.
+    func togglePin(_ controller: TerminalController) {
+        guard let window = controller.window else { return }
+        applyPin(window, !isPinned(controller))
     }
 
     func isPinned(_ controller: TerminalController) -> Bool {
         controller.window?.level == .floating
     }
 
+    /// Toggle pin for a SESSION by name, whatever its state. The intent is
+    /// stored on the session (persisted) so it survives detach/quit/reboot,
+    /// and a detached/asleep session can be pinned before it has a window;
+    /// a live window gets it applied immediately.
+    func togglePinSession(_ name: String) {
+        guard sessions[name] != nil else { return }
+        sessions[name]!.pinned.toggle()
+        let pin = sessions[name]!.pinned
+        if case .embedded(let controller) = sessions[name]!.state, let window = controller.window {
+            applyPin(window, pin)
+        }
+        persist()
+    }
+
+    /// The pin state of a session (its stored intent).
+    func sessionPinned(_ name: String) -> Bool {
+        sessions[name]?.pinned ?? false
+    }
+
     /// Pin/unpin the front window (menu + keybind entry point).
     func togglePinFront() {
         guard let controller = TerminalController.preferredParent else { return }
-        togglePin(controller)
+        if let name = sessionName(of: controller) {
+            togglePinSession(name)
+        } else {
+            togglePin(controller)
+        }
     }
 
     /// True while quitting should mean "become a menu bar service" instead of
@@ -1534,15 +1565,16 @@ class VigilSessionManager {
         let panes: [Pane]?
         let layout: Layout?
         let order: Int?
+        let pinned: Bool?
         let buriedUntil: Date?
     }
 
     private func persist() {
         var entries = sessions.values.map {
-            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order, buriedUntil: nil)
+            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order, pinned: $0.pinned, buriedUntil: nil)
         }
         entries += graveyard.values.filter { !$0.ephemeral }.map {
-            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order, buriedUntil: graveyardDeadlines[$0.name])
+            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name])
         }
         entries.sort { $0.name < $1.name }
         let data = try! JSONEncoder().encode(entries)
@@ -1573,19 +1605,27 @@ class VigilSessionManager {
             let persistent = name != nil
             let daemonBacked = persistent && Self.daemonBacked(controller.surfaceTree)
 
+            // Enforce a session's stored pin intent on its live window
+            // (covers resurrection/re-embed for free); ephemeral windows
+            // keep their pure window-level pin.
+            if let name, let session = sessions[name] {
+                applyPin(window, session.pinned)
+            }
+            let pinned = name.map { sessionPinned($0) } ?? isPinned(controller)
+
             let mark = VigilWindowMark(
                 label: name.flatMap { sessions[$0]?.label },
                 persistent: persistent,
                 daemonBacked: daemonBacked,
-                pinned: isPinned(controller),
+                pinned: pinned,
                 onTogglePersist: { [weak self] in
                     // Window scope: the eye moves the WHOLE window (all its
                     // tabs) between persistent and ephemeral as one unit.
                     self?.toggleWindowPersist(controller)
                 },
                 onTogglePin: { [weak self] in
-                    self?.togglePin(controller)
-                    self?.persist() // re-sync the pin badge
+                    if let name { self?.togglePinSession(name) }
+                    else { self?.togglePin(controller); self?.persist() }
                 })
 
             if let hosting = existing?.element.view as? NSHostingView<VigilWindowMark> {
@@ -1622,6 +1662,7 @@ class VigilSessionManager {
                 panes: entry.panes ?? [],
                 layout: entry.layout,
                 order: entry.order ?? 0)
+            session.pinned = entry.pinned ?? false
             session.thumbnail = NSImage(
                 contentsOfFile: dumpsDir(entry.name).appendingPathComponent("thumb.png").path)
             if let deadline = entry.buriedUntil {

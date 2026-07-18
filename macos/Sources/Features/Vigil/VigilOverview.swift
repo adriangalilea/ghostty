@@ -42,11 +42,7 @@ class VigilOverview: NSObject {
         var entries = manager.sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
             .map { session -> OverviewEntry in
-                let controller: TerminalController? = {
-                    if case .embedded(let c) = session.state { return c }
-                    return nil
-                }()
-                return OverviewEntry(
+                OverviewEntry(
                     kind: .window,
                     name: session.name,
                     label: session.label,
@@ -55,7 +51,7 @@ class VigilOverview: NSObject {
                     thumbnail: session.thumbnail,
                     persistent: true,
                     daemonBacked: manager.daemonBacked(session: session),
-                    pinned: controller.map(manager.isPinned) ?? false)
+                    pinned: manager.sessionPinned(session.name))
             }
         for controller in manager.ephemeralControllers() {
             let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
@@ -343,10 +339,17 @@ class VigilOverview: NSObject {
         refit()
     }
 
-    /// Pin/unpin the selected live window on top.
+    /// Pin/unpin the selected window on top. A persistent session stores
+    /// the intent (works detached/asleep too); an ephemeral window is pure
+    /// window level.
     private func togglePinSelected() {
-        guard let entry = model.selected, let controller = entry.controller else { return }
-        VigilSessionManager.shared.togglePin(controller)
+        guard let entry = model.selected, entry.isWindow else { return }
+        let manager = VigilSessionManager.shared
+        if entry.persistent {
+            manager.togglePinSession(entry.name)
+        } else if let controller = entry.controller {
+            manager.togglePin(controller)
+        }
         let keep = model.selection
         model.entries = buildEntries()
         model.selection = min(keep, max(model.entries.count - 1, 0))
@@ -766,11 +769,12 @@ struct OverviewView: View {
                 .overlay(alignment: .topTrailing) {
                     if entry.isWindow {
                         HStack(spacing: 6) {
-                            if entry.controller != nil {
-                                cornerButton("f", entry.pinned ? "pin.fill" : "pin",
-                                             tint: entry.pinned ? .accentColor : .white,
-                                             focused: focused) { onPin(entry) }
-                            }
+                            // Pin shows on EVERY session card: a persistent
+                            // session stores the pin intent even while
+                            // detached/asleep and applies it on open.
+                            cornerButton("f", entry.pinned ? "pin.fill" : "pin",
+                                         tint: entry.pinned ? .accentColor : .white,
+                                         focused: focused) { onPin(entry) }
                             cornerButton("⌫", "trash", tint: .red, focused: focused) { onKill(entry) }
                         }
                         .padding(8)
