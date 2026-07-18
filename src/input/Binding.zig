@@ -876,6 +876,11 @@ pub const Action = union(enum) {
     /// With nothing pending, dismisses whatever is floating.
     vigil_next_floating,
 
+    /// vigil: kill the session you are IN right now, floating or in a
+    /// normal window. The one-key nuke from inside, no trip to the
+    /// overview; dies with the usual undo grace.
+    vigil_kill,
+
     /// Show or hide all windows. If all windows become shown, we also ensure
     /// Ghostty becomes focused. When hiding all windows, focus is yielded
     /// to the next application as determined by the OS.
@@ -1374,6 +1379,7 @@ pub const Action = union(enum) {
             .vigil_overview,
             .vigil_cycle,
             .vigil_next_floating,
+            .vigil_kill,
             .toggle_visibility,
             .check_for_updates,
             .show_gtk_inspector,

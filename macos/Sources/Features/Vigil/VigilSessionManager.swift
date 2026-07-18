@@ -1106,6 +1106,29 @@ class VigilSessionManager {
         .sorted { $0.deadline < $1.deadline }
     }
 
+    /// Kill the session you are IN right now, floating or in a normal
+    /// window, with no trip to the overview. The floating quick terminal
+    /// takes priority when it is the key window (that is what you are
+    /// looking at); otherwise the front terminal's session; a plain
+    /// ephemeral window dies as an ephemeral kill. All with undo grace.
+    func killCurrent() {
+        if let name = floatingName,
+           let quick = quickController(create: false),
+           quick.window?.isKeyWindow == true {
+            kill(name: name)
+            return
+        }
+        guard let controller = TerminalController.preferredParent else {
+            if let name = floatingName { kill(name: name) }
+            return
+        }
+        if let name = sessionName(of: controller) {
+            kill(name: name)
+        } else {
+            killEphemeral(controller)
+        }
+    }
+
     /// Undo of a kill: back from the graveyard, everything still running.
     func exhume(_ name: String) {
         guard let session = graveyard.removeValue(forKey: name) else { return }

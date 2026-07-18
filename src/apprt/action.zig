@@ -366,6 +366,9 @@ pub const Action = union(Key) {
     /// vigil: open the most urgent session in the quick terminal.
     vigil_next_floating,
 
+    /// vigil: kill the session you are in (floating or normal window).
+    vigil_kill,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -440,6 +443,7 @@ pub const Action = union(Key) {
         vigil_overview,
         vigil_cycle,
         vigil_next_floating,
+        vigil_kill,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");

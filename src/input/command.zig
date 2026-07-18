@@ -745,6 +745,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Drop the most urgent session into the quick terminal.",
         }},
 
+        .vigil_kill => comptime &.{.{
+            .action = .vigil_kill,
+            .title = "Kill Session",
+            .description = "Kill the session you are in (floating or normal window).",
+        }},
+
         // No commands because I'm not sure they make sense in a command
         // palette context.
         .toggle_command_palette,
