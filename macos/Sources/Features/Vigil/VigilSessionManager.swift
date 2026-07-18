@@ -1395,11 +1395,7 @@ class VigilSessionManager {
     /// (survives quit) and ephemeral (dies on close), in place.
     func toggleFrontPersist() {
         guard let controller = TerminalController.preferredParent else { return }
-        if let name = sessionName(of: controller) {
-            forget(name: name)
-        } else {
-            persistFully(controller: controller)
-        }
+        toggleWindowPersist(controller) // window scope (whole tabGroup)
     }
 
     /// True when the front window is a persistent session.

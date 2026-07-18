@@ -751,6 +751,18 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Kill the session you are in (floating or normal window).",
         }},
 
+        .vigil_persist => comptime &.{.{
+            .action = .vigil_persist,
+            .title = "Toggle Persistent",
+            .description = "Toggle the front window between persistent and ephemeral.",
+        }},
+
+        .vigil_float => comptime &.{.{
+            .action = .vigil_float,
+            .title = "Toggle Floating",
+            .description = "Toggle the front window floating on top.",
+        }},
+
         // No commands because I'm not sure they make sense in a command
         // palette context.
         .toggle_command_palette,

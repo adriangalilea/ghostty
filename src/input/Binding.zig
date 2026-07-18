@@ -881,6 +881,13 @@ pub const Action = union(enum) {
     /// overview; dies with the usual undo grace.
     vigil_kill,
 
+    /// vigil: toggle the front window between persistent and ephemeral
+    /// (whole tabGroup), from inside the focused session.
+    vigil_persist,
+
+    /// vigil: toggle the front window floating on top, from inside.
+    vigil_float,
+
     /// Show or hide all windows. If all windows become shown, we also ensure
     /// Ghostty becomes focused. When hiding all windows, focus is yielded
     /// to the next application as determined by the OS.
@@ -1380,6 +1387,8 @@ pub const Action = union(enum) {
             .vigil_cycle,
             .vigil_next_floating,
             .vigil_kill,
+            .vigil_persist,
+            .vigil_float,
             .toggle_visibility,
             .check_for_updates,
             .show_gtk_inspector,

@@ -760,12 +760,22 @@ struct OverviewView: View {
     @ViewBuilder
     private func card(index: Int, entry: OverviewEntry) -> some View {
         let focused = index == model.selection
+        let (persistTint, persistIcon): (Color, String) = entry.persistent
+            ? (entry.daemonBacked ? .teal : .cyan, "infinity")
+            : (.secondary, "hourglass")
         VStack(spacing: 6) {
-            // The name + controls live in their own lane ABOVE the thumbnail
-            // (not overlaid on the picture). Create tile reserves the height
-            // so every card lines up.
+            // The lane ABOVE the thumbnail holds ONLY the name (+ rename).
             if entry.isWindow {
-                titleLane(entry, focused: focused)
+                HStack(spacing: 6) {
+                    Spacer(minLength: 0)
+                    Text(entry.label)
+                        .font(.system(size: 14, weight: focused ? .bold : .medium))
+                        .lineLimit(1)
+                    barButton("r", "pencil", tint: .secondary, focused: focused,
+                              help: "Rename") { onRename(entry) }
+                    Spacer(minLength: 0)
+                }
+                .frame(width: cardSize.width, height: 24)
             } else {
                 Color.clear.frame(height: 24)
             }
@@ -777,9 +787,30 @@ struct OverviewView: View {
                         .stroke(
                             focused ? Color.accentColor : Color.white.opacity(0.15),
                             lineWidth: focused ? 3 : 1))
+                // Persist top-LEFT; floating + kill top-RIGHT, on the picture.
+                .overlay(alignment: .topLeading) {
+                    if entry.isWindow {
+                        cornerButton("p", persistIcon, tint: persistTint, focused: focused,
+                                     help: entry.persistent
+                                        ? "Persistent: survives quit. Click to make ephemeral."
+                                        : "Ephemeral: dies on close. Click to make persistent.") { onPersist(entry) }
+                            .padding(8)
+                    }
+                }
+                .overlay(alignment: .topTrailing) {
+                    if entry.isWindow {
+                        HStack(spacing: 6) {
+                            cornerButton("f", entry.pinned ? "macwindow.on.rectangle" : "macwindow",
+                                         tint: .white, focused: focused,
+                                         help: entry.pinned ? "Floating on top. Click to drop." : "Float on top") { onPin(entry) }
+                            cornerButton("⌫", "trash", tint: .red, focused: focused,
+                                         help: "Kill") { onKill(entry) }
+                        }
+                        .padding(8)
+                    }
+                }
 
-            // Peek sits BELOW the thumbnail. Height always reserved (opacity
-            // toggles) so focus never shifts rows.
+            // Peek BELOW the thumbnail; height reserved so focus never shifts.
             HStack(spacing: 5) {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.system(size: 9, weight: .bold))
@@ -795,38 +826,8 @@ struct OverviewView: View {
         .modifier(DragReorder(entry: entry, model: model, onReorder: onReorder))
     }
 
-    /// The name + controls lane ABOVE the thumbnail: name on the left, the
-    /// toggles and close on the right. Icon + key only, no words (the
-    /// survival word lives in the hover tooltip). Buttons are always present
-    /// (dim when not focused) with keycap space reserved, so nothing shifts.
-    private func titleLane(_ entry: OverviewEntry, focused: Bool) -> some View {
-        let (persistTint, persistIcon): (Color, String) = entry.persistent
-            ? (entry.daemonBacked ? .teal : .cyan, "infinity")
-            : (.secondary, "hourglass")
-        return HStack(spacing: 7) {
-            barButton("p", persistIcon, tint: persistTint, focused: focused,
-                      help: entry.persistent
-                        ? "Persistent: survives quit. Click to make ephemeral."
-                        : "Ephemeral: dies on close. Click to make persistent.") { onPersist(entry) }
-            Text(entry.label)
-                .font(.system(size: 14, weight: focused ? .bold : .medium))
-                .foregroundColor(.primary)
-                .lineLimit(1)
-            barButton("r", "pencil", tint: .secondary, focused: focused,
-                      help: "Rename") { onRename(entry) }
-            Spacer(minLength: 4)
-            barButton("f", entry.pinned ? "macwindow.on.rectangle" : "macwindow",
-                      tint: .primary, focused: focused,
-                      help: entry.pinned ? "Floating on top. Click to drop." : "Float on top") { onPin(entry) }
-            barButton("⌫", "trash", tint: .red, focused: focused,
-                      help: "Kill") { onKill(entry) }
-        }
-        .frame(width: cardSize.width, height: 24)
-    }
-
-    /// A strip button: icon then its keycap (space reserved, shown on
-    /// focus), no per-button background (the strip gradient carries it),
-    /// dim when the card is not focused.
+    /// A small text button (rename): icon then its keycap (space reserved,
+    /// shown on focus), no background, dim when the card is not focused.
     private func barButton(
         _ key: String, _ icon: String, tint: Color, focused: Bool,
         help: String, action: @escaping () -> Void
@@ -837,6 +838,26 @@ struct OverviewView: View {
                 keycap(key).opacity(focused ? 1 : 0)
             }
             .opacity(focused ? 1 : 0.5)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    /// A control ON the thumbnail corner (persist, floating, kill): icon
+    /// then keycap on a dark chip so it reads over the preview; dim when the
+    /// card is not focused.
+    private func cornerButton(
+        _ key: String, _ icon: String, tint: Color, focused: Bool,
+        help: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: icon).font(.system(size: 11, weight: .bold)).foregroundColor(tint)
+                keycap(key).opacity(focused ? 1 : 0)
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.55)))
+            .opacity(focused ? 1 : 0.65)
         }
         .buttonStyle(.plain)
         .help(help)
