@@ -1662,21 +1662,10 @@ class VigilSessionManager {
                 window.addTitlebarAccessoryViewController(accessory)
             }
 
-            // Survival class as a full-width colour strip under the titlebar:
-            // teal daemon / cyan resume / yellow ephemeral. A native `.bottom`
-            // accessory, NOT a subview of the private frame view (that broke
-            // window teardown, 2026-07-18).
-            let color: NSColor = !persistent ? .systemYellow
-                : (daemonBacked ? .systemTeal : .systemCyan)
-            let strip = window.titlebarAccessoryViewControllers
-                .compactMap { $0 as? VigilTitlebarStrip }.first
-                ?? {
-                    let s = VigilTitlebarStrip()
-                    s.layoutAttribute = .bottom
-                    window.addTitlebarAccessoryViewController(s)
-                    return s
-                }()
-            strip.setColor(color)
+            // Survival class colour on the window itself is TODO: the pill
+            // carries it for now. (A .bottom titlebar strip became a fat
+            // band; a frame-view subview broke teardown. Needs a proper
+            // window-border approach, see the fork lessons.)
         }
     }
 

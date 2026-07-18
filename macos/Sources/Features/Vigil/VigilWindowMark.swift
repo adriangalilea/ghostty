@@ -9,25 +9,6 @@ import SwiftUI
 /// Native titlebar accessory, composes with tabs and titlebar theming.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
-/// A full-width class-colour strip under the titlebar: the window's
-/// survival colour back as a signal, native and safe (a `.bottom` titlebar
-/// accessory), NOT a subview of the private frame view (that broke window
-/// teardown, 2026-07-18).
-final class VigilTitlebarStrip: NSTitlebarAccessoryViewController {
-    private let strip = NSView()
-
-    override func loadView() {
-        strip.wantsLayer = true
-        strip.frame = NSRect(x: 0, y: 0, width: 100, height: 3)
-        strip.autoresizingMask = [.width]
-        view = strip
-    }
-
-    func setColor(_ color: NSColor) {
-        strip.wantsLayer = true
-        strip.layer?.backgroundColor = color.withAlphaComponent(0.7).cgColor
-    }
-}
 
 struct VigilWindowMark: View {
     /// The session label; shown only on hover (help), never inline. What
