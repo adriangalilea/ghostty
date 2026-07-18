@@ -72,20 +72,6 @@ class VigilOverview: NSObject {
                 daemonBacked: false,
                 pinned: manager.isPinned(controller)))
         }
-        // Killed sessions linger dimmed through their grace: the countdown
-        // and the recover act live ON the card, where the loss is.
-        for burial in manager.burials() {
-            entries.append(OverviewEntry(
-                kind: .buried(burial.deadline),
-                name: burial.name,
-                label: burial.label,
-                state: .asleep,
-                attention: .none,
-                thumbnail: burial.thumbnail,
-                persistent: !burial.ephemeral,
-                daemonBacked: false,
-                pinned: false))
-        }
         // The new-session act is a card too, right where you are looking.
         entries.append(OverviewEntry(
             kind: .create,
@@ -97,6 +83,7 @@ class VigilOverview: NSObject {
             persistent: false,
             daemonBacked: false,
             pinned: false))
+        model.burials = manager.burials()
         return entries
     }
 
@@ -142,7 +129,9 @@ class VigilOverview: NSObject {
                 self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
                 self?.togglePinSelected()
             },
-            onRecover: { [weak self] entry in self?.recover(entry) })
+            onRecover: { [weak self] entry in self?.recover(entry) },
+            onRecoverBurial: { [weak self] burial in self?.recoverBurial(burial) },
+            onDismissBurial: { [weak self] burial in self?.dismissBurial(burial) })
         let hosting = NSHostingView(rootView: view)
         hosting.frame = NSRect(x: 0, y: 0, width: 1, height: 1)
 
@@ -283,7 +272,6 @@ class VigilOverview: NSObject {
     private func activate(_ entry: OverviewEntry) {
         switch entry.kind {
         case .window: openAndHide(entry)
-        case .buried: recover(entry)
         case .create: createSession()
         }
     }
@@ -320,6 +308,22 @@ class VigilOverview: NSObject {
     /// Pull a killed session back out of its grace period, intact.
     private func recover(_ entry: OverviewEntry) {
         VigilSessionManager.shared.exhume(entry.name)
+        model.entries = buildEntries()
+        model.selection = min(model.selection, max(model.entries.count - 1, 0))
+        refit()
+    }
+
+    /// Recover a burial from the tray (back to a live/detached session).
+    private func recoverBurial(_ burial: VigilSessionManager.Burial) {
+        VigilSessionManager.shared.exhume(burial.name)
+        model.entries = buildEntries()
+        model.selection = min(model.selection, max(model.entries.count - 1, 0))
+        refit()
+    }
+
+    /// Dismiss a burial NOW: reap it immediately instead of waiting the grace.
+    private func dismissBurial(_ burial: VigilSessionManager.Burial) {
+        VigilSessionManager.shared.reapNow(burial.name)
         model.entries = buildEntries()
         model.selection = min(model.selection, max(model.entries.count - 1, 0))
         refit()
@@ -435,7 +439,6 @@ struct OverviewEntry: Identifiable {
     /// grace (dimmed, countdown, recoverable), or the new-session tile.
     enum Kind {
         case window
-        case buried(Date)
         case create
     }
 
@@ -514,6 +517,10 @@ class OverviewModel: ObservableObject {
     /// Display form of the configured `undo` shortcut (config-driven, shown
     /// only when one is bound).
     @Published var undoKey: String?
+    /// Killed sessions in their grace period, rendered as a compact tray
+    /// below the grid (out of the navigable grid, so a kill never reflows
+    /// the live cards and each has its own unambiguous recover/dismiss).
+    @Published var burials: [VigilSessionManager.Burial] = []
 
     var selected: OverviewEntry? {
         entries.indices.contains(selection) ? entries[selection] : nil
@@ -538,6 +545,8 @@ struct OverviewView: View {
     let onPersist: (OverviewEntry) -> Void
     let onPin: (OverviewEntry) -> Void
     let onRecover: (OverviewEntry) -> Void
+    let onRecoverBurial: (VigilSessionManager.Burial) -> Void
+    let onDismissBurial: (VigilSessionManager.Burial) -> Void
 
     var body: some View {
         VStack(spacing: 14) {
@@ -564,12 +573,67 @@ struct OverviewView: View {
             } else {
                 grid
             }
+
+            // Killed sessions live in a compact tray, NOT the grid: a kill
+            // never reflows the live cards, and each has its own recover
+            // and a dismiss-now so it need not linger the full grace.
+            if !model.burials.isEmpty {
+                Divider().padding(.horizontal, 40)
+                burialTray
+            }
         }
         .padding(20)
         .background(
             RoundedRectangle(cornerRadius: 14)
                 .fill(.ultraThinMaterial))
         .fixedSize()
+    }
+
+    private var burialTray: some View {
+        VStack(spacing: 6) {
+            Text("recently killed")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+                .textCase(.uppercase)
+            HStack(spacing: 10) {
+                ForEach(model.burials, id: \.name) { burial in
+                    HStack(spacing: 10) {
+                        Text(burial.label)
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
+                            .frame(maxWidth: 130, alignment: .leading)
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            let left = max(0, Int(burial.deadline.timeIntervalSince(context.date).rounded()))
+                            Text("\(left)s")
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundColor(.orange)
+                                .monospacedDigit()
+                        }
+                        Button(action: { onRecoverBurial(burial) }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.uturn.backward")
+                                Text("recover").font(.system(size: 12, weight: .semibold))
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 5)
+                            .background(Capsule().fill(Color.orange.opacity(0.9)))
+                            .foregroundColor(.black)
+                        }
+                        .buttonStyle(.plain)
+                        Button(action: { onDismissBurial(burial) }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.secondary)
+                                .frame(width: 18, height: 18)
+                                .background(Circle().fill(Color.primary.opacity(0.1)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dismiss now: kill immediately instead of waiting out the grace.")
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.25)))
+                }
+            }
+        }
     }
 
     /// Quick Look-style peek: the selected session near-fullscreen. Arrows
@@ -672,43 +736,6 @@ struct OverviewView: View {
                         keycap("n"); Text("new session").font(.system(size: 12))
                     }
                     .foregroundColor(.secondary)
-                }
-            }
-
-        case .buried(let deadline):
-            ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.6))
-                if let thumb = entry.thumbnail {
-                    Image(nsImage: thumb)
-                        .resizable().aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: cardSize.width - 8, maxHeight: cardSize.height - 8)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .opacity(0.28)
-                }
-                Rectangle().fill(Color.black.opacity(0.35))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                VStack(spacing: 10) {
-                    // Ticks every second without a manual timer.
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        let left = max(0, Int(deadline.timeIntervalSince(context.date).rounded()))
-                        Text("killed · \(left)s")
-                            .font(.system(size: 15, weight: .bold, design: .rounded))
-                            .foregroundColor(.orange)
-                    }
-                    Button(action: { onRecover(entry) }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.uturn.backward")
-                            Text("recover").font(.system(size: 13, weight: .semibold))
-                        }
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(Capsule().fill(Color.orange.opacity(0.9)))
-                        .foregroundColor(.black)
-                    }
-                    .buttonStyle(.plain)
-                    if let undo = model.undoKey {
-                        HStack(spacing: 5) { keycap(undo); Text("undo kill").font(.system(size: 11)) }
-                            .foregroundColor(.secondary)
-                    }
                 }
             }
 

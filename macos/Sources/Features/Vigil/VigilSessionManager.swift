@@ -1157,6 +1157,14 @@ class VigilSessionManager {
     /// The grace ran out: now the kill actually happens. Dropping the
     /// buried tree releases surfaces (recreation processes die) and every
     /// pane daemon is killed.
+    /// Reap NOW, before the grace expires: the daemons die immediately and
+    /// the burial is dropped. For "get this out of my face" from the
+    /// overview instead of waiting out the 120s.
+    func reapNow(_ name: String) {
+        graveyardDeadlines[name] = Date.distantPast
+        reapIfExpired(name)
+    }
+
     private func reapIfExpired(_ name: String) {
         guard let deadline = graveyardDeadlines[name], Date() >= deadline else { return }
         graveyard[name] = nil
