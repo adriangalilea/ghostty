@@ -48,7 +48,7 @@ struct VigilWindowMark: View {
             roundButton(
                 icon: pinned ? "pin.fill" : "pin",
                 on: pinned,
-                color: .accentColor,
+                color: .primary, // neutral, not the accent blue
                 action: onTogglePin,
                 help: pinned ? "Pinned above other windows. Click to unpin."
                              : "Pin this window above the others.")

@@ -778,7 +778,7 @@ struct OverviewView: View {
                             // session stores the pin intent even while
                             // detached/asleep and applies it on open.
                             cornerButton("f", entry.pinned ? "pin.fill" : "pin",
-                                         tint: entry.pinned ? .accentColor : .white,
+                                         tint: .white, // neutral; fill vs outline shows state
                                          focused: focused) { onPin(entry) }
                             cornerButton("⌫", "trash", tint: .red, focused: focused) { onKill(entry) }
                         }
