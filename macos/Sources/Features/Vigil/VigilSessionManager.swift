@@ -1110,23 +1110,54 @@ class VigilSessionManager {
     /// window, with no trip to the overview. The floating quick terminal
     /// takes priority when it is the key window (that is what you are
     /// looking at); otherwise the front terminal's session; a plain
-    /// ephemeral window dies as an ephemeral kill. All with undo grace.
+    /// ephemeral window dies as an ephemeral kill. Always confirmed first
+    /// (a keystroke that kills processes must ask), then undo grace.
     func killCurrent() {
         if let name = floatingName,
            let quick = quickController(create: false),
            quick.window?.isKeyWindow == true {
-            kill(name: name)
+            confirmKill(name: name) { self.kill(name: name) }
             return
         }
         guard let controller = TerminalController.preferredParent else {
-            if let name = floatingName { kill(name: name) }
+            if let name = floatingName { confirmKill(name: name) { self.kill(name: name) } }
             return
         }
         if let name = sessionName(of: controller) {
-            kill(name: name)
+            confirmKill(name: name) { self.kill(name: name) }
         } else {
-            killEphemeral(controller)
+            let title = controller.focusedSurface?.title.trimmingCharacters(in: .whitespaces)
+            confirmKill(
+                label: (title?.isEmpty == false ? title! : "this window"),
+                info: "The window closes and its processes die."
+            ) { self.killEphemeral(controller) }
         }
+    }
+
+    /// Confirmation before a kill fired from a keystroke (not the overview,
+    /// which has its own). Critical alert, Kill/Cancel; runs the kill only
+    /// on confirm. Shown from service mode too, hence the activate.
+    private func confirmKill(name: String, _ doKill: @escaping () -> Void) {
+        let session = sessions[name]
+        confirmKill(
+            label: session?.label ?? name,
+            info: "Its processes die. Undo within \(Int(Self.killGrace))s.",
+            thumbnail: session?.thumbnail,
+            doKill)
+    }
+
+    private func confirmKill(
+        label: String, info: String, thumbnail: NSImage? = nil, _ doKill: @escaping () -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "Kill \(label)?"
+        alert.informativeText = info
+        if let thumbnail { alert.icon = thumbnail }
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Kill")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn { doKill() }
     }
 
     /// Undo of a kill: back from the graveyard, everything still running.
