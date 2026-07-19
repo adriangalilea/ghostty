@@ -443,11 +443,17 @@ class AppDelegate: NSObject,
         // of focusing one of them.
         guard !flag else { return true }
 
-        // If we have any windows in our terminal manager we don't do anything.
-        // This is possible with flag set to false if there a race where the
-        // window is still initializing and is not visible but the user clicked
-        // the dock icon.
-        guard TerminalController.all.isEmpty else { return true }
+        // Only bail if a LIVE window exists (visible or miniaturized). Detached
+        // sessions leave corpse controllers in TerminalController.all (empty
+        // tree, window closed) that must not count: with all sessions detached
+        // in the background, clicking the dock icon must open a new window, not
+        // nothing (Adrian 2026-07-19). A miniaturized live window returns true
+        // so AppKit deminiaturizes it instead.
+        let hasLiveWindow = TerminalController.all.contains {
+            guard let window = $0.window else { return false }
+            return (window.isVisible || window.isMiniaturized) && !$0.surfaceTree.isEmpty
+        }
+        guard !hasLiveWindow else { return true }
 
         // If the application isn't active yet then we don't want to process
         // this because we're not ready. This happens sometimes in Xcode runs
