@@ -134,8 +134,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             submenu.addItem(sessionItem(verb, #selector(openSession(_:)), session.name, "macwindow"))
             if case .embedded = session.state {
                 submenu.addItem(sessionItem("Detach (keep running)", #selector(detachSession(_:)), session.name, "rectangle.portrait.and.arrow.right"))
-                if !manager.daemonBacked(session: session) {
-                    submenu.addItem(sessionItem("Upgrade (survive quit)", #selector(upgradeSession(_:)), session.name, "infinity"))
+                if session.persistent {
+                    submenu.addItem(sessionItem("Make Ephemeral", #selector(makeEphemeral(_:)), session.name, "hourglass"))
+                } else {
+                    submenu.addItem(sessionItem("Persist (survive quit)", #selector(persistSession(_:)), session.name, "infinity"))
                 }
             }
             submenu.addItem(sessionItem("Rename…", #selector(renameSession(_:)), session.name, "pencil"))
@@ -238,9 +240,14 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         VigilSessionManager.shared.detach(name: name)
     }
 
-    @objc private func upgradeSession(_ sender: NSMenuItem) {
+    @objc private func persistSession(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        VigilSessionManager.shared.upgrade(name: name)
+        VigilSessionManager.shared.setPersistent(name: name, true)
+    }
+
+    @objc private func makeEphemeral(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        VigilSessionManager.shared.setPersistent(name: name, false)
     }
 
     @objc private func forgetSession(_ sender: NSMenuItem) {

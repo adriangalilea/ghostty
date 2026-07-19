@@ -35,6 +35,12 @@ class VigilOverview: NSObject {
     /// boundary of what the switcher can see.
     private func buildEntries() -> [OverviewEntry] {
         let manager = VigilSessionManager.shared
+        // Self-heal before showing anything: a dead-window session must never
+        // become a card. Then scream if any impossible state slipped through.
+        manager.reconcile()
+        manager.assertInvariants("buildEntries")
+        manager.vlog("overview: " + manager.sessions.values
+            .map { "\($0.name)[\($0.persistent ? "P" : "e")]" }.sorted().joined(separator: " "))
         // Every rebuild refreshes live thumbnails: p/u/undo change what a
         // card IS mid-showing, and a session touched for the first time
         // (adopt, upgrade) has no frozen snapshot to fall back on.
@@ -49,8 +55,8 @@ class VigilOverview: NSObject {
                     state: session.state,
                     attention: session.attention,
                     thumbnail: session.thumbnail,
-                    persistent: true,
-                    daemonBacked: manager.daemonBacked(session: session),
+                    persistent: session.persistent,
+                    daemonBacked: session.persistent && manager.daemonBacked(session: session),
                     pinned: manager.sessionPinned(session.name))
             }
         for controller in manager.ephemeralControllers() {
@@ -289,22 +295,23 @@ class VigilOverview: NSObject {
 
     private func openAndHide(_ entry: OverviewEntry) {
         hide()
-        if entry.persistent {
-            VigilSessionManager.shared.open(name: entry.name)
-        } else if case .embedded(let controller) = entry.state {
+        // Embedded already has a window: just focus it. Detached/asleep needs
+        // open() to re-embed or resurrect. State decides, not the class.
+        if case .embedded(let controller) = entry.state {
             controller.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+        } else {
+            VigilSessionManager.shared.open(name: entry.name)
         }
     }
 
-    /// New session rooted where you are looking (the selected window's cwd),
-    /// or HOME if the selection is the create tile itself.
+    /// New session always rooted in HOME: a fresh scratch, never silently
+    /// inheriting some other session's cwd (Adrian: `n` must not pick a random
+    /// path).
     private func createSession() {
-        let cwd = model.selected
-            .flatMap { $0.isWindow ? VigilSessionManager.shared.sessions[$0.name]?.cwd : nil }
-            ?? FileManager.default.homeDirectoryForCurrentUser.path
         hide()
-        VigilSessionManager.shared.create(cwd: cwd)
+        VigilSessionManager.shared.create(
+            cwd: FileManager.default.homeDirectoryForCurrentUser.path)
     }
 
     /// Rename the selected session (persistent windows only; the label is
@@ -445,7 +452,9 @@ class VigilOverview: NSObject {
         panel?.makeKeyAndOrderFront(nil)
         guard confirmed else { return }
 
-        if entry.persistent {
+        // Any registered session (persistent OR ephemeral, any state) buries
+        // via kill(); killEphemeral is only for a session-less window (drag-out).
+        if manager.sessions[entry.name] != nil {
             manager.kill(name: entry.name)
         } else if case .embedded(let controller) = entry.state {
             manager.killEphemeral(controller)

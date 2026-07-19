@@ -251,7 +251,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
         withParent explicitParent: NSWindow? = nil
     ) -> TerminalController {
-        let c = TerminalController.init(ghostty, withBaseConfig: baseConfig)
+        // vigil: every window is daemon-backed from birth (ephemeral until the
+        // eye persists it), so persisting never restarts the session. Skips
+        // configs that already carry an attach id (create/resurrection/tab).
+        let vigil = VigilSessionManager.shared.newWindowConfig(base: baseConfig)
+        let c = TerminalController.init(ghostty, withBaseConfig: vigil?.config ?? baseConfig)
+        if let vigil {
+            VigilSessionManager.shared.registerEphemeralSession(
+                controller: c, name: vigil.name, cwd: vigil.cwd)
+        }
 
         // Get our parent. Our parent is the one explicitly given to us,
         // otherwise the focused terminal, otherwise an arbitrary one.
@@ -677,9 +685,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ node: SplitTree<Ghostty.SurfaceView>.Node,
         withConfirmation: Bool = true
     ) {
-        // If this isn't the root then we're dealing with a split closure.
+        // If this isn't the root then we're dealing with a split closure. A
+        // vigil session's pane is daemon-backed: closing it is not a data-loss
+        // event, so no generic confirm.
         if surfaceTree.root != node {
-            super.closeSurface(node, withConfirmation: withConfirmation)
+            let confirm = withConfirmation
+                && VigilSessionManager.shared.sessionName(of: self) == nil
+            super.closeSurface(node, withConfirmation: confirm)
             return
         }
 
@@ -1300,6 +1312,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
 
+        // vigil session tab: ephemeral kills (undo), persistent detaches. No
+        // generic running-process confirm.
+        if VigilSessionManager.shared.sessionName(of: self) != nil {
+            _ = VigilSessionManager.shared.handleWindowClose(controller: self)
+            return
+        }
+
         guard surfaceTree.contains(where: { $0.needsConfirmQuit }) else {
             closeTabImmediately()
             return
@@ -1381,21 +1400,31 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     @IBAction override func closeWindow(_ sender: Any?) {
         guard let window = window else { return }
+        let group = (window.tabGroup?.windows ?? [window])
+            .compactMap { $0.windowController as? TerminalController }
 
-        // We need to check all the windows in our tab group for confirmation
-        // if we're closing the window. If we don't have a tabgroup for any
-        // reason we check ourselves.
-        let windows: [NSWindow] = window.tabGroup?.windows ?? [window]
-        guard let confirmController = windows
-            .compactMap({ $0.windowController as? TerminalController })
+        // vigil owns the close of a session window: ephemeral kills with a
+        // 120s undo, persistent detaches and keeps running. Nothing is lost, so
+        // there is NO generic "sessions will be terminated" confirm (every
+        // surface is daemon-backed now, which would trigger it on every close).
+        if group.contains(where: { VigilSessionManager.shared.sessionName(of: $0) != nil }) {
+            for c in group {
+                if VigilSessionManager.shared.sessionName(of: c) != nil {
+                    _ = VigilSessionManager.shared.handleWindowClose(controller: c)
+                } else {
+                    c.closeWindowImmediately()
+                }
+            }
+            return
+        }
+
+        // Non-vigil window: ghostty's default confirm-then-close.
+        guard let confirmController = group
             .first(where: { $0.surfaceTree.contains(where: { $0.needsConfirmQuit }) })
         else {
             closeWindowImmediately()
             return
         }
-
-        // We call confirmClose on the proper controller so the alert is
-        // attached to the window that needs confirmation.
         confirmController.confirmClose(
             messageText: "Close Window?",
             informativeText: "All terminal sessions in this window will be terminated.",

@@ -93,6 +93,12 @@ class VigilSessionManager {
         /// survives detach, quit and reboot, and a detached/asleep session
         /// can be pinned before it even has a window.
         var pinned: Bool = false
+        /// Survival policy. Ephemeral (false): the daemon is killed on window
+        /// close and on quit, and the session is never written to vigil.json.
+        /// Persistent (true): survives close/quit/reboot and wears the class
+        /// border. ⌘⇧P flips this in place; the daemon keeps running either
+        /// way, so there is never a restart.
+        var persistent: Bool = false
         /// A buried ephemeral window (no session identity): exhumes to a
         /// plain window, never persisted. Runtime-only.
         var ephemeral: Bool = false
@@ -130,6 +136,7 @@ class VigilSessionManager {
 
     private init() {
         load()
+        reapOrphanDaemons()
         startEventWatcher()
         // Fresh ephemeral windows must wear their ring without waiting for
         // a session state change: any window becoming key re-syncs marks
@@ -313,8 +320,8 @@ class VigilSessionManager {
             float(name: session.name)
             return
         }
-        guard let controller = TerminalController.preferredParent else { return }
-        let name = sessionName(of: controller) ?? persistFully(controller: controller)
+        guard let controller = TerminalController.preferredParent,
+              let name = sessionName(of: controller) else { return }
         float(name: name)
     }
 
@@ -394,15 +401,22 @@ class VigilSessionManager {
     /// Closing an adopted session's window means detach, not kill. Returns
     /// true when handled (the close must be swallowed by the caller).
     func handleWindowClose(controller: TerminalController) -> Bool {
-        guard let name = sessionName(of: controller) else { return false }
-        // An empty tree has nothing to detach; let the corpse close and the
-        // session sleeps on its captured panes.
-        if controller.surfaceTree.isEmpty {
-            sessions[name]!.state = .asleep
+        guard let name = sessionName(of: controller) else {
+            vlog("handleWindowClose: controller has NO session -> not handled (window closes plain)")
+            return false
+        }
+        let persistent = sessions[name]!.persistent
+        let empty = controller.surfaceTree.isEmpty
+        vlog("handleWindowClose: '\(name)' persistent=\(persistent) emptyTree=\(empty)")
+        if empty {
+            if persistent { sessions[name]!.state = .asleep }
+            else { killDaemons(name: name); sessions[name] = nil }
             persist()
             return false
         }
-        detach(name: name)
+        // Persistent keeps running detached; ephemeral gets a 120s undo grace
+        // then its daemon dies (kill's burial).
+        if persistent { detach(name: name) } else { kill(name: name) }
         return true
     }
 
@@ -415,40 +429,63 @@ class VigilSessionManager {
 
     // MARK: Lifecycle
 
-    /// Adopt the workspace of a live window as a session. Zero friction: no
-    /// dialog, the name is derived from what the terminal already knows about
-    /// itself (title beats cwd basename) and refined async by the on-device
-    /// model. Rename later if it guessed wrong.
-    @discardableResult
-    func adopt(controller: TerminalController) -> String {
-        let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
-        let cwd = surface?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-
-        let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
-        let seed = title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title
-        let name = uniqueName(from: seed)
-
-        sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
-        sessions[name]!.panes = capturePanes(name: name, controller.surfaceTree)
-        sessions[name]!.layout = Self.captureLayout(controller.surfaceTree)
-        linkClaudes(name: name, tree: controller.surfaceTree)
+    /// Set a session's survival policy directly (menu entry point). Flag flip,
+    /// no restart.
+    func setPersistent(name: String, _ value: Bool) {
+        guard sessions[name] != nil else { return }
+        sessions[name]!.persistent = value
+        if value, case .embedded(let c) = sessions[name]!.state {
+            refineLabel(name: name, screen: c.focusedSurface?.cachedScreenContents.get() ?? "")
+        }
         persist()
-        refineLabel(name: name, screen: surface?.cachedScreenContents.get() ?? "")
-        return name
     }
 
-    /// New Session = a new EPHEMERAL window (Adrian 2026-07-19: new is ALWAYS
-    /// ephemeral; persistence is opt-in via the eye / ⌘⇧P, never automatic).
-    /// No daemon, no registry entry, no VIGIL_SESSION identity: it is a plain
-    /// window that happens to inherit the caller's cwd. Marking it persistent
-    /// (adopt) daemonizes it and links its live claude by tty (linkClaudes),
-    /// so nothing is lost and no stale container is resumed.
+    /// Stamp a fresh window's config so it is daemon-backed from birth (a
+    /// vigild attach id + VIGIL_SESSION). Returns nil when the config already
+    /// carries an attach id (create / resurrection / tab already handled it),
+    /// so this only augments plain windows (⌘N, the startup window, dock
+    /// reopen). Pair with registerEphemeralSession once the controller exists.
+    func newWindowConfig(
+        base: Ghostty.SurfaceConfiguration?
+    ) -> (config: Ghostty.SurfaceConfiguration, name: String, cwd: String)? {
+        if base?.vigilAttach != nil { return nil }
+        let cwd = base?.workingDirectory
+            ?? TerminalController.preferredParent?.focusedSurface?.pwd
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let name = newSessionId()
+        var config = base ?? Ghostty.SurfaceConfiguration()
+        config.workingDirectory = cwd
+        config.environmentVariables["VIGIL_SESSION"] = name
+        config.vigilAttach = "vigil-\(name)-0"
+        return (config, name, cwd)
+    }
+
+    /// Register a freshly-created plain window as an ephemeral session.
+    func registerEphemeralSession(controller: TerminalController, name: String, cwd: String) {
+        var session = Session(name: name, label: name, cwd: cwd, state: .embedded(controller))
+        session.panes = [Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0", dump: nil)]
+        sessions[name] = session
+        vlog("born(window): '\(name)' cwd=\(cwd)")
+        persist()
+    }
+
+    /// New Session = a new ephemeral, daemon-backed window. The shell/claude
+    /// lives in a vigild daemon, not the window's pty, so ⌘⇧P flips
+    /// `persistent` with zero restart: the process never moves.
     func create(cwd: String) {
         guard let ghostty = ghosttyApp else { return }
+        let name = newSessionId()
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = cwd
+        config.environmentVariables["VIGIL_SESSION"] = name
+        config.vigilAttach = "vigil-\(name)-0"
         becomeRegular()
-        _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        var session = Session(name: name, label: name, cwd: cwd, state: .embedded(controller))
+        session.panes = [Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0", dump: nil)]
+        sessions[name] = session // persistent defaults false → ephemeral
+        vlog("born(create): '\(name)' cwd=\(cwd)")
+        persist()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -596,74 +633,6 @@ class VigilSessionManager {
                 $0.command?.hasPrefix(Self.attachSentinel) == true
             }
         }
-    }
-
-    /// Argv that survives being typed into a shell verbatim: plain
-    /// path/word characters only, nothing a shell reinterprets.
-    static func shellSafe(_ arg: String) -> Bool {
-        !arg.isEmpty && arg.allSatisfy {
-            $0.isLetter || $0.isNumber || "@%+=:,./-_".contains($0)
-        }
-    }
-
-    /// Move every capture+resume pane of a live session into its own
-    /// daemon, IN PLACE: freeze content now, put a fresh daemon pane in
-    /// the same spot (same cwd), and let the daemon type the restore line
-    /// (content replay + program resume) once its shell truly booted (the
-    /// daemon's own first-attach quiescence mechanism, via VIGILD_RESUME).
-    /// The old processes die exactly as an app quit would have killed
-    /// them; the difference is the resume happens here and now, and from
-    /// then on the window survives everything.
-    func upgrade(name: String) {
-        guard let ghostty = ghosttyApp, let app = ghostty.app else { return }
-        guard let session = sessions[name],
-              case .embedded(let controller) = session.state else { return }
-        let tree = controller.surfaceTree
-        guard !Self.daemonBacked(tree) else { return }
-
-        sessions[name]!.panes = capturePanes(name: name, tree)
-        let panes = sessions[name]!.panes
-        var claudeAssigned = false
-        var nextIndex = nextPaneIndex(name: name, tree: tree)
-
-        for (index, view) in tree.enumerated() {
-            guard view.vigilAttachId == nil, index < panes.count else { continue }
-            let pane = panes[index]
-
-            var config = Ghostty.SurfaceConfiguration()
-            config.workingDirectory = pane.cwd
-            config.environmentVariables["VIGIL_SESSION"] = name
-            config.vigilAttach = "vigil-\(name)-\(nextIndex)"
-            nextIndex += 1
-
-            // What program (if any) is worth bringing back. A bare shell has
-            // none: upgrading it is just a fresh daemon shell, NO dump replay
-            // (catting a shell's frozen screen prints the raw `cat` command
-            // and junk into the new prompt, found live).
-            var program: String?
-            if Self.isClaudePane(pane.command) {
-                if !claudeAssigned {
-                    claudeAssigned = true
-                    program = "wake pane \(name)"
-                }
-            } else if let argv = pane.argv, argv.allSatisfy(Self.shellSafe) {
-                program = argv.joined(separator: " ")
-            }
-            // No dump replay here: `program` is always self-repainting (claude
-            // repaints its TUI on `wake pane`, a re-run command repaints too),
-            // so catting the frozen VT dump only flashes stale content, and a
-            // missing dump prints a raw `cat: No such file` into the prompt.
-            if let program {
-                config.environmentVariables["VIGILD_RESUME"] = program
-            }
-
-            let newView = Ghostty.SurfaceView(app, baseConfig: config)
-            guard let node = controller.surfaceTree.root?.node(view: view),
-                  let newTree = try? controller.surfaceTree.replacing(node: node, with: .leaf(view: newView))
-            else { continue }
-            controller.surfaceTree = newTree
-        }
-        persist()
     }
 
     /// The workspace's split shape, pane indices in DFS leaf order (the
@@ -1059,7 +1028,8 @@ class VigilSessionManager {
     /// expires do the daemons actually die. Undo within the grace exhumes
     /// everything intact. The caller already confirmed; no prompts here.
     func kill(name: String) {
-        guard sessions[name] != nil else { return }
+        guard let s = sessions[name] else { vlog("kill: '\(name)' NOT in sessions (noop)"); return }
+        vlog("kill: '\(name)' state=\(stateTag(s.state)) persistent=\(s.persistent) -> graveyard")
         if case .floating = sessions[name]!.state, let quick = quickController(create: false) {
             quick.animateOut()
             reclaim(name, from: quick)
@@ -1068,8 +1038,9 @@ class VigilSessionManager {
             detach(name: name)
         }
         var session = sessions[name]!
-        // A detached tree in the graveyard keeps its surfaces (and for
-        // recreation panes, their processes) alive until expiry or exhume.
+        // The buried tree keeps its daemons alive until expiry or exhume. An
+        // ephemeral session's burial is not written to vigil.json.
+        session.ephemeral = !session.persistent
         sessions[name] = nil
         session.attention = .none
         graveyard[name] = session
@@ -1242,13 +1213,18 @@ class VigilSessionManager {
         graveyard[name] = nil
         graveyardDeadlines[name] = nil
         try? FileManager.default.removeItem(at: dumpsDir(name))
+        killDaemons(name: name)
+        persist()
+    }
+
+    /// Kill every pane daemon of a session (vigil-<name>-<index>).
+    private func killDaemons(name: String) {
         let vigildBin = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/bin/vigild").path
         let stateDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/vigild")
-        // Boundary-safe match: pane ids are vigil-<name>-<index>, and a bare
-        // prefix test murders innocent neighbors (vigil-2026- matched
-        // vigil-2026-2-0, session "2026-2"'s live daemon; found live).
+        // Boundary-safe match: a bare prefix test murders innocent neighbors
+        // (vigil-2026- would match vigil-2026-2-0, session "2026-2").
         let prefix = "vigil-\(name)-"
         for entry in (try? FileManager.default.contentsOfDirectory(atPath: stateDir.path)) ?? []
         where entry.hasSuffix(".pid") {
@@ -1258,7 +1234,6 @@ class VigilSessionManager {
             else { continue }
             runFireAndForget(vigildBin, ["kill", stem])
         }
-        persist()
     }
 
     /// Silent, total window kill: emptying the tree closes the window without
@@ -1286,16 +1261,14 @@ class VigilSessionManager {
         }
     }
 
-    /// Persistent MEANS survives everything: adopt + move every pane into
-    /// daemons, one gesture. Two modes only (Adrian 2026-07-18): ephemeral
-    /// or persistent, and persistent always reboots; the capture+resume
-    /// middle class survives only as a fallback state (legacy sessions, a
-    /// pane whose upgrade failed), never as a destination.
-    @discardableResult
-    func persistFully(controller: TerminalController) -> String {
-        let name = adopt(controller: controller)
-        upgrade(name: name)
-        return name
+    /// Mark the window's session persistent (survives close/quit/reboot). The
+    /// window is already daemon-backed, so this only flips the flag.
+    func persistFully(controller: TerminalController) {
+        guard let name = sessionName(of: controller) else { return }
+        sessions[name]?.persistent = true
+        refineLabel(name: name,
+            screen: controller.focusedSurface?.cachedScreenContents.get() ?? "")
+        persist()
     }
 
     // MARK: Window scope = the whole tabGroup
@@ -1313,67 +1286,72 @@ class VigilSessionManager {
 
     /// True when ANY tab in the window is a persistent session.
     func windowPersistent(_ controller: TerminalController) -> Bool {
-        tabSiblings(controller).contains { sessionName(of: $0) != nil }
-    }
-
-    /// The eye toggle at window scope: if the window has any persistent tab,
-    /// make the WHOLE window ephemeral (forget every tab); otherwise persist
-    /// every tab. Everything in the window moves as one unit.
-    func toggleWindowPersist(_ controller: TerminalController) {
-        let siblings = tabSiblings(controller)
-        if windowPersistent(controller) {
-            for tab in siblings {
-                if let name = sessionName(of: tab) { forget(name: name) }
-            }
-        } else {
-            for tab in siblings where sessionName(of: tab) == nil {
-                persistFully(controller: tab)
-            }
+        tabSiblings(controller).contains {
+            guard let name = sessionName(of: $0) else { return false }
+            return sessions[name]?.persistent == true
         }
     }
 
-    /// A new tab born in a persistent window inherits persistence from
-    /// birth: this augments its surface config with a daemon attach id +
-    /// VIGIL_SESSION so it comes up daemon-backed, and returns the session
-    /// name to register once the controller exists. Returns nil when the
-    /// parent window is ephemeral (the new tab stays ephemeral too).
+    /// The eye toggle at window scope: flip every tab of the window between
+    /// persistent and ephemeral as one unit. A pure flag flip, no restart:
+    /// the daemons keep running, only their survival policy changes.
+    func toggleWindowPersist(_ controller: TerminalController) {
+        let makePersistent = !windowPersistent(controller)
+        for tab in tabSiblings(controller) {
+            guard let name = sessionName(of: tab) else { continue }
+            sessions[name]?.persistent = makePersistent
+            if makePersistent {
+                refineLabel(name: name,
+                    screen: tab.focusedSurface?.cachedScreenContents.get() ?? "")
+            }
+        }
+        persist()
+    }
+
+    /// Every new tab is daemon-backed from birth (like every window): this
+    /// augments its surface config with a daemon attach id + VIGIL_SESSION and
+    /// returns the name to register once the controller exists.
     func newTabConfig(
         parent: TerminalController,
         base: Ghostty.SurfaceConfiguration?
     ) -> (config: Ghostty.SurfaceConfiguration, name: String)? {
-        guard windowPersistent(parent) else { return nil }
         var config = base ?? Ghostty.SurfaceConfiguration()
         let cwd = config.workingDirectory
             ?? parent.focusedSurface?.pwd
             ?? FileManager.default.homeDirectoryForCurrentUser.path
-        let seed = URL(fileURLWithPath: cwd).lastPathComponent
-        let name = uniqueName(from: seed)
+        let name = newSessionId()
         config.workingDirectory = cwd
         config.environmentVariables["VIGIL_SESSION"] = name
         config.vigilAttach = "vigil-\(name)-0"
         return (config, name)
     }
 
-    /// Register a freshly-created tab controller as a daemon-backed session
-    /// (called by TerminalController.newTab right after it builds the tab
-    /// with the config from newTabConfig).
+    /// Register a freshly-created tab controller as a session. It inherits the
+    /// window's survival class (window scope): persistent iff a sibling tab is.
     func registerTabSession(controller: TerminalController, name: String, cwd: String) {
-        let seed = URL(fileURLWithPath: cwd).lastPathComponent
-        sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
-        sessions[name]!.panes = [
+        var session = Session(name: name, label: name, cwd: cwd, state: .embedded(controller))
+        session.panes = [
             Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0", dump: nil)
         ]
+        session.persistent = tabSiblings(controller).contains {
+            guard let n = sessionName(of: $0), n != name else { return false }
+            return sessions[n]?.persistent == true
+        }
+        sessions[name] = session
         persist()
     }
 
-    /// One-gesture detach for any window: persists the whole window first
-    /// (every tab) when needed, then detaches every tab of the group.
+    /// One-gesture detach for any window: detaching means keep-running-in-the-
+    /// background, which is what persistent is, so every tab is marked
+    /// persistent then detached as one group.
     func detachFrontWindow() {
         guard let controller = TerminalController.preferredParent else { return }
-        if !windowPersistent(controller) { persistFully(controller: controller) }
         for tab in tabSiblings(controller) {
-            if let name = sessionName(of: tab) { detach(name: name) }
+            guard let name = sessionName(of: tab) else { continue }
+            sessions[name]?.persistent = true
+            detach(name: name)
         }
+        persist()
     }
 
     /// The eye on/off toggle: flip the front window between persistent
@@ -1455,19 +1433,26 @@ class VigilSessionManager {
     func interceptTermination() -> Bool {
         guard !reallyQuit else { return false }
         reconcile()
-        let hasLive = sessions.values.contains {
-            switch $0.state {
-            case .embedded, .floating, .detached: return true
-            case .asleep: return false
-            }
-        }
-        guard hasLive else { return false }
 
         if let name = floatingName, let quick = quickController(create: false) {
             reclaim(name, from: quick)
         }
-        for (name, session) in sessions {
-            if case .embedded = session.state { detach(name: name) }
+        // Persistent sessions detach and keep running (service mode); ephemeral
+        // ones die with the app. Snapshot names first: detach/remove mutate
+        // sessions, which must not happen while iterating it.
+        let persistentNames = Array(sessions.filter { $0.value.persistent }.keys)
+        let ephemeralNames = Array(sessions.filter { !$0.value.persistent }.keys)
+        for name in persistentNames {
+            if case .embedded = sessions[name]?.state { detach(name: name) }
+        }
+        for name in ephemeralNames {
+            killDaemons(name: name)
+            sessions[name] = nil
+        }
+        // Nothing to survive: let the app quit for real.
+        guard sessions.values.contains(where: { $0.persistent }) else {
+            persist()
+            return false
         }
         for window in NSApp.windows where window.isVisible {
             window.close()
@@ -1494,13 +1479,58 @@ class VigilSessionManager {
         }
     }
 
-    /// Sessions whose embedded window silently died collapse to asleep so the
-    /// menu never lies about state. Windows left with an EMPTY tree (observed
-    /// zombie: blank window, no surfaces, 2026-07-17) are corpses; close them.
+    /// Append-only lifecycle trace at ~/.local/state/wake/vigil.log. Every
+    /// session transition is recorded so an impossible state is caught the
+    /// moment it appears instead of being guessed at from a screenshot.
+    func vlog(_ msg: String) {
+        let line = "\(Date()) \(msg)\n"
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/wake/vigil.log")
+        if let h = try? FileHandle(forWritingTo: url) {
+            h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()
+        } else {
+            try? line.data(using: .utf8)!.write(to: url)
+        }
+    }
+
+    private func stateTag(_ s: State) -> String {
+        switch s {
+        case .embedded(let c): return c.window == nil ? "embedded(WINDOW=nil)" : "embedded"
+        case .floating: return "floating"
+        case .detached: return "detached"
+        case .asleep: return "asleep"
+        }
+    }
+
+    /// Scream (loudly, in the log) when a session is in a state that must never
+    /// exist, so the impossible state is caught the moment it appears instead
+    /// of guessed at. Does not crash: the caller self-heals and the app stays
+    /// usable for repeated repro.
+    func assertInvariants(_ site: String) {
+        for (name, s) in sessions {
+            if case .embedded(let c) = s.state, c.window == nil {
+                vlog("!! IMPOSSIBLE [\(site)]: '\(name)' embedded but window==nil, persistent=\(s.persistent)")
+            }
+            if !s.persistent, case .asleep = s.state {
+                vlog("!! IMPOSSIBLE [\(site)]: ephemeral '\(name)' is asleep")
+            }
+        }
+    }
+
+    /// Sessions whose embedded window silently died: persistent sleeps,
+    /// ephemeral dies (its window IS its life). Empty-tree corpse windows close.
     func reconcile() {
-        for (name, session) in sessions {
-            if case .embedded(let controller) = session.state, controller.window == nil {
+        let orphaned = sessions.filter { _, session in
+            if case .embedded(let controller) = session.state { return controller.window == nil }
+            return false
+        }
+        for (name, session) in orphaned {
+            vlog("reconcile: '\(name)' embedded window==nil, persistent=\(session.persistent) -> \(session.persistent ? "asleep" : "killed")")
+            if session.persistent {
                 sessions[name]!.state = .asleep
+            } else {
+                killDaemons(name: name)
+                sessions[name] = nil
             }
         }
         for controller in TerminalController.all
@@ -1513,21 +1543,42 @@ class VigilSessionManager {
     // MARK: Naming
 
     /// Slugified, deduped stable key from a human seed.
-    private func uniqueName(from seed: String) -> String {
-        var slug = seed.lowercased()
-            .map { $0.isLetter || $0.isNumber ? $0 : "-" }
-            .reduce(into: "") { out, ch in
-                if ch == "-" && out.hasSuffix("-") { return }
-                out.append(ch)
-            }
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        if slug.count > 24 { slug = String(slug.prefix(24)) }
-        if slug.isEmpty { slug = "session" }
-        func taken(_ s: String) -> Bool { sessions[s] != nil || graveyard[s] != nil }
-        if !taken(slug) { return slug }
-        var n = 2
-        while taken("\(slug)-\(n)") { n += 1 }
-        return "\(slug)-\(n)"
+    private static let idAdjectives = [
+        "amber", "bold", "brave", "bright", "calm", "clever", "cosmic", "crisp",
+        "daring", "eager", "gentle", "jolly", "keen", "lively", "lucid", "merry",
+        "mighty", "nimble", "noble", "proud", "quiet", "rapid", "royal", "sage",
+        "sleek", "snowy", "solar", "spry", "stark", "sunny", "swift", "tidal",
+        "vivid", "witty", "zesty",
+    ]
+    private static let idNouns = [
+        "otter", "panda", "falcon", "heron", "lynx", "badger", "cedar", "maple",
+        "willow", "river", "harbor", "comet", "ember", "quartz", "canyon",
+        "meadow", "glacier", "summit", "delta", "fjord", "grove", "dune", "reef",
+        "tundra", "aurora", "nebula", "pulsar", "zephyr", "cobalt", "indigo",
+        "onyx", "topaz", "raven", "sparrow", "marten",
+    ]
+
+    /// A fresh session id — the identity, the source of truth. A pronounceable
+    /// adjective-noun (e.g. `brave-panda`) so we can refer to a session out
+    /// loud; NOT derived from the cwd (that named everything in $HOME "adrian-N"
+    /// and made real sessions look like cruft). The human label is a separate
+    /// alias. The daemon id is `vigil-<id>-<index>`, split on the LAST dash, so
+    /// the dash in the id is safe.
+    private func newSessionId() -> String {
+        func taken(_ s: String) -> Bool {
+            sessions[s] != nil || graveyard[s] != nil
+                || FileManager.default.fileExists(atPath: dumpsDir(s).path)
+        }
+        func gen() -> String {
+            "\(Self.idAdjectives.randomElement()!)-\(Self.idNouns.randomElement()!)"
+        }
+        var id = gen()
+        var tries = 0
+        while taken(id) {
+            tries += 1
+            id = tries < 40 ? gen() : "\(gen())-\(Int.random(in: 2...999))"
+        }
+        return id
     }
 
     /// Ask the on-device model for a nicer label, from what is on screen.
@@ -1575,7 +1626,7 @@ class VigilSessionManager {
     }
 
     private func persist() {
-        var entries = sessions.values.map {
+        var entries = sessions.values.filter { $0.persistent }.map {
             PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, panes: $0.panes, layout: $0.layout, order: $0.order, pinned: $0.pinned, buriedUntil: nil)
         }
         entries += graveyard.values.filter { !$0.ephemeral }.map {
@@ -1607,7 +1658,7 @@ class VigilSessionManager {
                 .first { $0.element is VigilTitlebarAccessory }
 
             let name = sessionName(of: controller)
-            let persistent = name != nil
+            let persistent = name.map { sessions[$0]?.persistent == true } ?? false
             let daemonBacked = persistent && Self.daemonBacked(controller.surfaceTree)
 
             // Enforce a session's stored pin intent on its live window
@@ -1698,6 +1749,8 @@ class VigilSessionManager {
                 panes: entry.panes ?? [],
                 layout: entry.layout,
                 order: entry.order ?? 0)
+            // vigil.json only ever holds persistent sessions (persist filters).
+            session.persistent = true
             session.pinned = entry.pinned ?? false
             session.thumbnail = NSImage(
                 contentsOfFile: dumpsDir(entry.name).appendingPathComponent("thumb.png").path)
@@ -1712,6 +1765,30 @@ class VigilSessionManager {
                 }
             } else {
                 sessions[entry.name] = session
+            }
+        }
+    }
+
+    /// At launch, kill any daemon no session owns. Ephemeral daemons never
+    /// survive a clean quit, but a crash can leave one that `vigild restore`
+    /// then respawns at login; with no owner it is a leak.
+    private func reapOrphanDaemons() {
+        let stateDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/vigild")
+        let vigildBin = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/vigild").path
+        let owned = Set(sessions.keys).union(graveyard.keys)
+        for entry in (try? FileManager.default.contentsOfDirectory(atPath: stateDir.path)) ?? []
+        where entry.hasSuffix(".pid") {
+            let stem = String(entry.dropLast(4)) // vigil-<name>-<index>
+            guard stem.hasPrefix("vigil-") else { continue }
+            let body = stem.dropFirst("vigil-".count)
+            guard let dash = body.lastIndex(of: "-"),
+                  body[body.index(after: dash)...].allSatisfy({ $0.isNumber })
+            else { continue }
+            let name = String(body[..<dash])
+            if !owned.contains(name) {
+                runFireAndForget(vigildBin, ["kill", stem])
             }
         }
     }
