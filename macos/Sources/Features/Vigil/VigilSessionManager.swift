@@ -437,34 +437,18 @@ class VigilSessionManager {
         return name
     }
 
-    /// A session born in vigil: the window spawns with VIGIL_SESSION in the
-    /// shell env, so every claude launched inside inherits the identity and
-    /// its hook events feed the attention queue from birth.
-    ///
-    /// Daemon-backed from birth: the shell (and everything launched in it)
-    /// lives in a vigild daemon; the window is a disposable client. Close
-    /// the window, quit the app, crash: the processes never notice, and the
-    /// next attach replays the backlog. State preserved, not recreated.
+    /// New Session = a new EPHEMERAL window (Adrian 2026-07-19: new is ALWAYS
+    /// ephemeral; persistence is opt-in via the eye / ⌘⇧P, never automatic).
+    /// No daemon, no registry entry, no VIGIL_SESSION identity: it is a plain
+    /// window that happens to inherit the caller's cwd. Marking it persistent
+    /// (adopt) daemonizes it and links its live claude by tty (linkClaudes),
+    /// so nothing is lost and no stale container is resumed.
     func create(cwd: String) {
         guard let ghostty = ghosttyApp else { return }
-        let seed = URL(fileURLWithPath: cwd).lastPathComponent
-        let name = uniqueName(from: seed)
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = cwd
-        config.environmentVariables["VIGIL_SESSION"] = name
-        // NATIVE: the surface's termio backend attaches to the daemon; no
-        // shell trickery, no typed exec. The Zig core spawns the daemon on
-        // first contact.
-        config.vigilAttach = "vigil-\(name)-0"
         becomeRegular()
-        let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
-        sessions[name] = Session(name: name, label: seed, cwd: cwd, state: .embedded(controller))
-        // The resurrect identity is known from birth: even a crash (no
-        // detach, no capture) resurrects by reattach while the daemon lives.
-        sessions[name]!.panes = [
-            Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0", dump: nil)
-        ]
-        persist()
+        _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
         NSApp.activate(ignoringOtherApps: true)
     }
 
