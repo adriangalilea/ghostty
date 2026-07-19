@@ -29,9 +29,9 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
         VigilSessionManager.shared.ghosttyApp = ghostty
 
-        statusItem.button?.image = NSImage(
-            systemSymbolName: "eye",
-            accessibilityDescription: "vigil sessions")
+        // Let macOS persist the item's menu-bar position across launches
+        // (the Apple-standard mechanism; without it the item jumps around).
+        statusItem.autosaveName = "com.mitchellh.ghostty.vigil"
         statusItem.button?.imagePosition = .imageLeading
         let menu = NSMenu()
         menu.delegate = self
@@ -81,13 +81,20 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         mainMenu.insertItem(holder, at: max(0, mainMenu.items.count - 1))
     }
 
-    /// The eye opens when sessions want you: count as badge, filled symbol.
+    /// The eye opens when sessions want you: filled symbol + count. The image
+    /// is a TEMPLATE so the menu bar tints it correctly for light/dark and the
+    /// open-menu highlight (the Apple-clean way; a raw colour would not adapt).
     private func updateBadge() {
+        guard let button = statusItem.button else { return }
         let count = VigilSessionManager.shared.pendingCount
-        statusItem.button?.title = count > 0 ? " \(count)" : ""
-        statusItem.button?.image = NSImage(
+        let eye = NSImage(
             systemSymbolName: count > 0 ? "eye.fill" : "eye",
             accessibilityDescription: "vigil sessions")
+        eye?.isTemplate = true
+        button.image = eye
+        button.title = count > 0 ? "\(count)" : ""
+        button.setAccessibilityLabel(
+            count > 0 ? "vigil sessions, \(count) pending" : "vigil sessions")
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -98,6 +105,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         if manager.pendingCount > 0 {
             let next = NSMenuItem(title: "Next (\(manager.pendingCount) pending)", action: #selector(nextSession(_:)), keyEquivalent: "")
             next.target = self
+            next.image = NSImage(systemSymbolName: "bell.badge", accessibilityDescription: nil)
             menu.addItem(next)
             menu.addItem(.separator())
         }
@@ -109,48 +117,37 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
 
         for session in manager.sessions.values.sorted(by: { $0.label < $1.label }) {
-            var glyph: String
             let verb: String
             switch session.state {
-            case .embedded:
-                glyph = "●"
-                verb = "Focus"
-            case .floating:
-                glyph = "◍"
-                verb = "Focus (in the quick terminal)"
-            case .detached:
-                glyph = "◌"
-                verb = "Open (re-embed, still running)"
-            case .asleep:
-                glyph = "○"
-                verb = "Open (resurrect)"
-            }
-            switch session.attention {
-            case .input: glyph = "🔔 \(glyph)"
-            case .done: glyph = "✓ \(glyph)"
-            case .none: break
+            case .embedded: verb = "Focus"
+            case .floating: verb = "Focus (in the Quick Terminal)"
+            case .detached: verb = "Open (re-embed, still running)"
+            case .asleep: verb = "Open (resurrect)"
             }
 
             // A parent item with a submenu never fires its own action on click,
-            // so every verb lives in the submenu.
-            let item = NSMenuItem(title: "\(glyph) \(session.label)", action: nil, keyEquivalent: "")
+            // so every verb lives in the submenu. The row's icon carries the
+            // state: shape = lifecycle, colour = attention (see stateImage).
+            let item = NSMenuItem(title: session.label, action: nil, keyEquivalent: "")
+            item.image = Self.stateImage(session.state, session.attention)
             let submenu = NSMenu()
-            submenu.addItem(sessionItem(verb, #selector(openSession(_:)), session.name))
+            submenu.addItem(sessionItem(verb, #selector(openSession(_:)), session.name, "macwindow"))
             if case .embedded = session.state {
-                submenu.addItem(sessionItem("Detach (keep running)", #selector(detachSession(_:)), session.name))
+                submenu.addItem(sessionItem("Detach (keep running)", #selector(detachSession(_:)), session.name, "rectangle.portrait.and.arrow.right"))
                 if !manager.daemonBacked(session: session) {
-                    submenu.addItem(sessionItem("Upgrade (survive quit)", #selector(upgradeSession(_:)), session.name))
+                    submenu.addItem(sessionItem("Upgrade (survive quit)", #selector(upgradeSession(_:)), session.name, "infinity"))
                 }
             }
-            submenu.addItem(sessionItem("Rename…", #selector(renameSession(_:)), session.name))
+            submenu.addItem(sessionItem("Rename…", #selector(renameSession(_:)), session.name, "pencil"))
             submenu.addItem(.separator())
             let removal: String
+            let removalSymbol: String
             switch session.state {
-            case .embedded: removal = "Unadopt (window stays)"
-            case .floating, .detached: removal = "Kill (processes die)"
-            case .asleep: removal = "Forget"
+            case .embedded: removal = "Unadopt (window stays)"; removalSymbol = "xmark.circle"
+            case .floating, .detached: removal = "Kill (processes die)"; removalSymbol = "trash"
+            case .asleep: removal = "Forget"; removalSymbol = "xmark.circle"
             }
-            submenu.addItem(sessionItem(removal, #selector(forgetSession(_:)), session.name))
+            submenu.addItem(sessionItem(removal, #selector(forgetSession(_:)), session.name, removalSymbol))
             item.submenu = submenu
             menu.addItem(item)
         }
@@ -158,14 +155,17 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         let create = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
         create.target = self
+        create.image = NSImage(systemSymbolName: "plus.rectangle", accessibilityDescription: nil)
         menu.addItem(create)
         let adopt = NSMenuItem(title: "Adopt Front Window", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
         adopt.target = self
+        adopt.image = NSImage(systemSymbolName: "infinity", accessibilityDescription: nil)
         menu.addItem(adopt)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Ghostty (kill all sessions)", action: #selector(quitForReal(_:)), keyEquivalent: "")
         quit.target = self
+        quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
         menu.addItem(quit)
     }
 
@@ -173,11 +173,43 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         VigilSessionManager.shared.quitForReal()
     }
 
-    private func sessionItem(_ title: String, _ action: Selector, _ name: String) -> NSMenuItem {
+    private func sessionItem(_ title: String, _ action: Selector, _ name: String, _ symbol: String? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.representedObject = name
+        if let symbol {
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        }
         return item
+    }
+
+    /// One SF Symbol per session row: SHAPE is the lifecycle state, COLOUR is
+    /// attention (red = needs input, green = turn done, none = template so the
+    /// menu tints it). A coloured symbol must be non-template for the palette
+    /// colour to survive; a monochrome one stays template to adapt to the menu.
+    private static func stateImage(
+        _ state: VigilSessionManager.State,
+        _ attention: VigilSessionManager.Attention
+    ) -> NSImage? {
+        let symbol: String
+        switch state {
+        case .embedded: symbol = "macwindow"
+        case .floating: symbol = "macwindow.on.rectangle"
+        case .detached: symbol = "pause.circle"
+        case .asleep: symbol = "moon.zzz"
+        }
+        let colour: NSColor?
+        switch attention {
+        case .input: colour = .systemRed
+        case .done: colour = .systemGreen
+        case .none: colour = nil
+        }
+        var config = NSImage.SymbolConfiguration(scale: .medium)
+        if let colour { config = config.applying(.init(paletteColors: [colour])) }
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+        image?.isTemplate = colour == nil
+        return image
     }
 
     @objc private func nextSession(_ sender: NSMenuItem) {
