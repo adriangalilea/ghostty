@@ -665,13 +665,12 @@ class VigilSessionManager {
             } else if let argv = pane.argv, argv.allSatisfy(Self.shellSafe) {
                 program = argv.joined(separator: " ")
             }
+            // No dump replay here: `program` is always self-repainting (claude
+            // repaints its TUI on `wake pane`, a re-run command repaints too),
+            // so catting the frozen VT dump only flashes stale content, and a
+            // missing dump prints a raw `cat: No such file` into the prompt.
             if let program {
-                var parts: [String] = []
-                if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
-                    parts.append("cat '\(dump)'")
-                }
-                parts.append(program)
-                config.environmentVariables["VIGILD_RESUME"] = parts.joined(separator: "; ")
+                config.environmentVariables["VIGILD_RESUME"] = program
             }
 
             let newView = Ghostty.SurfaceView(app, baseConfig: config)
@@ -925,12 +924,14 @@ class VigilSessionManager {
                     return config
                 }
                 var parts: [String] = []
-                if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
-                    parts.append("cat '\(dump)'")
-                }
+                // Dump replay only for a plain shell (restores its scrollback);
+                // a claude pane repaints its own TUI on `wake pane`, so catting
+                // its frozen screen just flashes stale content first.
                 if Self.isClaudePane(pane.command), !claudeAssigned {
                     claudeAssigned = true
                     parts.append("wake pane \(name)")
+                } else if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
+                    parts.append("cat '\(dump)'")
                 }
                 if !parts.isEmpty {
                     config.initialInput = parts.joined(separator: "; ") + "\n"
@@ -1452,6 +1453,11 @@ class VigilSessionManager {
         } else {
             togglePin(controller)
         }
+        // Refresh the titlebar mark so the float icon reflects the new state
+        // now, not on the next focus change. The session path already syncs via
+        // persist(); the ephemeral togglePin() does not, so the keybind left a
+        // stale icon (the window DID float, only the glyph lagged).
+        syncWindowMarks()
     }
 
     /// True while quitting should mean "become a menu bar service" instead of
