@@ -306,9 +306,11 @@ class VigilOverview: NSObject {
         // Embedded already has a window: just focus it. Detached/asleep needs
         // open() to re-embed or resurrect. State decides, not the class.
         if case .embedded = entry.state, let controller = entry.controller {
+            VigilSessionManager.shared.vlog("overview: focus '\(entry.name)'")
             controller.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {
+            VigilSessionManager.shared.vlog("overview: open '\(entry.name)'")
             VigilSessionManager.shared.open(name: entry.name)
         }
     }

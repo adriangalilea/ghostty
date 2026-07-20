@@ -968,8 +968,9 @@ class VigilSessionManager {
     /// Detached and asleep sessions come back as ONE window with all their
     /// tabs regrouped (session scope = the window).
     func open(name: String) {
-        guard let session = sessions[name] else { return }
-        guard let ghostty = ghosttyApp else { return }
+        guard let session = sessions[name] else { vlog("open: '\(name)' UNKNOWN session (noop)"); return }
+        guard let ghostty = ghosttyApp else { vlog("open: '\(name)' no ghosttyApp (noop)"); return }
+        vlog("open: '\(name)' state=\(stateTag(session.state))")
 
         // Opening is the acknowledge: attention clears here and only here.
         sessions[name]!.attention = .none
@@ -992,6 +993,7 @@ class VigilSessionManager {
             NSApp.activate(ignoringOtherApps: true)
 
         case .detached(let trees):
+            vlog("open: '\(name)' detached tabs=\(trees.count) -> re-embed")
             guard let first = trees.first else {
                 sessions[name]!.state = .asleep
                 open(name: name)
@@ -999,9 +1001,20 @@ class VigilSessionManager {
             }
             let controller = TerminalController.newWindow(ghostty, tree: first, confirmUndo: false)
             registerMember(controller, name: name)
-            for tree in trees.dropFirst() {
-                let tab = TerminalController.vigilNewTab(ghostty, parent: controller, tree: tree)
-                registerMember(tab, name: name)
+            let rest = Array(trees.dropFirst())
+            if !rest.isEmpty {
+                // The anchor window presents on the NEXT runloop tick
+                // (scheduleInitialPresentation); a tab added to an
+                // unpresented window is born invisible. Attach after it
+                // is actually up.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self else { return }
+                    for tree in rest {
+                        let tab = TerminalController.vigilNewTab(ghostty, parent: controller, tree: tree)
+                        self.registerMember(tab, name: name)
+                        self.vlog("open: '\(name)' tab attach window=\(tab.window != nil) grouped=\(tab.window?.tabGroup === controller.window?.tabGroup)")
+                    }
+                }
             }
             sessions[name]!.state = .embedded
             controller.window?.makeKeyAndOrderFront(nil)
@@ -1068,7 +1081,12 @@ class VigilSessionManager {
             return config
         }
 
+        /// Splits and subsequent tabs wait for their window to actually
+        /// present (next runloop tick); building against an unpresented
+        /// window drops splits and births invisible tabs.
+        vlog("resurrect: '\(name)' tabs=\(tabs.count) panes=\(tabs.map(\.panes.count))")
         var firstController: TerminalController?
+        var tabDelay: TimeInterval = 0
         for tab in tabs {
             let panes = tab.panes
             guard !panes.isEmpty else { continue }
@@ -1076,13 +1094,24 @@ class VigilSessionManager {
 
             let controller: TerminalController
             if let parent = firstController?.window {
-                // Regrouped: subsequent tabs join the first tab's window.
-                // The config already carries vigil identity, so the newTab
-                // path passes it through without minting a session.
-                guard let tabController = TerminalController.newTab(
-                    ghostty, from: parent, withBaseConfig: configFor(panes[firstIndex]))
-                else { continue }
-                controller = tabController
+                // Regrouped: subsequent tabs join the first tab's window,
+                // staggered behind its presentation. The config already
+                // carries vigil identity, so the newTab path passes it
+                // through without minting a session.
+                tabDelay += 0.3
+                let config = configFor(panes[firstIndex])
+                DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay) { [weak self] in
+                    guard let self else { return }
+                    guard let tabController = TerminalController.newTab(
+                        ghostty, from: parent, withBaseConfig: config) else {
+                        self.vlog("resurrect: '\(name)' tab creation FAILED")
+                        return
+                    }
+                    self.registerMember(tabController, name: name)
+                    self.vlog("resurrect: '\(name)' tab up grouped=\(tabController.window?.tabGroup === parent.tabGroup)")
+                    self.materializeSplits(tabController, tab: tab, configFor: configFor)
+                }
+                continue
             } else {
                 controller = TerminalController.newWindow(
                     ghostty, withBaseConfig: configFor(panes[firstIndex]))
@@ -1090,58 +1119,70 @@ class VigilSessionManager {
             }
             registerMember(controller, name: name)
 
-            if panes.count > 1 {
-                // Splits wait a beat: the window presents async and a split
-                // against an unhosted surface is dropped.
-                let layout = tab.layout
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                    guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else { return }
-                    if let layout {
-                        // Real shape: split the region first (preorder), then
-                        // recurse into each side.
-                        @MainActor
-                        func materialize(_ node: Layout, anchor: Ghostty.SurfaceView) {
-                            let direction: SplitTree<Ghostty.SurfaceView>.NewDirection
-                            let l: Layout, r: Layout
-                            switch node {
-                            case .leaf: return
-                            case .h(_, let left, let right):
-                                direction = .right
-                                l = left; r = right
-                            case .v(_, let left, let right):
-                                direction = .down
-                                l = left; r = right
-                            }
-                            guard r.firstLeaf < panes.count,
-                                  let rightView = controller.newSplit(
-                                      at: anchor,
-                                      direction: direction,
-                                      baseConfig: configFor(panes[r.firstLeaf]))
-                            else { return }
-                            materialize(l, anchor: anchor)
-                            materialize(r, anchor: rightView)
-                        }
-                        materialize(layout, anchor: anchor)
-                        // Splits are born 0.5; re-shape to the captured ratios
-                        // wherever the realized tree matches the layout.
-                        if let root = controller.surfaceTree.root {
-                            controller.surfaceTree = SplitTree(
-                                root: Self.applyRatios(root, layout),
-                                zoomed: nil)
-                        }
-                    } else {
-                        var at: Ghostty.SurfaceView? = anchor
-                        for pane in panes.dropFirst() {
-                            guard let anchorView = at else { break }
-                            at = controller.newSplit(at: anchorView, direction: .right, baseConfig: configFor(pane)) ?? at
-                        }
-                    }
-                }
-            }
+            materializeSplits(controller, tab: tab, configFor: configFor)
         }
         sessions[name]!.state = .embedded
         firstController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Rebuild one tab's splits a beat after its window presents (a split
+    /// against an unhosted surface is dropped), then re-shape to the
+    /// captured ratios.
+    private func materializeSplits(
+        _ controller: TerminalController,
+        tab: Tab,
+        configFor: @escaping (Pane) -> Ghostty.SurfaceConfiguration
+    ) {
+        let panes = tab.panes
+        guard panes.count > 1 else { return }
+        let layout = tab.layout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else {
+                self?.vlog("resurrect: splits DROPPED (no anchor surface)")
+                return
+            }
+            if let layout {
+                // Real shape: split the region first (preorder), then
+                // recurse into each side.
+                @MainActor
+                func materialize(_ node: Layout, anchor: Ghostty.SurfaceView) {
+                    let direction: SplitTree<Ghostty.SurfaceView>.NewDirection
+                    let l: Layout, r: Layout
+                    switch node {
+                    case .leaf: return
+                    case .h(_, let left, let right):
+                        direction = .right
+                        l = left; r = right
+                    case .v(_, let left, let right):
+                        direction = .down
+                        l = left; r = right
+                    }
+                    guard r.firstLeaf < panes.count,
+                          let rightView = controller.newSplit(
+                              at: anchor,
+                              direction: direction,
+                              baseConfig: configFor(panes[r.firstLeaf]))
+                    else { return }
+                    materialize(l, anchor: anchor)
+                    materialize(r, anchor: rightView)
+                }
+                materialize(layout, anchor: anchor)
+                // Splits are born 0.5; re-shape to the captured ratios
+                // wherever the realized tree matches the layout.
+                if let root = controller.surfaceTree.root {
+                    controller.surfaceTree = SplitTree(
+                        root: Self.applyRatios(root, layout),
+                        zoomed: nil)
+                }
+            } else {
+                var at: Ghostty.SurfaceView? = anchor
+                for pane in panes.dropFirst() {
+                    guard let anchorView = at else { break }
+                    at = controller.newSplit(at: anchorView, direction: .right, baseConfig: configFor(pane)) ?? at
+                }
+            }
+        }
     }
 
     // MARK: Close (vigil owns every close; scope decides the meaning)
