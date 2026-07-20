@@ -852,6 +852,10 @@ struct OverviewView: View {
     @ViewBuilder
     private func card(index: Int, entry: OverviewEntry) -> some View {
         let focused = index == model.selection
+        // Editing is a MODE: the editor owns the card's top band alone; the
+        // corner controls vanish for its duration (they collide otherwise,
+        // and none of them belongs in the middle of a rename).
+        let editingThis = focused && model.editing
         let (persistTint, persistIcon): (Color, String) = entry.persistent
             ? (.teal, "infinity")
             : (.secondary, "hourglass")
@@ -879,21 +883,9 @@ struct OverviewView: View {
                         .stroke(
                             focused ? Color.accentColor : Color.white.opacity(0.15),
                             lineWidth: focused ? 3 : 1))
-                // The identity editor floats over the card being edited:
-                // rename happens where you are already looking, no dialog.
-                .overlay(alignment: .top) {
-                    if focused, model.editing, let draft = model.draft {
-                        VigilIdentityEditor(
-                            draft: draft,
-                            context: model.editContext,
-                            recents: model.editRecents,
-                            onSubmit: onCommitRename)
-                            .padding(10)
-                    }
-                }
                 // Persist top-LEFT; floating + kill top-RIGHT, on the picture.
                 .overlay(alignment: .topLeading) {
-                    if entry.isWindow {
+                    if entry.isWindow && !editingThis {
                         cornerButton("p", persistIcon, tint: persistTint, focused: focused,
                                      help: entry.persistent
                                         ? "Persistent: survives quit. Click to make ephemeral."
@@ -902,7 +894,7 @@ struct OverviewView: View {
                     }
                 }
                 .overlay(alignment: .topTrailing) {
-                    if entry.isWindow {
+                    if entry.isWindow && !editingThis {
                         HStack(spacing: 6) {
                             cornerButton("f", entry.pinned ? "macwindow.on.rectangle" : "macwindow",
                                          tint: .white, focused: focused,
@@ -911,6 +903,19 @@ struct OverviewView: View {
                                          help: "Kill") { onKill(entry) }
                         }
                         .padding(8)
+                    }
+                }
+                // The identity editor floats over the card being edited
+                // (topmost overlay: rename happens where you are already
+                // looking, nothing competing above it).
+                .overlay(alignment: .top) {
+                    if editingThis, let draft = model.draft {
+                        VigilIdentityEditor(
+                            draft: draft,
+                            context: model.editContext,
+                            recents: model.editRecents,
+                            onSubmit: onCommitRename)
+                            .padding(10)
                     }
                 }
 
