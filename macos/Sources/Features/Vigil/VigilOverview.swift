@@ -42,8 +42,8 @@ class VigilOverview: NSObject {
         manager.vlog("overview: " + manager.sessions.values
             .map { "\($0.name)[\($0.persistent ? "P" : "e")]" }.sorted().joined(separator: " "))
         // Every rebuild refreshes live thumbnails: p/u/undo change what a
-        // card IS mid-showing, and a session touched for the first time
-        // (adopt, upgrade) has no frozen snapshot to fall back on.
+        // card IS mid-showing, and a freshly born session has no frozen
+        // snapshot to fall back on.
         manager.refreshThumbnails()
         var entries = manager.sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }

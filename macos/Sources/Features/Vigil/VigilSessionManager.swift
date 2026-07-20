@@ -282,6 +282,15 @@ class VigilSessionManager {
     private var eventsOffset: UInt64 = 0
     private var eventsTimer: Timer?
 
+    /// The drain offset survives relaunches: attention that fired while the
+    /// app was CLOSED (a watcher verdict, a headless claude finishing in its
+    /// daemon) is exactly the attention a relaunch must surface. Only ancient
+    /// history (pre-truncation) is not pending.
+    private var eventsOffsetURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/wake/events.offset")
+    }
+
     private struct WakeEvent: Decodable {
         let container: String
         let event: String
@@ -301,8 +310,10 @@ class VigilSessionManager {
     /// enough for human attention; the log is small and offset-read.
     private func startEventWatcher() {
         // Bound the attention log: it is append-only and offset-tailed, so
-        // launch (offset resets anyway) is the one safe moment to truncate.
-        // The ms-wide race with a concurrent hook append is accepted.
+        // launch is the one safe moment to truncate (the saved offset is
+        // reset below when we do). The ms-wide race with a concurrent hook
+        // append is accepted.
+        var truncated = false
         if let attrs = try? FileManager.default.attributesOfItem(atPath: eventsURL.path),
            let size = attrs[.size] as? UInt64, size > 1024 * 1024,
            let handle = try? FileHandle(forReadingFrom: eventsURL) {
@@ -312,14 +323,20 @@ class VigilSessionManager {
             // Cut at a line boundary so the first record parses.
             if let nl = tail.firstIndex(of: 0x0a) {
                 try? tail.suffix(from: tail.index(after: nl)).write(to: eventsURL, options: .atomic)
+                truncated = true
             }
         }
 
-        // Start at end of file: history is not pending attention.
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: eventsURL.path),
-           let size = attrs[.size] as? UInt64 {
-            eventsOffset = size
-        }
+        // Resume from the last drained position: attention that fired while
+        // the app was closed replays now (presence/ownership filters still
+        // apply). After a truncation the saved offset points into the old
+        // file; the whole bounded tail replays instead.
+        let size = (try? FileManager.default.attributesOfItem(atPath: eventsURL.path))
+            .flatMap { $0[.size] as? UInt64 } ?? 0
+        let saved = (try? String(contentsOf: eventsOffsetURL, encoding: .utf8))
+            .flatMap { UInt64($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        eventsOffset = truncated ? 0 : min(saved ?? size, size)
+        drainEvents()
         eventsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -338,6 +355,7 @@ class VigilSessionManager {
         handle.seek(toFileOffset: eventsOffset)
         let data = handle.readDataToEndOfFile()
         eventsOffset = size
+        try? "\(size)".write(to: eventsOffsetURL, atomically: true, encoding: .utf8)
 
         var changed = false
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
