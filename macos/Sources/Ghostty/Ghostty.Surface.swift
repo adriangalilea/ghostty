@@ -25,13 +25,25 @@ extension Ghostty {
 
         deinit {
             // deinit is not guaranteed to happen on the main actor and our API
-            // calls into libghostty must happen there so we capture the surface
-            // value so we don't capture `self` and then we detach it in a task.
-            // We can't wait for the task to succeed so this will happen sometime
-            // but that's okay.
+            // calls into libghostty must happen there.
+            //
+            // Vigil: when we ARE on the main thread (every vigil teardown
+            // wave: burial reaps, undo expiry, quick-terminal reclaim), the
+            // free must be SYNCHRONOUS. A deferred free leaves the core
+            // surface alive with a dangling userdata pointer to the freed
+            // SurfaceView; a surface message queued in that window (the
+            // child_exited a killed pane daemon's socket EOF posts) is
+            // delivered by the next tick into freed memory. Crashed exactly
+            // there (EXC_BAD_ACCESS in showChildExited -> surfaceView(from:)).
             let surface = self.surface
-            Task.detached { @MainActor in
-                ghostty_surface_free(surface)
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    ghostty_surface_free(surface)
+                }
+            } else {
+                Task.detached { @MainActor in
+                    ghostty_surface_free(surface)
+                }
             }
         }
 

@@ -1621,24 +1621,34 @@ class VigilSessionManager {
     /// owned pane daemon is killed.
     private func reapIfExpired(_ name: String) {
         guard let deadline = graveyardDeadlines[name], Date() >= deadline else { return }
-        let session = graveyard[name]
+        // Resolve the daemon list BEFORE releasing anything, then drop every
+        // reference so the surfaces fully free, and only THEN kill the
+        // daemons: a daemon killed under a live surface posts child_exited
+        // into the teardown (the socket EOF), racing the free.
+        let paneIds = graveyard[name].map { ownedPaneIds($0) } ?? []
         graveyard[name] = nil
         graveyardDeadlines[name] = nil
         try? FileManager.default.removeItem(at: dumpsDir(name))
-        if let session { killDaemons(of: session) }
+        killDaemons(paneIds: paneIds)
         persist()
         sweepPaneDaemons()
+    }
+
+    /// Kill pane daemons by id (resolved by the caller while its references
+    /// were still alive).
+    private func killDaemons(paneIds: Set<String>) {
+        let vigildBin = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/vigild").path
+        for id in paneIds {
+            runFireAndForget(vigildBin, ["kill", id])
+        }
     }
 
     /// Kill every pane daemon a session owns. Ownership is the session's
     /// derived pane-id list, never a name-prefix match (a dragged-in tab's
     /// daemon carries its BIRTH session in its id, not its owner).
     private func killDaemons(of session: Session) {
-        let vigildBin = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin/vigild").path
-        for id in ownedPaneIds(session) {
-            runFireAndForget(vigildBin, ["kill", id])
-        }
+        killDaemons(paneIds: ownedPaneIds(session))
     }
 
     /// Garbage-collect pane daemons by reachability: a daemon lives while a
