@@ -671,11 +671,13 @@ struct OverviewView: View {
                 burialTray
             }
         }
-        // Top padding tuned so the name/esc line sits vertically CENTERED
-        // between the panel edge and the thumbnails (6 + 24-lane + 6 gap:
-        // equal air above and below the text).
-        .padding([.leading, .trailing, .bottom], 20)
+        // Vertical rhythm: the top band (6 + 24 name lane + 3.5 ring inset
+        // = 33.5) and the bottom band (6 gap + 16 footer + 12 = 34) hold
+        // the same air around the thumbnails; the name/esc line sits
+        // centered in its band.
+        .padding([.leading, .trailing], 20)
         .padding(.top, 6)
+        .padding(.bottom, 12)
         // Close controls top-LEFT, macOS convention — OVERLAID on the same
         // line as the cards' name lane (a stacked header row was a band of
         // dead space above the grid).
