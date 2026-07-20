@@ -817,18 +817,6 @@ struct OverviewView: View {
                 Color.clear.frame(height: 24)
             }
 
-            // The truth lane: what this session is actually RUNNING (from
-            // the daemons' live tree files). On the panel background, not
-            // over the picture (a dark chip on a dark thumbnail was
-            // invisible). Height always reserved so cards never reflow.
-            Text(entry.running.isEmpty ? " "
-                 : entry.running.prefix(4).joined(separator: " · ")
-                   + (entry.running.count > 4 ? " +\(entry.running.count - 4)" : ""))
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .frame(width: cardSize.width - 16, height: 14)
-
             thumbnail(entry, focused: focused)
                 .frame(width: cardSize.width, height: cardSize.height)
                 .overlay(
@@ -893,16 +881,27 @@ struct OverviewView: View {
                 .frame(height: 18)
             }
 
-            // Peek BELOW the thumbnail; height reserved so focus never shifts.
-            HStack(spacing: 5) {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 9, weight: .bold))
-                keycap("space")
-                Text("peek").font(.system(size: 11))
+            // One footer row, no dead space: LEFT is the truth lane (what
+            // the session actually runs, from the daemons' live tree
+            // files), RIGHT the peek hint (shown on focus). Height
+            // reserved so focus never shifts.
+            HStack(spacing: 8) {
+                Text(entry.running.prefix(4).joined(separator: " · ")
+                     + (entry.running.count > 4 ? " +\(entry.running.count - 4)" : ""))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 9, weight: .bold))
+                    keycap("space")
+                    Text("peek").font(.system(size: 11))
+                }
+                .foregroundColor(.secondary)
+                .opacity(focused && entry.isWindow ? 1 : 0)
             }
-            .foregroundColor(.secondary)
-            .opacity(focused && entry.isWindow ? 1 : 0)
-            .frame(height: 16)
+            .frame(width: cardSize.width - 8, height: 16)
         }
         .onTapGesture { onActivate(entry) }
         .onHover { hovering in if hovering && model.mouseMoved() { model.selection = index } }
