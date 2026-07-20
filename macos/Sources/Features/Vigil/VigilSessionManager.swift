@@ -179,8 +179,9 @@ class VigilSessionManager {
             queue: .main
         ) { notification in
             MainActor.assumeIsolated {
-                guard notification.object is NSWindow else { return }
+                guard let window = notification.object as? NSWindow else { return }
                 VigilSessionManager.shared.reconcileTabs()
+                VigilSessionManager.shared.ackFocus(window: window)
                 VigilSessionManager.shared.syncWindowMarks()
             }
         }
@@ -352,6 +353,9 @@ class VigilSessionManager {
             } else {
                 continue
             }
+            // Presence beats attention: an event for the session you are
+            // LOOKING AT is already answered; only unwatched sessions queue.
+            if isWatching(name) { continue }
             let attention: Attention = event.event == "Notification" ? .input : .done
             // Escalate only: an input request is not downgraded by a later Stop.
             if attention.rawValue > sessions[name]!.attention.rawValue {
@@ -361,6 +365,27 @@ class VigilSessionManager {
             }
         }
         if changed { onAttentionChange?() }
+    }
+
+    /// True when Adrian is looking at this session right now: its window
+    /// (or the quick terminal hosting it) is key and the app is active.
+    private func isWatching(_ name: String) -> Bool {
+        guard NSApp.isActive else { return false }
+        if floatingName == name,
+           quickController(create: false)?.window?.isKeyWindow == true { return true }
+        guard let window = focusWindow(of: name) else { return false }
+        return window.isKeyWindow
+    }
+
+    /// Focusing a session's window IS the acknowledgement: whatever it
+    /// wanted, you are there now. Called on every key-window change.
+    func ackFocus(window: NSWindow) {
+        guard let controller = window.windowController as? TerminalController,
+              let name = sessionName(of: controller),
+              let session = sessions[name], session.attention != .none else { return }
+        sessions[name]!.attention = .none
+        sessions[name]!.attentionSince = nil
+        onAttentionChange?()
     }
 
     /// The head of the attention FIFO: input beats done, oldest first
