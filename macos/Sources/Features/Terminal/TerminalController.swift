@@ -681,13 +681,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ node: SplitTree<Ghostty.SurfaceView>.Node,
         withConfirmation: Bool = true
     ) {
-        // If this isn't the root then we're dealing with a split closure. A
-        // vigil session's pane is daemon-backed: closing it is not a data-loss
-        // event, so no generic confirm.
+        // If this isn't the root then we're dealing with a split closure.
+        // The pane ITSELF is lost (daemon-backed or not: its daemon dies
+        // once unreachable), so the normal running-process confirm applies.
+        // Only closes that PRESERVE the work (window close = detach/undo)
+        // skip it.
         if surfaceTree.root != node {
-            let confirm = withConfirmation
-                && VigilSessionManager.shared.sessionName(of: self) == nil
-            super.closeSurface(node, withConfirmation: confirm)
+            super.closeSurface(node, withConfirmation: withConfirmation)
             return
         }
 
@@ -1308,10 +1308,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // vigil session tab: closing ONE tab of a multi-tab session is a
         // structural edit, not the session's lifecycle: the tab leaves the
-        // session, buried with the undo grace. No generic running-process
-        // confirm (daemon-backed, nothing lost until the grace expires).
+        // session, buried with the undo grace, then its processes DIE. The
+        // tab itself is lost, so a running process gets the normal confirm.
+        // (The LAST tab falls through to closeWindow above: the session is
+        // preserved there, so that path never confirms.)
         if VigilSessionManager.shared.sessionName(of: self) != nil {
-            VigilSessionManager.shared.closeTabStructurally(self)
+            guard surfaceTree.contains(where: { $0.needsConfirmQuit }) else {
+                VigilSessionManager.shared.closeTabStructurally(self)
+                return
+            }
+            confirmClose(
+                messageText: "Close Tab?",
+                informativeText: "The terminal still has a running process. Closing the tab will kill it (undo keeps it for \(Int(VigilSessionManager.killGrace))s)."
+            ) {
+                VigilSessionManager.shared.closeTabStructurally(self)
+            }
             return
         }
 
