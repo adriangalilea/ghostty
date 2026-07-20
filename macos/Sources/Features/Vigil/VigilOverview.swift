@@ -677,7 +677,7 @@ struct OverviewView: View {
         // centered in its band.
         .padding([.leading, .trailing], 20)
         .padding(.top, 6)
-        .padding(.bottom, 12)
+        .padding(.bottom, 9)
         // Close controls top-LEFT, macOS convention — OVERLAID on the same
         // line as the cards' name lane (a stacked header row was a band of
         // dead space above the grid).
