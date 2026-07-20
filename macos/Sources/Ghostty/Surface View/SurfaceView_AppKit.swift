@@ -223,6 +223,12 @@ extension Ghostty {
         /// any. Session capture preserves it so resurrection reattaches.
         private(set) var vigilAttachId: String?
 
+        /// Vigil: every live attach-backed surface, weakly. ARC truth for
+        /// daemon reachability: while any surface holds an attach id (in a
+        /// tree, a detached session, an undo corpse), its daemon is owned;
+        /// the sweep kills only daemons no surface and no capture claims.
+        static let vigilAttachSurfaces = NSHashTable<SurfaceView>.weakObjects()
+
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             self.vigilAttachId = baseConfig?.vigilAttach
             self.markedText = NSMutableAttributedString()
@@ -244,6 +250,8 @@ extension Ghostty {
             // is non-zero so that our layer bounds are non-zero so that our renderer
             // can do SOMETHING.
             super.init(id: uuid, frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+
+            if vigilAttachId != nil { Self.vigilAttachSurfaces.add(self) }
 
             // Our cache of screen data
             cachedScreenContents = .init(duration: .milliseconds(500)) { [weak self] in

@@ -437,8 +437,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return nil
         }
 
-        // vigil: a new tab in a persistent window inherits persistence from
-        // birth (daemon-backed), so everything in the window survives quit.
+        // vigil: a new tab JOINS its window's session (session scope = the
+        // window): daemon-backed from birth under the session's identity.
         let vigilTab = VigilSessionManager.shared.newTabConfig(
             parent: parentController, base: baseConfig)
 
@@ -447,11 +447,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             ghostty, withBaseConfig: vigilTab?.config ?? baseConfig)
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
         if let vigilTab {
-            VigilSessionManager.shared.registerTabSession(
-                controller: controller,
-                name: vigilTab.name,
-                cwd: vigilTab.config.workingDirectory
-                    ?? FileManager.default.homeDirectoryForCurrentUser.path)
+            VigilSessionManager.shared.registerMember(controller, name: vigilTab.name)
         }
         guard let window = controller.window else { return controller }
 
@@ -1194,12 +1190,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     lazy private(set) var tabGroupCloseCoordinator = TabGroupCloseCoordinator()
 
     override func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // vigil: closing an adopted session's window detaches it (ptys keep
-        // running, manager owns the tree). Kill is explicit via Forget.
-        if VigilSessionManager.shared.handleWindowClose(controller: self) {
-            return false
-        }
-
+        // vigil owns both close scopes, but the SCOPE decides the meaning:
+        // a tab close is a structural edit, a window close is the session's
+        // lifecycle event. The coordinator disambiguates; closeTab and
+        // closeWindow below carry the vigil semantics.
         tabGroupCloseCoordinator.windowShouldClose(sender) { [weak self] scope in
             guard let self else { return }
             switch scope {
@@ -1312,10 +1306,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
 
-        // vigil session tab: ephemeral kills (undo), persistent detaches. No
-        // generic running-process confirm.
+        // vigil session tab: closing ONE tab of a multi-tab session is a
+        // structural edit, not the session's lifecycle: the tab leaves the
+        // session, buried with the undo grace. No generic running-process
+        // confirm (daemon-backed, nothing lost until the grace expires).
         if VigilSessionManager.shared.sessionName(of: self) != nil {
-            _ = VigilSessionManager.shared.handleWindowClose(controller: self)
+            VigilSessionManager.shared.closeTabStructurally(self)
             return
         }
 
@@ -1407,9 +1403,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // 120s undo, persistent detaches and keeps running. Nothing is lost, so
         // there is NO generic "sessions will be terminated" confirm (every
         // surface is daemon-backed now, which would trigger it on every close).
-        if group.contains(where: { VigilSessionManager.shared.sessionName(of: $0) != nil }) {
+        // One session spans the whole tabGroup; handle each session ONCE and
+        // let stray session-less tabs close plain.
+        let sessionNames = group.compactMap { VigilSessionManager.shared.sessionName(of: $0) }
+        if !sessionNames.isEmpty {
+            var handled = Set<String>()
             for c in group {
-                if VigilSessionManager.shared.sessionName(of: c) != nil {
+                if let name = VigilSessionManager.shared.sessionName(of: c) {
+                    guard handled.insert(name).inserted else { continue }
                     _ = VigilSessionManager.shared.handleWindowClose(controller: c)
                 } else {
                     c.closeWindowImmediately()

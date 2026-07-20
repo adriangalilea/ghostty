@@ -57,7 +57,8 @@ class VigilOverview: NSObject {
                     thumbnail: session.thumbnail,
                     persistent: session.persistent,
                     daemonBacked: session.persistent && manager.daemonBacked(session: session),
-                    pinned: manager.sessionPinned(session.name))
+                    pinned: manager.sessionPinned(session.name),
+                    controller: manager.anchorController(of: session.name))
             }
         for controller in manager.ephemeralControllers() {
             let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
@@ -69,12 +70,13 @@ class VigilOverview: NSObject {
                 kind: .window,
                 name: "ephemeral-\(UInt(bitPattern: ObjectIdentifier(controller).hashValue))",
                 label: label,
-                state: .embedded(controller),
+                state: .embedded,
                 attention: .none,
                 thumbnail: VigilSessionManager.windowSnapshot(controller),
                 persistent: false,
                 daemonBacked: false,
-                pinned: manager.isPinned(controller)))
+                pinned: manager.isPinned(controller),
+                controller: controller))
         }
         // The new-session act is a card too, right where you are looking.
         entries.append(OverviewEntry(
@@ -86,7 +88,8 @@ class VigilOverview: NSObject {
             thumbnail: nil,
             persistent: false,
             daemonBacked: false,
-            pinned: false))
+            pinned: false,
+            controller: nil))
         model.burials = manager.burials()
         return entries
     }
@@ -100,8 +103,13 @@ class VigilOverview: NSObject {
         // always the first card: the overview opens where you left off.
         let front = (NSApp.keyWindow?.windowController as? TerminalController)
             ?? TerminalController.preferredParent
-        model.selection = front
-            .flatMap { f in model.entries.firstIndex { $0.controller === f } } ?? 0
+        model.selection = front.flatMap { f in
+            // Any tab of the front window selects its session's card.
+            if let name = manager.sessionName(of: f) {
+                return model.entries.firstIndex { $0.name == name }
+            }
+            return model.entries.firstIndex { $0.controller === f }
+        } ?? 0
         // Seed the hover anchor at the current cursor so the grid appearing
         // under a stationary mouse doesn't hijack the initial selection.
         model.lastHoverLocation = NSEvent.mouseLocation
@@ -297,7 +305,7 @@ class VigilOverview: NSObject {
         hide()
         // Embedded already has a window: just focus it. Detached/asleep needs
         // open() to re-embed or resurrect. State decides, not the class.
-        if case .embedded(let controller) = entry.state {
+        if case .embedded = entry.state, let controller = entry.controller {
             controller.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {
@@ -397,7 +405,7 @@ class VigilOverview: NSObject {
     /// (there is no window to hand back); removing them is backspace's job.
     private func togglePersistSelected() {
         guard let entry = model.selected, entry.isWindow else { return }
-        guard case .embedded(let controller) = entry.state else { return }
+        guard case .embedded = entry.state, let controller = entry.controller else { return }
         let manager = VigilSessionManager.shared
         if entry.persistent {
             manager.forget(name: entry.name)
@@ -438,7 +446,7 @@ class VigilOverview: NSObject {
         case .asleep: info = "Only the registry entry and its frozen state are dropped."
         }
         if entry.persistent, let session = manager.sessions[entry.name] {
-            info = "cwd: \(session.cwd)\npanes: \(max(session.panes.count, 1))\n" + info
+            info = "cwd: \(session.cwd)\ntabs: \(max(session.tabs.count, 1)) panes: \(max(session.paneCount, 1))\n" + info
         }
         alert.informativeText = info
         if let thumb = entry.thumbnail { alert.icon = thumb }
@@ -453,10 +461,11 @@ class VigilOverview: NSObject {
         guard confirmed else { return }
 
         // Any registered session (persistent OR ephemeral, any state) buries
-        // via kill(); killEphemeral is only for a session-less window (drag-out).
+        // via kill(); killEphemeral is only for an unregistered window
+        // (safety net).
         if manager.sessions[entry.name] != nil {
             manager.kill(name: entry.name)
-        } else if case .embedded(let controller) = entry.state {
+        } else if let controller = entry.controller {
             manager.killEphemeral(controller)
         }
         model.entries = buildEntries()
@@ -528,11 +537,9 @@ struct OverviewEntry: Identifiable {
         return false
     }
 
-    /// The live controller behind this card, if any (embedded window).
-    var controller: TerminalController? {
-        if case .embedded(let c) = state { return c }
-        return nil
-    }
+    /// The live controller behind this card, if any (embedded window: the
+    /// session's selected tab).
+    let controller: TerminalController?
 
     /// Words, not glyphs: the overview must be readable with zero vocabulary.
     /// State-dependent verbs live in the kill CONFIRMATION, never in the
