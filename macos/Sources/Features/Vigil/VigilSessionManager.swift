@@ -15,7 +15,8 @@ import SwiftUI
 ///   detached  alive with no window (this manager strongly owns the tab
 ///             trees, ptys running)
 ///   asleep    no live surfaces (app relaunch/reboot); only the captured tabs
-///             remain and opening resurrects them into one tabbed window
+///             remain and opening reattaches them (their daemons live on)
+///             regrouped into one tabbed window
 ///
 /// Identity is pointer-not-value: `name` is the stable key (a random
 /// adjective-noun; feeds VIGIL_SESSION and the wake registry), `label` is the
@@ -51,21 +52,13 @@ class VigilSessionManager {
         case input = 2
     }
 
-    /// One leaf of the workspace, enough to rebuild it: where it was and what
-    /// ran in it. A daemon pane resurrects by native reattach; a claude pane
-    /// without a daemon resurrects via `wake pane` (resume); stateless tools
-    /// re-run their command; a bare shell resurrects as a bare shell.
+    /// One leaf of the workspace. Every pane lives in a vigild daemon, so
+    /// `command` is its attach sentinel and resurrection is native reattach;
+    /// a pane that somehow lost its daemon resurrects as a bare shell in its
+    /// cwd (the honest fallback, nothing recreated, nothing replayed).
     struct Pane: Codable {
         let cwd: String
         let command: String?
-        /// The command's exact argv from the kernel (KERN_PROCARGS2), never
-        /// ps text: resurrection execs it directly, no shell ever parses it,
-        /// so a process styling its title with metacharacters can misparse
-        /// but never execute.
-        var argv: [String]?
-        /// VT dump (scrollback + screen) frozen at capture; replayed with
-        /// `cat` on resurrection so the content survives, not just the shape.
-        var dump: String?
     }
 
     /// Recursive shape of one tab's splits. Pane indices refer to Tab.panes,
@@ -291,25 +284,10 @@ class VigilSessionManager {
     private struct WakeEvent: Decodable {
         let container: String
         let event: String
-        let tty: String?
         /// The vigild pane daemon the claude lives in. Ground truth for
         /// ownership: VIGIL_SESSION in the process env is stamped at birth
         /// and goes stale when a tab is dragged into another session.
         let pane: String?
-    }
-
-    /// Join key for claudes born without a container env (adopted windows):
-    /// the event's tty against every session surface's ttyName.
-    private func sessionMatching(tty: String) -> String? {
-        guard tty.count > 2, tty != "??" else { return nil }
-        for (name, session) in sessions {
-            for tree in liveTrees(session) {
-                for view in tree where view.surfaceModel?.ttyName?.hasSuffix(tty) == true {
-                    return name
-                }
-            }
-        }
-        return nil
     }
 
     /// The session owning this pane daemon right now (live surfaces or
@@ -364,15 +342,13 @@ class VigilSessionManager {
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
             guard let event = try? JSONDecoder().decode(WakeEvent.self, from: Data(line.utf8)) else { continue }
             // Ownership resolution, strongest first: the pane daemon the
-            // claude lives in (survives drag-out; env container goes stale),
-            // then the birth container, then the tty (adopted claudes).
+            // claude lives in (survives drag-out; env container goes
+            // stale), then the birth container.
             let name: String
             if let pane = event.pane, !pane.isEmpty, let owner = sessionOwning(pane: pane) {
                 name = owner
             } else if sessions[event.container] != nil {
                 name = event.container
-            } else if let tty = event.tty, let matched = sessionMatching(tty: tty) {
-                name = matched
             } else {
                 continue
             }
@@ -702,7 +678,6 @@ class VigilSessionManager {
             ?? (focusController.focusedSurface ?? focusController.surfaceTree.root?.leftmostLeaf())?.asImage
         let trees = ms.map(\.surfaceTree).filter { !$0.isEmpty }
         sessions[name]!.tabs = captureTabs(name: name, trees)
-        for tree in trees { linkClaudes(name: name, tree: tree) }
         sessions[name]!.state = .detached(trees)
         // Membership ends BEFORE the trees empty: the window-close cascade
         // must see these controllers as session-less.
@@ -746,44 +721,6 @@ class VigilSessionManager {
             right: applyRatios(split.right, r)))
     }
 
-    /// A pane the claude adapter owns: claude itself, or vigil's own
-    /// resume wrapper (a re-captured resurrected pane's foreground is the
-    /// `wake pane` node process, not claude).
-    static func isClaudePane(_ command: String?) -> Bool {
-        guard let command else { return false }
-        return command.contains("claude")
-            || command.contains("wake.ts")
-            || command.contains("wake pane")
-    }
-
-    // MARK: Survival class
-
-    /// True when every pane of the tree lives in a daemon: the session
-    /// survives the app dying. Any plain pane makes the whole window
-    /// capture+resume class; the weakest link is the honest answer.
-    static func daemonBacked(_ tree: SplitTree<Ghostty.SurfaceView>) -> Bool {
-        var any = false
-        for view in tree {
-            any = true
-            if view.vigilAttachId == nil { return false }
-        }
-        return any
-    }
-
-    /// The session's survival class across all states (asleep judges by
-    /// its captured tabs: all attach sentinels = daemons waiting).
-    func daemonBacked(session: Session) -> Bool {
-        if case .asleep = session.state {
-            return !session.tabs.isEmpty && session.tabs.allSatisfy { tab in
-                !tab.panes.isEmpty && tab.panes.allSatisfy {
-                    $0.command?.hasPrefix(Self.attachSentinel) == true
-                }
-            }
-        }
-        let trees = liveTrees(session)
-        return !trees.isEmpty && trees.allSatisfy { Self.daemonBacked($0) }
-    }
-
     /// The workspace's split shape, pane indices in DFS leaf order (the
     /// same order capturePanes walks).
     static func captureLayout(_ tree: SplitTree<Ghostty.SurfaceView>) -> Layout? {
@@ -813,111 +750,21 @@ class VigilSessionManager {
             .appendingPathComponent(".local/state/wake/dumps/\(name)")
     }
 
-    /// Capture every tab of the workspace: panes + split shape per tree,
-    /// dump filenames indexed across the whole session so tabs never
-    /// collide.
+    /// Capture every tab of the workspace: panes + split shape per tree.
+    /// Daemon panes need only their attach sentinel (the daemon IS the
+    /// state); a daemon-less pane records its cwd and comes back as a bare
+    /// shell.
     private func captureTabs(
         name: String, _ trees: [SplitTree<Ghostty.SurfaceView>]
     ) -> [Tab] {
-        var tabs: [Tab] = []
-        var paneIndex = 0
-        for tree in trees {
-            let panes = capturePanes(name: name, tree, startIndex: paneIndex)
-            paneIndex += panes.count
-            tabs.append(Tab(panes: panes, layout: Self.captureLayout(tree)))
-        }
-        return tabs
-    }
-
-    /// What is running where, plus what was on screen, for resurrection. The
-    /// foreground process of a pane is its command; a bare shell reads as nil.
-    /// Every pane's content (scrollback + screen) is frozen as a VT dump.
-    private func capturePanes(
-        name: String, _ tree: SplitTree<Ghostty.SurfaceView>, startIndex: Int
-    ) -> [Pane] {
-        let dir = dumpsDir(name)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        var panes: [Pane] = []
-        for (offset, view) in tree.enumerated() {
-            let index = startIndex + offset
-            let cwd = view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-
-            // Daemon panes: identity IS the attach id; the daemon holds the
-            // live state, nothing else needs capturing for resurrection.
-            if let attachId = view.vigilAttachId {
-                let dumpPath = dir.appendingPathComponent("\(index).vt").path
-                let dumped = view.surfaceModel?.vigilDump(to: dumpPath) == true
-                panes.append(Pane(
-                    cwd: cwd,
-                    command: "\(Self.attachSentinel)\(attachId)",
-                    dump: dumped ? dumpPath : nil))
-                continue
+        trees.map { tree in
+            let panes = tree.map { view -> Pane in
+                let cwd = view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+                let command = view.vigilAttachId.map { "\(Self.attachSentinel)\($0)" }
+                return Pane(cwd: cwd, command: command)
             }
-
-            var command: String?
-            var argv: [String]?
-            if let pid = view.surfaceModel?.foregroundPID,
-               let args = Self.processArgv(pid: pid_t(pid)), let first = args.first {
-                let base = URL(fileURLWithPath: first).lastPathComponent
-                let shells = ["fish", "bash", "zsh", "sh", "login"]
-                if !shells.contains(base), !base.hasPrefix("-") {
-                    command = args.joined(separator: " ")
-                    argv = args
-                }
-            }
-            var dump: String?
-            let dumpPath = dir.appendingPathComponent("\(index).vt").path
-            if view.surfaceModel?.vigilDump(to: dumpPath) == true {
-                dump = dumpPath
-            }
-            panes.append(Pane(cwd: cwd, command: command, argv: argv, dump: dump))
+            return Tab(panes: panes, layout: Self.captureLayout(tree))
         }
-        return panes
-    }
-
-    /// The real argv of a process straight from the kernel. ps renders argv
-    /// as one space-joined string, which destroys argument boundaries and
-    /// makes replay a quoting problem; the kernel buffer has the exact
-    /// NUL-separated array.
-    static func processArgv(pid: pid_t) -> [String]? {
-        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
-        var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0,
-              size > MemoryLayout<Int32>.size else { return nil }
-        var buffer = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return nil }
-        let argc = buffer.withUnsafeBytes { $0.load(as: Int32.self) }
-        guard argc > 0 else { return nil }
-        // Layout: argc, exec path, NUL padding, then argc NUL-terminated args.
-        var index = MemoryLayout<Int32>.size
-        while index < size, buffer[index] != 0 { index += 1 }
-        while index < size, buffer[index] == 0 { index += 1 }
-        var args: [String] = []
-        var start = index
-        while index < size, args.count < Int(argc) {
-            if buffer[index] == 0 {
-                args.append(String(decoding: buffer[start..<index], as: UTF8.self))
-                start = index + 1
-            }
-            index += 1
-        }
-        return args.isEmpty ? nil : args
-    }
-
-    /// Adopted claudes were born without identity: recover it forensically via
-    /// `wake link` (process on the pane's tty -> its newest transcript) so
-    /// resurrection resumes the conversation.
-    private func linkClaudes(name: String, tree: SplitTree<Ghostty.SurfaceView>) {
-        for view in tree {
-            guard let tty = view.surfaceModel?.ttyName else { continue }
-            let suffix = URL(fileURLWithPath: tty).lastPathComponent
-            runFireAndForget(wakeBin, ["link", name, suffix])
-        }
-    }
-
-    private var wakeBin: String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin/wake").path
     }
 
     private func runFireAndForget(_ bin: String, _ args: [String]) {
@@ -1033,55 +880,21 @@ class VigilSessionManager {
 
     /// Rebuild the whole workspace from its captured tabs: one window, every
     /// tab regrouped, every pane back in its cwd. Daemon panes reattach
-    /// natively (living daemon = living processes); a legacy claude pane
-    /// resumes via wake; other commands re-run; shells come back bare.
+    /// natively (living daemon = living processes, per-pane resume rides
+    /// VIGILD_RESUME); a daemon-less pane comes back as a bare shell.
     private func resurrect(name: String, ghostty: Ghostty.App) {
         let session = sessions[name]!
         var tabs = session.tabs
         if tabs.isEmpty || tabs.allSatisfy({ $0.panes.isEmpty }) {
-            tabs = [Tab(panes: [Pane(cwd: session.cwd, command: "claude")], layout: nil)]
+            tabs = [Tab(panes: [Pane(cwd: session.cwd, command: nil)], layout: nil)]
         }
 
-        // One claude resume per session for the legacy (non-daemon) path:
-        // the wake registry has one uuid.
-        var claudeAssigned = false
         func configFor(_ pane: Pane) -> Ghostty.SurfaceConfiguration {
             var config = Ghostty.SurfaceConfiguration()
             config.workingDirectory = pane.cwd
             config.environmentVariables["VIGIL_SESSION"] = name
-
-            // Daemon panes resurrect by NATIVE reattach: living daemon
-            // means living processes, nothing recreated.
             if let command = pane.command, command.hasPrefix(Self.attachSentinel) {
                 config.vigilAttach = String(command.dropFirst(Self.attachSentinel.count))
-                return config
-            }
-
-            // Recreation path (adopted, pre-daemon panes). Command panes
-            // exec their captured argv directly: no shell parses it, and
-            // the program repaints its own screen (no dump replay). The
-            // claude pane resumes via wake TYPED INTO A SHELL: the
-            // adapter needs the login environment (a direct: spawn under
-            // the app's launchd env has no user PATH; found live, the
-            // wrapper died instantly and the pane came back blank).
-            // Every typed string here is vigil's own (dump paths,
-            // slugs), never captured process text.
-            if let argv = pane.argv, !Self.isClaudePane(pane.command) {
-                config.command = "direct:" + argv.joined(separator: " ")
-                return config
-            }
-            var parts: [String] = []
-            // Dump replay only for a plain shell (restores its scrollback);
-            // a claude pane repaints its own TUI on `wake pane`, so catting
-            // its frozen screen just flashes stale content first.
-            if Self.isClaudePane(pane.command), !claudeAssigned {
-                claudeAssigned = true
-                parts.append("wake pane \(name)")
-            } else if let dump = pane.dump, FileManager.default.fileExists(atPath: dump) {
-                parts.append("cat '\(dump)'")
-            }
-            if !parts.isEmpty {
-                config.initialInput = parts.joined(separator: "; ") + "\n"
             }
             return config
         }
@@ -2028,10 +1841,6 @@ class VigilSessionManager {
         let label: String
         let cwd: String
         let tabs: [Tab]?
-        /// Pre-tab schema (one flat pane list + layout): decoded as a
-        /// single-tab session, never written.
-        let panes: [Pane]?
-        let layout: Layout?
         let order: Int?
         let pinned: Bool?
         let buriedUntil: Date?
@@ -2054,10 +1863,10 @@ class VigilSessionManager {
 
     private func persist() {
         var entries = sessions.values.filter { $0.persistent }.map {
-            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, panes: nil, layout: nil, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0))
+            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0))
         }
         entries += graveyard.values.filter { !$0.ephemeral }.map {
-            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, panes: nil, layout: nil, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false)
+            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false)
         }
         entries.sort { $0.name < $1.name }
         let data = try! JSONEncoder().encode(entries)
@@ -2086,7 +1895,6 @@ class VigilSessionManager {
 
             let name = sessionName(of: controller)
             let persistent = name.map { sessions[$0]?.persistent == true } ?? false
-            let daemonBacked = persistent && Self.daemonBacked(controller.surfaceTree)
 
             // Enforce a session's stored pin intent on its live window
             // (covers resurrection/re-embed for free); session-less windows
@@ -2099,7 +1907,6 @@ class VigilSessionManager {
             let mark = VigilWindowMark(
                 label: name.flatMap { sessions[$0]?.label },
                 persistent: persistent,
-                daemonBacked: daemonBacked,
                 pinned: pinned,
                 onTogglePersist: { [weak self] in
                     // Session scope IS the window: one flip covers every tab.
@@ -2125,12 +1932,10 @@ class VigilSessionManager {
                 window.addTitlebarAccessoryViewController(accessory)
             }
 
-            // Persistent windows wear a thin class-colour border (teal daemon
-            // / cyan resume); ephemeral windows get NONE (the default,
-            // undramatic state). Persistent is the one that stands out.
-            let color: NSColor? = !persistent ? nil
-                : (daemonBacked ? .systemTeal : .systemCyan)
-            syncBorder(window, color: color)
+            // Persistent windows wear the thin teal border; ephemeral
+            // windows get NONE (the default, undramatic state). Persistent
+            // is the one that stands out.
+            syncBorder(window, color: persistent ? .systemTeal : nil)
         }
     }
 
@@ -2172,8 +1977,7 @@ class VigilSessionManager {
                 label: entry.label,
                 cwd: entry.cwd,
                 state: .asleep,
-                tabs: entry.tabs
-                    ?? [Tab(panes: entry.panes ?? [], layout: entry.layout)],
+                tabs: entry.tabs ?? [],
                 order: entry.order ?? 0)
             // vigil.json only ever holds persistent sessions (persist filters).
             session.persistent = true

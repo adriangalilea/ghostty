@@ -167,20 +167,6 @@ extension Ghostty {
                 event.mods.cScrollMods)
         }
 
-        /// Vigil: dump the full terminal content (scrollback + screen) as a
-        /// VT stream to the given path. Replaying it into a fresh terminal
-        /// reproduces the content: state preserved, not recreated.
-        @MainActor
-        @discardableResult
-        func vigilDump(to path: String) -> Bool {
-            let utf8 = Array(path.utf8)
-            return utf8.withUnsafeBufferPointer { buf in
-                buf.baseAddress!.withMemoryRebound(to: CChar.self, capacity: utf8.count) {
-                    ghostty_surface_vigil_dump(surface, $0, UInt(utf8.count))
-                }
-            }
-        }
-
         /// Perform a keybinding action.
         ///
         /// The action can be any valid keybind parameter. e.g. `keybind = goto_tab:4`

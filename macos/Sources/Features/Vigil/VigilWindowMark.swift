@@ -2,11 +2,10 @@ import AppKit
 import SwiftUI
 
 /// Per-window controls in the titlebar: the survival eye ON/OFF (click to
-/// flip ephemeral <-> persistent) and the pin-on-top, on EVERY window. The
-/// eye's color is the survival class, cold on purpose (persisted =
-/// preserved): teal = daemon-backed (survives quit), icy cyan =
-/// capture+resume fallback, yellow = ephemeral (the class that just dies).
-/// Native titlebar accessory, composes with tabs and titlebar theming.
+/// flip ephemeral <-> persistent) and the pin-on-top, on EVERY window.
+/// Persistent wears teal, cold on purpose (persisted = preserved);
+/// ephemeral is neutral. Native titlebar accessory, composes with tabs and
+/// titlebar theming.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
 /// The survival-class border: a click-through overlay INSIDE the window's
@@ -26,16 +25,9 @@ struct VigilWindowMark: View {
     /// the titlebar shows is one thing: is this window persistent or not.
     let label: String?
     let persistent: Bool
-    let daemonBacked: Bool
     let pinned: Bool
     var onTogglePersist: () -> Void
     var onTogglePin: () -> Void
-
-    /// The persistent class colour (cold = preserved). Only read when
-    /// persistent; ephemeral is neutral.
-    private var eyeColor: Color {
-        daemonBacked ? .teal : .cyan
-    }
 
     var body: some View {
         content
@@ -61,7 +53,7 @@ struct VigilWindowMark: View {
                 // close). Persistent in the cold class colour, ephemeral neutral.
                 icon: persistent ? "infinity" : "hourglass",
                 on: persistent,
-                color: persistent ? eyeColor : .secondary,
+                color: persistent ? .teal : .secondary,
                 action: onTogglePersist,
                 help: persistHelp)
         }

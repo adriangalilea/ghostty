@@ -56,7 +56,6 @@ class VigilOverview: NSObject {
                     attention: session.attention,
                     thumbnail: session.thumbnail,
                     persistent: session.persistent,
-                    daemonBacked: session.persistent && manager.daemonBacked(session: session),
                     pinned: manager.sessionPinned(session.name),
                     controller: manager.anchorController(of: session.name))
             }
@@ -74,7 +73,6 @@ class VigilOverview: NSObject {
                 attention: .none,
                 thumbnail: VigilSessionManager.windowSnapshot(controller),
                 persistent: false,
-                daemonBacked: false,
                 pinned: manager.isPinned(controller),
                 controller: controller))
         }
@@ -87,7 +85,6 @@ class VigilOverview: NSObject {
             attention: .none,
             thumbnail: nil,
             persistent: false,
-            daemonBacked: false,
             pinned: false,
             controller: nil))
         model.burials = manager.burials()
@@ -529,9 +526,6 @@ struct OverviewEntry: Identifiable {
     /// Persistent = vigil session (survives detach/quit/reboot). Ephemeral =
     /// a plain window, dies on close. A toggle, not a boundary.
     let persistent: Bool
-    /// Survival class: true = every pane in a daemon (survives the app
-    /// dying), false = capture+resume (processes die with the app).
-    let daemonBacked: Bool
     /// Pinned on top (Antinote-style); only meaningful for live windows.
     let pinned: Bool
 
@@ -782,7 +776,7 @@ struct OverviewView: View {
     private func card(index: Int, entry: OverviewEntry) -> some View {
         let focused = index == model.selection
         let (persistTint, persistIcon): (Color, String) = entry.persistent
-            ? (entry.daemonBacked ? .teal : .cyan, "infinity")
+            ? (.teal, "infinity")
             : (.secondary, "hourglass")
         VStack(spacing: 6) {
             // The lane ABOVE the thumbnail holds ONLY the name (+ rename).
@@ -934,14 +928,12 @@ struct OverviewView: View {
         }
     }
 
-    /// The survival readout, one chip: teal = survives quit, icy cyan =
-    /// resumes on quit, yellow = ephemeral (the class that just dies).
+    /// The survival readout, one chip: teal = survives quit, neutral =
+    /// ephemeral (the class that just dies).
     @ViewBuilder
     private func survivalChip(_ entry: OverviewEntry) -> some View {
         if entry.persistent {
-            chip(entry.daemonBacked ? "survives quit" : "resumes on quit",
-                 entry.daemonBacked ? .teal : .cyan,
-                 icon: "infinity")
+            chip("survives quit", .teal, icon: "infinity")
         } else {
             chip("ephemeral", .secondary, icon: "hourglass")
         }

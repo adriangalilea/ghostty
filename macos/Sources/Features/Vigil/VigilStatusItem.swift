@@ -1,8 +1,8 @@
 import AppKit
 
 /// Menu bar presence for vigil: list sessions with their state, open/detach/
-/// rename/forget them, adopt the front window (zero friction, auto-named).
-/// The menu is rebuilt on every open so it never shows stale state.
+/// rename/forget them, persist the front window. The menu is rebuilt on
+/// every open so it never shows stale state.
 @MainActor
 class VigilStatusItem: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
@@ -16,7 +16,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     let menuNextFloating = NSMenuItem(title: "Next Floating", action: #selector(nextFloating(_:)), keyEquivalent: "")
     let menuOverview = NSMenuItem(title: "Overview", action: #selector(overview(_:)), keyEquivalent: "")
     let menuNewSession = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
-    let menuAdopt = NSMenuItem(title: "Adopt Front Window", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
+    let menuPersist = NSMenuItem(title: "Persist Front Window", action: #selector(persistFrontWindow(_:)), keyEquivalent: "")
     let menuDetach = NSMenuItem(title: "Detach Front Window", action: #selector(detachFrontWindow(_:)), keyEquivalent: "")
 
     init(ghostty: Ghostty.App) {
@@ -69,7 +69,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         guard !mainMenu.items.contains(where: { $0.title == "Sessions" }) else { return }
 
         let menu = NSMenu(title: "Sessions")
-        for item in [menuNext, menuNextFloating, menuCycle, menuOverview, .separator(), menuNewSession, menuAdopt, menuDetach] {
+        for item in [menuNext, menuNextFloating, menuCycle, menuOverview, .separator(), menuNewSession, menuPersist, menuDetach] {
             item.target = self
             item.menu?.removeItem(item)
             menu.addItem(item)
@@ -145,7 +145,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             let removal: String
             let removalSymbol: String
             switch session.state {
-            case .embedded: removal = "Unadopt (window stays)"; removalSymbol = "xmark.circle"
+            case .embedded: removal = "Forget (window stays)"; removalSymbol = "xmark.circle"
             case .floating, .detached: removal = "Kill (processes die)"; removalSymbol = "trash"
             case .asleep: removal = "Forget"; removalSymbol = "xmark.circle"
             }
@@ -159,10 +159,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         create.target = self
         create.image = NSImage(systemSymbolName: "plus.rectangle", accessibilityDescription: nil)
         menu.addItem(create)
-        let adopt = NSMenuItem(title: "Adopt Front Window", action: #selector(adoptFrontWindow(_:)), keyEquivalent: "")
-        adopt.target = self
-        adopt.image = NSImage(systemSymbolName: "infinity", accessibilityDescription: nil)
-        menu.addItem(adopt)
+        let persist = NSMenuItem(title: "Persist Front Window", action: #selector(persistFrontWindow(_:)), keyEquivalent: "")
+        persist.target = self
+        persist.image = NSImage(systemSymbolName: "infinity", accessibilityDescription: nil)
+        menu.addItem(persist)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Ghostty (kill all sessions)", action: #selector(quitForReal(_:)), keyEquivalent: "")
@@ -285,7 +285,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         VigilSessionManager.shared.create(cwd: cwd)
     }
 
-    @objc private func adoptFrontWindow(_ sender: NSMenuItem) {
+    @objc private func persistFrontWindow(_ sender: NSMenuItem) {
         guard let controller = TerminalController.preferredParent else { return }
         VigilSessionManager.shared.persistFully(controller: controller)
     }
