@@ -671,7 +671,11 @@ struct OverviewView: View {
                 burialTray
             }
         }
-        .padding(20)
+        // Top padding tuned so the name/esc line sits vertically CENTERED
+        // between the panel edge and the thumbnails (6 + 24-lane + 6 gap:
+        // equal air above and below the text).
+        .padding([.leading, .trailing, .bottom], 20)
+        .padding(.top, 6)
         // Close controls top-LEFT, macOS convention — OVERLAID on the same
         // line as the cards' name lane (a stacked header row was a band of
         // dead space above the grid).
@@ -691,7 +695,7 @@ struct OverviewView: View {
                 keycap("esc")
             }
             .frame(height: 24)
-            .padding(.top, 20)
+            .padding(.top, 6)
             .padding(.leading, 20)
         }
         .background(
