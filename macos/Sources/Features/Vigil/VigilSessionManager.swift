@@ -1564,6 +1564,143 @@ class VigilSessionManager {
         }
     }
 
+    // MARK: Process truth (the daemons' tree/died files, surfaced)
+
+    private var vigildStateDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/vigild")
+    }
+
+    /// Compact human label for one tree line's argv; nil for noise (shells,
+    /// wrappers, caffeinate). Interpreters are named by their script.
+    private static func processLabel(_ argv: String) -> String? {
+        let parts = argv.split(separator: " ")
+        guard let first = parts.first else { return nil }
+        let base = URL(fileURLWithPath: String(first)).lastPathComponent
+        if base.hasPrefix("-") { return nil }
+        let noise: Set<String> = ["fish", "bash", "zsh", "sh", "login", "caffeinate"]
+        if noise.contains(base) { return nil }
+        let interpreters: Set<String> = ["node", "python", "python3", "ruby", "bun", "deno", "tsx"]
+        if interpreters.contains(base) {
+            for part in parts.dropFirst() where !part.hasPrefix("-") && !part.contains("=") {
+                let pb = URL(fileURLWithPath: String(part)).lastPathComponent
+                if pb.contains(".") { return pb }
+            }
+        }
+        return base
+    }
+
+    private func paneFileLines(_ pane: String, _ ext: String) -> [String] {
+        let url = vigildStateDir.appendingPathComponent("\(pane).\(ext)")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        return text.components(separatedBy: "\n").filter { !$0.isEmpty }
+    }
+
+    /// argv column of a tree/died file, skipping line 1 (the pane's shell).
+    private func paneCommands(_ pane: String, _ ext: String) -> [String] {
+        paneFileLines(pane, ext).dropFirst().map {
+            $0.split(separator: "\t", maxSplits: 1).last.map(String.init) ?? ""
+        }
+    }
+
+    /// What a session is RUNNING right now, compact and deduped, straight
+    /// from the daemons' live tree files.
+    func runningSummary(of name: String) -> [String] {
+        guard let session = sessions[name] else { return [] }
+        var out: [String] = []
+        for pane in ownedPaneIds(session).sorted() {
+            for argv in paneCommands(pane, "tree") {
+                if let label = Self.processLabel(argv), !out.contains(label) {
+                    out.append(label)
+                }
+            }
+        }
+        return out
+    }
+
+    struct DiedProcess {
+        let pane: String
+        let command: String
+    }
+
+    /// What died with the machine and nobody re-armed: tombstones still on
+    /// disk for this session's panes. Claude panes consume their own via
+    /// the SessionStart hook, so what remains is exactly what needs a
+    /// human decision.
+    func diedProcesses(of name: String) -> [DiedProcess] {
+        guard let session = sessions[name] else { return [] }
+        var out: [DiedProcess] = []
+        for pane in ownedPaneIds(session).sorted() {
+            for argv in paneCommands(pane, "died") {
+                guard Self.processLabel(argv) != nil else { continue }
+                guard !argv.hasPrefix("claude"), !argv.contains("/claude") else { continue }
+                out.append(DiedProcess(pane: pane, command: argv))
+            }
+        }
+        return out
+    }
+
+    /// Short labels for the died row in the overview.
+    func diedSummary(of name: String) -> [String] {
+        var out: [String] = []
+        for died in diedProcesses(of: name) {
+            if let label = Self.processLabel(died.command), !out.contains(label) {
+                out.append(label)
+            }
+        }
+        return out
+    }
+
+    /// True when the pane's shell sits at a prompt (pidfile line 3, the
+    /// deep foreground, equals the child shell): safe to type into.
+    private func paneIdleAtShell(_ pane: String) -> Bool {
+        let lines = paneFileLines(pane, "pid")
+        guard lines.count >= 3,
+              let child = lines[0].split(separator: " ").last.flatMap({ Int($0) }),
+              let fg = Int(lines[2].trimmingCharacters(in: .whitespaces))
+        else { return false }
+        return child == fg
+    }
+
+    private func liveView(attachId: String) -> Ghostty.SurfaceView? {
+        Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
+            .first { $0.vigilAttachId == attachId }
+    }
+
+    /// Relaunch what died: the exact captured argv, typed into the pane it
+    /// died in — ONLY when that pane's shell is idle at a prompt (never
+    /// into a running program), and only from an explicit user click (the
+    /// click IS the approval that makes replaying a captured command
+    /// acceptable). Busy panes keep their tombstone for a later attempt.
+    func relaunchDied(name: String) {
+        guard case .embedded = sessions[name]?.state else {
+            open(name: name)
+            return
+        }
+        let byPane = Dictionary(grouping: diedProcesses(of: name), by: \.pane)
+        for (pane, procs) in byPane {
+            guard paneIdleAtShell(pane), let view = liveView(attachId: pane) else {
+                vlog("relaunch: pane '\(pane)' busy or unattached, tombstone kept")
+                continue
+            }
+            for died in procs {
+                view.surfaceModel?.sendText(died.command + "\r")
+                vlog("relaunch: '\(died.command)' -> \(pane)")
+            }
+            try? FileManager.default.removeItem(
+                at: vigildStateDir.appendingPathComponent("\(pane).died"))
+        }
+    }
+
+    /// Drop a session's tombstones without acting on them.
+    func dismissDied(name: String) {
+        guard let session = sessions[name] else { return }
+        for pane in ownedPaneIds(session) {
+            try? FileManager.default.removeItem(
+                at: vigildStateDir.appendingPathComponent("\(pane).died"))
+        }
+    }
+
     /// Silent, total window kill: emptying the tree closes the window without
     /// ghostty's own close confirmation (same mechanism detach uses), and with
     /// no reference kept the surfaces free and the processes die.

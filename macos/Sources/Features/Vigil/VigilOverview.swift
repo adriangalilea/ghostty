@@ -57,7 +57,9 @@ class VigilOverview: NSObject {
                     thumbnail: session.thumbnail,
                     persistent: session.persistent,
                     pinned: manager.sessionPinned(session.name),
-                    controller: manager.anchorController(of: session.name))
+                    controller: manager.anchorController(of: session.name),
+                    running: manager.runningSummary(of: session.name),
+                    died: manager.diedSummary(of: session.name))
             }
         for controller in manager.ephemeralControllers() {
             let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
@@ -74,7 +76,9 @@ class VigilOverview: NSObject {
                 thumbnail: VigilSessionManager.windowSnapshot(controller),
                 persistent: false,
                 pinned: manager.isPinned(controller),
-                controller: controller))
+                controller: controller,
+                running: [],
+                died: []))
         }
         // The new-session act is a card too, right where you are looking.
         entries.append(OverviewEntry(
@@ -86,7 +90,9 @@ class VigilOverview: NSObject {
             thumbnail: nil,
             persistent: false,
             pinned: false,
-            controller: nil))
+            controller: nil,
+            running: [],
+            died: []))
         model.burials = manager.burials()
         return entries
     }
@@ -152,7 +158,17 @@ class VigilOverview: NSObject {
             },
             onRecover: { [weak self] entry in self?.recover(entry) },
             onRecoverBurial: { [weak self] burial in self?.recoverBurial(burial) },
-            onDismissBurial: { [weak self] burial in self?.dismissBurial(burial) })
+            onDismissBurial: { [weak self] burial in self?.dismissBurial(burial) },
+            onRelaunchDied: { [weak self] entry in
+                guard let self else { return }
+                VigilSessionManager.shared.relaunchDied(name: entry.name)
+                self.model.entries = self.buildEntries()
+            },
+            onDismissDied: { [weak self] entry in
+                guard let self else { return }
+                VigilSessionManager.shared.dismissDied(name: entry.name)
+                self.model.entries = self.buildEntries()
+            })
         let hosting = NSHostingView(rootView: view)
         hosting.frame = NSRect(x: 0, y: 0, width: 1, height: 1)
 
@@ -539,6 +555,10 @@ struct OverviewEntry: Identifiable {
     /// The live controller behind this card, if any (embedded window: the
     /// session's selected tab).
     let controller: TerminalController?
+    /// What the session is RUNNING right now (daemon tree files), compact.
+    let running: [String]
+    /// What died with a reboot and nobody re-armed (tombstones on disk).
+    let died: [String]
 
     /// Words, not glyphs: the overview must be readable with zero vocabulary.
     /// State-dependent verbs live in the kill CONFIRMATION, never in the
@@ -632,6 +652,8 @@ struct OverviewView: View {
     let onRecover: (OverviewEntry) -> Void
     let onRecoverBurial: (VigilSessionManager.Burial) -> Void
     let onDismissBurial: (VigilSessionManager.Burial) -> Void
+    let onRelaunchDied: (OverviewEntry) -> Void
+    let onDismissDied: (OverviewEntry) -> Void
 
     var body: some View {
         VStack(spacing: 14) {
@@ -825,6 +847,40 @@ struct OverviewView: View {
                     }
                 }
 
+            // What died with a reboot and nobody re-armed: the human decides,
+            // one click. Relaunch types the exact captured command into the
+            // pane it died in (only when its shell is idle); the explicit
+            // click is the consent that makes replay acceptable.
+            if !entry.died.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.slash")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.orange)
+                    Text("died: " + entry.died.prefix(3).joined(separator: " · ")
+                         + (entry.died.count > 3 ? " +\(entry.died.count - 3)" : ""))
+                        .font(.system(size: 11))
+                        .foregroundColor(.orange)
+                        .lineLimit(1)
+                    Button(action: { onRelaunchDied(entry) }) {
+                        Text("relaunch")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(Capsule().stroke(Color.orange.opacity(0.7)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Type each command back into the pane it died in (panes with an idle shell only).")
+                    Button(action: { onDismissDied(entry) }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss without relaunching.")
+                }
+                .frame(height: 18)
+            }
+
             // Peek BELOW the thumbnail; height reserved so focus never shifts.
             HStack(spacing: 5) {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -912,7 +968,9 @@ struct OverviewView: View {
                 } else {
                     Text("no preview").font(.system(size: 14)).foregroundColor(.secondary)
                 }
-                // Attention lives BOTTOM-left; the titlebar strip owns the top.
+                // Attention lives BOTTOM-left; the titlebar strip owns the
+                // top; the running readout (what the daemons actually host)
+                // BOTTOM-right.
                 if entry.attention != .none {
                     VStack {
                         Spacer()
@@ -921,6 +979,22 @@ struct OverviewView: View {
                                  entry.attention == .input ? .red : .green, filled: true)
                                 .padding(6)
                             Spacer()
+                        }
+                    }
+                }
+                if !entry.running.isEmpty {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Text(entry.running.prefix(3).joined(separator: " · ")
+                                 + (entry.running.count > 3 ? " +\(entry.running.count - 3)" : ""))
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.85))
+                                .lineLimit(1)
+                                .padding(.horizontal, 6).padding(.vertical, 3)
+                                .background(RoundedRectangle(cornerRadius: 5).fill(Color.black.opacity(0.55)))
+                                .padding(6)
                         }
                     }
                 }
