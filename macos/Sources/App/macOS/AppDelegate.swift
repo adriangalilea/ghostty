@@ -365,10 +365,18 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            if TerminalController.all.isEmpty && derivedConfig.initialWindow {
-                undoManager.disableUndoRegistration()
-                _ = TerminalController.newWindow(ghostty)
-                undoManager.enableUndoRegistration()
+            //
+            // vigil: sessions that had windows when the app last died come
+            // back as windows, exactly as they were; only a truly blank
+            // slate gets the virgin initial window.
+            if TerminalController.all.isEmpty {
+                if VigilSessionManager.shared.restoreForegroundSessions() {
+                    // The workspace is back; no virgin window.
+                } else if derivedConfig.initialWindow {
+                    undoManager.disableUndoRegistration()
+                    _ = TerminalController.newWindow(ghostty)
+                    undoManager.enableUndoRegistration()
+                }
             }
         }
     }
@@ -378,6 +386,18 @@ class AppDelegate: NSObject,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // vigil: a system shutdown/restart/logout must NOT be intercepted
+        // (cancelling blocks the shutdown). Record the workspace exactly as
+        // it stands and die; login restores it (vigild respawns the
+        // daemons, launch reopens the foreground sessions).
+        if let event = NSAppleEventManager.shared().currentAppleEvent,
+           let keyword = AEKeyword("why?"),
+           let why = event.attributeDescriptor(forKeyword: keyword),
+           [kAEShutDown, kAERestart, kAEReallyLogOut].contains(why.typeCodeValue) {
+            VigilSessionManager.shared.prepareForSystemShutdown()
+            return .terminateNow
+        }
+
         // vigil: while sessions exist, quit means "detach everything and keep
         // living as a menu bar service" (no dock, no windows, ptys alive).
         // Killing for real is the explicit Quit in the eye menu.

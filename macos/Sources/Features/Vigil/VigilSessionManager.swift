@@ -116,6 +116,11 @@ class VigilSessionManager {
         /// A buried ephemeral session: exhumes intact but is never written
         /// to vigil.json. Runtime-only.
         var ephemeral: Bool = false
+        /// Loaded intent: this session had a WINDOW when the app last
+        /// recorded it (crash or shutdown), so launch restores it as one.
+        /// Detached-in-background sessions load with this false and stay
+        /// asleep: startup rebuilds the workspace exactly as it was.
+        var foreground: Bool = false
         /// Live for embedded (refreshed on overview open), frozen at the
         /// moment of detach for detached. Runtime-only.
         var thumbnail: NSImage?
@@ -1826,6 +1831,47 @@ class VigilSessionManager {
         NSApp.terminate(nil)
     }
 
+    /// System shutdown/restart/logout: the app must DIE (cancelling
+    /// termination blocks the shutdown), recording the workspace exactly as
+    /// it stands so login rebuilds it: foreground flags frozen while the
+    /// windows are still open, ephemeral daemons killed (their specs die
+    /// with them, so `vigild restore` does not respawn cruft), persistent
+    /// daemons left for the OS to kill (their specs survive; restore
+    /// respawns them at login).
+    func prepareForSystemShutdown() {
+        var frozen: [String: Bool] = [:]
+        for (name, session) in sessions { frozen[name] = isForeground(session) }
+        shutdownForeground = frozen
+        for (name, session) in sessions where !session.persistent {
+            killDaemons(of: session)
+            for controller in members(of: name) { memberships.removeObject(forKey: controller) }
+            sessions[name] = nil
+        }
+        persist()
+    }
+
+    /// Launch restoration: reopen every session that had a window when the
+    /// app last died (crash or shutdown), in overview order. Detached and
+    /// asleep background sessions stay exactly as they were. Returns true
+    /// when anything was restored (the caller then skips the virgin
+    /// initial window).
+    func restoreForegroundSessions() -> Bool {
+        let names = sessions.values
+            .filter { session in
+                guard session.foreground else { return false }
+                if case .asleep = session.state { return true }
+                return false
+            }
+            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
+            .map(\.name)
+        for name in names {
+            sessions[name]!.foreground = false
+            vlog("restore(launch): '\(name)' -> window")
+            open(name: name)
+        }
+        return !names.isEmpty
+    }
+
     /// Returning from service mode: any opened window brings back the dock
     /// presence.
     private func becomeRegular() {
@@ -1839,7 +1885,9 @@ class VigilSessionManager {
     /// Append-only lifecycle trace at ~/.local/state/wake/vigil.log. Every
     /// session transition is recorded so an impossible state is caught the
     /// moment it appears instead of being guessed at from a screenshot.
+    /// Dev builds only: a public (Release) build writes nothing to disk.
     func vlog(_ msg: String) {
+        #if DEBUG
         let line = "\(Date()) \(msg)\n"
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/wake/vigil.log")
@@ -1848,6 +1896,7 @@ class VigilSessionManager {
         } else {
             try? line.data(using: .utf8)!.write(to: url)
         }
+        #endif
     }
 
     private func stateTag(_ s: State) -> String {
@@ -1864,6 +1913,7 @@ class VigilSessionManager {
     /// of guessed at. Does not crash: the caller self-heals and the app stays
     /// usable for repeated repro.
     func assertInvariants(_ site: String) {
+        #if DEBUG
         for (name, s) in sessions {
             if case .embedded = s.state, members(of: name).isEmpty {
                 vlog("!! IMPOSSIBLE [\(site)]: '\(name)' embedded with no members, persistent=\(s.persistent)")
@@ -1872,6 +1922,7 @@ class VigilSessionManager {
                 vlog("!! IMPOSSIBLE [\(site)]: ephemeral '\(name)' is asleep")
             }
         }
+        #endif
     }
 
     /// Self-heal: sessions whose member windows silently died (persistent
@@ -1984,14 +2035,29 @@ class VigilSessionManager {
         let order: Int?
         let pinned: Bool?
         let buriedUntil: Date?
+        /// Had a window at record time; launch restores it as one.
+        let foreground: Bool?
+    }
+
+    /// Frozen foreground truth for the shutdown persist: the flags must
+    /// record the windows as OPEN while the app dies with them showing.
+    private var shutdownForeground: [String: Bool]?
+
+    /// Was this session showing (window or quick terminal) at persist time?
+    private func isForeground(_ session: Session) -> Bool {
+        if let frozen = shutdownForeground { return frozen[session.name] ?? false }
+        switch session.state {
+        case .embedded, .floating: return true
+        case .detached, .asleep: return false
+        }
     }
 
     private func persist() {
         var entries = sessions.values.filter { $0.persistent }.map {
-            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, panes: nil, layout: nil, order: $0.order, pinned: $0.pinned, buriedUntil: nil)
+            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, panes: nil, layout: nil, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0))
         }
         entries += graveyard.values.filter { !$0.ephemeral }.map {
-            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, panes: nil, layout: nil, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name])
+            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, panes: nil, layout: nil, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false)
         }
         entries.sort { $0.name < $1.name }
         let data = try! JSONEncoder().encode(entries)
@@ -2112,6 +2178,7 @@ class VigilSessionManager {
             // vigil.json only ever holds persistent sessions (persist filters).
             session.persistent = true
             session.pinned = entry.pinned ?? false
+            session.foreground = entry.foreground ?? false
             session.thumbnail = NSImage(
                 contentsOfFile: dumpsDir(entry.name).appendingPathComponent("thumb.png").path)
             if let deadline = entry.buriedUntil {
