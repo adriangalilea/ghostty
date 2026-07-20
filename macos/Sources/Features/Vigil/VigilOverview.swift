@@ -178,9 +178,12 @@ class VigilOverview: NSObject {
                 width: size.width,
                 height: size.height),
             display: true)
-        // Key + active so the keyboard reaches us even when summoned via the
-        // global shortcut with the app in service mode.
-        NSApp.activate(ignoringOtherApps: true)
+        // Key WITHOUT activating the app: a nonactivating panel receives the
+        // keyboard like Spotlight does, whatever app is active. Activating
+        // here dragged a session window to the foreground under the panel,
+        // and esc then left you in that window; the previous app keeps
+        // activation the whole time and esc returns you to it. Choosing a
+        // card is the moment ghostty activates (openAndHide), not the peek.
         panel.makeKeyAndOrderFront(nil)
         self.panel = panel
 
