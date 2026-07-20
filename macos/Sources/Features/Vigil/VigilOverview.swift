@@ -52,6 +52,7 @@ class VigilOverview: NSObject {
                     kind: .window,
                     name: session.name,
                     label: session.label,
+                    emoji: session.emoji,
                     state: session.state,
                     attention: session.attention,
                     thumbnail: session.thumbnail,
@@ -71,6 +72,7 @@ class VigilOverview: NSObject {
                 kind: .window,
                 name: "ephemeral-\(UInt(bitPattern: ObjectIdentifier(controller).hashValue))",
                 label: label,
+                emoji: nil,
                 state: .embedded,
                 attention: .none,
                 thumbnail: VigilSessionManager.windowSnapshot(controller),
@@ -85,6 +87,7 @@ class VigilOverview: NSObject {
             kind: .create,
             name: "vigil-create-tile",
             label: "new session",
+            emoji: nil,
             state: .asleep,
             attention: .none,
             thumbnail: nil,
@@ -117,6 +120,8 @@ class VigilOverview: NSObject {
         // under a stationary mouse doesn't hijack the initial selection.
         model.lastHoverLocation = NSEvent.mouseLocation
         model.zoomed = false
+        model.editing = false
+        model.draft = nil
         model.undoKey = manager.ghosttyApp?.config.keyboardShortcut(for: "undo")
             .map(Self.displayShortcut)
         guard !model.entries.isEmpty else { return }
@@ -156,6 +161,7 @@ class VigilOverview: NSObject {
                 self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
                 self?.renameSelected()
             },
+            onCommitRename: { [weak self] in self?.commitRename() },
             onRecover: { [weak self] entry in self?.recover(entry) },
             onRecoverBurial: { [weak self] burial in self?.recoverBurial(burial) },
             onDismissBurial: { [weak self] burial in self?.dismissBurial(burial) },
@@ -209,7 +215,10 @@ class VigilOverview: NSObject {
         ) { [weak self] _ in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, !self.modalActive else { return }
+                    // While editing, losing key status is normal life (the
+                    // character palette takes it to insert emoji), never a
+                    // dismissal.
+                    guard let self, !self.modalActive, !self.model.editing else { return }
                     self.hide()
                 }
             }
@@ -223,6 +232,14 @@ class VigilOverview: NSObject {
                 // The kill confirmation owns the keyboard: pass everything
                 // through so Enter/esc hit the alert's buttons, not us.
                 if self.modalActive { return event }
+
+                // The inline editor owns the keyboard: every key belongs to
+                // its fields (Enter commits via onSubmit); esc alone is ours
+                // and cancels the edit, not the overview.
+                if self.model.editing {
+                    if event.keyCode == 53 { self.cancelRename(); return nil }
+                    return event
+                }
 
                 // The toggle shortcut closes from inside: while this panel is
                 // key there is no surface to run the keybind, so the monitor
@@ -340,41 +357,49 @@ class VigilOverview: NSObject {
             cwd: FileManager.default.homeDirectoryForCurrentUser.path)
     }
 
-    /// Rename the selected session (persistent windows only; the label is
-    /// the session's, ephemeral windows have no vigil label). The alert
-    /// owns the keyboard while it runs, same modal handling as the kill
-    /// confirmation.
+    /// Edit the selected card's identity (emoji + label) IN PLACE: the
+    /// editor floats over the card, no dialog, no focus trip. Enter commits
+    /// (onSubmit → commitRename), esc cancels (the key monitor).
     private func renameSelected() {
         guard let entry = model.selected, entry.isWindow else { return }
         let manager = VigilSessionManager.shared
+        model.draft = VigilIdentityDraft(label: entry.label, emoji: entry.emoji ?? "")
+        model.editContext = manager.sessions[entry.name] != nil
+            ? manager.identityContext(name: entry.name)
+            : "title: \(entry.label)\nscreen:\n"
+                + String((entry.controller?.focusedSurface?.cachedScreenContents.get() ?? "").suffix(1500))
+        model.editRecents = manager.recentEmoji()
+        model.editing = true
+    }
 
-        let alert = NSAlert()
-        alert.messageText = "Rename"
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        field.stringValue = entry.label
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-
-        modalActive = true
-        NSApp.activate(ignoringOtherApps: true)
-        let confirmed = alert.runModal() == .alertFirstButtonReturn
-        modalActive = false
-        panel?.makeKeyAndOrderFront(nil)
-        guard confirmed else { return }
-
-        let label = field.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !label.isEmpty else { return }
-        if entry.persistent {
-            manager.rename(name: entry.name, label: label)
-        } else if let controller = entry.controller {
+    /// Enter in the editor: read the draft, write the session. Any
+    /// registered session takes the full identity; only the safety-net
+    /// unregistered window falls back to the runtime label.
+    private func commitRename() {
+        guard model.editing, let entry = model.selected, let draft = model.draft else { return }
+        model.editing = false
+        model.draft = nil
+        let manager = VigilSessionManager.shared
+        let label = draft.label.trimmingCharacters(in: .whitespaces)
+        if manager.sessions[entry.name] != nil {
+            manager.rename(
+                name: entry.name,
+                label: label.isEmpty ? entry.label : label,
+                emoji: draft.emoji.isEmpty ? nil : draft.emoji)
+        } else if let controller = entry.controller, !label.isEmpty {
             manager.renameEphemeral(controller, label)
         }
+        panel?.makeKeyAndOrderFront(nil)
         let keep = model.selection
         model.entries = buildEntries()
         model.selection = min(keep, max(model.entries.count - 1, 0))
         refit()
+    }
+
+    private func cancelRename() {
+        model.editing = false
+        model.draft = nil
+        panel?.makeKeyAndOrderFront(nil)
     }
 
     /// Pin/unpin the selected window on top. A persistent session stores
@@ -455,7 +480,7 @@ class VigilOverview: NSObject {
         let manager = VigilSessionManager.shared
 
         let alert = NSAlert()
-        alert.messageText = "\(entry.removeVerb.capitalized) \(entry.label)?"
+        alert.messageText = "\(entry.removeVerb.capitalized) \(entry.title)?"
         var info: String
         switch entry.state {
         case .embedded: info = "The window closes and its processes die."
@@ -536,6 +561,8 @@ struct OverviewEntry: Identifiable {
     let kind: Kind
     let name: String
     let label: String
+    /// The session's emoji face; display ornament, never identity.
+    let emoji: String?
     let state: VigilSessionManager.State
     let attention: VigilSessionManager.Attention
     let thumbnail: NSImage?
@@ -546,6 +573,11 @@ struct OverviewEntry: Identifiable {
     let pinned: Bool
 
     var id: String { name }
+
+    /// The display string everywhere a card/row names itself: face + label.
+    var title: String {
+        [emoji, label].compactMap { $0 }.joined(separator: " ")
+    }
 
     var isWindow: Bool {
         if case .window = kind { return true }
@@ -614,6 +646,18 @@ class OverviewModel: ObservableObject {
     /// Peek-zoom (space): the selected card fills the panel, Quick Look
     /// style. Arrows keep working; space or esc returns to the grid.
     @Published var zoomed: Bool = false
+    /// Inline identity editing of the SELECTED card (r / the pencil): the
+    /// editor floats over the card's thumbnail; Enter commits, esc cancels.
+    /// While editing the key monitor passes everything but esc through to
+    /// the fields, and hover must not steal the selection out from under
+    /// the edit.
+    @Published var editing: Bool = false
+    /// The draft the editor mutates; the commit reads it (single source of
+    /// truth for whichever gesture ends the edit).
+    var draft: VigilIdentityDraft?
+    /// Sparkle context + reuse strip, computed once at edit start.
+    var editContext: String = ""
+    var editRecents: [String] = []
     /// Name of the entry being dragged for reorder, while a drag is live.
     var dragging: String?
     /// Cards per row; up/down arrows jump a whole row.
@@ -649,6 +693,7 @@ struct OverviewView: View {
     let onPersist: (OverviewEntry) -> Void
     let onPin: (OverviewEntry) -> Void
     let onRename: (OverviewEntry) -> Void
+    let onCommitRename: () -> Void
     let onRecover: (OverviewEntry) -> Void
     let onRecoverBurial: (VigilSessionManager.Burial) -> Void
     let onDismissBurial: (VigilSessionManager.Burial) -> Void
@@ -715,7 +760,7 @@ struct OverviewView: View {
             HStack(spacing: 10) {
                 ForEach(model.burials, id: \.name) { burial in
                     HStack(spacing: 10) {
-                        Text(burial.label)
+                        Text([burial.emoji, burial.label].compactMap { $0 }.joined(separator: " "))
                             .font(.system(size: 12, weight: .semibold))
                             .lineLimit(1)
                             .frame(maxWidth: 130, alignment: .leading)
@@ -781,7 +826,7 @@ struct OverviewView: View {
             .frame(width: peekSize.width, height: peekSize.height - 80)
 
             HStack(spacing: 10) {
-                Text(entry.label)
+                Text(entry.title)
                     .font(.system(size: 18, weight: .bold))
                     .lineLimit(1)
                 survivalChip(entry)
@@ -815,11 +860,11 @@ struct OverviewView: View {
             if entry.isWindow {
                 HStack(spacing: 6) {
                     Spacer(minLength: 0)
-                    Text(entry.label)
+                    Text(entry.title)
                         .font(.system(size: 14, weight: focused ? .bold : .medium))
                         .lineLimit(1)
                     barButton("r", "pencil", tint: .secondary, focused: focused,
-                              help: "Rename") { onRename(entry) }
+                              help: "Edit emoji + name") { onRename(entry) }
                     Spacer(minLength: 0)
                 }
                 .frame(width: cardSize.width, height: 24)
@@ -834,6 +879,18 @@ struct OverviewView: View {
                         .stroke(
                             focused ? Color.accentColor : Color.white.opacity(0.15),
                             lineWidth: focused ? 3 : 1))
+                // The identity editor floats over the card being edited:
+                // rename happens where you are already looking, no dialog.
+                .overlay(alignment: .top) {
+                    if focused, model.editing, let draft = model.draft {
+                        VigilIdentityEditor(
+                            draft: draft,
+                            context: model.editContext,
+                            recents: model.editRecents,
+                            onSubmit: onCommitRename)
+                            .padding(10)
+                    }
+                }
                 // Persist top-LEFT; floating + kill top-RIGHT, on the picture.
                 .overlay(alignment: .topLeading) {
                     if entry.isWindow {
@@ -914,7 +971,10 @@ struct OverviewView: View {
             .frame(width: cardSize.width - 8, height: 16)
         }
         .onTapGesture { onActivate(entry) }
-        .onHover { hovering in if hovering && model.mouseMoved() { model.selection = index } }
+        .onHover { hovering in
+            // Hover must not drag the selection out from under a live edit.
+            if hovering && !model.editing && model.mouseMoved() { model.selection = index }
+        }
         .modifier(DragReorder(entry: entry, model: model, onReorder: onReorder))
     }
 

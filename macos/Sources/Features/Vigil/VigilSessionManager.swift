@@ -1,5 +1,4 @@
 import AppKit
-import FoundationModels
 import SwiftUI
 
 /// vigil: sessions as a first-class native concept.
@@ -86,6 +85,9 @@ class VigilSessionManager {
     struct Session {
         let name: String
         var label: String
+        /// The session's face: 1–3 emoji, display-only ornament (never
+        /// identity, same rule as the label). nil = none.
+        var emoji: String? = nil
         var cwd: String
         var state: State
         var attention: Attention = .none
@@ -562,9 +564,7 @@ class VigilSessionManager {
     func setPersistent(name: String, _ value: Bool) {
         guard sessions[name] != nil else { return }
         sessions[name]!.persistent = value
-        if value, let controller = anchorController(of: name) {
-            refineLabel(name: name, screen: controller.focusedSurface?.cachedScreenContents.get() ?? "")
-        }
+        if value { refineIdentity(name: name) }
         persist()
     }
 
@@ -1217,6 +1217,7 @@ class VigilSessionManager {
         while taken.contains("\(old.label) \(ordinal)") { ordinal += 1 }
         var session = Session(name: name, label: "\(old.label) \(ordinal)", cwd: cwd, state: .embedded)
         session.persistent = old.persistent
+        session.emoji = old.emoji // visual lineage, renameable like the label
         sessions[name] = session
         for controller in controllers { registerMember(controller, name: name) }
         vlog("mint(drag-out): '\(name)' ('\(session.label)') from '\(old.name)' tabs=\(controllers.count) persistent=\(old.persistent)")
@@ -1284,9 +1285,10 @@ class VigilSessionManager {
         persist()
     }
 
-    func rename(name: String, label: String) {
+    func rename(name: String, label: String, emoji: String?) {
         guard sessions[name] != nil else { return }
         sessions[name]!.label = label
+        sessions[name]!.emoji = emoji
         persist()
     }
 
@@ -1370,6 +1372,7 @@ class VigilSessionManager {
     struct Burial {
         let name: String
         let label: String
+        let emoji: String?
         let deadline: Date
         let thumbnail: NSImage?
         let ephemeral: Bool
@@ -1381,6 +1384,7 @@ class VigilSessionManager {
             return Burial(
                 name: session.name,
                 label: session.label,
+                emoji: session.emoji,
                 deadline: deadline,
                 thumbnail: session.thumbnail,
                 ephemeral: session.ephemeral)
@@ -1422,7 +1426,7 @@ class VigilSessionManager {
     private func confirmKill(name: String, _ doKill: @escaping () -> Void) {
         let session = sessions[name]
         confirmKill(
-            label: session?.label ?? name,
+            label: [session?.emoji, session?.label ?? name].compactMap { $0 }.joined(separator: " "),
             info: "Its processes die. Undo within \(Int(Self.killGrace))s.",
             thumbnail: session?.thumbnail,
             doKill)
@@ -1988,33 +1992,54 @@ class VigilSessionManager {
         return id
     }
 
-    /// Ask the on-device model for a nicer label, from what is on screen.
-    /// Fire-and-forget: if the model is unavailable or slow the seed label
-    /// stands, and a manual rename always wins (checked before applying).
-    private func refineLabel(name: String, screen: String) {
-        guard #available(macOS 26.0, *) else { return }
-        guard SystemLanguageModel.default.availability == .available else { return }
+    /// What the sparkle (and the persist refinement) reasons from: cwd,
+    /// current label, what the daemons actually run, the visible screen.
+    func identityContext(name: String) -> String {
+        guard let session = sessions[name] else { return "" }
+        let screen = anchorController(of: name)?.focusedSurface?.cachedScreenContents.get() ?? ""
+        let running = runningSummary(of: name).joined(separator: ", ")
+        return "cwd: \(session.cwd)\ntitle: \(session.label)\nrunning: \(running)\nscreen:\n\(screen.suffix(1500))"
+    }
+
+    /// Emoji already chosen across sessions, deduped: the editor's one-click
+    /// reuse strip.
+    func recentEmoji() -> [String] {
+        var out: [String] = []
+        for session in sessions.values {
+            guard let emoji = session.emoji else { continue }
+            for cluster in emoji.map(String.init) where !out.contains(cluster) {
+                out.append(cluster)
+            }
+        }
+        return out
+    }
+
+    /// Ask the on-device model for a nicer identity (emoji + label as one
+    /// coherent pair), from what the session is doing. Fire-and-forget: if
+    /// the model is unavailable or slow the seeds stand, and a manual choice
+    /// always wins (label applied only if untouched since the seed, emoji
+    /// only if still unset at both ends).
+    private func refineIdentity(name: String) {
+        guard VigilIdentity.modelAvailable else { return }
         guard let session = sessions[name] else { return }
         let seedLabel = session.label
-        let context = "cwd: \(session.cwd)\ntitle: \(seedLabel)\nscreen:\n\(screen.suffix(1500))"
+        let hadEmoji = session.emoji != nil
+        let context = identityContext(name: name)
 
         Task {
-            let lm = LanguageModelSession(instructions: """
-                You name terminal workspace sessions. Given the working directory, \
-                title and visible screen of a terminal, answer with ONLY a short \
-                evocative name for the session, 2 to 4 lowercase words, no \
-                punctuation. Name the task being done, not the tools.
-                """)
-            guard let response = try? await lm.respond(to: context) else { return }
-            let label = response.content
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            guard !label.isEmpty, label.count <= 48 else { return }
+            guard let suggestion = await VigilIdentity.suggest(context: context, avoiding: []) else { return }
             await MainActor.run {
-                // Apply only if nobody renamed it while we were thinking.
-                guard let current = self.sessions[name], current.label == seedLabel else { return }
-                self.sessions[name]!.label = label
-                self.persist()
+                guard let current = self.sessions[name] else { return }
+                var changed = false
+                if current.label == seedLabel {
+                    self.sessions[name]!.label = suggestion.label
+                    changed = true
+                }
+                if !hadEmoji, current.emoji == nil, !suggestion.emoji.isEmpty {
+                    self.sessions[name]!.emoji = suggestion.emoji
+                    changed = true
+                }
+                if changed { self.persist() }
             }
         }
     }
@@ -2024,6 +2049,7 @@ class VigilSessionManager {
     private struct PersistedSession: Codable {
         let name: String
         let label: String
+        let emoji: String?
         let cwd: String
         let tabs: [Tab]?
         let order: Int?
@@ -2048,10 +2074,10 @@ class VigilSessionManager {
 
     private func persist() {
         var entries = sessions.values.filter { $0.persistent }.map {
-            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0))
+            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0))
         }
         entries += graveyard.values.filter { !$0.ephemeral }.map {
-            PersistedSession(name: $0.name, label: $0.label, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false)
+            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false)
         }
         entries.sort { $0.name < $1.name }
         let data = try! JSONEncoder().encode(entries)
@@ -2091,8 +2117,10 @@ class VigilSessionManager {
 
             let mark = VigilWindowMark(
                 label: name.flatMap { sessions[$0]?.label },
+                emoji: name.flatMap { sessions[$0]?.emoji },
                 persistent: persistent,
                 pinned: pinned,
+                onEditIdentity: name.map { n in { VigilIdentity.editModal(name: n) } },
                 onTogglePersist: { [weak self] in
                     // Session scope IS the window: one flip covers every tab.
                     self?.toggleWindowPersist(controller)
@@ -2160,6 +2188,7 @@ class VigilSessionManager {
             var session = Session(
                 name: entry.name,
                 label: entry.label,
+                emoji: entry.emoji,
                 cwd: entry.cwd,
                 state: .asleep,
                 tabs: entry.tabs ?? [],

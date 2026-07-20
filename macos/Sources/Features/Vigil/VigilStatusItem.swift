@@ -127,8 +127,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
             // A parent item with a submenu never fires its own action on click,
             // so every verb lives in the submenu. The row's icon carries the
-            // state: shape = lifecycle, colour = attention (see stateImage).
-            let item = NSMenuItem(title: session.label, action: nil, keyEquivalent: "")
+            // state: shape = lifecycle, colour = attention (see stateImage);
+            // the emoji face rides the title, never the icon slot.
+            let title = [session.emoji, session.label].compactMap { $0 }.joined(separator: " ")
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.image = Self.stateImage(session.state, session.attention)
             let submenu = NSMenu()
             submenu.addItem(sessionItem(verb, #selector(openSession(_:)), session.name, "macwindow"))
@@ -257,22 +259,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func renameSession(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        guard let session = VigilSessionManager.shared.sessions[name] else { return }
-
-        let alert = NSAlert()
-        alert.messageText = "Rename session"
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
-        field.stringValue = session.label
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let label = field.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !label.isEmpty else { return }
-        VigilSessionManager.shared.rename(name: name, label: label)
+        VigilIdentity.editModal(name: name)
     }
 
     @objc private func detachFrontWindow(_ sender: NSMenuItem) {

@@ -21,11 +21,18 @@ final class VigilBorderOverlay: NSView {
 
 
 struct VigilWindowMark: View {
-    /// The session label; shown only on hover (help), never inline. What
-    /// the titlebar shows is one thing: is this window persistent or not.
+    /// The session label; shown only on hover (help), never inline. The
+    /// titlebar shows two things: the session's emoji face (its chip is the
+    /// door to the identity editor) and whether the window is persistent.
     let label: String?
+    /// The session's emoji face, shown inline (colour carries itself; no
+    /// class semantics). nil session emoji shows a faint placeholder.
+    let emoji: String?
     let persistent: Bool
     let pinned: Bool
+    /// Opens the identity editor; nil for session-less windows (safety-net
+    /// strays have no identity to edit) which then show no chip at all.
+    var onEditIdentity: (() -> Void)?
     var onTogglePersist: () -> Void
     var onTogglePin: () -> Void
 
@@ -38,6 +45,26 @@ struct VigilWindowMark: View {
 
     private var content: some View {
         HStack(spacing: 7) {
+            if let onEditIdentity {
+                Button(action: onEditIdentity) {
+                    Group {
+                        if let emoji, !emoji.isEmpty {
+                            Text(emoji).font(.system(size: 11))
+                        } else {
+                            Image(systemName: "face.smiling")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .frame(minWidth: 18)
+                    .frame(height: 18)
+                    .padding(.horizontal, 2)
+                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .help(identityHelp)
+            }
+
             roundButton(
                 // Floating (on top): a window hovering over another. Neutral.
                 icon: pinned ? "macwindow.on.rectangle" : "macwindow",
@@ -58,6 +85,11 @@ struct VigilWindowMark: View {
                 help: persistHelp)
         }
         .padding(.trailing, 8)
+    }
+
+    private var identityHelp: String {
+        let name = label.map { "“\($0)”. " } ?? ""
+        return "\(name)Edit this session's emoji and name."
     }
 
     private var persistHelp: String {
