@@ -1205,19 +1205,24 @@ class VigilSessionManager {
 
     /// Drag-out: these tabs left their session's window; they become their
     /// own session, inheriting the survival class (dragging a tab out of a
-    /// surviving window must not silently make it mortal). New random id
-    /// (identity is never derived), label refined async when persistent.
+    /// surviving window must not silently make it mortal). The ID stays a
+    /// fresh random handle (identity is NEVER derived — the adrian-N
+    /// lesson); lineage lives in the LABEL: "<parent label> 2", "… 3",
+    /// renameable and refined async when persistent.
     private func mintSession(from controllers: [TerminalController], inheriting old: Session) {
         let name = newSessionId()
         let cwd = controllers.first?.focusedSurface?.pwd ?? old.cwd
-        var session = Session(name: name, label: name, cwd: cwd, state: .embedded)
+        var ordinal = 2
+        let taken = Set(sessions.values.map(\.label))
+        while taken.contains("\(old.label) \(ordinal)") { ordinal += 1 }
+        var session = Session(name: name, label: "\(old.label) \(ordinal)", cwd: cwd, state: .embedded)
         session.persistent = old.persistent
         sessions[name] = session
         for controller in controllers { registerMember(controller, name: name) }
-        vlog("mint(drag-out): '\(name)' from '\(old.name)' tabs=\(controllers.count) persistent=\(old.persistent)")
-        if session.persistent, let controller = controllers.first {
-            refineLabel(name: name, screen: controller.focusedSurface?.cachedScreenContents.get() ?? "")
-        }
+        vlog("mint(drag-out): '\(name)' ('\(session.label)') from '\(old.name)' tabs=\(controllers.count) persistent=\(old.persistent)")
+        // No async label refinement here: the lineage label is already
+        // meaningful (unlike an id seed), and silently replacing it would
+        // erase exactly the breadcrumb the mint just created. Rename wins.
         persist()
     }
 
