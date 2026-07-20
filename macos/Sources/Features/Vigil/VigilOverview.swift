@@ -657,24 +657,6 @@ struct OverviewView: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            // Close controls top-LEFT, macOS convention: the traffic-light
-            // red X with an esc keycap beside it, clear of the content.
-            HStack(spacing: 8) {
-                Button(action: onClose) {
-                    ZStack {
-                        Circle()
-                            .fill(Color(red: 1.0, green: 0.373, blue: 0.341))
-                            .frame(width: 15, height: 15)
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundColor(.black.opacity(0.5))
-                    }
-                }
-                .buttonStyle(.plain)
-                keycap("esc")
-                Spacer()
-            }
-
             if model.zoomed, let selected = model.selected {
                 peek(selected)
             } else {
@@ -690,6 +672,28 @@ struct OverviewView: View {
             }
         }
         .padding(20)
+        // Close controls top-LEFT, macOS convention — OVERLAID on the same
+        // line as the cards' name lane (a stacked header row was a band of
+        // dead space above the grid).
+        .overlay(alignment: .topLeading) {
+            HStack(spacing: 8) {
+                Button(action: onClose) {
+                    ZStack {
+                        Circle()
+                            .fill(Color(red: 1.0, green: 0.373, blue: 0.341))
+                            .frame(width: 15, height: 15)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(.black.opacity(0.5))
+                    }
+                }
+                .buttonStyle(.plain)
+                keycap("esc")
+            }
+            .frame(height: 24)
+            .padding(.top, 20)
+            .padding(.leading, 20)
+        }
         .background(
             RoundedRectangle(cornerRadius: 14)
                 .fill(.ultraThinMaterial))
