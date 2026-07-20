@@ -1647,17 +1647,20 @@ class VigilSessionManager {
     /// (sessions, burials). Everything else is unreachable and dies. Young
     /// pidfiles are spared: a daemon mid-birth has no surface yet.
     private func sweepPaneDaemons() {
-        // Two-instance safety: the Debug and release bundles coexist and
-        // share the vigild state dir. Another instance's ephemeral daemons
-        // are invisible to this one (not in vigil.json), so sweeping while
-        // it runs would murder its live sessions.
+        // Two-instance safety: another instance of THIS bundle shares the
+        // vigild state dir, and its ephemeral daemons are invisible to this
+        // one (not in vigil.json), so sweeping while it runs would murder
+        // its live sessions. Vanilla upstream ghostty never touches vigild
+        // and does not block the GC. Caveat until the fork owns its bundle
+        // id everywhere: a fork installed under a DIFFERENT id is invisible
+        // to this guard.
         let me = ProcessInfo.processInfo.processIdentifier
         let rivals = NSWorkspace.shared.runningApplications.filter {
-            ($0.bundleIdentifier?.hasPrefix("com.mitchellh.ghostty") == true)
+            $0.bundleIdentifier == Bundle.main.bundleIdentifier
                 && $0.processIdentifier != me
         }
         guard rivals.isEmpty else {
-            vlog("sweep: skipped, another ghostty instance is running")
+            vlog("sweep: skipped, another instance of this bundle is running")
             return
         }
 
