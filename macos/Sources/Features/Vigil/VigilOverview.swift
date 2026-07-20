@@ -817,6 +817,18 @@ struct OverviewView: View {
                 Color.clear.frame(height: 24)
             }
 
+            // The truth lane: what this session is actually RUNNING (from
+            // the daemons' live tree files). On the panel background, not
+            // over the picture (a dark chip on a dark thumbnail was
+            // invisible). Height always reserved so cards never reflow.
+            Text(entry.running.isEmpty ? " "
+                 : entry.running.prefix(4).joined(separator: " · ")
+                   + (entry.running.count > 4 ? " +\(entry.running.count - 4)" : ""))
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .frame(width: cardSize.width - 16, height: 14)
+
             thumbnail(entry, focused: focused)
                 .frame(width: cardSize.width, height: cardSize.height)
                 .overlay(
@@ -979,22 +991,6 @@ struct OverviewView: View {
                                  entry.attention == .input ? .red : .green, filled: true)
                                 .padding(6)
                             Spacer()
-                        }
-                    }
-                }
-                if !entry.running.isEmpty {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            Text(entry.running.prefix(3).joined(separator: " · ")
-                                 + (entry.running.count > 3 ? " +\(entry.running.count - 3)" : ""))
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.85))
-                                .lineLimit(1)
-                                .padding(.horizontal, 6).padding(.vertical, 3)
-                                .background(RoundedRectangle(cornerRadius: 5).fill(Color.black.opacity(0.55)))
-                                .padding(6)
                         }
                     }
                 }
