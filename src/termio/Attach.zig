@@ -6,9 +6,12 @@
 //!
 //! Protocol (see vigild.zig): frames out ([1 byte type]['d' data | 'r'
 //! resize][u16 le len][payload]), raw pty bytes in. Reads reuse Exec's
-//! ReadThread over the socket fd. Writes are direct blocking writes on the
-//! io thread: keystroke-sized, local socket, and sequential syscalls keep
-//! the frame protocol uncorruptible by construction.
+//! ReadThread over the socket fd — which flips the SHARED fd O_NONBLOCK,
+//! so writes can hit WouldBlock whenever a burst (a large paste) outruns
+//! the socket buffer. A frame abandoned mid-write desyncs the stream
+//! permanently; writeAll therefore blocks on POLLOUT until the daemon
+//! drains, and severs the socket on any unrecoverable error so the reader
+//! sees EOF and the surface learns the truth instead of going zombie.
 const Attach = @This();
 
 const std = @import("std");
@@ -91,6 +94,10 @@ fn connectSock(self: *Attach) !posix.fd_t {
     const path = try self.sockPath(&buf);
     const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
     errdefer posix.close(fd);
+    // Never inherited by spawned daemons: a leaked attach fd in a sibling
+    // daemon holds this connection open past its owner, so the daemon
+    // never sees EOF and EOF-driven detach detection silently breaks.
+    _ = try posix.fcntl(fd, posix.F.SETFD, posix.FD_CLOEXEC);
     var addr: std.net.Address = try .initUnix(path);
     try posix.connect(fd, &addr.any, addr.getOsSockLen());
     return fd;
@@ -204,9 +211,29 @@ pub fn focusGained(
 fn writeAll(fd: posix.fd_t, data: []const u8) void {
     var off: usize = 0;
     while (off < data.len) {
-        const n = posix.write(fd, data[off..]) catch |err| {
-            log.warn("attach write failed err={}", .{err});
-            return;
+        const n = posix.write(fd, data[off..]) catch |err| switch (err) {
+            error.WouldBlock => {
+                // The daemon drains continuously; writability returns in
+                // microseconds. A full 10s stall means the stream is dead
+                // — sever it rather than leave a half-written frame.
+                var pfds = [1]posix.pollfd{.{
+                    .fd = fd,
+                    .events = posix.POLL.OUT,
+                    .revents = 0,
+                }};
+                const ready = posix.poll(&pfds, 10_000) catch 0;
+                if (ready == 0) {
+                    log.warn("attach write stalled 10s -> sever", .{});
+                    posix.shutdown(fd, .both) catch {};
+                    return;
+                }
+                continue;
+            },
+            else => {
+                log.warn("attach write failed err={} -> sever", .{err});
+                posix.shutdown(fd, .both) catch {};
+                return;
+            },
         };
         off += n;
     }
