@@ -1,0 +1,173 @@
+import AppKit
+import SwiftUI
+
+/// The two custom side bars of every terminal window (NEVER native
+/// NSSplitViewController sidebars): LEFT the session tree, one global
+/// visibility + width shared by every window; RIGHT the per-tab dock.
+/// Both are push splits INSIDE TerminalViewContainer: the bar views are
+/// siblings of the terminal hosting view and the terminal is inset to make
+/// room, so the titlebar toggle buttons never move when a bar toggles.
+@MainActor
+final class VigilBars {
+    static let shared = VigilBars()
+    private init() {}
+
+    private let visibleKey = "vigil.sidebar.visible"
+    private let widthKey = "vigil.sidebar.width"
+
+    var sidebarVisible: Bool {
+        get { UserDefaults.standard.bool(forKey: visibleKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: visibleKey)
+            syncAll()
+        }
+    }
+
+    var sidebarWidth: CGFloat {
+        get {
+            let width = CGFloat(UserDefaults.standard.double(forKey: widthKey))
+            return width > 0 ? min(max(width, 200), 480) : 280
+        }
+        set {
+            UserDefaults.standard.set(Double(min(max(newValue, 200), 480)), forKey: widthKey)
+            syncAll()
+        }
+    }
+
+    func toggleSidebar() {
+        sidebarVisible.toggle()
+    }
+
+    func syncAll() {
+        for controller in TerminalController.all where controller.window != nil {
+            sync(controller)
+        }
+    }
+
+    /// Idempotent per-window install + state sync. Rides the
+    /// syncWindowMarks chokepoint, so every window that exists gets its
+    /// bars and every state change re-syncs them.
+    func sync(_ controller: TerminalController) {
+        guard let window = controller.window,
+              let container = controller.terminalViewContainer,
+              !controller.surfaceTree.isEmpty else { return }
+
+        // Left: the session tree.
+        let sidebar = ensureSidebar(container, controller: controller)
+        let showSidebar = sidebarVisible
+        sidebar.isHidden = !showSidebar
+        sidebar.widthConstraint.constant = sidebarWidth
+        if showSidebar { sidebar.model.refresh() }
+
+        // Right: the tab's dock.
+        let manager = VigilSessionManager.shared
+        let runtime = manager.dock(for: controller)
+        let showDock = runtime.map { !$0.collapsed && !$0.views.isEmpty } ?? false
+        var dockWidth: CGFloat = 0
+        if let runtime {
+            let dock = ensureDock(container, controller: controller)
+            dock.isHidden = !showDock
+            dock.widthConstraint.constant = runtime.width
+            if showDock {
+                dock.present(runtime: runtime, controller: controller)
+                dockWidth = runtime.width
+            } else {
+                dock.unmountActive()
+            }
+        } else if let dock = existingDock(container) {
+            dock.isHidden = true
+            dock.unmountActive()
+        }
+
+        container.vigilSetSideInsets(
+            leading: showSidebar ? sidebarWidth : 0,
+            trailing: dockWidth)
+
+        ensureToggleAccessory(window)
+    }
+
+    // MARK: Install
+
+    private func ensureSidebar(
+        _ container: TerminalViewContainer, controller: TerminalController
+    ) -> VigilSidebarHost {
+        if let existing = container.subviews.compactMap({ $0 as? VigilSidebarHost }).first {
+            return existing
+        }
+        let host = VigilSidebarHost(controller: controller)
+        container.addSubview(host)
+        host.widthConstraint = host.widthAnchor.constraint(equalToConstant: sidebarWidth)
+        NSLayoutConstraint.activate([
+            host.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            host.topAnchor.constraint(equalTo: container.topAnchor),
+            host.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            host.widthConstraint,
+        ])
+        return host
+    }
+
+    private func existingDock(_ container: TerminalViewContainer) -> VigilDockHost? {
+        container.subviews.compactMap({ $0 as? VigilDockHost }).first
+    }
+
+    private func ensureDock(
+        _ container: TerminalViewContainer, controller: TerminalController
+    ) -> VigilDockHost {
+        if let existing = existingDock(container) { return existing }
+        let host = VigilDockHost(controller: controller)
+        container.addSubview(host)
+        host.widthConstraint = host.widthAnchor.constraint(equalToConstant: 340)
+        NSLayoutConstraint.activate([
+            host.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            host.topAnchor.constraint(equalTo: container.topAnchor),
+            host.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            host.widthConstraint,
+        ])
+        return host
+    }
+
+    /// The LEFT titlebar toggle: fixed at the far left, rides the titlebar,
+    /// never moves when the bar toggles (the whole point).
+    private func ensureToggleAccessory(_ window: NSWindow) {
+        let existing = window.titlebarAccessoryViewControllers
+            .compactMap { $0 as? VigilSidebarToggleAccessory }
+            .first
+        let toggle = VigilSidebarToggle(on: sidebarVisible) { [weak self] in
+            self?.toggleSidebar()
+        }
+        if let hosting = existing?.view as? NSHostingView<VigilSidebarToggle> {
+            hosting.rootView = toggle
+            hosting.setFrameSize(hosting.fittingSize)
+        } else {
+            let hosting = NSHostingView(rootView: toggle)
+            // A titlebar accessory does not size from SwiftUI intrinsic
+            // content; a concrete frame or it collapses to zero width.
+            hosting.setFrameSize(hosting.fittingSize)
+            let accessory = VigilSidebarToggleAccessory()
+            accessory.view = hosting
+            accessory.layoutAttribute = .left
+            window.addTitlebarAccessoryViewController(accessory)
+        }
+    }
+}
+
+final class VigilSidebarToggleAccessory: NSTitlebarAccessoryViewController {}
+
+struct VigilSidebarToggle: View {
+    let on: Bool
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(on ? .primary : .secondary)
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(Color.primary.opacity(on ? 0.18 : 0.08)))
+        }
+        .buttonStyle(.plain)
+        .help(on ? "Hide the session sidebar." : "Show the session sidebar: every session, its tabs, its panes, what they run.")
+        .padding(.leading, 8)
+        .frame(height: 28)
+    }
+}

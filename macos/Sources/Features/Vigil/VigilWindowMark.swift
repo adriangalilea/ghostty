@@ -30,11 +30,15 @@ struct VigilWindowMark: View {
     let emoji: String?
     let persistent: Bool
     let pinned: Bool
+    /// Whether this tab's dock (the right bar) is open.
+    let dockOpen: Bool
     /// Opens the identity editor; nil for session-less windows (safety-net
     /// strays have no identity to edit) which then show no chip at all.
     var onEditIdentity: (() -> Void)?
     var onTogglePersist: () -> Void
     var onTogglePin: () -> Void
+    /// Toggles the tab's dock; nil for session-less windows.
+    var onToggleDock: (() -> Void)?
 
     var body: some View {
         content
@@ -83,6 +87,20 @@ struct VigilWindowMark: View {
                 color: persistent ? .teal : .secondary,
                 action: onTogglePersist,
                 help: persistHelp)
+
+            if let onToggleDock {
+                roundButton(
+                    // The tab's dock: a collapsible stack of tool panes
+                    // (lazygit, dev server) on the right. Collapse never
+                    // kills; the tenants' daemons keep running.
+                    icon: "sidebar.right",
+                    on: dockOpen,
+                    color: .primary,
+                    action: onToggleDock,
+                    help: dockOpen
+                        ? "Collapse this tab's dock (its panes keep running)."
+                        : "Open this tab's dock: side panes like lazygit or a dev server.")
+            }
         }
         .padding(.trailing, 8)
     }
