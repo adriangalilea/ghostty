@@ -2521,7 +2521,33 @@ class VigilSessionManager {
         }
     }
 
+    /// Captures of EMBEDDED sessions go stale between detaches, and a hard
+    /// app kill (crash, vigil-dev restart) then resurrects the LAST
+    /// DETACH's shape while the launch sweep murders every daemon the
+    /// stale capture never claimed (cost real panes 2026-08-01:
+    /// sleek-onyx-1/2/3, bold-willow-7). Refresh at the persist
+    /// chokepoint: every state change re-captures the live shape, so
+    /// vigil.json always resurrects what is actually on screen.
+    private func refreshEmbeddedCaptures() {
+        for (name, session) in sessions {
+            guard case .embedded = session.state else { continue }
+            let ms = members(of: name)
+            guard !ms.isEmpty else { continue }
+            var trees: [SplitTree<Ghostty.SurfaceView>] = []
+            var docks: [Int: VigilDockRuntime] = [:]
+            for controller in ms where !controller.surfaceTree.isEmpty {
+                if let runtime = dockMap.object(forKey: controller) {
+                    docks[trees.count] = runtime
+                }
+                trees.append(controller.surfaceTree)
+            }
+            guard !trees.isEmpty else { continue }
+            sessions[name]!.tabs = captureTabs(name: name, trees, docks: docks)
+        }
+    }
+
     private func persist() {
+        refreshEmbeddedCaptures()
         var entries = sessions.values.filter { $0.persistent }.map {
             PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0))
         }
