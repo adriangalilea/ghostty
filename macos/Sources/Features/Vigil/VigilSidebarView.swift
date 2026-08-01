@@ -360,12 +360,24 @@ struct VigilSidebarView: View {
                 Color.clear.frame(width: 7, height: 7)
             } else {
                 // Per-PANE dots: duplicates are the point, so identity is
-                // positional, not by state.
+                // positional, not by state. Each dot PUNCHES OUT what is
+                // beneath it in the cluster (destinationOut inside the
+                // compositing group): the front dot fully occludes the one
+                // behind - its translucency shows the sidebar, never the
+                // neighbour's border - and the oversized punch leaves a
+                // hairline gap that makes the count crisp.
                 ForEach(Array(states.enumerated()), id: \.offset) { _, state in
-                    VigilStateDot(state: state)
+                    ZStack {
+                        Circle()
+                            .fill(Color.black)
+                            .frame(width: 8.5, height: 8.5)
+                            .blendMode(.destinationOut)
+                        VigilStateDot(state: state)
+                    }
                 }
             }
         }
+        .compositingGroup()
         .frame(minWidth: Grid.dot, alignment: .trailing)
     }
 
