@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The left bar: the session tree. Every session (live, detached, asleep)
 /// → its tabs → their panes (splits AND dock tenants), each pane wearing
@@ -123,8 +124,50 @@ final class VigilSidebarModel: ObservableObject {
             return
         }
         lastRefresh = now
+        // A live drag owns the row order; a snapshot would clobber the
+        // preview. Staleness guard: a cancelled drag never blocks forever.
+        if draggingSession != nil {
+            if Date().timeIntervalSince(dragStarted) > 10 { draggingSession = nil }
+            else { return }
+        }
         let fresh = VigilSessionManager.shared.sidebarSnapshot()
         if fresh != rows { rows = fresh }
+    }
+
+    /// Keyboard entry (⌘⇧B lands here): something must be selected.
+    func ensureSelection() {
+        if selection == nil || !visibleItems.contains(where: { $0.id == selection }) {
+            selection = visibleItems.first?.id
+        }
+    }
+
+    // MARK: Drag reorder (session rows; order shared with the overview)
+
+    @Published var draggingSession: String?
+    private var dragStarted: Date = .distantPast
+
+    func beginDrag(_ name: String) {
+        draggingSession = name
+        dragStarted = Date()
+    }
+
+    /// Live preview: the dragged row follows the cursor through the list.
+    func moveSession(_ dragged: String, over target: String) {
+        guard dragged != target,
+              let from = rows.firstIndex(where: { $0.id == dragged }),
+              let to = rows.firstIndex(where: { $0.id == target }) else { return }
+        let row = rows.remove(at: from)
+        rows.insert(row, at: to)
+    }
+
+    /// Drop: the preview order becomes THE order (persisted; the overview
+    /// cycles in the same order).
+    func commitOrder() {
+        let manager = VigilSessionManager.shared
+        for (index, row) in rows.enumerated() {
+            manager.setOrder(name: row.id, order: index)
+        }
+        draggingSession = nil
     }
 
     // MARK: Navigation items (the flattened, currently-visible tree)
@@ -223,6 +266,7 @@ final class VigilSidebarModel: ObservableObject {
 
 struct VigilSidebarView: View {
     @ObservedObject var model: VigilSidebarModel
+    @State private var hovered: String?
 
     private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -298,13 +342,23 @@ struct VigilSidebarView: View {
                 .foregroundColor(row.persistent ? .teal : Color.secondary.opacity(0.6))
             stateDot(collapsed ? row.agg : sessionOwnDot(row))
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 5)
         .padding(.horizontal, 5)
-        .background(rowBackground(selected: model.selection == id, front: row.isFront))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(rowBackground(
+            selected: model.selection == id,
+            hovered: hovered == id,
+            front: row.isFront))
         .contentShape(Rectangle())
+        .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
         .onTapGesture {
             model.activate(.init(id: id, kind: .session(id)))
         }
+        .onDrag {
+            model.beginDrag(id)
+            return NSItemProvider(object: id as NSString)
+        }
+        .onDrop(of: [UTType.text], delegate: VigilSessionDrop(target: id, model: model))
         .contextMenu {
             Button(row.persistent
                 ? "Make Ephemeral (dies on explicit close)"
@@ -343,11 +397,16 @@ struct VigilSidebarView: View {
             if collapsed { stateDot(tab.panes.compactMap(\.state).max()) }
         }
         .opacity(tab.cold ? 0.75 : 1)
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
         .padding(.horizontal, 5)
         .padding(.leading, 14)
-        .background(rowBackground(selected: model.selection == tab.id, front: false))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(rowBackground(
+            selected: model.selection == tab.id,
+            hovered: hovered == tab.id,
+            front: false))
         .contentShape(Rectangle())
+        .onHover { inside in hovered = inside ? tab.id : (hovered == tab.id ? nil : hovered) }
         .onTapGesture {
             model.activate(.init(id: tab.id, kind: .tab(name: session, anchor: tab.anchor, id: tab.id)))
         }
@@ -373,11 +432,16 @@ struct VigilSidebarView: View {
             Spacer(minLength: 4)
             stateDot(pane.state)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
         .padding(.horizontal, 5)
         .padding(.leading, CGFloat(14 * indent))
-        .background(rowBackground(selected: model.selection == id, front: false))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(rowBackground(
+            selected: model.selection == id,
+            hovered: hovered == id,
+            front: false))
         .contentShape(Rectangle())
+        .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
         .onTapGesture {
             model.activate(.init(id: id, kind: .pane(name: session, paneId: pane.paneId)))
         }
@@ -386,12 +450,14 @@ struct VigilSidebarView: View {
 
     // MARK: Atoms
 
+    /// A real hitbox (20×20, full shape), not an 8pt glyph.
     private func chevron(collapsed: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: collapsed ? "chevron.right" : "chevron.down")
                 .font(.system(size: 8, weight: .semibold))
                 .foregroundColor(.secondary)
-                .frame(width: 12, height: 12)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -429,10 +495,34 @@ struct VigilSidebarView: View {
         }
     }
 
-    private func rowBackground(selected: Bool, front: Bool) -> some View {
+    private func rowBackground(selected: Bool, hovered: Bool, front: Bool) -> some View {
         RoundedRectangle(cornerRadius: 5)
             .fill(selected
                 ? Color.accentColor.opacity(0.25)
+                : hovered ? Color.primary.opacity(0.10)
                 : front ? Color.primary.opacity(0.06) : Color.clear)
+    }
+}
+
+/// Session-row drag reorder: dropEntered previews the move live,
+/// performDrop commits it (persisted; the overview shares the order).
+struct VigilSessionDrop: DropDelegate {
+    let target: String
+    let model: VigilSidebarModel
+
+    func dropEntered(info: DropInfo) {
+        MainActor.assumeIsolated {
+            guard let dragging = model.draggingSession else { return }
+            model.moveSession(dragging, over: target)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        MainActor.assumeIsolated { model.commitOrder() }
+        return true
     }
 }

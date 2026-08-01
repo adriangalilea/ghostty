@@ -10,7 +10,36 @@ import SwiftUI
 @MainActor
 final class VigilBars {
     static let shared = VigilBars()
-    private init() {}
+
+    private var keyMonitor: Any?
+
+    private init() {
+        // ⌘⇧B: summon the keyboard into the sidebar (shows it if hidden);
+        // pressed again while it holds the keyboard, hands focus back to
+        // the terminal. A LOCAL monitor: app-internal, no Accessibility.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command, .shift],
+                  event.keyCode == 11 // B
+            else { return event }
+            MainActor.assumeIsolated { VigilBars.shared.focusSidebar() }
+            return nil
+        }
+    }
+
+    /// The keyboard door into the left bar.
+    func focusSidebar() {
+        guard let window = NSApp.keyWindow,
+              let controller = window.windowController as? TerminalController,
+              let container = controller.terminalViewContainer else { return }
+        if !sidebarVisible { sidebarVisible = true }
+        guard let host = container.subviews.compactMap({ $0 as? VigilSidebarHost }).first else { return }
+        if window.firstResponder === host {
+            host.model.returnFocus?()
+            return
+        }
+        window.makeFirstResponder(host)
+        host.model.ensureSelection()
+    }
 
     private let visibleKey = "vigil.sidebar.visible"
     private let widthKey = "vigil.sidebar.width"
@@ -166,7 +195,9 @@ struct VigilSidebarToggle: View {
                 .background(Circle().fill(Color.primary.opacity(on ? 0.18 : 0.08)))
         }
         .buttonStyle(.plain)
-        .help(on ? "Hide the session sidebar." : "Show the session sidebar: every session, its tabs, its panes, what they run.")
+        .help(on
+            ? "Hide the session sidebar (⌘⇧B focuses it for keyboard navigation)."
+            : "Show the session sidebar: every session, its tabs, its panes, what they run. ⌘⇧B summons it with the keyboard; arrows move, enter lands, esc returns.")
         .padding(.leading, 8)
         .frame(height: 28)
     }
