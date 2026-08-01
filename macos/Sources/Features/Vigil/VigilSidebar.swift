@@ -106,7 +106,7 @@ final class VigilSidebarModel: ObservableObject {
     struct NavItem: Equatable {
         enum Kind: Equatable {
             case session(String)
-            case tab(name: String, index: Int, id: String)
+            case tab(name: String, anchor: String?, id: String)
             case pane(name: String, paneId: String?)
         }
         let id: String
@@ -131,7 +131,7 @@ final class VigilSidebarModel: ObservableObject {
             for tab in row.tabs {
                 out.append(NavItem(
                     id: tab.id,
-                    kind: .tab(name: row.id, index: tab.index, id: tab.id)))
+                    kind: .tab(name: row.id, anchor: tab.anchor, id: tab.id)))
                 guard !collapsedTabs.contains(tab.id) else { continue }
                 for pane in tab.panes {
                     out.append(NavItem(
@@ -169,8 +169,8 @@ final class VigilSidebarModel: ObservableObject {
             } else {
                 manager.open(name: name)
             }
-        case .tab(let name, let index, _):
-            manager.activateTab(name: name, index: index, in: hostController)
+        case .tab(let name, let anchor, _):
+            manager.activateTab(name: name, anchor: anchor, in: hostController)
         case .pane(let name, let paneId):
             manager.activatePane(name: name, paneId: paneId, in: hostController)
         }
@@ -290,7 +290,7 @@ struct VigilSidebarView: View {
                 if collapsed { model.collapsedTabs.remove(tab.id) }
                 else { model.collapsedTabs.insert(tab.id) }
             }
-            Image(systemName: "rectangle.on.rectangle")
+            Image(systemName: tab.cold ? "moon.zzz" : "rectangle.on.rectangle")
                 .font(.system(size: 8))
                 .foregroundColor(.secondary)
             Text(tab.title)
@@ -299,15 +299,17 @@ struct VigilSidebarView: View {
             Spacer(minLength: 4)
             if collapsed { stateDot(tab.panes.compactMap(\.state).max()) }
         }
+        .opacity(tab.cold ? 0.75 : 1)
         .padding(.vertical, 2)
         .padding(.horizontal, 5)
         .padding(.leading, 14)
         .background(rowBackground(selected: model.selection == tab.id, front: false))
         .contentShape(Rectangle())
         .onTapGesture {
-            model.activate(.init(id: tab.id, kind: .tab(name: session, index: tab.index, id: tab.id)))
+            model.activate(.init(id: tab.id, kind: .tab(name: session, anchor: tab.anchor, id: tab.id)))
         }
         .id(tab.id)
+        .help(tab.cold ? "Cold tab: its processes run in their daemons; click to swap it into this window." : tab.title)
     }
 
     private func paneRow(
