@@ -63,12 +63,29 @@ final class VigilSidebarHost: NSVisualEffectView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if model.hintMode {
+            switch event.keyCode {
+            case 53: model.exitHintMode()   // esc
+            case 36: model.commitHint()     // return: commit ambiguous exact
+            case 41: model.jumpAttention()  // ; = attention head
+            default:
+                if let chars = event.charactersIgnoringModifiers?.lowercased(),
+                   chars.count == 1, chars.first!.isLetter {
+                    model.hintType(chars)
+                } else {
+                    NSSound.beep()
+                }
+            }
+            return
+        }
         switch event.keyCode {
         case 126: model.move(-1)          // up
         case 125: model.move(1)           // down
         case 123: model.collapseSelection() // left
         case 124: model.expandSelection()   // right
         case 36: model.activateSelection()  // return
+        case 3: model.enterHintMode()       // f = jump hints (helix gw)
+        case 41: model.jumpAttention()      // ; = attention head
         case 53: model.returnFocus?()       // esc
         default: super.keyDown(with: event)
         }
@@ -143,6 +160,101 @@ final class VigilSidebarModel: ObservableObject {
     func ensureSelection() {
         if selection == nil || !visibleItems.contains(where: { $0.id == selection }) {
             selection = visibleItems.first?.id
+        }
+    }
+
+    // MARK: Jump hints (helix gw for the tree)
+
+    /// Positional labels over every visible row: session `a`, its first
+    /// tab `aa`, that tab's first split `aaa` (home-row alphabet). Typing
+    /// walks the tree; a unique match jumps immediately, an ambiguous
+    /// exact match (a IS a prefix of aa by design) commits after a beat
+    /// or on return. `;` jumps to the head of the attention FIFO.
+    @Published var hintMode = false
+    @Published var hintBuffer = ""
+    @Published private(set) var hintLabels: [String: String] = [:]
+    private var hintCommitWork: DispatchWorkItem?
+
+    private static let hintAlphabet = Array("asdfghjklqwertyuiopzxcvbnm")
+
+    private static func hintLetter(_ index: Int) -> String {
+        index < hintAlphabet.count ? String(hintAlphabet[index]) : "z"
+    }
+
+    func enterHintMode() {
+        var labels: [String: String] = [:]
+        for (i, row) in rows.enumerated() {
+            let s = Self.hintLetter(i)
+            labels[row.id] = s
+            guard !collapsedSessions.contains(row.id) else { continue }
+            if row.tabs.count == 1, let tab = row.tabs.first {
+                for (k, pane) in tab.panes.enumerated() {
+                    labels["\(tab.id)#\(pane.id)"] = s + Self.hintLetter(k)
+                }
+                continue
+            }
+            for (j, tab) in row.tabs.enumerated() {
+                labels[tab.id] = s + Self.hintLetter(j)
+                guard !collapsedTabs.contains(tab.id) else { continue }
+                for (k, pane) in tab.panes.enumerated() {
+                    labels["\(tab.id)#\(pane.id)"] = s + Self.hintLetter(j) + Self.hintLetter(k)
+                }
+            }
+        }
+        hintLabels = labels
+        hintBuffer = ""
+        hintMode = true
+    }
+
+    func exitHintMode() {
+        hintCommitWork?.cancel()
+        hintMode = false
+        hintBuffer = ""
+        hintLabels = [:]
+    }
+
+    func hintType(_ char: String) {
+        hintBuffer += char
+        hintCommitWork?.cancel()
+        let matches = hintLabels.filter { $0.value.hasPrefix(hintBuffer) }
+        guard !matches.isEmpty else { exitHintMode(); return }
+        guard let exact = matches.first(where: { $0.value == hintBuffer }) else { return }
+        if matches.count == 1 {
+            activateHint(exact.key)
+            return
+        }
+        // `a` is deliberately a prefix of `aa`: an exact match with live
+        // extensions commits after a beat, so a pause means "this one" and
+        // fast typing keeps descending.
+        let work = DispatchWorkItem { [weak self] in self?.activateHint(exact.key) }
+        hintCommitWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    func commitHint() {
+        if let exact = hintLabels.first(where: { $0.value == hintBuffer }) {
+            activateHint(exact.key)
+        } else {
+            exitHintMode()
+        }
+    }
+
+    private func activateHint(_ id: String) {
+        exitHintMode()
+        guard let item = visibleItems.first(where: { $0.id == id }) else { return }
+        activate(item)
+    }
+
+    /// Direct access to the attention FIFO's head: the most urgent session
+    /// shapeshifts into this window.
+    func jumpAttention() {
+        exitHintMode()
+        guard let name = VigilSessionManager.shared.mostUrgentName else { return }
+        selection = name
+        if let host = hostController {
+            VigilSessionManager.shared.shapeshift(in: host, to: name)
+        } else {
+            VigilSessionManager.shared.open(name: name)
         }
     }
 

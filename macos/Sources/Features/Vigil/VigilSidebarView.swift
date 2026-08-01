@@ -213,6 +213,8 @@ struct VigilSidebarView: View {
             }
         }
         .help("\(row.label) (\(row.id)) · \(row.stateTag) · \(row.persistent ? "persistent" : "ephemeral")")
+        .opacity(hintFade(id))
+        .overlay(alignment: .leading) { hintChip(id, depth: 0) }
     }
 
     private func tabRow(_ tab: VigilSessionManager.SidebarTab, session: String) -> some View {
@@ -271,6 +273,8 @@ struct VigilSidebarView: View {
         .help(tab.cold
             ? "Cold tab: its processes run in their daemons; click to swap it into this window."
             : tab.title)
+        .opacity(hintFade(tab.id))
+        .overlay(alignment: .leading) { hintChip(tab.id, depth: 1) }
     }
 
     private func paneRow(
@@ -308,6 +312,35 @@ struct VigilSidebarView: View {
             model.activate(.init(id: id, kind: .pane(name: session, paneId: pane.paneId)))
         }
         .id(id)
+        .opacity(hintFade(id))
+        .overlay(alignment: .leading) { hintChip(id, depth: level) }
+    }
+
+    // MARK: Jump hints (helix gw: f in the bar, labels appear, type to land)
+
+    @ViewBuilder
+    private func hintChip(_ id: String, depth: Int) -> some View {
+        if model.hintMode, let label = model.hintLabels[id],
+           label.hasPrefix(model.hintBuffer) {
+            HStack(spacing: 0) {
+                Text(model.hintBuffer)
+                    .foregroundColor(.black.opacity(0.45))
+                Text(label.dropFirst(model.hintBuffer.count))
+                    .foregroundColor(.black)
+            }
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .padding(.horizontal, 3)
+            .padding(.vertical, 1)
+            .background(RoundedRectangle(cornerRadius: 3).fill(Color.yellow))
+            .padding(.leading, 4 + CGFloat(depth) * 18)
+            .allowsHitTesting(false)
+        }
+    }
+
+    private func hintFade(_ id: String) -> Double {
+        guard model.hintMode else { return 1 }
+        guard let label = model.hintLabels[id] else { return 0.3 }
+        return label.hasPrefix(model.hintBuffer) ? 1 : 0.3
     }
 
     // MARK: Atoms

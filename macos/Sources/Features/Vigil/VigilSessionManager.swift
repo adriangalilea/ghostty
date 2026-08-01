@@ -537,6 +537,10 @@ class VigilSessionManager {
         open(name: session.name)
     }
 
+    /// The head of the attention FIFO by name (the sidebar's direct-access
+    /// key shapeshifts to it).
+    var mostUrgentName: String? { mostUrgent?.name }
+
     // MARK: Floating (the quick terminal hosts one tab of a session)
 
     /// Name of the session currently hosted by the quick terminal.
