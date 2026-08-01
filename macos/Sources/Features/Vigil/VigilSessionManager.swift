@@ -1062,13 +1062,7 @@ class VigilSessionManager {
         }
 
         func configFor(_ pane: Pane) -> Ghostty.SurfaceConfiguration {
-            var config = Ghostty.SurfaceConfiguration()
-            config.workingDirectory = pane.cwd
-            config.environmentVariables["VIGIL_SESSION"] = name
-            if let command = pane.command, command.hasPrefix(Self.attachSentinel) {
-                config.vigilAttach = String(command.dropFirst(Self.attachSentinel.count))
-            }
-            return config
+            resurrectConfig(name: name, pane: pane)
         }
 
         /// Splits and subsequent tabs wait for their window to actually
@@ -1076,23 +1070,8 @@ class VigilSessionManager {
         /// window drops splits and births invisible tabs.
         vlog("resurrect: '\(name)' tabs=\(tabs.count) panes=\(tabs.map(\.panes.count))")
 
-        /// A captured dock comes back as live tenant surfaces: their daemons
-        /// survived (spec files, `vigild restore`), so each SurfaceView is a
-        /// native reattach exactly like a split pane's.
-        @MainActor
         func materializeDock(_ controller: TerminalController, _ capture: DockCapture?) {
-            guard let capture, !capture.panes.isEmpty,
-                  let app = ghostty.app else { return }
-            let views = capture.panes.map {
-                Ghostty.SurfaceView(app, baseConfig: configFor($0))
-            }
-            let runtime = VigilDockRuntime(
-                views: views,
-                active: min(capture.active, views.count - 1),
-                width: CGFloat(capture.width),
-                collapsed: capture.collapsed)
-            dockMap.setObject(runtime, forKey: controller)
-            VigilBars.shared.sync(controller)
+            materializeDockCapture(controller, capture, configFor: configFor)
         }
 
         var firstController: TerminalController?
@@ -1136,6 +1115,40 @@ class VigilSessionManager {
         sessions[name]!.state = .embedded
         firstController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// A pane's resurrection config: cwd + session identity + the native
+    /// attach id when its daemon lives (then the surface is a reattach).
+    private func resurrectConfig(name: String, pane: Pane) -> Ghostty.SurfaceConfiguration {
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = pane.cwd
+        config.environmentVariables["VIGIL_SESSION"] = name
+        if let command = pane.command, command.hasPrefix(Self.attachSentinel) {
+            config.vigilAttach = String(command.dropFirst(Self.attachSentinel.count))
+        }
+        return config
+    }
+
+    /// A captured dock comes back as live tenant surfaces: their daemons
+    /// survived (spec files, `vigild restore`), so each SurfaceView is a
+    /// native reattach exactly like a split pane's.
+    private func materializeDockCapture(
+        _ controller: TerminalController,
+        _ capture: DockCapture?,
+        configFor: (Pane) -> Ghostty.SurfaceConfiguration
+    ) {
+        guard let capture, !capture.panes.isEmpty,
+              let app = ghosttyApp?.app else { return }
+        let views = capture.panes.map {
+            Ghostty.SurfaceView(app, baseConfig: configFor($0))
+        }
+        let runtime = VigilDockRuntime(
+            views: views,
+            active: min(capture.active, views.count - 1),
+            width: CGFloat(capture.width),
+            collapsed: capture.collapsed)
+        dockMap.setObject(runtime, forKey: controller)
+        VigilBars.shared.sync(controller)
     }
 
     /// Rebuild one tab's splits a beat after its window presents (a split
@@ -1407,10 +1420,172 @@ class VigilSessionManager {
         onAttentionChange?()
     }
 
-    // MARK: Sidebar navigation (click a row, land in the thing)
+    // MARK: Shapeshift (the sidebar's click semantic)
 
-    /// Focus one tab of a session: open (resurrects if needed), then key
-    /// the member window at that index.
+    /// The window is a VIEWPORT: clicking a session in the bar swaps what
+    /// this window displays, it never spawns a window. Live targets keep
+    /// their home (focus it); detached/asleep targets mount INTO this
+    /// window. The current occupant leaves honestly: persistent detaches
+    /// (running, invisible), ephemeral buries (120s undo), a session-less
+    /// stray's tree buries too.
+    func shapeshift(in controller: TerminalController, to targetName: String) {
+        guard let target = sessions[targetName], let ghostty = ghosttyApp else { return }
+        switch target.state {
+        case .embedded, .floating:
+            open(name: targetName)
+            return
+        case .detached, .asleep:
+            break
+        }
+        guard sessionName(of: controller) != targetName else { return }
+        guard controller.window != nil else { open(name: targetName); return }
+        vlog("shapeshift: window of '\(sessionName(of: controller) ?? "stray")' -> '\(targetName)'")
+
+        releaseOccupant(of: controller)
+
+        // Mounting IS the acknowledge, same as open.
+        sessions[targetName]!.attention = .none
+        sessions[targetName]!.attentionSince = nil
+        lastAck[targetName] = Date()
+        onAttentionChange?()
+        mount(targetName, into: controller, ghostty: ghostty)
+        controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        persist()
+    }
+
+    /// The current occupant leaves the window WITHOUT the window closing:
+    /// every tab is captured, sibling tab-windows close (trees emptied),
+    /// and this controller's tree is left alone for mount to REPLACE
+    /// (an emptied tree closes the window; a replaced one never does).
+    private func releaseOccupant(of controller: TerminalController) {
+        if let current = sessionName(of: controller) {
+            let ms = members(of: current)
+            var trees: [SplitTree<Ghostty.SurfaceView>] = []
+            var docks: [Int: VigilDockRuntime] = [:]
+            for member in ms where !member.surfaceTree.isEmpty {
+                if let runtime = dockMap.object(forKey: member) {
+                    runtime.unmount()
+                    docks[trees.count] = runtime
+                    dockMap.removeObject(forKey: member)
+                }
+                trees.append(member.surfaceTree)
+            }
+            sessions[current]!.tabs = captureTabs(name: current, trees, docks: docks)
+            detachedDocks[current] = docks.isEmpty ? nil : docks
+            if let pwd = controller.focusedSurface?.pwd { sessions[current]!.cwd = pwd }
+            sessions[current]!.thumbnail = Self.windowSnapshot(controller)
+            for member in ms { memberships.removeObject(forKey: member) }
+            for member in ms where member !== controller { member.surfaceTree = SplitTree() }
+            if sessions[current]!.persistent {
+                sessions[current]!.state = .detached(trees)
+                if let thumb = sessions[current]!.thumbnail {
+                    persistThumb(name: current, image: thumb)
+                }
+            } else {
+                var buried = sessions[current]!
+                buried.state = .detached(trees)
+                buried.ephemeral = true
+                sessions[current] = nil
+                bury(buried)
+            }
+        } else if !controller.surfaceTree.isEmpty {
+            // Safety-net stray: its tree buries as an ephemeral session,
+            // the killEphemeral courtesy without closing this window.
+            let tree = controller.surfaceTree
+            let surface = controller.focusedSurface ?? tree.root?.leftmostLeaf()
+            let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
+            let cwd = surface?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+            var stray = Session(
+                name: newSessionId(),
+                label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
+                cwd: cwd,
+                state: .detached([tree]))
+            stray.ephemeral = true
+            stray.thumbnail = surface?.asImage
+            bury(stray)
+        }
+    }
+
+    /// Mount a detached/asleep session INTO an existing window: the first
+    /// tab REPLACES the window's tree, the rest regroup behind it.
+    private func mount(_ name: String, into controller: TerminalController, ghostty: Ghostty.App) {
+        guard let session = sessions[name] else { return }
+        switch session.state {
+        case .detached(let trees):
+            guard let first = trees.first else {
+                sessions[name]!.state = .asleep
+                mount(name, into: controller, ghostty: ghostty)
+                return
+            }
+            registerMember(controller, name: name)
+            controller.surfaceTree = first
+            if let dock = detachedDocks[name]?[0] {
+                dockMap.setObject(dock, forKey: controller)
+            }
+            let rest = Array(trees.dropFirst())
+            if !rest.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self else { return }
+                    for (index, tree) in rest.enumerated() {
+                        let tab = TerminalController.vigilNewTab(ghostty, parent: controller, tree: tree)
+                        self.registerMember(tab, name: name)
+                        if let dock = self.detachedDocks[name]?[index + 1] {
+                            self.dockMap.setObject(dock, forKey: tab)
+                        }
+                    }
+                    self.detachedDocks[name] = nil
+                    VigilBars.shared.syncAll()
+                }
+            } else {
+                detachedDocks[name] = nil
+            }
+            sessions[name]!.state = .embedded
+
+        case .asleep:
+            var tabs = session.tabs
+            if tabs.isEmpty || tabs.allSatisfy({ $0.panes.isEmpty }) {
+                tabs = [Tab(panes: [Pane(cwd: session.cwd, command: nil)], layout: nil)]
+            }
+            guard let app = ghostty.app else { return }
+            let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [unowned self] in
+                self.resurrectConfig(name: name, pane: $0)
+            }
+            registerMember(controller, name: name)
+            var tabDelay: TimeInterval = 0
+            for (index, tab) in tabs.enumerated() {
+                let panes = tab.panes
+                guard !panes.isEmpty else { continue }
+                let firstIndex = min(tab.layout?.firstLeaf ?? 0, panes.count - 1)
+                if index == 0 {
+                    let view = Ghostty.SurfaceView(app, baseConfig: configFor(panes[firstIndex]))
+                    controller.surfaceTree = SplitTree(view: view)
+                    materializeSplits(controller, tab: tab, configFor: configFor)
+                    materializeDockCapture(controller, tab.dock, configFor: configFor)
+                } else {
+                    guard let parent = controller.window else { continue }
+                    tabDelay += 0.3
+                    let config = configFor(panes[firstIndex])
+                    DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay) { [weak self] in
+                        guard let self else { return }
+                        guard let tabController = TerminalController.newTab(
+                            ghostty, from: parent, withBaseConfig: config) else { return }
+                        self.registerMember(tabController, name: name)
+                        self.materializeSplits(tabController, tab: tab, configFor: configFor)
+                        self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
+                    }
+                }
+            }
+            sessions[name]!.state = .embedded
+
+        case .embedded, .floating:
+            break
+        }
+    }
+
+    // MARK: Sidebar navigation (rows resolve through shapeshift)
+
+    /// Focus one tab of an EMBEDDED session's window group.
     func focusTab(name: String, index: Int) {
         open(name: name)
         let ms = members(of: name)
@@ -1418,18 +1593,41 @@ class VigilSessionManager {
         window.makeKeyAndOrderFront(nil)
     }
 
-    /// Focus one pane by its daemon id: open the session, then move focus
-    /// to the live surface (retry once: resurrection materializes async).
-    func focusPane(name: String, paneId: String) {
-        open(name: name)
-        @MainActor func attempt() -> Bool {
-            guard let view = liveView(attachId: paneId), let window = view.window else { return false }
+    /// A tab row: embedded sessions focus their real tab; anything else
+    /// shapeshifts into the clicking window first, then keys the tab.
+    func activateTab(name: String, index: Int, in controller: TerminalController?) {
+        if case .embedded = sessions[name]?.state {
+            focusTab(name: name, index: index)
+            return
+        }
+        if let controller { shapeshift(in: controller, to: name) } else { open(name: name) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            let ms = self.members(of: name)
+            if ms.indices.contains(index) { ms[index].window?.makeKeyAndOrderFront(nil) }
+        }
+    }
+
+    /// A pane row: a live surface gets direct focus; anything else
+    /// shapeshifts, then focuses the surface once it materializes.
+    func activatePane(name: String, paneId: String?, in controller: TerminalController?) {
+        guard let paneId else {
+            activateTab(name: name, index: 0, in: controller)
+            return
+        }
+        if let view = liveView(attachId: paneId), let window = view.window {
             window.makeKeyAndOrderFront(nil)
             Ghostty.moveFocus(to: view)
-            return true
+            NSApp.activate(ignoringOtherApps: true)
+            return
         }
-        if !attempt() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { _ = attempt() }
+        if let controller { shapeshift(in: controller, to: name) } else { open(name: name) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self,
+                  let view = self.liveView(attachId: paneId),
+                  let window = view.window else { return }
+            window.makeKeyAndOrderFront(nil)
+            Ghostty.moveFocus(to: view)
         }
     }
 
@@ -2241,6 +2439,16 @@ class VigilSessionManager {
     func interceptTermination() -> Bool {
         guard !reallyQuit else { return false }
         reconcile()
+        // Freeze foreground truth NOW: the detach cascade below closes the
+        // windows, and a termination that proceeds to death (vigil-dev
+        // pkill, SIGTERM) must record them as OPEN or the next launch
+        // restores nothing (observed 2026-08-01: every dev restart came up
+        // windowless). Cleared a tick later so service-mode persists go
+        // back to live truth.
+        var frozen: [String: Bool] = [:]
+        for (name, session) in sessions { frozen[name] = isForeground(session) }
+        shutdownForeground = frozen
+        defer { DispatchQueue.main.async { self.shutdownForeground = nil } }
 
         if let name = floatingName, let quick = quickController(create: false) {
             reclaim(name, from: quick)

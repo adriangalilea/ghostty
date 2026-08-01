@@ -21,6 +21,7 @@ final class VigilSidebarHost: NSVisualEffectView {
         blendingMode = .behindWindow
         state = .followsWindowActiveState
 
+        model.hostController = controller
         model.returnFocus = { [weak self] in
             guard let self, let controller = self.controller,
                   let surface = controller.focusedSurface else { return }
@@ -86,6 +87,8 @@ final class VigilSidebarModel: ObservableObject {
         didSet { UserDefaults.standard.set(Array(collapsedTabs), forKey: "vigil.sidebar.collapsedTabs") }
     }
     var returnFocus: (() -> Void)?
+    /// The window this sidebar lives in: the viewport that shapeshifts.
+    weak var hostController: TerminalController?
 
     init() {
         collapsedSessions = Set(UserDefaults.standard.stringArray(forKey: "vigil.sidebar.collapsed") ?? [])
@@ -153,20 +156,23 @@ final class VigilSidebarModel: ObservableObject {
         activate(item)
     }
 
+    /// The click semantic is SHAPESHIFT: this window swaps to show the
+    /// chosen session (live sessions keep their home window and get
+    /// focused there instead).
     func activate(_ item: NavItem) {
         selection = item.id
         let manager = VigilSessionManager.shared
         switch item.kind {
         case .session(let name):
-            manager.open(name: name)
-        case .tab(let name, let index, _):
-            manager.focusTab(name: name, index: index)
-        case .pane(let name, let paneId):
-            if let paneId {
-                manager.focusPane(name: name, paneId: paneId)
+            if let host = hostController {
+                manager.shapeshift(in: host, to: name)
             } else {
                 manager.open(name: name)
             }
+        case .tab(let name, let index, _):
+            manager.activateTab(name: name, index: index, in: hostController)
+        case .pane(let name, let paneId):
+            manager.activatePane(name: name, paneId: paneId, in: hostController)
         }
     }
 
