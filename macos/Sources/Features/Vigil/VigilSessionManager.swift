@@ -223,6 +223,10 @@ class VigilSessionManager {
     /// Set once at app launch by VigilStatusItem; needed to spawn windows.
     weak var ghosttyApp: Ghostty.App?
 
+    /// SIGTERM handler (see init): a signal must never leave a service-mode
+    /// survivor behind a dev restart.
+    private var sigtermSource: DispatchSourceSignal?
+
     /// Status item hook: called whenever attention state changes.
     var onAttentionChange: (() -> Void)?
 
@@ -239,6 +243,23 @@ class VigilSessionManager {
         load()
         sweepPaneDaemons()
         startEventWatcher()
+        startStateDirWatcher()
+        // SIGTERM means DIE (vigil-dev restarts, system tooling). Without
+        // this, AppKit routed it into the ⌘Q intercept, which CANCELS
+        // termination into menu-bar service mode when persistent sessions
+        // exist: three invisible survivors once stacked up behind
+        // pkill + open -n (2026-08-01). Freeze foreground truth, kill
+        // ephemeral daemons, then really terminate.
+        signal(SIGTERM, SIG_IGN)
+        sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        sigtermSource?.setEventHandler {
+            MainActor.assumeIsolated {
+                let manager = VigilSessionManager.shared
+                manager.prepareForSystemShutdown()
+                manager.quitForReal()
+            }
+        }
+        sigtermSource?.resume()
         // The sweep is a garbage collector: collection points are events
         // (burial reaps) plus this slow safety tick for anything that dies
         // outside vigil's sight (undo expiry, crashes).
@@ -2131,6 +2152,26 @@ class VigilSessionManager {
     private var agentStateDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/wake/state")
+    }
+
+    /// Event-driven state, not polled: any hook write into the state dir
+    /// repaints the projections within the refresh throttle, instead of
+    /// waiting for the sidebar's 2s ticker. (Whatever latency remains on a
+    /// permission prompt is claude firing its Notification late, upstream.)
+    private var stateDirWatcher: DispatchSourceFileSystemObject?
+
+    private func startStateDirWatcher() {
+        try? FileManager.default.createDirectory(at: agentStateDir, withIntermediateDirectories: true)
+        let fd = Darwin.open(agentStateDir.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: .write, queue: .main)
+        source.setEventHandler {
+            NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        stateDirWatcher = source
     }
 
     /// The pane's continuous program state as its adapter last wrote it.

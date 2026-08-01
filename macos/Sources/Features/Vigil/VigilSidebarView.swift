@@ -403,9 +403,7 @@ struct VigilStateDot: View {
             }
             .onDisappear { spin = false }
         case .blocked:
-            Circle()
-                .fill(Color.orange)
-                .frame(width: 7, height: 7)
+            ringDot(.orange)
                 .opacity(pulse ? 0.35 : 1)
                 .onAppear {
                     withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
@@ -414,11 +412,21 @@ struct VigilStateDot: View {
                 }
                 .onDisappear { pulse = false }
         case .done:
-            Circle().fill(Color.teal).frame(width: 7, height: 7)
+            ringDot(.teal)
         case .idle:
-            Circle().fill(Color.secondary.opacity(0.45)).frame(width: 7, height: 7)
+            ringDot(Color.secondary.opacity(0.6))
         case nil:
             Color.clear.frame(width: 7, height: 7)
         }
+    }
+
+    /// Every dot is a RING + translucent body (border at full colour,
+    /// body ~55%): two same-colour dots overlapping in a cluster stay
+    /// countable because the borders draw the boundary.
+    private func ringDot(_ color: Color) -> some View {
+        Circle()
+            .fill(color.opacity(0.55))
+            .overlay(Circle().stroke(color, lineWidth: 1))
+            .frame(width: 7, height: 7)
     }
 }
