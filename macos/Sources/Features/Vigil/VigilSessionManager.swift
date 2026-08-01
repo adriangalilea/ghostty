@@ -1235,8 +1235,22 @@ class VigilSessionManager {
             persist()
             return false
         }
-        if persistent { detach(name: name) } else { kill(name: name) }
+        if persistent {
+            detach(name: name)
+        } else {
+            // Explicit ⌘W on an ephemeral session: the one gesture that
+            // kills it, confirmed like ⌘⇧⌫ (Adrian 2026-08-01), then the
+            // usual 120s undo grace.
+            confirmKill(name: name) { self.kill(name: name) }
+        }
         return true
+    }
+
+    /// Confirm-then-kill for surfaces outside the keybind path (sidebar
+    /// context menu): same alert, same grace.
+    func killWithConfirm(name: String) {
+        guard sessions[name] != nil else { return }
+        confirmKill(name: name) { self.kill(name: name) }
     }
 
     /// Closing one TAB of a multi-tab session is a structural edit, not a
@@ -1493,15 +1507,15 @@ class VigilSessionManager {
                     persistThumb(name: current, image: thumb)
                 }
             } else {
-                var buried = sessions[current]!
-                buried.state = .detached(trees) // buried trees stay ALIVE for the undo grace
-                buried.ephemeral = true
-                sessions[current] = nil
-                bury(buried)
+                // Looking away is NOT a close (Adrian 2026-08-01): an
+                // ephemeral session lives on detached-in-memory (trees
+                // held, daemons running), listed in the bar, and dies only
+                // on explicit ⌘W / ⌘⇧⌫ / ⌘Q.
+                sessions[current]!.state = .detached(trees)
             }
         } else if !controller.surfaceTree.isEmpty {
-            // Safety-net stray: its tree buries as an ephemeral session,
-            // the killEphemeral courtesy without closing this window.
+            // Safety-net stray: mint it a REAL ephemeral session (alive,
+            // listed, killable) instead of silently burying its tree.
             let tree = controller.surfaceTree
             let surface = controller.focusedSurface ?? tree.root?.leftmostLeaf()
             let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
@@ -1511,9 +1525,8 @@ class VigilSessionManager {
                 label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
                 cwd: cwd,
                 state: .detached([tree]))
-            stray.ephemeral = true
             stray.thumbnail = surface?.asImage
-            bury(stray)
+            sessions[stray.name] = stray
         }
     }
 

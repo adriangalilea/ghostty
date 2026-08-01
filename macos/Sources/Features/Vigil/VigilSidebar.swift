@@ -265,6 +265,11 @@ struct VigilSidebarView: View {
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
             }
+            // Survival class, the titlebar's language: infinity = endures,
+            // hourglass = dies on explicit close. Right-click to flip.
+            Image(systemName: row.persistent ? "infinity" : "hourglass")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundColor(row.persistent ? .teal : Color.secondary.opacity(0.6))
             stateDot(collapsed ? row.agg : sessionOwnDot(row))
         }
         .padding(.vertical, 3)
@@ -274,7 +279,19 @@ struct VigilSidebarView: View {
         .onTapGesture {
             model.activate(.init(id: id, kind: .session(id)))
         }
-        .help("\(row.label) (\(row.id)) · \(row.stateTag)")
+        .contextMenu {
+            Button(row.persistent
+                ? "Make Ephemeral (dies on explicit close)"
+                : "Make Persistent (survives quit and reboot)") {
+                VigilSessionManager.shared.setPersistent(name: id, !row.persistent)
+            }
+            Button("Rename…") { VigilIdentity.editModal(name: id) }
+            Divider()
+            Button("Kill…", role: .destructive) {
+                VigilSessionManager.shared.killWithConfirm(name: id)
+            }
+        }
+        .help("\(row.label) (\(row.id)) · \(row.stateTag) · \(row.persistent ? "persistent" : "ephemeral")")
     }
 
     /// An EXPANDED session row keeps its rollup dot too: the children show
