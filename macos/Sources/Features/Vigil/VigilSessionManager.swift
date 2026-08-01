@@ -1745,6 +1745,25 @@ class VigilSessionManager {
         let ephemeral: Bool
     }
 
+    /// The sidebar's burial tray rows: lightweight, equatable, countdown
+    /// baked in so the tray re-renders as the grace runs out.
+    struct SidebarBurial: Identifiable, Equatable {
+        let id: String
+        let emoji: String?
+        let label: String
+        let remaining: Int
+    }
+
+    func sidebarBurials() -> [SidebarBurial] {
+        burials().map {
+            SidebarBurial(
+                id: $0.name,
+                emoji: $0.emoji,
+                label: $0.label,
+                remaining: max(0, Int($0.deadline.timeIntervalSinceNow)))
+        }
+    }
+
     func burials() -> [Burial] {
         graveyard.values.compactMap { session in
             guard let deadline = graveyardDeadlines[session.name] else { return nil }

@@ -22,23 +22,91 @@ struct VigilSidebarView: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 5) {
-                    ForEach(model.rows) { row in
-                        sessionGroup(row)
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 5) {
+                        ForEach(model.rows) { row in
+                            sessionGroup(row)
+                        }
                     }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 6)
                 }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 6)
+                .onChange(of: model.selection) { selection in
+                    if let selection { proxy.scrollTo(selection) }
+                }
             }
-            .onChange(of: model.selection) { selection in
-                if let selection { proxy.scrollTo(selection) }
+            if !model.burials.isEmpty {
+                burialTray
             }
         }
         .onReceive(ticker) { _ in model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.stateDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh() }
+    }
+
+    // MARK: Burial tray (sticky bottom: killed, still undoable)
+
+    private var burialTray: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Image(systemName: "trash")
+                    .font(.system(size: 8))
+                    .foregroundColor(.secondary)
+                Text("recently killed")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 5)
+            ForEach(model.burials) { burial in
+                burialRow(burial)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1)
+        }
+    }
+
+    private func burialRow(_ burial: VigilSessionManager.SidebarBurial) -> some View {
+        let id = "burial-\(burial.id)"
+        return HStack(spacing: 4) {
+            Text(face(burial.emoji))
+                .font(.system(size: 12))
+                .frame(width: Grid.icon)
+            Text(burial.label)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text("\(burial.remaining)s")
+                .font(.system(size: 9))
+                .monospacedDigit()
+                .foregroundColor(.secondary)
+            Button {
+                VigilSessionManager.shared.reapNow(burial.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Let it die now (skips the remaining grace).")
+        }
+        .frame(height: 22)
+        .padding(.horizontal, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(rowBackground(selected: false, hovered: hovered == id, front: false))
+        .contentShape(Rectangle())
+        .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
+        .onTapGesture { VigilSessionManager.shared.exhume(burial.id) }
+        .help("Killed; dies for real in \(burial.remaining)s. Click to recover it whole (⌘⇧T also exhumes).")
     }
 
     // MARK: Session group (one block per session)
@@ -48,7 +116,7 @@ struct VigilSidebarView: View {
         return VStack(alignment: .leading, spacing: 0) {
             sessionRow(row, collapsed: collapsed)
                 .id(row.id)
-            if !collapsed && !VigilSidebarModel.hidesChildren(row) {
+            if !collapsed {
                 if row.tabs.count == 1, let tab = row.tabs.first {
                     ForEach(tab.panes) { pane in
                         paneRow(pane, session: row.id, tab: tab, level: 1)
@@ -83,7 +151,9 @@ struct VigilSidebarView: View {
 
     private func sessionRow(_ row: VigilSessionManager.SidebarSessionRow, collapsed: Bool) -> some View {
         let id = row.id
-        let hasChildren = !VigilSidebarModel.hidesChildren(row) && !row.tabs.isEmpty
+        // The chevron NEVER blinks out from under the cursor: any session
+        // with content keeps it, however boring the content.
+        let hasChildren = !row.tabs.isEmpty
         return HStack(spacing: 4) {
             if hasChildren {
                 chevron(collapsed: collapsed) {

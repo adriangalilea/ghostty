@@ -132,7 +132,12 @@ final class VigilSidebarModel: ObservableObject {
         }
         let fresh = VigilSessionManager.shared.sidebarSnapshot()
         if fresh != rows { rows = fresh }
+        let freshBurials = VigilSessionManager.shared.sidebarBurials()
+        if freshBurials != burials { burials = freshBurials }
     }
+
+    /// The sticky bottom tray: killed sessions living out their grace.
+    @Published private(set) var burials: [VigilSessionManager.SidebarBurial] = []
 
     /// Keyboard entry (⌘⇧B lands here): something must be selected.
     func ensureSelection() {
@@ -182,14 +187,6 @@ final class VigilSidebarModel: ObservableObject {
         let kind: Kind
     }
 
-    /// A session whose whole content is one bare shell says everything in
-    /// its own row; a child row would be pure noise.
-    static func hidesChildren(_ row: VigilSessionManager.SidebarSessionRow) -> Bool {
-        guard row.tabs.count == 1, let tab = row.tabs.first,
-              tab.panes.count == 1, let pane = tab.panes.first else { return false }
-        return pane.program == nil && pane.state == nil && !pane.isDock
-    }
-
     /// Single-tab sessions skip the tab level: their panes hang directly
     /// off the session row (a tab row would be pure noise).
     var visibleItems: [NavItem] {
@@ -197,7 +194,6 @@ final class VigilSidebarModel: ObservableObject {
         for row in rows {
             out.append(NavItem(id: row.id, kind: .session(row.id)))
             guard !collapsedSessions.contains(row.id) else { continue }
-            guard !Self.hidesChildren(row) else { continue }
             if row.tabs.count == 1, let tab = row.tabs.first {
                 for pane in tab.panes {
                     out.append(NavItem(
