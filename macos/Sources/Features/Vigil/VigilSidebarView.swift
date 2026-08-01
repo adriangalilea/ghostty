@@ -171,7 +171,6 @@ struct VigilSidebarView: View {
                 .lineLimit(1)
                 .opacity(row.stateTag == "live" ? 1 : 0.85)
             Spacer(minLength: 4)
-            attentionBadge(row.attention)
             if row.stateTag != "live" {
                 Text(row.stateTag)
                     .font(.system(size: 9))
@@ -340,29 +339,15 @@ struct VigilSidebarView: View {
             .frame(width: Grid.dot)
     }
 
+    /// ONE indicator, the dot (no bell/checkmark doubling it): orange =
+    /// blocked on you, yellow = working, teal = done unseen, faint = idle.
     private func dotColor(_ state: VigilSessionManager.AgentState?) -> Color? {
         switch state {
-        case .blocked: return .red
+        case .blocked: return .orange
         case .working: return .yellow
         case .done: return .teal
         case .idle: return Color.secondary.opacity(0.45)
         case nil: return nil
-        }
-    }
-
-    @ViewBuilder
-    private func attentionBadge(_ attention: VigilSessionManager.Attention) -> some View {
-        switch attention {
-        case .input:
-            Image(systemName: "bell.fill")
-                .font(.system(size: 8))
-                .foregroundColor(.orange)
-        case .done:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 8))
-                .foregroundColor(.teal)
-        case .none:
-            EmptyView()
         }
     }
 

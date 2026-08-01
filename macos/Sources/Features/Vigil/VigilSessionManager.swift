@@ -186,6 +186,30 @@ class VigilSessionManager {
     /// capture order). Re-embed zips them back onto controllers.
     private var detachedDocks: [String: [Int: VigilDockRuntime]] = [:]
 
+    /// Tabs mid-materialization (first pane mounted, splits landing a
+    /// tick later): the sidebar renders the CAPTURE's shape for these so
+    /// a 2-split tab never flashes as 1 row. Time-capped self-clearing.
+    private let materializing = NSMapTable<TerminalController, NSDate>(
+        keyOptions: [.weakMemory, .objectPointerPersonality],
+        valueOptions: .strongMemory)
+
+    private func markMaterializing(_ controller: TerminalController) {
+        materializing.setObject(NSDate(), forKey: controller)
+    }
+
+    func isMaterializing(_ controller: TerminalController) -> Bool {
+        guard let date = materializing.object(forKey: controller) else { return false }
+        if Date().timeIntervalSince(date as Date) > 3 {
+            materializing.removeObject(forKey: controller)
+            return false
+        }
+        return true
+    }
+
+    private func clearMaterializing(_ controller: TerminalController) {
+        materializing.removeObject(forKey: controller)
+    }
+
     /// Killed sessions rest here for a grace period before their daemons
     /// actually die. Undo (ghostty's native `undo` action; bind cmd+shift+T
     /// to it) exhumes the session intact: kill was a detach + a deadline,
@@ -1118,11 +1142,13 @@ class VigilSessionManager {
     ) {
         let panes = tab.panes
         guard panes.count > 1 else { return }
+        markMaterializing(controller)
         let layout = tab.layout
         // The default delay exists for windows that have not PRESENTED yet
         // (splits against an unhosted surface drop); mounting into a live
         // window passes 0 and splits land on the next runloop tick.
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            defer { self?.clearMaterializing(controller) }
             guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else {
                 self?.vlog("resurrect: splits DROPPED (no anchor surface)")
                 return
@@ -2048,6 +2074,9 @@ class VigilSessionManager {
         guard let first = parts.first else { return nil }
         let base = URL(fileURLWithPath: String(first)).lastPathComponent
         if base.hasPrefix("-") { return nil }
+        // "ssh: /path/ctl [mux]" and friends: daemons that rewrite argv0
+        // with a colon are background machinery, never the pane's program.
+        if base.hasSuffix(":") { return nil }
         let noise: Set<String> = ["fish", "bash", "zsh", "sh", "login", "caffeinate"]
         if noise.contains(base) { return nil }
         let interpreters: Set<String> = ["node", "python", "python3", "ruby", "bun", "deno", "tsx"]
@@ -2073,10 +2102,25 @@ class VigilSessionManager {
         }
     }
 
-    /// The deepest interesting process of one pane (its "program"): last
-    /// tree line with a label, so `fish → claude` reads claude and
-    /// `fish → bun dev` reads bun. nil = just a shell.
+    /// One pane's "program": what the user actually SEES. The deep
+    /// foreground process (pidfile line 3, the tty's e_tpgid) wins; only
+    /// when it has no label (a shell at its prompt) does the deepest
+    /// interesting descendant speak, so a background ssh mux or stray
+    /// daemon in the tree never masquerades as the pane's program.
     func paneProgram(_ pane: String) -> String? {
+        let lines = paneFileLines(pane, "tree")
+        guard !lines.isEmpty else { return nil }
+
+        let pidLines = paneFileLines(pane, "pid")
+        if pidLines.count >= 3,
+           let fg = Int(pidLines[2].trimmingCharacters(in: .whitespaces)) {
+            for line in lines.dropFirst() {
+                let parts = line.split(separator: "\t", maxSplits: 1)
+                guard parts.count == 2, Int(parts[0]) == fg else { continue }
+                if let label = Self.processLabel(String(parts[1])) { return label }
+                break
+            }
+        }
         var out: String?
         for argv in paneCommands(pane, "tree") {
             if let label = Self.processLabel(argv) { out = label }
@@ -2362,7 +2406,25 @@ class VigilSessionManager {
                     let ids = Set(idList)
                     if let member = memberHosting(ids) {
                         usedMembers.insert(ObjectIdentifier(member))
-                        tabs.append(liveTabRow(member, index: index))
+                        if isMaterializing(member) {
+                            // Mid-materialization the capture IS the shape:
+                            // the half-built tree would flash 1 pane, then N.
+                            // Same row ids (attach ids), so nothing jumps.
+                            var panes = tab.panes.enumerated().map {
+                                capturedPaneRow($1, session: name, index: $0, tab: index, isDock: false)
+                            }
+                            panes += (tab.dock?.panes ?? []).enumerated().map {
+                                capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
+                            }
+                            tabs.append(SidebarTab(
+                                id: "\(name)-t\(index)",
+                                title: tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
+                                index: index,
+                                panes: panes,
+                                anchor: idList.first))
+                        } else {
+                            tabs.append(liveTabRow(member, index: index))
+                        }
                     } else if !ids.isEmpty, ids.allSatisfy({ !live.contains($0) }) {
                         var panes = tab.panes.enumerated().map {
                             capturedPaneRow($1, session: name, index: $0, tab: index, isDock: false)
