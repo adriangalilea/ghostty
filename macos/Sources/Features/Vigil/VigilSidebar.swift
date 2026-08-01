@@ -182,6 +182,14 @@ final class VigilSidebarModel: ObservableObject {
         let kind: Kind
     }
 
+    /// A session whose whole content is one bare shell says everything in
+    /// its own row; a child row would be pure noise.
+    static func hidesChildren(_ row: VigilSessionManager.SidebarSessionRow) -> Bool {
+        guard row.tabs.count == 1, let tab = row.tabs.first,
+              tab.panes.count == 1, let pane = tab.panes.first else { return false }
+        return pane.program == nil && pane.state == nil && !pane.isDock
+    }
+
     /// Single-tab sessions skip the tab level: their panes hang directly
     /// off the session row (a tab row would be pure noise).
     var visibleItems: [NavItem] {
@@ -189,6 +197,7 @@ final class VigilSidebarModel: ObservableObject {
         for row in rows {
             out.append(NavItem(id: row.id, kind: .session(row.id)))
             guard !collapsedSessions.contains(row.id) else { continue }
+            guard !Self.hidesChildren(row) else { continue }
             if row.tabs.count == 1, let tab = row.tabs.first {
                 for pane in tab.panes {
                     out.append(NavItem(
@@ -261,246 +270,6 @@ final class VigilSidebarModel: ObservableObject {
         case .tab(_, _, let id): collapsedTabs.remove(id)
         case .pane: break
         }
-    }
-}
-
-struct VigilSidebarView: View {
-    @ObservedObject var model: VigilSidebarModel
-    @State private var hovered: String?
-
-    private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    ForEach(model.rows) { row in
-                        sessionRows(row)
-                    }
-                }
-                .padding(.vertical, 6)
-                .padding(.horizontal, 6)
-            }
-            .onChange(of: model.selection) { selection in
-                if let selection { proxy.scrollTo(selection) }
-            }
-        }
-        .onReceive(ticker) { _ in model.refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.stateDidChange)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh() }
-    }
-
-    // MARK: Rows
-
-    @ViewBuilder
-    private func sessionRows(_ row: VigilSessionManager.SidebarSessionRow) -> some View {
-        let collapsed = model.collapsedSessions.contains(row.id)
-        sessionRow(row, collapsed: collapsed)
-            .id(row.id)
-        if !collapsed {
-            if row.tabs.count == 1, let tab = row.tabs.first {
-                ForEach(tab.panes) { pane in
-                    paneRow(pane, session: row.id, tab: tab, indent: 1)
-                }
-            } else {
-                ForEach(row.tabs) { tab in
-                    tabRow(tab, session: row.id)
-                    if !model.collapsedTabs.contains(tab.id) {
-                        ForEach(tab.panes) { pane in
-                            paneRow(pane, session: row.id, tab: tab, indent: 2)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func sessionRow(_ row: VigilSessionManager.SidebarSessionRow, collapsed: Bool) -> some View {
-        let id = row.id
-        return HStack(spacing: 5) {
-            chevron(collapsed: collapsed) {
-                if collapsed { model.collapsedSessions.remove(id) }
-                else { model.collapsedSessions.insert(id) }
-            }
-            Text(row.emoji ?? "•")
-                .font(.system(size: 11))
-                .frame(minWidth: 14)
-            Text(row.label)
-                .font(.system(size: 12, weight: row.isFront ? .semibold : .medium))
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            attentionBadge(row.attention)
-            if row.stateTag != "live" {
-                Text(row.stateTag)
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-            }
-            // Survival class, the titlebar's language: infinity = endures,
-            // hourglass = dies on explicit close. Right-click to flip.
-            Image(systemName: row.persistent ? "infinity" : "hourglass")
-                .font(.system(size: 8, weight: .semibold))
-                .foregroundColor(row.persistent ? .teal : Color.secondary.opacity(0.6))
-            stateDot(collapsed ? row.agg : sessionOwnDot(row))
-        }
-        .padding(.vertical, 5)
-        .padding(.horizontal, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(rowBackground(
-            selected: model.selection == id,
-            hovered: hovered == id,
-            front: row.isFront))
-        .contentShape(Rectangle())
-        .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
-        .onTapGesture {
-            model.activate(.init(id: id, kind: .session(id)))
-        }
-        .onDrag {
-            model.beginDrag(id)
-            return NSItemProvider(object: id as NSString)
-        }
-        .onDrop(of: [UTType.text], delegate: VigilSessionDrop(target: id, model: model))
-        .contextMenu {
-            Button(row.persistent
-                ? "Make Ephemeral (dies on explicit close)"
-                : "Make Persistent (survives quit and reboot)") {
-                VigilSessionManager.shared.setPersistent(name: id, !row.persistent)
-            }
-            Button("Rename…") { VigilIdentity.editModal(name: id) }
-            Divider()
-            Button("Kill…", role: .destructive) {
-                VigilSessionManager.shared.killWithConfirm(name: id)
-            }
-        }
-        .help("\(row.label) (\(row.id)) · \(row.stateTag) · \(row.persistent ? "persistent" : "ephemeral")")
-    }
-
-    /// An EXPANDED session row keeps its rollup dot too: the children show
-    /// detail, the parent still answers "does anything in here need me".
-    private func sessionOwnDot(_ row: VigilSessionManager.SidebarSessionRow) -> VigilSessionManager.AgentState? {
-        row.agg
-    }
-
-    private func tabRow(_ tab: VigilSessionManager.SidebarTab, session: String) -> some View {
-        let collapsed = model.collapsedTabs.contains(tab.id)
-        return HStack(spacing: 5) {
-            chevron(collapsed: collapsed) {
-                if collapsed { model.collapsedTabs.remove(tab.id) }
-                else { model.collapsedTabs.insert(tab.id) }
-            }
-            Image(systemName: tab.cold ? "moon.zzz" : "rectangle.on.rectangle")
-                .font(.system(size: 8))
-                .foregroundColor(.secondary)
-            Text(tab.title)
-                .font(.system(size: 11))
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            if collapsed { stateDot(tab.panes.compactMap(\.state).max()) }
-        }
-        .opacity(tab.cold ? 0.75 : 1)
-        .padding(.vertical, 4)
-        .padding(.horizontal, 5)
-        .padding(.leading, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(rowBackground(
-            selected: model.selection == tab.id,
-            hovered: hovered == tab.id,
-            front: false))
-        .contentShape(Rectangle())
-        .onHover { inside in hovered = inside ? tab.id : (hovered == tab.id ? nil : hovered) }
-        .onTapGesture {
-            model.activate(.init(id: tab.id, kind: .tab(name: session, anchor: tab.anchor, id: tab.id)))
-        }
-        .id(tab.id)
-        .help(tab.cold ? "Cold tab: its processes run in their daemons; click to swap it into this window." : tab.title)
-    }
-
-    private func paneRow(
-        _ pane: VigilSessionManager.SidebarPane,
-        session: String,
-        tab: VigilSessionManager.SidebarTab,
-        indent: Int
-    ) -> some View {
-        let id = "\(tab.id)#\(pane.id)"
-        return HStack(spacing: 5) {
-            Image(systemName: pane.isDock ? "sidebar.right" : "terminal")
-                .font(.system(size: 8))
-                .foregroundColor(.secondary)
-            Text(pane.title)
-                .font(.system(size: 11))
-                .foregroundColor(.primary.opacity(0.85))
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            stateDot(pane.state)
-        }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 5)
-        .padding(.leading, CGFloat(14 * indent))
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(rowBackground(
-            selected: model.selection == id,
-            hovered: hovered == id,
-            front: false))
-        .contentShape(Rectangle())
-        .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
-        .onTapGesture {
-            model.activate(.init(id: id, kind: .pane(name: session, paneId: pane.paneId)))
-        }
-        .id(id)
-    }
-
-    // MARK: Atoms
-
-    /// A real hitbox (20×20, full shape), not an 8pt glyph.
-    private func chevron(collapsed: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                .font(.system(size: 8, weight: .semibold))
-                .foregroundColor(.secondary)
-                .frame(width: 20, height: 20)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    @ViewBuilder
-    private func stateDot(_ state: VigilSessionManager.AgentState?) -> some View {
-        if let color = dotColor(state) {
-            Circle().fill(color).frame(width: 7, height: 7)
-        }
-    }
-
-    private func dotColor(_ state: VigilSessionManager.AgentState?) -> Color? {
-        switch state {
-        case .blocked: return .red
-        case .working: return .yellow
-        case .done: return .teal
-        case .idle: return Color.secondary.opacity(0.45)
-        case nil: return nil
-        }
-    }
-
-    @ViewBuilder
-    private func attentionBadge(_ attention: VigilSessionManager.Attention) -> some View {
-        switch attention {
-        case .input:
-            Image(systemName: "bell.fill")
-                .font(.system(size: 8))
-                .foregroundColor(.orange)
-        case .done:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 8))
-                .foregroundColor(.teal)
-        case .none:
-            EmptyView()
-        }
-    }
-
-    private func rowBackground(selected: Bool, hovered: Bool, front: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 5)
-            .fill(selected
-                ? Color.accentColor.opacity(0.25)
-                : hovered ? Color.primary.opacity(0.10)
-                : front ? Color.primary.opacity(0.06) : Color.clear)
     }
 }
 

@@ -2268,7 +2268,8 @@ class VigilSessionManager {
     struct SidebarPane: Identifiable, Equatable {
         let id: String            // attach id, or a synthetic id for daemon-less panes
         let paneId: String?       // vigild daemon id when daemon-backed
-        let title: String         // program (argv truth) or surface title
+        let title: String         // display: program (argv truth) or surface title
+        let program: String?      // the argv truth alone; nil = just a shell
         let state: AgentState?
         let isDock: Bool
     }
@@ -2314,23 +2315,31 @@ class VigilSessionManager {
                 id: paneId ?? "view-\(ObjectIdentifier(view).hashValue)",
                 paneId: paneId,
                 title: title,
+                program: program,
                 state: paneId.flatMap { paneDisplayState($0, in: session) },
                 isDock: isDock)
         }
 
         func capturedPaneRow(_ pane: Pane, session: String, index: Int, tab: Int, isDock: Bool) -> SidebarPane {
-            let paneId = pane.command.flatMap { cmd -> String? in
-                guard cmd.hasPrefix(Self.attachSentinel) else { return nil }
-                return String(cmd.dropFirst(Self.attachSentinel.count))
-            }
-            let title = paneId.flatMap { paneProgram($0) }
+            let paneId = self.paneId(of: pane)
+            let program = paneId.flatMap { paneProgram($0) }
+            let title = program
                 ?? URL(fileURLWithPath: pane.cwd).lastPathComponent
             return SidebarPane(
                 id: paneId ?? "captured-\(session)-\(tab)-\(index)\(isDock ? "-d" : "")",
                 paneId: paneId,
                 title: title,
+                program: program,
                 state: paneId.flatMap { paneDisplayState($0, in: session) },
                 isDock: isDock)
+        }
+
+        /// A tab's skim label: WHERE it lives (cwd basename), never an echo
+        /// of its first pane's program (the pane rows already say that).
+        func tabTitle(cwd: String?, fallback: String) -> String {
+            guard let cwd, !cwd.isEmpty else { return fallback }
+            let base = URL(fileURLWithPath: cwd).lastPathComponent
+            return base.isEmpty ? fallback : base
         }
 
         var rows: [SidebarSessionRow] = []
@@ -2348,12 +2357,12 @@ class VigilSessionManager {
                     if let dock = dockMap.object(forKey: controller) {
                         panes += dock.views.map { paneRow(view: $0, session: name, isDock: true) }
                     }
-                    let windowTitle = controller.window?.title ?? ""
-                    let title = windowTitle.isEmpty
-                        ? (panes.first?.title ?? "tab \(index + 1)")
-                        : windowTitle
+                    let cwd = controller.focusedSurface?.pwd
+                        ?? controller.surfaceTree.root?.leftmostLeaf().pwd
                     tabs.append(SidebarTab(
-                        id: "\(name)-t\(index)", title: title, index: index, panes: panes,
+                        id: "\(name)-t\(index)",
+                        title: tabTitle(cwd: cwd, fallback: "tab \(index + 1)"),
+                        index: index, panes: panes,
                         anchor: panes.first(where: { $0.paneId != nil })?.paneId))
                 }
                 // COLD tabs: captured, none of their panes live anywhere
@@ -2371,7 +2380,7 @@ class VigilSessionManager {
                     }
                     tabs.append(SidebarTab(
                         id: "\(name)-c\(index)",
-                        title: panes.first?.title ?? "tab \(index + 1)",
+                        title: tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                         index: index,
                         panes: panes,
                         anchor: ids.first,
@@ -2385,7 +2394,7 @@ class VigilSessionManager {
                     }
                     tabs.append(SidebarTab(
                         id: "\(name)-t\(index)",
-                        title: panes.first?.title ?? "tab \(index + 1)",
+                        title: tabTitle(cwd: tree.root?.leftmostLeaf().pwd, fallback: "tab \(index + 1)"),
                         index: index,
                         panes: panes,
                         anchor: panes.first(where: { $0.paneId != nil })?.paneId))
@@ -2400,7 +2409,7 @@ class VigilSessionManager {
                     }
                     tabs.append(SidebarTab(
                         id: "\(name)-t\(index)",
-                        title: panes.first?.title ?? "tab \(index + 1)",
+                        title: tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                         index: index,
                         panes: panes,
                         anchor: panes.first(where: { $0.paneId != nil })?.paneId,
