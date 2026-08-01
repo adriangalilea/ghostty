@@ -14,19 +14,70 @@ final class VigilBars {
     private var keyMonitor: Any?
 
     private init() {
-        // ⌘⇧B: summon the keyboard into the sidebar (shows it if hidden);
-        // pressed again while it holds the keyboard, hands focus back to
-        // the terminal. A LOCAL monitor: app-internal, no Accessibility.
+        // ONE local monitor (app-internal, no Accessibility) is the modal
+        // seam: the terminal owns every key, so stepping out needs an
+        // interceptor that fires BEFORE the pty ever sees the event.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command, .shift],
-                  event.keyCode == 11 // B
-            else { return event }
-            MainActor.assumeIsolated { VigilBars.shared.focusSidebar() }
-            return nil
+            MainActor.assumeIsolated { VigilBars.shared.route(event) }
         }
     }
 
-    /// The keyboard door into the left bar.
+    // MARK: Control mode (step OUT of the terminal, helix-style)
+
+    /// ⇧Esc toggles it from anywhere (plain Esc stays the terminal's).
+    /// Entering: the sidebar reveals, wears the yellow ring (input is
+    /// grabbed), and the jump labels appear - the labels ARE the mode.
+    /// Landing anywhere hands input straight back to the terminal.
+    private(set) var controlMode = false
+    private weak var controlHost: VigilSidebarHost?
+
+    private func route(_ event: NSEvent) -> NSEvent? {
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if event.keyCode == 53, mods == [.shift] { // ⇧Esc
+            toggleControlMode()
+            return nil
+        }
+        if mods == [.command, .shift], event.keyCode == 11 { // ⌘⇧B
+            focusSidebar()
+            return nil
+        }
+        guard controlMode, let host = controlHost else { return event }
+        // ⌘ combos keep their meaning even in control mode (close, quit…).
+        if mods.contains(.command) { return event }
+        host.keyDown(with: event)
+        return nil
+    }
+
+    func toggleControlMode() {
+        controlMode ? exitControlMode() : enterControlMode()
+    }
+
+    func enterControlMode() {
+        guard let window = NSApp.keyWindow,
+              let controller = window.windowController as? TerminalController,
+              let container = controller.terminalViewContainer else { return }
+        if !sidebarVisible { sidebarVisible = true }
+        guard let host = container.subviews.compactMap({ $0 as? VigilSidebarHost }).first else { return }
+        controlHost = host
+        controlMode = true
+        host.setControlActive(true)
+        window.makeFirstResponder(host)
+        host.model.ensureSelection()
+        host.model.enterHintMode()
+        host.model.onLeaveControl = { [weak self] in self?.exitControlMode() }
+    }
+
+    func exitControlMode() {
+        guard controlMode else { return }
+        controlMode = false
+        controlHost?.model.onLeaveControl = nil
+        controlHost?.model.exitHintMode()
+        controlHost?.setControlActive(false)
+        controlHost?.model.returnFocus?()
+        controlHost = nil
+    }
+
+    /// The keyboard door into the left bar (nav without hint labels).
     func focusSidebar() {
         guard let window = NSApp.keyWindow,
               let controller = window.windowController as? TerminalController,

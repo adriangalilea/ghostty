@@ -55,6 +55,13 @@ final class VigilSidebarHost: NSVisualEffectView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Control mode's visible affordance: the ring says "input is grabbed".
+    func setControlActive(_ active: Bool) {
+        wantsLayer = true
+        layer?.borderWidth = active ? 2 : 0
+        layer?.borderColor = NSColor.systemYellow.withAlphaComponent(0.55).cgColor
+    }
+
     override var acceptsFirstResponder: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
@@ -65,9 +72,16 @@ final class VigilSidebarHost: NSVisualEffectView {
     override func keyDown(with event: NSEvent) {
         if model.hintMode {
             switch event.keyCode {
-            case 53: model.exitHintMode()   // esc
-            case 36: model.commitHint()     // return: commit ambiguous exact
+            case 53: // esc: out of hints, and out of control mode with them
+                model.exitHintMode()
+                model.onLeaveControl?()
+            case 36: // return: commit the typed hint, else the selection
+                model.hintBuffer.isEmpty ? model.activateSelection() : model.commitHint()
             case 41: model.jumpAttention()  // ; = attention head
+            case 126: model.move(-1)
+            case 125: model.move(1)
+            case 123: model.collapseSelection()
+            case 124: model.expandSelection()
             default:
                 if let chars = event.charactersIgnoringModifiers?.lowercased(),
                    chars.count == 1, chars.first!.isLetter {
@@ -86,7 +100,9 @@ final class VigilSidebarHost: NSVisualEffectView {
         case 36: model.activateSelection()  // return
         case 3: model.enterHintMode()       // f = jump hints (helix gw)
         case 41: model.jumpAttention()      // ; = attention head
-        case 53: model.returnFocus?()       // esc
+        case 53:                            // esc: back to the terminal
+            model.returnFocus?()
+            model.onLeaveControl?()
         default: super.keyDown(with: event)
         }
     }
@@ -105,6 +121,9 @@ final class VigilSidebarModel: ObservableObject {
         didSet { UserDefaults.standard.set(Array(collapsedTabs), forKey: "vigil.sidebar.collapsedTabs") }
     }
     var returnFocus: (() -> Void)?
+    /// Set while control mode owns the keyboard: any landing (hint jump,
+    /// click, enter, esc) calls it to hand input back to the terminal.
+    var onLeaveControl: (() -> Void)?
     /// The window this sidebar lives in: the viewport that shapeshifts.
     weak var hostController: TerminalController?
 
@@ -249,13 +268,17 @@ final class VigilSidebarModel: ObservableObject {
     /// shapeshifts into this window.
     func jumpAttention() {
         exitHintMode()
-        guard let name = VigilSessionManager.shared.mostUrgentName else { return }
+        guard let name = VigilSessionManager.shared.mostUrgentName else {
+            NSSound.beep()
+            return
+        }
         selection = name
         if let host = hostController {
             VigilSessionManager.shared.shapeshift(in: host, to: name)
         } else {
             VigilSessionManager.shared.open(name: name)
         }
+        onLeaveControl?()
     }
 
     // MARK: Drag reorder (session rows; order shared with the overview)
@@ -360,6 +383,7 @@ final class VigilSidebarModel: ObservableObject {
         case .pane(let name, let paneId):
             manager.activatePane(name: name, paneId: paneId, in: hostController)
         }
+        onLeaveControl?() // landing hands the keyboard back
     }
 
     func collapseSelection() {
