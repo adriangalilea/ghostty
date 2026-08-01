@@ -384,17 +384,24 @@ struct VigilStateDot: View {
     var body: some View {
         switch state {
         case .working:
-            Circle()
-                .trim(from: 0.2, to: 1)
-                .stroke(Color.yellow, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
-                .frame(width: 7, height: 7)
-                .rotationEffect(.degrees(spin ? 360 : 0))
-                .onAppear {
-                    withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
-                        spin = true
-                    }
+            // A FILLED spinner: faint yellow body (so it holds its own
+            // next to solid dots in a cluster) with the bright arc
+            // spinning on top.
+            ZStack {
+                Circle().fill(Color.yellow.opacity(0.3))
+                Circle()
+                    .trim(from: 0.25, to: 1)
+                    .stroke(Color.yellow, style: StrokeStyle(lineWidth: 1.8, lineCap: .round))
+                    .padding(0.9)
+                    .rotationEffect(.degrees(spin ? 360 : 0))
+            }
+            .frame(width: 7, height: 7)
+            .onAppear {
+                withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
+                    spin = true
                 }
-                .onDisappear { spin = false }
+            }
+            .onDisappear { spin = false }
         case .blocked:
             Circle()
                 .fill(Color.orange)
