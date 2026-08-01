@@ -2311,10 +2311,22 @@ class VigilSessionManager {
         let label: String
         let stateTag: String      // live / floating / detached / asleep
         let attention: Attention
-        let agg: AgentState?
+        /// Distinct descendant states, priority-ordered (blocked first),
+        /// idle only when it is the only one: the collapsed row's cluster.
+        let states: [AgentState]
         let persistent: Bool
         let isFront: Bool
         let tabs: [SidebarTab]
+    }
+
+    /// The cluster rule, shared by session and tab rollups.
+    static func distinctStates(_ states: [AgentState]) -> [AgentState] {
+        var out: [AgentState] = []
+        for state: AgentState in [.blocked, .working, .done] where states.contains(state) {
+            out.append(state)
+        }
+        if out.isEmpty, states.contains(.idle) { out.append(.idle) }
+        return out
     }
 
     /// One immutable projection of everything the left bar shows: every
@@ -2490,7 +2502,7 @@ class VigilSessionManager {
                 label: session.label,
                 stateTag: tag,
                 attention: session.attention,
-                agg: tabs.flatMap(\.panes).compactMap(\.state).max(),
+                states: Self.distinctStates(tabs.flatMap(\.panes).compactMap(\.state)),
                 persistent: session.persistent,
                 isFront: name == frontName,
                 tabs: tabs))

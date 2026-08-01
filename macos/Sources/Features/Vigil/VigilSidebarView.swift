@@ -176,7 +176,11 @@ struct VigilSidebarView: View {
             // is displayed-or-not, and the front tint + filled tab icons
             // already say that. Full state stays in the tooltip.
             classGlyph(row.persistent)
-            dotSlot(row.agg)
+            // Expanded, the children speak for themselves; collapsed, the
+            // parent peeks: one dot per distinct state, overlapped.
+            Group {
+                if collapsed { dotCluster(row.states) } else { dotSlot(nil) }
+            }
         }
         .frame(height: 26)
         .padding(.horizontal, 5)
@@ -238,7 +242,13 @@ struct VigilSidebarView: View {
             }
             Spacer(minLength: 4)
             Color.clear.frame(width: Grid.classSlot, height: 1)
-            dotSlot(collapsed ? tab.panes.compactMap(\.state).max() : nil)
+            Group {
+                if collapsed {
+                    dotCluster(VigilSessionManager.distinctStates(tab.panes.compactMap(\.state)))
+                } else {
+                    dotSlot(nil)
+                }
+            }
         }
         .frame(height: 22)
         .padding(.leading, Grid.indent)
@@ -334,6 +344,22 @@ struct VigilSidebarView: View {
     private func dotSlot(_ state: VigilSessionManager.AgentState?) -> some View {
         VigilStateDot(state: state)
             .frame(width: Grid.dot)
+    }
+
+    /// The collapsed rollup: one dot per distinct descendant state,
+    /// overlapped (negative gap), blocked leftmost so the most urgent
+    /// reads first. Grows inward; the right rail edge never moves.
+    private func dotCluster(_ states: [VigilSessionManager.AgentState]) -> some View {
+        HStack(spacing: -3) {
+            if states.isEmpty {
+                Color.clear.frame(width: 7, height: 7)
+            } else {
+                ForEach(states, id: \.rawValue) { state in
+                    VigilStateDot(state: state)
+                }
+            }
+        }
+        .frame(minWidth: Grid.dot, alignment: .trailing)
     }
 
     private func rowBackground(selected: Bool, hovered: Bool, front: Bool) -> some View {
