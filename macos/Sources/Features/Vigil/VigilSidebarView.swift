@@ -339,8 +339,10 @@ struct VigilSidebarView: View {
 
     private func hintFade(_ id: String) -> Double {
         guard model.hintMode else { return 1 }
-        guard let label = model.hintLabels[id] else { return 0.3 }
-        return label.hasPrefix(model.hintBuffer) ? 1 : 0.3
+        // Containers carry no label (leaves are the targets): never dim
+        // them. A labeled row dims once it stops matching the buffer.
+        guard let label = model.hintLabels[id] else { return 1 }
+        return label.hasPrefix(model.hintBuffer) ? 1 : 0.35
     }
 
     // MARK: Atoms

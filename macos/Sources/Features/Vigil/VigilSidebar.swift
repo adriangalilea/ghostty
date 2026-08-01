@@ -184,17 +184,18 @@ final class VigilSidebarModel: ObservableObject {
 
     // MARK: Jump hints (helix gw for the tree)
 
-    /// Positional labels over every visible row: session `a`, its first
-    /// tab `aa`, that tab's first split `aaa` (home-row alphabet). Typing
-    /// walks the tree; a unique match jumps immediately, an ambiguous
-    /// exact match (a IS a prefix of aa by design) commits after a beat
-    /// or on return. `;` jumps to the head of the attention FIFO.
+    /// Positional labels, PLAIN alphabetical in list order (first session
+    /// `a`, second `b`), assigned to the actual JUMP TARGETS: leaves.
+    /// Non-branching chains collapse (a session with one pane is just
+    /// `a`), so the label set is prefix-free by construction and typing
+    /// never needs timers: the moment the input matches exactly ONE
+    /// candidate, even mid-label, it fires. Nothing auto-selects while
+    /// ambiguity remains; an invalid letter beeps and is ignored.
     @Published var hintMode = false
     @Published var hintBuffer = ""
     @Published private(set) var hintLabels: [String: String] = [:]
-    private var hintCommitWork: DispatchWorkItem?
 
-    private static let hintAlphabet = Array("asdfghjklqwertyuiopzxcvbnm")
+    private static let hintAlphabet = Array("abcdefghijklmnopqrstuvwxyz")
 
     private static func hintLetter(_ index: Int) -> String {
         index < hintAlphabet.count ? String(hintAlphabet[index]) : "z"
@@ -204,19 +205,30 @@ final class VigilSidebarModel: ObservableObject {
         var labels: [String: String] = [:]
         for (i, row) in rows.enumerated() {
             let s = Self.hintLetter(i)
-            labels[row.id] = s
-            guard !collapsedSessions.contains(row.id) else { continue }
-            if row.tabs.count == 1, let tab = row.tabs.first {
-                for (k, pane) in tab.panes.enumerated() {
-                    labels["\(tab.id)#\(pane.id)"] = s + Self.hintLetter(k)
+            // Collapsed or childless: the session row IS the leaf.
+            if collapsedSessions.contains(row.id) || row.tabs.isEmpty {
+                labels[row.id] = s
+                continue
+            }
+            func labelPanes(_ tab: VigilSessionManager.SidebarTab, prefix: String) {
+                if tab.panes.count == 1, let pane = tab.panes.first {
+                    labels["\(tab.id)#\(pane.id)"] = prefix
+                } else {
+                    for (k, pane) in tab.panes.enumerated() {
+                        labels["\(tab.id)#\(pane.id)"] = prefix + Self.hintLetter(k)
+                    }
                 }
+            }
+            if row.tabs.count == 1, let tab = row.tabs.first {
+                labelPanes(tab, prefix: s)
                 continue
             }
             for (j, tab) in row.tabs.enumerated() {
-                labels[tab.id] = s + Self.hintLetter(j)
-                guard !collapsedTabs.contains(tab.id) else { continue }
-                for (k, pane) in tab.panes.enumerated() {
-                    labels["\(tab.id)#\(pane.id)"] = s + Self.hintLetter(j) + Self.hintLetter(k)
+                let t = s + Self.hintLetter(j)
+                if collapsedTabs.contains(tab.id) || tab.panes.isEmpty {
+                    labels[tab.id] = t
+                } else {
+                    labelPanes(tab, prefix: t)
                 }
             }
         }
@@ -226,35 +238,30 @@ final class VigilSidebarModel: ObservableObject {
     }
 
     func exitHintMode() {
-        hintCommitWork?.cancel()
         hintMode = false
         hintBuffer = ""
         hintLabels = [:]
     }
 
     func hintType(_ char: String) {
-        hintBuffer += char
-        hintCommitWork?.cancel()
-        let matches = hintLabels.filter { $0.value.hasPrefix(hintBuffer) }
-        guard !matches.isEmpty else { exitHintMode(); return }
-        guard let exact = matches.first(where: { $0.value == hintBuffer }) else { return }
-        if matches.count == 1 {
-            activateHint(exact.key)
+        let candidate = hintBuffer + char
+        let matches = hintLabels.filter { $0.value.hasPrefix(candidate) }
+        guard !matches.isEmpty else {
+            NSSound.beep() // invalid letter: ignored, buffer stands
             return
         }
-        // `a` is deliberately a prefix of `aa`: an exact match with live
-        // extensions commits after a beat, so a pause means "this one" and
-        // fast typing keeps descending.
-        let work = DispatchWorkItem { [weak self] in self?.activateHint(exact.key) }
-        hintCommitWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+        hintBuffer = candidate
+        if matches.count == 1, let only = matches.first {
+            activateHint(only.key)
+        }
     }
 
     func commitHint() {
-        if let exact = hintLabels.first(where: { $0.value == hintBuffer }) {
-            activateHint(exact.key)
+        let matches = hintLabels.filter { $0.value.hasPrefix(hintBuffer) }
+        if matches.count == 1, let only = matches.first {
+            activateHint(only.key)
         } else {
-            exitHintMode()
+            NSSound.beep()
         }
     }
 
