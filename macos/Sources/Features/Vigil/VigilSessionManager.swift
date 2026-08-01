@@ -1007,7 +1007,12 @@ class VigilSessionManager {
             NSApp.activate(ignoringOtherApps: true)
 
         case .detached(let trees):
-            vlog("open: '\(name)' detached tabs=\(trees.count) -> re-embed")
+            // ONE window, first live tree mounted, the rest released to
+            // COLD (captures + daemons; the sidebar mounts them on click).
+            // The lazy rule is universal: launch, overview and shapeshift
+            // all materialize the same way, so tabs never "disappear"
+            // between the first open and the first swap.
+            vlog("open: '\(name)' detached tabs=\(trees.count) -> mount first, \(trees.count - 1) cold")
             guard let first = trees.first else {
                 sessions[name]!.state = .asleep
                 open(name: name)
@@ -1018,28 +1023,11 @@ class VigilSessionManager {
             if let dock = detachedDocks[name]?[0] {
                 dockMap.setObject(dock, forKey: controller)
             }
-            let rest = Array(trees.dropFirst())
-            if !rest.isEmpty {
-                // The anchor window presents on the NEXT runloop tick
-                // (scheduleInitialPresentation); a tab added to an
-                // unpresented window is born invisible. Attach after it
-                // is actually up.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                    guard let self else { return }
-                    for (index, tree) in rest.enumerated() {
-                        let tab = TerminalController.vigilNewTab(ghostty, parent: controller, tree: tree)
-                        self.registerMember(tab, name: name)
-                        if let dock = self.detachedDocks[name]?[index + 1] {
-                            self.dockMap.setObject(dock, forKey: tab)
-                        }
-                        self.vlog("open: '\(name)' tab attach window=\(tab.window != nil) grouped=\(tab.window?.tabGroup === controller.window?.tabGroup)")
-                    }
-                    self.detachedDocks[name] = nil
-                    VigilBars.shared.syncAll()
-                }
-            } else {
-                detachedDocks[name] = nil
+            for runtime in (detachedDocks[name] ?? [:]).values
+            where runtime !== dockMap.object(forKey: controller) {
+                runtime.unmount()
             }
+            detachedDocks[name] = nil
             sessions[name]!.state = .embedded
             controller.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -1068,52 +1056,20 @@ class VigilSessionManager {
         /// Splits and subsequent tabs wait for their window to actually
         /// present (next runloop tick); building against an unpresented
         /// window drops splits and births invisible tabs.
-        vlog("resurrect: '\(name)' tabs=\(tabs.count) panes=\(tabs.map(\.panes.count))")
+        vlog("resurrect: '\(name)' tabs=\(tabs.count) panes=\(tabs.map(\.panes.count)) -> mount first, rest cold")
 
-        func materializeDock(_ controller: TerminalController, _ capture: DockCapture?) {
-            materializeDockCapture(controller, capture, configFor: configFor)
-        }
-
-        var firstController: TerminalController?
-        var tabDelay: TimeInterval = 0
-        for tab in tabs {
-            let panes = tab.panes
-            guard !panes.isEmpty else { continue }
-            let firstIndex = min(tab.layout?.firstLeaf ?? 0, panes.count - 1)
-
-            let controller: TerminalController
-            if let parent = firstController?.window {
-                // Regrouped: subsequent tabs join the first tab's window,
-                // staggered behind its presentation. The config already
-                // carries vigil identity, so the newTab path passes it
-                // through without minting a session.
-                tabDelay += 0.3
-                let config = configFor(panes[firstIndex])
-                DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay) { [weak self] in
-                    guard let self else { return }
-                    guard let tabController = TerminalController.newTab(
-                        ghostty, from: parent, withBaseConfig: config) else {
-                        self.vlog("resurrect: '\(name)' tab creation FAILED")
-                        return
-                    }
-                    self.registerMember(tabController, name: name)
-                    self.vlog("resurrect: '\(name)' tab up grouped=\(tabController.window?.tabGroup === parent.tabGroup)")
-                    self.materializeSplits(tabController, tab: tab, configFor: configFor)
-                    materializeDock(tabController, tab.dock)
-                }
-                continue
-            } else {
-                controller = TerminalController.newWindow(
-                    ghostty, withBaseConfig: configFor(panes[firstIndex]))
-                firstController = controller
-            }
-            registerMember(controller, name: name)
-
-            materializeSplits(controller, tab: tab, configFor: configFor)
-            materializeDock(controller, tab.dock)
-        }
+        // ONE window, first tab mounted, the rest COLD (the universal lazy
+        // rule; native tab-windows exist only when made by hand via ⌘T).
+        guard let tab = tabs.first(where: { !$0.panes.isEmpty }) else { return }
+        let panes = tab.panes
+        let firstIndex = min(tab.layout?.firstLeaf ?? 0, panes.count - 1)
+        let controller = TerminalController.newWindow(
+            ghostty, withBaseConfig: configFor(panes[firstIndex]))
+        registerMember(controller, name: name)
+        materializeSplits(controller, tab: tab, configFor: configFor)
+        materializeDockCapture(controller, tab.dock, configFor: configFor)
         sessions[name]!.state = .embedded
-        firstController?.window?.makeKeyAndOrderFront(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -2349,8 +2305,14 @@ class VigilSessionManager {
             var tabs: [SidebarTab] = []
             switch session.state {
             case .embedded:
-                for (index, controller) in members(of: name).enumerated() {
-                    guard !controller.surfaceTree.isEmpty else { continue }
+                // Capture order is THE order: a tab keeps its row (and its
+                // row id, so selection/collapse survive) whether it is
+                // mounted or cold; a swap never reshuffles the tree.
+                let ms = members(of: name)
+                let live = liveAttachIds(of: name)
+                var usedMembers = Set<ObjectIdentifier>()
+
+                func liveTabRow(_ controller: TerminalController, index: Int) -> SidebarTab {
                     var panes = controller.surfaceTree.map {
                         paneRow(view: $0, session: name, isDock: false)
                     }
@@ -2359,32 +2321,50 @@ class VigilSessionManager {
                     }
                     let cwd = controller.focusedSurface?.pwd
                         ?? controller.surfaceTree.root?.leftmostLeaf().pwd
-                    tabs.append(SidebarTab(
+                    return SidebarTab(
                         id: "\(name)-t\(index)",
                         title: tabTitle(cwd: cwd, fallback: "tab \(index + 1)"),
                         index: index, panes: panes,
-                        anchor: panes.first(where: { $0.paneId != nil })?.paneId))
+                        anchor: panes.first(where: { $0.paneId != nil })?.paneId)
                 }
-                // COLD tabs: captured, none of their panes live anywhere
-                // (lazy shapeshift keeps them asleep on purpose); their
-                // daemons run and their state dots stay truthful.
-                let live = liveAttachIds(of: name)
+
+                func memberHosting(_ ids: Set<String>) -> TerminalController? {
+                    guard !ids.isEmpty else { return nil }
+                    for member in ms where !usedMembers.contains(ObjectIdentifier(member)) {
+                        for view in member.surfaceTree {
+                            if let vid = view.vigilAttachId, ids.contains(vid) { return member }
+                        }
+                    }
+                    return nil
+                }
+
                 for (index, tab) in session.tabs.enumerated() {
-                    let ids = (tab.panes + (tab.dock?.panes ?? [])).compactMap { paneId(of: $0) }
-                    guard !ids.isEmpty, ids.allSatisfy({ !live.contains($0) }) else { continue }
-                    var panes = tab.panes.enumerated().map {
-                        capturedPaneRow($1, session: name, index: $0, tab: index, isDock: false)
+                    let idList = tabPaneIds(tab)
+                    let ids = Set(idList)
+                    if let member = memberHosting(ids) {
+                        usedMembers.insert(ObjectIdentifier(member))
+                        tabs.append(liveTabRow(member, index: index))
+                    } else if !ids.isEmpty, ids.allSatisfy({ !live.contains($0) }) {
+                        var panes = tab.panes.enumerated().map {
+                            capturedPaneRow($1, session: name, index: $0, tab: index, isDock: false)
+                        }
+                        panes += (tab.dock?.panes ?? []).enumerated().map {
+                            capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
+                        }
+                        tabs.append(SidebarTab(
+                            id: "\(name)-t\(index)",
+                            title: tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
+                            index: index,
+                            panes: panes,
+                            anchor: idList.first,
+                            cold: true))
                     }
-                    panes += (tab.dock?.panes ?? []).enumerated().map {
-                        capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
-                    }
-                    tabs.append(SidebarTab(
-                        id: "\(name)-c\(index)",
-                        title: tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
-                        index: index,
-                        panes: panes,
-                        anchor: ids.first,
-                        cold: true))
+                }
+                // Members not represented in the captures yet (a fresh ⌘T
+                // between persists): appended, never lost.
+                for (offset, member) in ms.enumerated()
+                where !usedMembers.contains(ObjectIdentifier(member)) && !member.surfaceTree.isEmpty {
+                    tabs.append(liveTabRow(member, index: session.tabs.count + offset))
                 }
             case .floating, .detached:
                 for (index, tree) in liveTrees(session).enumerated() {
@@ -2813,11 +2793,16 @@ class VigilSessionManager {
         return ids
     }
 
-    /// Capture an embedded session WITHOUT losing its COLD tabs: live
-    /// member trees capture normally; previous captures none of whose
-    /// panes are live anywhere carry forward. Cold tabs are deliberate
-    /// (shapeshift mounts lazily, the daemons hold their state); dropping
-    /// one from the capture would strand its daemons for the sweep.
+    /// Every daemon id a captured tab references (panes + dock).
+    func tabPaneIds(_ tab: Tab) -> [String] {
+        (tab.panes + (tab.dock?.panes ?? [])).compactMap { paneId(of: $0) }
+    }
+
+    /// Capture an embedded session WITHOUT losing its COLD tabs and
+    /// WITHOUT reordering: each previous tab keeps its position (captured
+    /// fresh if its panes are live, carried cold otherwise; a mount swap
+    /// must never make rows jump), new live tabs append. Dropping a cold
+    /// tab from the capture would strand its daemons for the sweep.
     private func mergedCapture(name: String) -> [Tab] {
         guard let session = sessions[name] else { return [] }
         var trees: [SplitTree<Ghostty.SurfaceView>] = []
@@ -2828,14 +2813,29 @@ class VigilSessionManager {
             }
             trees.append(member.surfaceTree)
         }
-        var tabs = captureTabs(name: name, trees, docks: docks)
+        let liveTabs = captureTabs(name: name, trees, docks: docks)
         let live = liveAttachIds(of: name)
-        for tab in session.tabs {
-            let ids = (tab.panes + (tab.dock?.panes ?? [])).compactMap { paneId(of: $0) }
-            guard !ids.isEmpty, ids.allSatisfy({ !live.contains($0) }) else { continue }
-            tabs.append(tab)
+
+        var out: [Tab] = []
+        var used = Set<Int>()
+        for prev in session.tabs {
+            let prevIds = Set(tabPaneIds(prev))
+            if let index = liveTabs.indices.first(where: { candidate in
+                !used.contains(candidate)
+                    && !prevIds.isDisjoint(with: Set(tabPaneIds(liveTabs[candidate])))
+            }) {
+                out.append(liveTabs[index])
+                used.insert(index)
+            } else if !prevIds.isEmpty, prevIds.allSatisfy({ !live.contains($0) }) {
+                out.append(prev) // still cold, same position
+            }
+            // else: panes partially live under another tab or gone; the
+            // live capture already represents them.
         }
-        return tabs
+        for index in liveTabs.indices where !used.contains(index) {
+            out.append(liveTabs[index])
+        }
+        return out
     }
 
     /// Captures of EMBEDDED sessions go stale between detaches, and a hard

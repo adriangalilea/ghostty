@@ -68,11 +68,11 @@ struct VigilSidebarView: View {
         .padding(.vertical, 2)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(row.persistent ? Color.teal.opacity(0.07) : Color.clear))
+                .fill(row.persistent ? Color.teal.opacity(0.035) : Color.clear))
         .overlay(alignment: .leading) {
             if row.persistent {
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(Color.teal.opacity(0.45))
+                    .fill(Color.teal.opacity(0.3))
                     .frame(width: 2)
                     .padding(.vertical, 4)
             }
@@ -149,12 +149,16 @@ struct VigilSidebarView: View {
                 if collapsed { model.collapsedTabs.remove(tab.id) }
                 else { model.collapsedTabs.insert(tab.id) }
             }
-            Image(systemName: tab.cold ? "moon.zzz" : "rectangle.on.rectangle")
+            // Same silhouette either way (no layout flash on swap): the
+            // FILLED variant marks the tab the window displays right now,
+            // the outline is a tab resting cold (daemons running).
+            Image(systemName: tab.cold ? "rectangle.on.rectangle" : "rectangle.inset.filled.on.rectangle")
                 .font(.system(size: 9))
-                .foregroundColor(.secondary)
+                .foregroundColor(tab.cold ? .secondary : .primary.opacity(0.8))
                 .frame(width: Grid.icon)
             Text(tab.title)
-                .font(.system(size: 11))
+                .font(.system(size: 11, weight: tab.cold ? .regular : .medium))
+                .foregroundColor(tab.cold ? .secondary : .primary)
                 .lineLimit(1)
             if tab.panes.count > 1 {
                 Text("\(tab.panes.count)")
@@ -168,7 +172,6 @@ struct VigilSidebarView: View {
             Color.clear.frame(width: Grid.classSlot, height: 1)
             dotSlot(collapsed ? tab.panes.compactMap(\.state).max() : nil)
         }
-        .opacity(tab.cold ? 0.7 : 1)
         .frame(height: 22)
         .padding(.leading, Grid.indent)
         .padding(.horizontal, 5)
