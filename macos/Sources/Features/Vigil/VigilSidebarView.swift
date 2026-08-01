@@ -188,7 +188,8 @@ struct VigilSidebarView: View {
         .background(rowBackground(
             selected: model.selection == id,
             hovered: hovered == id,
-            front: row.isFront))
+            front: row.isFront,
+            state: collapsed ? row.states.first : nil))
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
         .onTapGesture {
@@ -257,7 +258,10 @@ struct VigilSidebarView: View {
         .background(rowBackground(
             selected: model.selection == tab.id,
             hovered: hovered == tab.id,
-            front: false))
+            front: false,
+            state: collapsed
+                ? VigilSessionManager.clusterStates(tab.panes.compactMap(\.state)).first
+                : nil))
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? tab.id : (hovered == tab.id ? nil : hovered) }
         .onTapGesture {
@@ -296,7 +300,8 @@ struct VigilSidebarView: View {
         .background(rowBackground(
             selected: model.selection == id,
             hovered: hovered == id,
-            front: false))
+            front: false,
+            state: pane.state))
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
         .onTapGesture {
@@ -364,12 +369,32 @@ struct VigilSidebarView: View {
         .frame(minWidth: Grid.dot, alignment: .trailing)
     }
 
-    private func rowBackground(selected: Bool, hovered: Bool, front: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 5)
-            .fill(selected
-                ? Color.accentColor.opacity(0.25)
-                : hovered ? Color.primary.opacity(0.10)
-                : front ? Color.primary.opacity(0.06) : Color.clear)
+    private func rowBackground(
+        selected: Bool, hovered: Bool, front: Bool,
+        state: VigilSessionManager.AgentState? = nil
+    ) -> some View {
+        ZStack {
+            // The state's whisper, under everything: same collapse logic
+            // as the dots (collapsed parent wears the rollup, expanded
+            // rows wear their own).
+            if let tint = stateTint(state) {
+                RoundedRectangle(cornerRadius: 5).fill(tint)
+            }
+            RoundedRectangle(cornerRadius: 5)
+                .fill(selected
+                    ? Color.accentColor.opacity(0.25)
+                    : hovered ? Color.primary.opacity(0.10)
+                    : front ? Color.primary.opacity(0.06) : Color.clear)
+        }
+    }
+
+    private func stateTint(_ state: VigilSessionManager.AgentState?) -> Color? {
+        switch state {
+        case .blocked: return Color.orange.opacity(0.10)
+        case .working: return Color.yellow.opacity(0.06)
+        case .done: return Color.teal.opacity(0.06)
+        case .idle, nil: return nil
+        }
     }
 }
 
