@@ -2360,14 +2360,14 @@ class VigilSessionManager {
         let tabs: [SidebarTab]
     }
 
-    /// The cluster rule, shared by session and tab rollups.
-    static func distinctStates(_ states: [AgentState]) -> [AgentState] {
-        var out: [AgentState] = []
-        for state: AgentState in [.blocked, .working, .done] where states.contains(state) {
-            out.append(state)
-        }
-        if out.isEmpty, states.contains(.idle) { out.append(.idle) }
-        return out
+    /// The cluster rule, shared by session and tab rollups: one dot PER
+    /// PANE with an active state (two blocked claudes = two orange dots),
+    /// most urgent first, capped at 4; idle panes stay out of the cluster
+    /// unless idle is all there is (then a single idle dot).
+    static func clusterStates(_ states: [AgentState]) -> [AgentState] {
+        let active = states.filter { $0 != .idle }.sorted { $0.rawValue > $1.rawValue }
+        if !active.isEmpty { return Array(active.prefix(4)) }
+        return states.isEmpty ? [] : [.idle]
     }
 
     /// One immutable projection of everything the left bar shows: every
@@ -2543,7 +2543,7 @@ class VigilSessionManager {
                 label: session.label,
                 stateTag: tag,
                 attention: session.attention,
-                states: Self.distinctStates(tabs.flatMap(\.panes).compactMap(\.state)),
+                states: Self.clusterStates(tabs.flatMap(\.panes).compactMap(\.state)),
                 persistent: session.persistent,
                 isFront: name == frontName,
                 tabs: tabs))

@@ -244,7 +244,7 @@ struct VigilSidebarView: View {
             Color.clear.frame(width: Grid.classSlot, height: 1)
             Group {
                 if collapsed {
-                    dotCluster(VigilSessionManager.distinctStates(tab.panes.compactMap(\.state)))
+                    dotCluster(VigilSessionManager.clusterStates(tab.panes.compactMap(\.state)))
                 } else {
                     dotSlot(nil)
                 }
@@ -350,11 +350,13 @@ struct VigilSidebarView: View {
     /// overlapped (negative gap), blocked leftmost so the most urgent
     /// reads first. Grows inward; the right rail edge never moves.
     private func dotCluster(_ states: [VigilSessionManager.AgentState]) -> some View {
-        HStack(spacing: -3) {
+        HStack(spacing: -2) {
             if states.isEmpty {
                 Color.clear.frame(width: 7, height: 7)
             } else {
-                ForEach(states, id: \.rawValue) { state in
+                // Per-PANE dots: duplicates are the point, so identity is
+                // positional, not by state.
+                ForEach(Array(states.enumerated()), id: \.offset) { _, state in
                     VigilStateDot(state: state)
                 }
             }
@@ -391,8 +393,8 @@ struct VigilStateDot: View {
                 Circle().fill(Color.yellow.opacity(0.3))
                 Circle()
                     .trim(from: 0.25, to: 1)
-                    .stroke(Color.yellow, style: StrokeStyle(lineWidth: 1.8, lineCap: .round))
-                    .padding(0.9)
+                    .stroke(Color.yellow, style: StrokeStyle(lineWidth: 1, lineCap: .round))
+                    .padding(0.5)
                     .rotationEffect(.degrees(spin ? 360 : 0))
             }
             .frame(width: 7, height: 7)
