@@ -171,11 +171,10 @@ struct VigilSidebarView: View {
                 .lineLimit(1)
                 .opacity(row.stateTag == "live" ? 1 : 0.85)
             Spacer(minLength: 4)
-            if row.stateTag != "live" {
-                Text(row.stateTag)
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-            }
+            // No "asleep/detached" tag: every session is ALIVE by
+            // construction (daemons carry it); the only honest distinction
+            // is displayed-or-not, and the front tint + filled tab icons
+            // already say that. Full state stays in the tooltip.
             classGlyph(row.persistent)
             dotSlot(row.agg)
         }
@@ -333,22 +332,8 @@ struct VigilSidebarView: View {
     /// Fixed-width dot column: absent state reserves the slot, so the
     /// right rail never wiggles.
     private func dotSlot(_ state: VigilSessionManager.AgentState?) -> some View {
-        Circle()
-            .fill(dotColor(state) ?? Color.clear)
-            .frame(width: 7, height: 7)
+        VigilStateDot(state: state)
             .frame(width: Grid.dot)
-    }
-
-    /// ONE indicator, the dot (no bell/checkmark doubling it): orange =
-    /// blocked on you, yellow = working, teal = done unseen, faint = idle.
-    private func dotColor(_ state: VigilSessionManager.AgentState?) -> Color? {
-        switch state {
-        case .blocked: return .orange
-        case .working: return .yellow
-        case .done: return .teal
-        case .idle: return Color.secondary.opacity(0.45)
-        case nil: return nil
-        }
     }
 
     private func rowBackground(selected: Bool, hovered: Bool, front: Bool) -> some View {
@@ -357,5 +342,50 @@ struct VigilSidebarView: View {
                 ? Color.accentColor.opacity(0.25)
                 : hovered ? Color.primary.opacity(0.10)
                 : front ? Color.primary.opacity(0.06) : Color.clear)
+    }
+}
+
+/// ONE indicator, the dot, and its motion IS the state: a spinning arc =
+/// working (something is literally in motion), a pulsing solid = blocked
+/// on you (it breathes until you answer), solid teal = done unseen,
+/// faint solid = idle. Identical 7pt footprint in every form: state
+/// changes never move layout.
+struct VigilStateDot: View {
+    let state: VigilSessionManager.AgentState?
+    @State private var spin = false
+    @State private var pulse = false
+
+    var body: some View {
+        switch state {
+        case .working:
+            Circle()
+                .trim(from: 0.2, to: 1)
+                .stroke(Color.yellow, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+                .frame(width: 7, height: 7)
+                .rotationEffect(.degrees(spin ? 360 : 0))
+                .onAppear {
+                    withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
+                        spin = true
+                    }
+                }
+                .onDisappear { spin = false }
+        case .blocked:
+            Circle()
+                .fill(Color.orange)
+                .frame(width: 7, height: 7)
+                .opacity(pulse ? 0.35 : 1)
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                        pulse = true
+                    }
+                }
+                .onDisappear { pulse = false }
+        case .done:
+            Circle().fill(Color.teal).frame(width: 7, height: 7)
+        case .idle:
+            Circle().fill(Color.secondary.opacity(0.45)).frame(width: 7, height: 7)
+        case nil:
+            Color.clear.frame(width: 7, height: 7)
+        }
     }
 }
