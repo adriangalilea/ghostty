@@ -96,7 +96,33 @@ final class VigilSidebarModel: ObservableObject {
         refresh()
     }
 
+    private var lastRefresh: Date = .distantPast
+    private var refreshQueued = false
+    private var refreshCount = 0
+
+    /// Coalesced + throttled: any number of triggers (ticker, state
+    /// notifications, bar syncs) collapse into at most ~4 snapshots/s.
+    /// The snapshot reads per-pane files; an unthrottled storm once
+    /// saturated the main thread and starved the runloop so hard that
+    /// launch restore never ran (2026-08-01).
     func refresh() {
+        refreshCount += 1
+        if refreshCount % 500 == 0 {
+            VigilSessionManager.shared.vlog("!! sidebar refresh storm tripwire: count=\(refreshCount)")
+        }
+        let now = Date()
+        guard now.timeIntervalSince(lastRefresh) >= 0.25 else {
+            if !refreshQueued {
+                refreshQueued = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self else { return }
+                    self.refreshQueued = false
+                    self.refresh()
+                }
+            }
+            return
+        }
+        lastRefresh = now
         let fresh = VigilSessionManager.shared.sidebarSnapshot()
         if fresh != rows { rows = fresh }
     }
