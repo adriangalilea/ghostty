@@ -225,7 +225,7 @@ struct VigilSidebarView: View {
             model.activate(.init(id: id, kind: .session(id)))
         }
         .onDrag {
-            model.beginDrag(id)
+            model.beginDrag(.session(id))
             return NSItemProvider(object: id as NSString)
         }
         .onDrop(of: [UTType.text], delegate: VigilSessionDrop(target: id, model: model))
@@ -236,6 +236,15 @@ struct VigilSidebarView: View {
                 VigilSessionManager.shared.setPersistent(name: id, !row.persistent)
             }
             Button("Rename…") { VigilIdentity.editModal(name: id) }
+            if model.rows.count > 1 {
+                Menu("Merge Into") {
+                    ForEach(model.rows.filter { $0.id != id }) { other in
+                        Button("\(face(other.emoji)) \(other.label)") {
+                            VigilSessionManager.shared.mergeSession(id, into: other.id)
+                        }
+                    }
+                }
+            }
             Divider()
             Button("Kill…", role: .destructive) {
                 VigilSessionManager.shared.killWithConfirm(name: id)
@@ -299,6 +308,13 @@ struct VigilSidebarView: View {
             model.activate(.init(id: tab.id, kind: .tab(name: session, anchor: tab.anchor, id: tab.id)))
         }
         .id(tab.id)
+        .onDrag {
+            if let anchor = tab.anchor {
+                model.beginDrag(.tab(session: session, anchor: anchor))
+            }
+            return NSItemProvider(object: tab.id as NSString)
+        }
+        .onDrop(of: [UTType.text], delegate: VigilTabDrop(session: session, anchor: tab.anchor, model: model))
         .contextMenu {
             Button("Close Tab…", role: .destructive) {
                 VigilSessionManager.shared.closeTabFromSidebar(
@@ -347,6 +363,12 @@ struct VigilSidebarView: View {
             model.activate(.init(id: id, kind: .pane(name: session, paneId: pane.paneId)))
         }
         .id(id)
+        .onDrag {
+            if let paneId = pane.paneId {
+                model.beginDrag(.pane(session: session, paneId: paneId, isDock: pane.isDock))
+            }
+            return NSItemProvider(object: id as NSString)
+        }
         .contextMenu {
             Button("Close Pane…", role: .destructive) {
                 VigilSessionManager.shared.closePaneFromSidebar(

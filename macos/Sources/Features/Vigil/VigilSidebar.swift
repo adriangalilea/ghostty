@@ -173,8 +173,8 @@ final class VigilSidebarModel: ObservableObject {
         lastRefresh = now
         // A live drag owns the row order; a snapshot would clobber the
         // preview. Staleness guard: a cancelled drag never blocks forever.
-        if draggingSession != nil {
-            if Date().timeIntervalSince(dragStarted) > 10 { draggingSession = nil }
+        if draggingItem != nil {
+            if Date().timeIntervalSince(dragStarted) > 10 { draggingItem = nil }
             else { return }
         }
         let fresh = VigilSessionManager.shared.sidebarSnapshot()
@@ -324,14 +324,30 @@ final class VigilSidebarModel: ObservableObject {
         onLeaveControl?()
     }
 
-    // MARK: Drag reorder (session rows; order shared with the overview)
+    // MARK: Drag (sessions reorder; panes/tabs MOVE between sessions)
 
-    @Published var draggingSession: String?
+    enum DragItem: Equatable {
+        case session(String)
+        case tab(session: String, anchor: String)
+        case pane(session: String, paneId: String, isDock: Bool)
+    }
+
+    @Published var draggingItem: DragItem?
     private var dragStarted: Date = .distantPast
 
-    func beginDrag(_ name: String) {
-        draggingSession = name
+    var draggingSession: String? {
+        if case .session(let name) = draggingItem { return name }
+        return nil
+    }
+
+    func beginDrag(_ item: DragItem) {
+        draggingItem = item
         dragStarted = Date()
+    }
+
+    func endDrag() {
+        draggingItem = nil
+        refresh()
     }
 
     /// Live preview: the dragged row follows the cursor through the list.
@@ -350,7 +366,7 @@ final class VigilSidebarModel: ObservableObject {
         for (index, row) in rows.enumerated() {
             manager.setOrder(name: row.id, order: index)
         }
-        draggingSession = nil
+        draggingItem = nil
     }
 
     // MARK: Navigation items (the flattened, currently-visible tree)
@@ -456,17 +472,68 @@ struct VigilSessionDrop: DropDelegate {
 
     func dropEntered(info: DropInfo) {
         MainActor.assumeIsolated {
-            guard let dragging = model.draggingSession else { return }
+            guard case .session(let dragging) = model.draggingItem else { return }
             model.moveSession(dragging, over: target)
         }
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
+        MainActor.assumeIsolated {
+            if case .session = model.draggingItem,
+               NSEvent.modifierFlags.contains(.option) {
+                return DropProposal(operation: .copy) // the merge badge
+            }
+            return DropProposal(operation: .move)
+        }
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        MainActor.assumeIsolated { model.commitOrder() }
+        MainActor.assumeIsolated {
+            let manager = VigilSessionManager.shared
+            switch model.draggingItem {
+            case .session(let source):
+                if NSEvent.modifierFlags.contains(.option), source != target {
+                    model.endDrag()
+                    manager.mergeSession(source, into: target)
+                } else {
+                    model.commitOrder()
+                }
+            case .tab(let session, let anchor):
+                model.endDrag()
+                manager.moveTab(anchor: anchor, from: session, to: target)
+            case .pane(let session, let paneId, let isDock):
+                model.endDrag()
+                manager.movePane(paneId: paneId, from: session, to: target, isDock: isDock)
+            case nil:
+                break
+            }
+        }
+        return true
+    }
+}
+
+/// Tab-row drop: a dragged PANE lands INSIDE this tab (live target splits
+/// natively, cold target grows its capture).
+struct VigilTabDrop: DropDelegate {
+    let session: String
+    let anchor: String?
+    let model: VigilSidebarModel
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        MainActor.assumeIsolated {
+            if case .pane = model.draggingItem { return DropProposal(operation: .move) }
+            return DropProposal(operation: .forbidden)
+        }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        MainActor.assumeIsolated {
+            guard case .pane(let from, let paneId, _) = model.draggingItem,
+                  let anchor else { return }
+            model.endDrag()
+            VigilSessionManager.shared.movePane(
+                paneId: paneId, from: from, intoTabAnchoredBy: anchor, of: session)
+        }
         return true
     }
 }

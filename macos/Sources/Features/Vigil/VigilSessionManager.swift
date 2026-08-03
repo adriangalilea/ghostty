@@ -1847,6 +1847,253 @@ class VigilSessionManager {
         vlog("closePane(sidebar): '\(paneId)' removed from '\(name)'")
     }
 
+    // MARK: Move (drag: capture-space re-parenting between sessions)
+    //
+    // Moving panes/tabs/sessions is a CAPTURE operation: ownership is
+    // reachability (never parsed from a daemon id, the drag-out
+    // invariant), so re-parenting means moving pane ids between captures.
+    // Daemons never notice; live views release first (the daemon holds
+    // their exact state) and the target mounts them lazily on click.
+
+    private func sentinelCommand(_ paneId: String) -> String {
+        "\(Self.attachSentinel)\(paneId)"
+    }
+
+    /// Capture the mounted tab OUT of its window for a move: the viewport
+    /// mounts the session's next tab, else the next session, else closes.
+    /// Returns the captured tab (dock included).
+    private func vacateMountedTab(_ controller: TerminalController, name: String) -> Tab? {
+        sessions[name]?.tabs = mergedCapture(name: name)
+        let tree = controller.surfaceTree
+        guard !tree.isEmpty else { return nil }
+        let dock = dockMap.object(forKey: controller)
+        dockMap.removeObject(forKey: controller)
+        var mountedIds = Set<String>()
+        for view in tree { if let id = view.vigilAttachId { mountedIds.insert(id) } }
+        for view in dock?.views ?? [] { if let id = view.vigilAttachId { mountedIds.insert(id) } }
+        let captured = sessions[name]?.tabs.first { !Set(tabPaneIds($0)).isDisjoint(with: mountedIds) }
+        sessions[name]?.tabs.removeAll { !Set(tabPaneIds($0)).isDisjoint(with: mountedIds) }
+        dock?.unmount()
+
+        if members(of: name).count > 1 {
+            // A native tab window: it just closes.
+            memberships.removeObject(forKey: controller)
+            controller.surfaceTree = SplitTree()
+        } else if let next = sessions[name]?.tabs.first(where: { !$0.panes.isEmpty }) {
+            mountCapturedTab(next, name: name, in: controller)
+        } else {
+            memberships.removeObject(forKey: controller)
+            let nextSession = sessions.values
+                .filter { $0.name != name }
+                .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
+                .first
+            if let nextSession, let ghostty = ghosttyApp {
+                mount(nextSession.name, into: controller, ghostty: ghostty)
+            } else {
+                killController(controller)
+            }
+        }
+        return captured
+    }
+
+    /// A source emptied by moves clears: identity through the tray
+    /// (120s, undoable), never a silent delete.
+    private func clearIfEmpty(_ name: String) {
+        guard var session = sessions[name] else { return }
+        session.tabs.removeAll { $0.panes.isEmpty && ($0.dock?.panes.isEmpty ?? true) }
+        sessions[name] = session
+        let liveMembers = members(of: name).filter { !$0.surfaceTree.isEmpty }
+        guard session.tabs.isEmpty, liveMembers.isEmpty else { return }
+        vlog("clearIfEmpty: '\(name)' emptied by a move -> buried")
+        for member in members(of: name) {
+            memberships.removeObject(forKey: member)
+            killController(member)
+        }
+        detachedDocks[name] = nil
+        var buried = sessions[name]!
+        buried.state = .asleep
+        buried.ephemeral = !buried.persistent ? true : buried.ephemeral
+        sessions[name] = nil
+        bury(buried)
+        onAttentionChange?()
+    }
+
+    /// Move a whole TAB (anchored by any of its pane ids) to another
+    /// session, where it lands as a cold tab.
+    func moveTab(anchor: String, from source: String, to target: String) {
+        guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
+        sessions[source]!.tabs = mergedCapture(name: source)
+        var moved: Tab?
+        if let view = liveView(attachId: anchor),
+           let controller = view.window?.windowController as? TerminalController,
+           sessionName(of: controller) == source {
+            moved = vacateMountedTab(controller, name: source)
+        } else if let index = sessions[source]!.tabs.firstIndex(where: { tabPaneIds($0).contains(anchor) }) {
+            moved = sessions[source]!.tabs.remove(at: index)
+        }
+        guard let moved else { return }
+        sessions[target]!.tabs.append(moved)
+        vlog("moveTab: \(anchor): '\(source)' -> '\(target)'")
+        clearIfEmpty(source)
+        persist()
+    }
+
+    /// Move ONE pane to another session. A split pane becomes its own
+    /// cold tab there; a dock tenant stays a dock tenant (of the target's
+    /// first tab, live-appended when the target is mounted).
+    func movePane(paneId: String, from source: String, to target: String, isDock: Bool) {
+        guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
+        sessions[source]!.tabs = mergedCapture(name: source)
+        var pane: Pane?
+
+        if let view = liveView(attachId: paneId),
+           let controller = view.window?.windowController as? TerminalController {
+            if let runtime = dockMap.object(forKey: controller),
+               let index = runtime.views.firstIndex(where: { $0 === view }) {
+                pane = Pane(cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
+                            command: sentinelCommand(paneId))
+                let released = runtime.views.remove(at: index)
+                released.removeFromSuperview()
+                runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
+                if runtime.views.isEmpty { dockMap.removeObject(forKey: controller) }
+                VigilBars.shared.sync(controller)
+            } else if let node = controller.surfaceTree.root?.node(view: view) {
+                pane = Pane(cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
+                            command: sentinelCommand(paneId))
+                if controller.surfaceTree.root == node {
+                    // Last pane of the mounted tab: this IS a tab move.
+                    _ = vacateMountedTab(controller, name: source)
+                } else {
+                    controller.surfaceTree = controller.surfaceTree.removing(node)
+                }
+            }
+        }
+        if pane == nil {
+            // Cold: lift it out of the captures.
+            outer: for index in sessions[source]!.tabs.indices {
+                if let paneIndex = sessions[source]!.tabs[index].panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
+                    pane = sessions[source]!.tabs[index].panes.remove(at: paneIndex)
+                    sessions[source]!.tabs[index].layout = nil
+                    break outer
+                }
+                if var dock = sessions[source]!.tabs[index].dock,
+                   let dockIndex = dock.panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
+                    pane = dock.panes.remove(at: dockIndex)
+                    dock.active = min(dock.active, max(dock.panes.count - 1, 0))
+                    sessions[source]!.tabs[index].dock = dock.panes.isEmpty ? nil : dock
+                    break outer
+                }
+            }
+        }
+        guard let pane else { return }
+
+        if isDock {
+            // Stays a dock tenant. Mounted target: live append (native
+            // reattach); otherwise into the first tab's dock capture.
+            if let host = members(of: target).first(where: { !$0.surfaceTree.isEmpty }),
+               let app = ghosttyApp?.app {
+                let view = Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: target, pane: pane))
+                let runtime = dockMap.object(forKey: host) ?? {
+                    let r = VigilDockRuntime(views: [], active: 0, width: 340, collapsed: false)
+                    dockMap.setObject(r, forKey: host)
+                    return r
+                }()
+                runtime.views.append(view)
+                runtime.active = runtime.views.count - 1
+                VigilBars.shared.sync(host)
+            } else {
+                if sessions[target]!.tabs.isEmpty {
+                    sessions[target]!.tabs = [Tab(panes: [], layout: nil)]
+                }
+                var dock = sessions[target]!.tabs[0].dock
+                    ?? DockCapture(panes: [], active: 0, width: 340, collapsed: false)
+                dock.panes.append(pane)
+                sessions[target]!.tabs[0].dock = dock
+            }
+        } else {
+            sessions[target]!.tabs.append(Tab(panes: [pane], layout: nil))
+        }
+        vlog("movePane: \(paneId): '\(source)' -> '\(target)' dock=\(isDock)")
+        clearIfEmpty(source)
+        persist()
+    }
+
+    /// Move a pane INTO a specific tab of a session (drop on a tab row):
+    /// a mounted target splits live (native reattach); a cold one grows
+    /// its capture.
+    func movePane(paneId: String, from source: String, intoTabAnchoredBy anchor: String, of target: String) {
+        guard sessions[target] != nil else { return }
+        // Lift the pane out exactly as a session-level move does...
+        movePane(paneId: paneId, from: source, to: target, isDock: false)
+        // ...then fold the fresh single-pane tab into the anchored tab.
+        guard var session = sessions[target] else { return }
+        guard let freshIndex = session.tabs.lastIndex(where: {
+            $0.panes.count == 1 && self.paneId(of: $0.panes[0]) == paneId
+        }) else { return }
+        let fresh = session.tabs.remove(at: freshIndex)
+        if let view = liveView(attachId: anchor), view.window != nil,
+           let controller = view.window?.windowController as? TerminalController,
+           controller.surfaceTree.contains(view),
+           let app = ghosttyApp?.app {
+            // Live split, right of the anchor.
+            sessions[target] = session
+            let newView = Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: target, pane: fresh.panes[0]))
+            if let tree = try? controller.surfaceTree.inserting(view: newView, at: view, direction: .right) {
+                controller.surfaceTree = tree
+            }
+        } else if let tabIndex = session.tabs.firstIndex(where: { tabPaneIds($0).contains(anchor) }) {
+            session.tabs[tabIndex].panes.append(contentsOf: fresh.panes)
+            session.tabs[tabIndex].layout = nil
+            sessions[target] = session
+        } else {
+            session.tabs.append(fresh) // anchor gone: stay a new tab
+            sessions[target] = session
+        }
+        persist()
+    }
+
+    /// Merge: every tab of `source` becomes a cold tab of `target`; the
+    /// source's windows move on (viewport rule) and its emptied identity
+    /// clears through the tray.
+    func mergeSession(_ source: String, into target: String) {
+        guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
+        sessions[source]!.tabs = mergedCapture(name: source)
+        let ms = members(of: source)
+        sessions[target]!.tabs.append(contentsOf: sessions[source]!.tabs)
+        sessions[source]!.tabs = []
+        for member in ms {
+            dockMap.object(forKey: member)?.unmount()
+            dockMap.removeObject(forKey: member)
+            memberships.removeObject(forKey: member)
+        }
+        detachedDocks[source] = nil
+        if sessions[target]!.attention.rawValue < sessions[source]!.attention.rawValue {
+            sessions[target]!.attention = sessions[source]!.attention
+            sessions[target]!.attentionSince = sessions[source]!.attentionSince
+        }
+        var buried = sessions[source]!
+        buried.state = .asleep
+        buried.ephemeral = !buried.persistent
+        sessions[source] = nil
+        bury(buried)
+        vlog("merge: '\(source)' -> '\(target)' (\(sessions[target]!.tabs.count) tabs)")
+        // The source's windows shapeshift to the merged target (first one)
+        // or close (the rest).
+        var first = true
+        for member in ms {
+            if first, let ghostty = ghosttyApp, members(of: target).isEmpty {
+                first = false
+                sessions[target]!.attention = .none
+                lastAck[target] = Date()
+                mount(target, into: member, ghostty: ghostty)
+            } else {
+                killController(member)
+            }
+        }
+        persist()
+        onAttentionChange?()
+    }
+
     /// Is any pane's blocked state FRESH (a real unanswered ask)? A long
     /// tool approved through a hook confirmation leaves blocked STALE (no
     /// hook fires between the approval and the tool's end), so blocked is
