@@ -178,12 +178,25 @@ final class VigilBars {
               let container = controller.terminalViewContainer,
               !controller.surfaceTree.isEmpty else { return }
 
-        // Left: the session tree.
+        // Left: the session tree. The model refreshes even hidden: the
+        // tab strip reads the same rows.
         let sidebar = ensureSidebar(container, controller: controller)
         let showSidebar = sidebarVisible
         sidebar.isHidden = !showSidebar
         sidebar.widthConstraint.constant = sidebarWidth
-        if showSidebar { sidebar.model.refresh() }
+        sidebar.model.refresh()
+
+        // Top: the session's tab strip, the moment it has >1 tab.
+        let manager0 = VigilSessionManager.shared
+        let sessionName = manager0.sessionName(of: controller)
+        let tabCount = sessionName.flatMap { manager0.sessions[$0]?.tabs.count } ?? 0
+        let memberCount = sessionName.map { manager0.members(of: $0).count } ?? 0
+        let showStrip = sessionName != nil && memberCount <= 1 && tabCount > 1
+        let strip = ensureStrip(container)
+        strip.isHidden = !showStrip
+        if showStrip, let sessionName {
+            strip.present(model: sidebar.model, session: sessionName, controller: controller)
+        }
 
         // Right: the tab's dock.
         let manager = VigilSessionManager.shared
@@ -205,11 +218,29 @@ final class VigilBars {
             dock.unmountActive()
         }
 
-        container.vigilSetSideInsets(
+        // The strip sits below the titlebar (safe area top); with it
+        // visible the terminal starts below BOTH, so nothing overlaps.
+        container.vigilSetInsets(
             leading: showSidebar ? sidebarWidth : 0,
-            trailing: dockWidth)
+            trailing: dockWidth,
+            top: showStrip ? container.safeAreaInsets.top + 30 : 0)
 
         ensureToggleAccessory(window)
+    }
+
+    private func ensureStrip(_ container: TerminalViewContainer) -> VigilTabStripHost {
+        if let existing = container.subviews.compactMap({ $0 as? VigilTabStripHost }).first {
+            return existing
+        }
+        let host = VigilTabStripHost()
+        container.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
+            host.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            host.heightAnchor.constraint(equalToConstant: 30),
+        ])
+        return host
     }
 
     // MARK: Install

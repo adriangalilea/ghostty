@@ -52,16 +52,18 @@ class TerminalViewContainer: NSView {
         return hostingSize
     }
 
-    /// vigil: the terminal's side edges are adjustable so the session
-    /// sidebar (left) and the tab dock (right) can push it, as sibling
-    /// subviews owned by vigil. Everything else about this container is
-    /// untouched.
+    /// vigil: the terminal's edges are adjustable so the session sidebar
+    /// (left), the tab dock (right) and the tab strip (top) can push it,
+    /// as sibling subviews owned by vigil. Everything else about this
+    /// container is untouched.
     private var terminalLeading: NSLayoutConstraint!
     private var terminalTrailing: NSLayoutConstraint!
+    private var terminalTop: NSLayoutConstraint!
 
-    func vigilSetSideInsets(leading: CGFloat, trailing: CGFloat) {
+    func vigilSetInsets(leading: CGFloat, trailing: CGFloat, top: CGFloat) {
         terminalLeading.constant = leading
         terminalTrailing.constant = -trailing
+        terminalTop.constant = top
     }
 
     private func setup() {
@@ -69,8 +71,9 @@ class TerminalViewContainer: NSView {
         terminalView.translatesAutoresizingMaskIntoConstraints = false
         terminalLeading = terminalView.leadingAnchor.constraint(equalTo: leadingAnchor)
         terminalTrailing = terminalView.trailingAnchor.constraint(equalTo: trailingAnchor)
+        terminalTop = terminalView.topAnchor.constraint(equalTo: topAnchor)
         NSLayoutConstraint.activate([
-            terminalView.topAnchor.constraint(equalTo: topAnchor),
+            terminalTop,
             terminalLeading,
             terminalView.bottomAnchor.constraint(equalTo: bottomAnchor),
             terminalTrailing,

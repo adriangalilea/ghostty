@@ -1495,7 +1495,7 @@ class VigilSessionManager {
     /// window. The current occupant leaves honestly: persistent detaches
     /// (running, invisible), ephemeral buries (120s undo), a session-less
     /// stray's tree buries too.
-    func shapeshift(in controller: TerminalController, to targetName: String) {
+    func shapeshift(in controller: TerminalController, to targetName: String, anchor: String? = nil) {
         guard let target = sessions[targetName], let ghostty = ghosttyApp else { return }
         switch target.state {
         case .embedded, .floating:
@@ -1515,7 +1515,7 @@ class VigilSessionManager {
         sessions[targetName]!.attentionSince = nil
         lastAck[targetName] = Date()
         onAttentionChange?()
-        mount(targetName, into: controller, ghostty: ghostty)
+        mount(targetName, into: controller, ghostty: ghostty, anchor: anchor)
         // No focus theatre: the user is already IN this window; only pull
         // it forward when it is not key (menu/intent entry points).
         if controller.window?.isKeyWindow != true {
@@ -1585,21 +1585,30 @@ class VigilSessionManager {
     /// lists them and a click mounts them the same way). No window is ever
     /// created or closed here: a shapeshift must be instant, not a
     /// shuffle (Adrian 2026-08-01).
-    private func mount(_ name: String, into controller: TerminalController, ghostty: Ghostty.App) {
+    private func mount(
+        _ name: String,
+        into controller: TerminalController,
+        ghostty: Ghostty.App,
+        anchor: String? = nil
+    ) {
         guard let session = sessions[name] else { return }
         switch session.state {
         case .detached(let trees):
-            // Captures were written by whoever detached; mount the first
-            // LIVE tree as-is and release the rest to cold (their daemons
-            // hold the state, the captures resurrect them on click).
-            guard let first = trees.first else {
+            // Captures were written by whoever detached; mount the
+            // ANCHORED tree (else the first) as-is and release the rest to
+            // cold (their daemons hold the state, the captures resurrect
+            // them on click).
+            let chosenIndex = anchor.flatMap { a in
+                trees.firstIndex { tree in tree.contains { $0.vigilAttachId == a } }
+            } ?? 0
+            guard trees.indices.contains(chosenIndex) else {
                 sessions[name]!.state = .asleep
-                mount(name, into: controller, ghostty: ghostty)
+                mount(name, into: controller, ghostty: ghostty, anchor: anchor)
                 return
             }
             registerMember(controller, name: name)
-            controller.surfaceTree = first
-            if let dock = detachedDocks[name]?[0] {
+            controller.surfaceTree = trees[chosenIndex]
+            if let dock = detachedDocks[name]?[chosenIndex] {
                 dockMap.setObject(dock, forKey: controller)
             }
             for runtime in (detachedDocks[name] ?? [:]).values where runtime !== dockMap.object(forKey: controller) {
@@ -1619,7 +1628,10 @@ class VigilSessionManager {
                 self.resurrectConfig(name: name, pane: $0)
             }
             registerMember(controller, name: name)
-            guard let tab = tabs.first(where: { !$0.panes.isEmpty }) else { return }
+            let tab = anchor.flatMap { a in
+                tabs.first { !$0.panes.isEmpty && tabPaneIds($0).contains(a) }
+            } ?? tabs.first(where: { !$0.panes.isEmpty })
+            guard let tab else { return }
             let panes = tab.panes
             let firstIndex = min(tab.layout?.firstLeaf ?? 0, panes.count - 1)
             let view = Ghostty.SurfaceView(app, baseConfig: configFor(panes[firstIndex]))
@@ -1631,6 +1643,30 @@ class VigilSessionManager {
         case .embedded, .floating:
             break
         }
+    }
+
+    /// ⌘T in the viewport paradigm: a NEW session tab, never a native
+    /// tab-window. The mounted tab goes cold (captured, daemons running)
+    /// and a fresh shell mounts in its place; the tab strip shows both.
+    /// Returns false for native multi-tab windows and strays.
+    func newViewportTab(_ controller: TerminalController) -> Bool {
+        guard let name = sessionName(of: controller),
+              members(of: name).count <= 1,
+              let app = controller.ghostty.app else { return false }
+        sessions[name]!.tabs = mergedCapture(name: name)
+        dockMap.object(forKey: controller)?.unmount()
+        dockMap.removeObject(forKey: controller)
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = controller.focusedSurface?.pwd
+            ?? sessions[name]?.cwd
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        config.environmentVariables["VIGIL_SESSION"] = name
+        config.vigilAttach = "vigil-\(name)-\(nextPaneIndex(name: name))"
+        let view = Ghostty.SurfaceView(app, baseConfig: config)
+        controller.surfaceTree = SplitTree(view: view)
+        vlog("newViewportTab: '\(name)'")
+        persist()
+        return true
     }
 
     /// Swap WHICH tab of the CURRENT session this window displays: capture
@@ -2177,7 +2213,9 @@ class VigilSessionManager {
         }
         guard let controller else { open(name: name); return }
         if sessionName(of: controller) != name {
-            shapeshift(in: controller, to: name)
+            // ONE swap, straight to the anchored tab: mounting tab 0 and
+            // then swapping again was a visible double-blink.
+            shapeshift(in: controller, to: name, anchor: anchor)
         }
         if let anchor, sessionName(of: controller) == name, liveView(attachId: anchor) == nil {
             shapeshiftTab(name: name, anchor: anchor, in: controller)
