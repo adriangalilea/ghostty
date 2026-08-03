@@ -1147,18 +1147,35 @@ class VigilSessionManager {
         /// Splits and subsequent tabs wait for their window to actually
         /// present (next runloop tick); building against an unpresented
         /// window drops splits and births invisible tabs.
-        vlog("resurrect: '\(name)' tabs=\(tabs.count) panes=\(tabs.map(\.panes.count)) -> mount first, rest cold")
+        vlog("resurrect: '\(name)' tabs=\(tabs.count) panes=\(tabs.map(\.panes.count)) -> native tabs")
 
-        // ONE window, first tab mounted, the rest COLD (the universal lazy
-        // rule; native tab-windows exist only when made by hand via ⌘T).
-        guard let tab = tabs.first(where: { !$0.panes.isEmpty }) else { return }
-        let panes = tab.panes
-        let firstIndex = min(tab.layout?.firstLeaf ?? 0, panes.count - 1)
+        // First tab gets the window; the rest come back as NATIVE tabs
+        // behind it (ghostty's regular tab UX, exactly).
+        let usable = tabs.filter { !$0.panes.isEmpty }
+        guard let first = usable.first else { return }
+        let panes = first.panes
+        let firstIndex = min(first.layout?.firstLeaf ?? 0, panes.count - 1)
         let controller = TerminalController.newWindow(
             ghostty, withBaseConfig: configFor(panes[firstIndex]))
         registerMember(controller, name: name)
-        materializeSplits(controller, tab: tab, configFor: configFor)
-        materializeDockCapture(controller, tab.dock, configFor: configFor)
+        materializeSplits(controller, tab: first, configFor: configFor)
+        materializeDockCapture(controller, first.dock, configFor: configFor)
+        var tabDelay: TimeInterval = 0
+        for tab in usable.dropFirst() {
+            guard let parent = controller.window else { continue }
+            tabDelay += 0.3
+            let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
+            let config = configFor(tab.panes[firstPane])
+            DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay) { [weak self] in
+                guard let self else { return }
+                guard let tabController = TerminalController.newTab(
+                    ghostty, from: parent, withBaseConfig: config) else { return }
+                self.registerMember(tabController, name: name)
+                self.materializeSplits(tabController, tab: tab, configFor: configFor)
+                self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
+                controller.window?.makeKeyAndOrderFront(nil)
+            }
+        }
         sessions[name]!.state = .embedded
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -1594,10 +1611,10 @@ class VigilSessionManager {
         guard let session = sessions[name] else { return }
         switch session.state {
         case .detached(let trees):
-            // Captures were written by whoever detached; mount the
-            // ANCHORED tree (else the first) as-is and release the rest to
-            // cold (their daemons hold the state, the captures resurrect
-            // them on click).
+            // The ANCHORED tree (else the first) mounts into THIS window
+            // instantly; remaining tabs regroup as NATIVE tab-windows
+            // behind it (ghostty's regular tab UX, exactly - Adrian
+            // 2026-08-03: session tabs ARE native tabs, period).
             let chosenIndex = anchor.flatMap { a in
                 trees.firstIndex { tree in tree.contains { $0.vigilAttachId == a } }
             } ?? 0
@@ -1611,10 +1628,24 @@ class VigilSessionManager {
             if let dock = detachedDocks[name]?[chosenIndex] {
                 dockMap.setObject(dock, forKey: controller)
             }
-            for runtime in (detachedDocks[name] ?? [:]).values where runtime !== dockMap.object(forKey: controller) {
-                runtime.unmount()
+            let rest = trees.enumerated().filter { $0.offset != chosenIndex }
+            if !rest.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self else { return }
+                    for (index, tree) in rest {
+                        let tab = TerminalController.vigilNewTab(ghostty, parent: controller, tree: tree)
+                        self.registerMember(tab, name: name)
+                        if let dock = self.detachedDocks[name]?[index] {
+                            self.dockMap.setObject(dock, forKey: tab)
+                        }
+                    }
+                    self.detachedDocks[name] = nil
+                    controller.window?.makeKeyAndOrderFront(nil)
+                    VigilBars.shared.syncAll()
+                }
+            } else {
+                detachedDocks[name] = nil
             }
-            detachedDocks[name] = nil
             sessions[name]!.state = .embedded
 
         case .asleep:
@@ -1623,21 +1654,39 @@ class VigilSessionManager {
                 tabs = [Tab(panes: [Pane(cwd: session.cwd, command: nil)], layout: nil)]
                 sessions[name]!.tabs = tabs
             }
-            guard let app = ghostty.app else { return }
+            guard ghostty.app != nil else { return }
             let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [unowned self] in
                 self.resurrectConfig(name: name, pane: $0)
             }
             registerMember(controller, name: name)
-            let tab = anchor.flatMap { a in
-                tabs.first { !$0.panes.isEmpty && tabPaneIds($0).contains(a) }
-            } ?? tabs.first(where: { !$0.panes.isEmpty })
-            guard let tab else { return }
-            let panes = tab.panes
-            let firstIndex = min(tab.layout?.firstLeaf ?? 0, panes.count - 1)
+            let usable = tabs.filter { !$0.panes.isEmpty }
+            let first = anchor.flatMap { a in
+                usable.first { tabPaneIds($0).contains(a) }
+            } ?? usable.first
+            guard let first, let app = ghostty.app else { return }
+            let panes = first.panes
+            let firstIndex = min(first.layout?.firstLeaf ?? 0, panes.count - 1)
             let view = Ghostty.SurfaceView(app, baseConfig: configFor(panes[firstIndex]))
             controller.surfaceTree = SplitTree(view: view)
-            materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
-            materializeDockCapture(controller, tab.dock, configFor: configFor)
+            materializeSplits(controller, tab: first, configFor: configFor, delay: 0)
+            materializeDockCapture(controller, first.dock, configFor: configFor)
+            // Remaining tabs come back as NATIVE tabs behind this window.
+            var tabDelay: TimeInterval = 0
+            for tab in usable where tabPaneIds(tab) != tabPaneIds(first) {
+                guard let parent = controller.window else { continue }
+                tabDelay += 0.3
+                let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
+                let config = configFor(tab.panes[firstPane])
+                DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay) { [weak self] in
+                    guard let self else { return }
+                    guard let tabController = TerminalController.newTab(
+                        ghostty, from: parent, withBaseConfig: config) else { return }
+                    self.registerMember(tabController, name: name)
+                    self.materializeSplits(tabController, tab: tab, configFor: configFor)
+                    self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
+                    controller.window?.makeKeyAndOrderFront(nil)
+                }
+            }
             sessions[name]!.state = .embedded
 
         case .embedded, .floating:
@@ -1645,29 +1694,6 @@ class VigilSessionManager {
         }
     }
 
-    /// ⌘T in the viewport paradigm: a NEW session tab, never a native
-    /// tab-window. The mounted tab goes cold (captured, daemons running)
-    /// and a fresh shell mounts in its place; the tab strip shows both.
-    /// Returns false for native multi-tab windows and strays.
-    func newViewportTab(_ controller: TerminalController) -> Bool {
-        guard let name = sessionName(of: controller),
-              members(of: name).count <= 1,
-              let app = controller.ghostty.app else { return false }
-        sessions[name]!.tabs = mergedCapture(name: name)
-        dockMap.object(forKey: controller)?.unmount()
-        dockMap.removeObject(forKey: controller)
-        var config = Ghostty.SurfaceConfiguration()
-        config.workingDirectory = controller.focusedSurface?.pwd
-            ?? sessions[name]?.cwd
-            ?? FileManager.default.homeDirectoryForCurrentUser.path
-        config.environmentVariables["VIGIL_SESSION"] = name
-        config.vigilAttach = "vigil-\(name)-\(nextPaneIndex(name: name))"
-        let view = Ghostty.SurfaceView(app, baseConfig: config)
-        controller.surfaceTree = SplitTree(view: view)
-        vlog("newViewportTab: '\(name)'")
-        persist()
-        return true
-    }
 
     /// Swap WHICH tab of the CURRENT session this window displays: capture
     /// the mounted tab back (its daemons keep its exact state), release
@@ -3057,8 +3083,11 @@ class VigilSessionManager {
                     if let dock = dockMap.object(forKey: controller) {
                         panes += dock.views.map { paneRow(view: $0, session: name, isDock: true) }
                     }
-                    let cwd = controller.focusedSurface?.pwd
-                        ?? controller.surfaceTree.root?.leftmostLeaf().pwd
+                    // STABLE title: the root pane's cwd only. Deriving it
+                    // from focusedSurface re-titled the row on every
+                    // click, re-rendering the subtree (the "vanishes
+                    // briefly" flash).
+                    let cwd = controller.surfaceTree.root?.leftmostLeaf().pwd
                     let anchor = panes.first(where: { $0.paneId != nil })?.paneId
                     let custom = tabCustom(anchor)
                     return SidebarTab(
@@ -3776,3 +3805,22 @@ class VigilSessionManager {
     }
 }
 
+
+extension TerminalController {
+    /// A new tab in an existing window hosting an EXISTING split tree: the
+    /// re-embed primitive for multi-tab sessions (newWindow(tree:) is the
+    /// window half, this is the tab half).
+    static func vigilNewTab(
+        _ ghostty: Ghostty.App,
+        parent: TerminalController,
+        tree: SplitTree<Ghostty.SurfaceView>
+    ) -> TerminalController {
+        let controller = TerminalController(ghostty, withSurfaceTree: tree)
+        controller.isBackgroundOpaque = parent.isBackgroundOpaque
+        if let window = controller.window, let parentWindow = parent.window {
+            parentWindow.addTabbedWindowSafely(window, ordered: .above)
+            controller.showWindow(nil)
+        }
+        return controller
+    }
+}

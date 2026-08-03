@@ -1299,10 +1299,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        // vigil viewport: ⌘T creates a SESSION tab (the strip's), never a
-        // native tab-window; the mounted tab goes cold, a fresh shell
-        // mounts in its place.
-        if VigilSessionManager.shared.newViewportTab(self) { return }
         guard let surface = focusedSurface?.surface else { return }
         ghostty.newTab(surface: surface)
     }
