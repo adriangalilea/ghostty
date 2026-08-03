@@ -224,6 +224,19 @@ class AppDelegate: NSObject,
         // its menu items are present for the first syncMenuShortcuts pass.
         vigilStatusItem = VigilStatusItem(ghostty: ghostty)
 
+        // vigil: launch restoration must not wait for ACTIVATION. An app
+        // launched from a background shell (open -n while another app
+        // holds focus) never becomes active on its own and sat windowless
+        // until clicked (the open bug, observed on every dev restart).
+        // One beat for launch plumbing, then the same first-activation
+        // path runs synthetically; a foreground launch already ran it and
+        // the guard makes this a no-op.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, !self.applicationHasBecomeActive else { return }
+            self.applicationDidBecomeActive(
+                .init(name: NSApplication.didBecomeActiveNotification))
+        }
+
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 

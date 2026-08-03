@@ -2064,6 +2064,7 @@ class VigilSessionManager {
         vlog("moveTab: \(anchor): '\(source)' -> '\(target)'")
         clearIfEmpty(source)
         persist()
+        assertInvariants("moveTab")
     }
 
     /// Move ONE pane to another session. A split pane becomes its own
@@ -2144,6 +2145,7 @@ class VigilSessionManager {
         vlog("movePane: \(paneId): '\(source)' -> '\(target)' dock=\(isDock)")
         clearIfEmpty(source)
         persist()
+        assertInvariants("movePane")
     }
 
     /// Move a pane INTO a specific tab of a session (drop on a tab row):
@@ -2220,6 +2222,7 @@ class VigilSessionManager {
         }
         persist()
         onAttentionChange?()
+        assertInvariants("merge")
     }
 
     /// Is any pane's blocked state FRESH (a real unanswered ask)? A long
@@ -2566,7 +2569,16 @@ class VigilSessionManager {
         graveyardDeadlines[name] = nil
         detachedDocks[name] = nil // tenant surfaces freed BEFORE their daemons die
         try? FileManager.default.removeItem(at: dumpsDir(name))
-        killDaemons(paneIds: paneIds)
+        // A pane whose SurfaceView is STILL HELD elsewhere (ghostty's
+        // undo-close corpses outlive our burial) is not killed now: a
+        // daemon dying under a live surface is the zombie-pane bug. The
+        // reachability sweep collects it once the surface actually frees.
+        let held = Set(Ghostty.SurfaceView.vigilAttachSurfaces.allObjects.compactMap(\.vigilAttachId))
+        let free = paneIds.filter { !held.contains($0) }
+        for id in paneIds.subtracting(free) {
+            vlog("reap: '\(id)' still held by a live surface -> left for the sweep")
+        }
+        killDaemons(paneIds: Set(free))
         persist()
         sweepPaneDaemons()
     }
@@ -2849,10 +2861,16 @@ class VigilSessionManager {
     }
 
     /// Display state: `done` decays to idle once the session was focused
-    /// after it fired (looking at a finished turn IS seeing it).
+    /// after it fired (looking at a finished turn IS seeing it), and
+    /// `blocked` decays to WORKING after 2 minutes — a permission answered
+    /// through a hook confirmation fires no hook until the tool ENDS, so
+    /// old blocked almost always means a long approved tool mid-run (the
+    /// same freshness rule auto-follow trusts). A real unanswered prompt
+    /// re-blocks the moment any hook fires again.
     func paneDisplayState(_ pane: String, in session: String) -> AgentState? {
         guard let s = paneAgentState(pane) else { return nil }
         if s.state == .done, let ack = lastAck[session], ack >= s.since { return .idle }
+        if s.state == .blocked, Date().timeIntervalSince(s.since) > 120 { return .working }
         return s.state
     }
 
@@ -3445,6 +3463,17 @@ class VigilSessionManager {
             }
             if !s.persistent, case .asleep = s.state {
                 vlog("!! IMPOSSIBLE [\(site)]: ephemeral '\(name)' is asleep")
+            }
+        }
+        // The move machinery's tripwire: every live attach surface must be
+        // OWNED (a session or a burial claims its daemon), or a move
+        // stranded it and the sweep will murder a pane someone can see.
+        var owned = Set<String>()
+        for session in sessions.values { owned.formUnion(ownedPaneIds(session)) }
+        for session in graveyard.values { owned.formUnion(ownedPaneIds(session)) }
+        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
+            if let id = view.vigilAttachId, view.window != nil, !owned.contains(id) {
+                vlog("!! IMPOSSIBLE [\(site)]: live pane '\(id)' owned by NOBODY (stranded by a move?)")
             }
         }
         #endif
