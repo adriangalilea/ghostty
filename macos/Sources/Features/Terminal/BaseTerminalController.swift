@@ -409,6 +409,13 @@ class BaseTerminalController: NSWindowController,
         _ view: Ghostty.SurfaceView,
         withConfirmation: Bool = true
     ) {
+        // vigil: a DOCK tenant is not in the tree; its close (⌘W with the
+        // keyboard in the dock) closes the tenant alone.
+        if let terminal = self as? TerminalController,
+           VigilSessionManager.shared.closeDockTenantIfHosted(
+               view, in: terminal, withConfirmation: withConfirmation) {
+            return
+        }
         guard let node = surfaceTree.root?.node(view: view) else { return }
         closeSurface(node, withConfirmation: withConfirmation)
     }

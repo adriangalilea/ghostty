@@ -60,6 +60,19 @@ final class VigilDockHost: NSView {
         handle.translatesAutoresizingMaskIntoConstraints = false
         addSubview(handle)
 
+        // The same divider every split wears: the dock is a pane.
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(divider)
+        NSLayoutConstraint.activate([
+            divider.leadingAnchor.constraint(equalTo: leadingAnchor),
+            divider.topAnchor.constraint(equalTo: topAnchor),
+            divider.bottomAnchor.constraint(equalTo: bottomAnchor),
+            divider.widthAnchor.constraint(equalToConstant: 1),
+        ])
+
         // Fallback top for the strip-less moment; the strip's required
         // constraint overrides it once present() builds the chrome.
         let fallbackTop = content.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor)

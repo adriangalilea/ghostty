@@ -40,6 +40,13 @@ final class VigilSidebarHost: NSVisualEffectView {
         handle.translatesAutoresizingMaskIntoConstraints = false
         addSubview(handle)
 
+        // The same divider every split wears: the sidebar is a pane too.
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(divider)
+
         NSLayoutConstraint.activate([
             hosting.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
             hosting.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -49,6 +56,10 @@ final class VigilSidebarHost: NSVisualEffectView {
             handle.topAnchor.constraint(equalTo: topAnchor),
             handle.bottomAnchor.constraint(equalTo: bottomAnchor),
             handle.widthAnchor.constraint(equalToConstant: 5),
+            divider.trailingAnchor.constraint(equalTo: trailingAnchor),
+            divider.topAnchor.constraint(equalTo: topAnchor),
+            divider.bottomAnchor.constraint(equalTo: bottomAnchor),
+            divider.widthAnchor.constraint(equalToConstant: 1),
         ])
     }
 
@@ -202,39 +213,36 @@ final class VigilSidebarModel: ObservableObject {
     }
 
     func enterHintMode() {
+        rebuildHintLabels()
+        hintBuffer = ""
+        hintMode = true
+    }
+
+    /// EVERY row wears its letter, parents included (session `a`, tab
+    /// `ab`, pane `abc`, plain alphabetical in list order). Collapsed
+    /// parents hide their children's labels until opened.
+    private func rebuildHintLabels() {
         var labels: [String: String] = [:]
         for (i, row) in rows.enumerated() {
             let s = Self.hintLetter(i)
-            // Collapsed or childless: the session row IS the leaf.
-            if collapsedSessions.contains(row.id) || row.tabs.isEmpty {
-                labels[row.id] = s
-                continue
-            }
-            func labelPanes(_ tab: VigilSessionManager.SidebarTab, prefix: String) {
-                if tab.panes.count == 1, let pane = tab.panes.first {
-                    labels["\(tab.id)#\(pane.id)"] = prefix
-                } else {
-                    for (k, pane) in tab.panes.enumerated() {
-                        labels["\(tab.id)#\(pane.id)"] = prefix + Self.hintLetter(k)
-                    }
-                }
-            }
+            labels[row.id] = s
+            guard !collapsedSessions.contains(row.id) else { continue }
             if row.tabs.count == 1, let tab = row.tabs.first {
-                labelPanes(tab, prefix: s)
+                for (k, pane) in tab.panes.enumerated() {
+                    labels["\(tab.id)#\(pane.id)"] = s + Self.hintLetter(k)
+                }
                 continue
             }
             for (j, tab) in row.tabs.enumerated() {
                 let t = s + Self.hintLetter(j)
-                if collapsedTabs.contains(tab.id) || tab.panes.isEmpty {
-                    labels[tab.id] = t
-                } else {
-                    labelPanes(tab, prefix: t)
+                labels[tab.id] = t
+                guard !collapsedTabs.contains(tab.id) else { continue }
+                for (k, pane) in tab.panes.enumerated() {
+                    labels["\(tab.id)#\(pane.id)"] = t + Self.hintLetter(k)
                 }
             }
         }
         hintLabels = labels
-        hintBuffer = ""
-        hintMode = true
     }
 
     func exitHintMode() {
@@ -245,21 +253,49 @@ final class VigilSidebarModel: ObservableObject {
 
     func hintType(_ char: String) {
         let candidate = hintBuffer + char
-        let matches = hintLabels.filter { $0.value.hasPrefix(candidate) }
-        guard !matches.isEmpty else {
+        guard hintLabels.contains(where: { $0.value.hasPrefix(candidate) }) else {
             NSSound.beep() // invalid letter: ignored, buffer stands
             return
         }
         hintBuffer = candidate
+        resolveHintBuffer()
+    }
+
+    /// The buffer's meaning, in order: a COLLAPSED parent's letter OPENS
+    /// it (children get labels, typing continues); an expanded parent
+    /// with ONE labeled descendant fires that descendant (a lone claude
+    /// is one letter away); with several, their letters disambiguate and
+    /// return commits the parent itself; a unique match always fires.
+    private func resolveHintBuffer() {
+        let matches = hintLabels.filter { $0.value.hasPrefix(hintBuffer) }
+        if let exact = matches.first(where: { $0.value == hintBuffer }) {
+            let id = exact.key
+            if collapsedSessions.contains(id) {
+                collapsedSessions.remove(id)
+                rebuildHintLabels()
+                return
+            }
+            if collapsedTabs.contains(id) {
+                collapsedTabs.remove(id)
+                rebuildHintLabels()
+                return
+            }
+            let descendants = matches.filter { $0.value != hintBuffer }
+            if descendants.isEmpty {
+                activateHint(id)
+            } else if descendants.count == 1, let only = descendants.first {
+                activateHint(only.key)
+            }
+            return
+        }
         if matches.count == 1, let only = matches.first {
             activateHint(only.key)
         }
     }
 
     func commitHint() {
-        let matches = hintLabels.filter { $0.value.hasPrefix(hintBuffer) }
-        if matches.count == 1, let only = matches.first {
-            activateHint(only.key)
+        if let exact = hintLabels.first(where: { $0.value == hintBuffer }) {
+            activateHint(exact.key)
         } else {
             NSSound.beep()
         }

@@ -299,6 +299,12 @@ struct VigilSidebarView: View {
             model.activate(.init(id: tab.id, kind: .tab(name: session, anchor: tab.anchor, id: tab.id)))
         }
         .id(tab.id)
+        .contextMenu {
+            Button("Close Tab…", role: .destructive) {
+                VigilSessionManager.shared.closeTabFromSidebar(
+                    name: session, anchor: tab.anchor, in: model.hostController)
+            }
+        }
         .help(tab.cold
             ? "Cold tab: its processes run in their daemons; click to swap it into this window."
             : tab.title)
@@ -341,6 +347,12 @@ struct VigilSidebarView: View {
             model.activate(.init(id: id, kind: .pane(name: session, paneId: pane.paneId)))
         }
         .id(id)
+        .contextMenu {
+            Button("Close Pane…", role: .destructive) {
+                VigilSessionManager.shared.closePaneFromSidebar(
+                    name: session, paneId: pane.paneId, in: model.hostController)
+            }
+        }
         .opacity(hintFade(id))
         .overlay(alignment: .leading) { hintChip(id, depth: level) }
     }
@@ -357,8 +369,8 @@ struct VigilSidebarView: View {
                 Text(label.dropFirst(model.hintBuffer.count))
                     .foregroundColor(.black)
             }
-            .font(.system(size: 9, weight: .bold, design: .monospaced))
-            .padding(.horizontal, 3)
+            .font(.system(size: 11, weight: .bold, design: .monospaced))
+            .padding(.horizontal, 4)
             .padding(.vertical, 1)
             .background(RoundedRectangle(cornerRadius: 3).fill(Color.yellow))
             .padding(.leading, 4 + CGFloat(depth) * 18)

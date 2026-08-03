@@ -1732,8 +1732,136 @@ class VigilSessionManager {
         persist()
     }
 
+    /// ⌘W with the keyboard in a DOCK tenant closes that tenant alone
+    /// (it is not in the tree; without this the close request no-ops or
+    /// escalates). Native confirm when its process runs.
+    func closeDockTenantIfHosted(
+        _ view: Ghostty.SurfaceView, in controller: TerminalController, withConfirmation: Bool
+    ) -> Bool {
+        guard let runtime = dockMap.object(forKey: controller),
+              let index = runtime.views.firstIndex(where: { $0 === view }) else { return false }
+        if withConfirmation, view.needsConfirmQuit {
+            controller.confirmClose(
+                messageText: "Close Dock Pane?",
+                informativeText: "The pane still has a running process. Closing it will kill it."
+            ) { [weak self, weak controller] in
+                guard let self, let controller else { return }
+                self.closeDockTenant(controller, index: index)
+            }
+        } else {
+            closeDockTenant(controller, index: index)
+        }
+        return true
+    }
+
+    /// Right-click Close Tab from the sidebar: the native flow for
+    /// whatever form the tab is in. Live → its window's close-tab (which
+    /// carries the viewport semantics and confirms); COLD → buried from
+    /// capture (daemons alive, exhumable), confirming when the tree files
+    /// say something runs.
+    func closeTabFromSidebar(name: String, anchor: String?, in host: TerminalController?) {
+        guard sessions[name] != nil, let anchor else { return }
+        if let view = liveView(attachId: anchor),
+           let controller = view.window?.windowController as? TerminalController {
+            controller.closeTab(nil)
+            return
+        }
+        sessions[name]!.tabs = mergedCapture(name: name)
+        guard let tab = sessions[name]!.tabs.first(where: { tabPaneIds($0).contains(anchor) }) else { return }
+        let running = tabPaneIds(tab).contains { paneProgram($0) != nil }
+        let proceed = { [weak self] in
+            guard let self else { return }
+            self.buryColdTab(tab, from: name)
+        }
+        if running, let host {
+            host.confirmClose(
+                messageText: "Close Tab?",
+                informativeText: "The tab still has a running process. Closing it will kill it (undo keeps it for \(Int(Self.killGrace))s).")
+            { proceed() }
+        } else {
+            proceed()
+        }
+    }
+
+    private func buryColdTab(_ tab: Tab, from name: String) {
+        let ids = tabPaneIds(tab)
+        sessions[name]?.tabs.removeAll { tabPaneIds($0) == ids }
+        let cwd = tab.panes.first?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+        var buried = Session(
+            name: newSessionId(),
+            label: URL(fileURLWithPath: cwd).lastPathComponent,
+            cwd: cwd,
+            state: .asleep)
+        buried.tabs = [tab]
+        buried.ephemeral = true
+        bury(buried)
+        vlog("closeTab(sidebar): cold tab of '\(name)' buried")
+        persist()
+    }
+
+    /// Right-click Close Pane: live panes ride the native close flow
+    /// (dock tenants included); cold panes leave the capture, then their
+    /// daemon dies. Confirms exactly when something runs.
+    func closePaneFromSidebar(name: String, paneId: String?, in host: TerminalController?) {
+        guard let paneId else { return }
+        if let view = liveView(attachId: paneId),
+           let controller = view.window?.windowController as? TerminalController {
+            if closeDockTenantIfHosted(view, in: controller, withConfirmation: true) { return }
+            controller.closeSurface(view, withConfirmation: true)
+            return
+        }
+        guard sessions[name] != nil else { return }
+        let program = paneProgram(paneId)
+        let proceed = { [weak self] in
+            guard let self else { return }
+            self.removeColdPane(name: name, paneId: paneId)
+        }
+        if program != nil, let host {
+            host.confirmClose(
+                messageText: "Close Pane?",
+                informativeText: "The pane still has a running process (\(program ?? "")). Closing it will kill it.")
+            { proceed() }
+        } else {
+            proceed()
+        }
+    }
+
+    private func removeColdPane(name: String, paneId: String) {
+        guard var session = sessions[name] else { return }
+        for index in session.tabs.indices {
+            if let paneIndex = session.tabs[index].panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
+                session.tabs[index].panes.remove(at: paneIndex)
+                session.tabs[index].layout = nil // shape no longer matches
+            }
+            if var dock = session.tabs[index].dock,
+               let dockIndex = dock.panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
+                dock.panes.remove(at: dockIndex)
+                dock.active = min(dock.active, max(dock.panes.count - 1, 0))
+                session.tabs[index].dock = dock.panes.isEmpty ? nil : dock
+            }
+        }
+        session.tabs.removeAll { $0.panes.isEmpty && ($0.dock?.panes.isEmpty ?? true) }
+        sessions[name] = session
+        persist()
+        killDaemons(paneIds: [paneId])
+        vlog("closePane(sidebar): '\(paneId)' removed from '\(name)'")
+    }
+
+    /// Is any pane's blocked state FRESH (a real unanswered ask)? A long
+    /// tool approved through a hook confirmation leaves blocked STALE (no
+    /// hook fires between the approval and the tool's end), so blocked is
+    /// only trusted briefly.
+    func freshlyBlocked(_ name: String, within seconds: TimeInterval) -> Bool {
+        guard let session = sessions[name] else { return false }
+        return ownedPaneIds(session).contains { pane in
+            guard let s = paneAgentState(pane), s.state == .blocked else { return false }
+            return Date().timeIntervalSince(s.since) < seconds
+        }
+    }
+
     /// Auto-follow's target: the attention FIFO's input head, else the
-    /// first session (overview order) sitting in a blocked state.
+    /// first session (overview order) FRESHLY blocked (stale blocked is a
+    /// long tool still running, not an ask).
     var followTarget: String? {
         if let name = sessions.values
             .filter({ $0.attention == .input })
@@ -1743,7 +1871,7 @@ class VigilSessionManager {
         }
         return sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .first { sessionAgentState($0.name) == .blocked }?
+            .first { freshlyBlocked($0.name, within: 120) }?
             .name
     }
 
