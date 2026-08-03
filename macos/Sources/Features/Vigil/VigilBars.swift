@@ -20,6 +20,42 @@ final class VigilBars {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             MainActor.assumeIsolated { VigilBars.shared.route(event) }
         }
+        NotificationCenter.default.addObserver(
+            forName: VigilSessionManager.stateDidChange,
+            object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { VigilBars.shared.scheduleAutoFollow() }
+        }
+    }
+
+    // MARK: Auto-follow (the viewport chases the attention queue)
+
+    /// Toggle at the sidebar's foot: when a session asks for input, the
+    /// key window follows it; answering (the state flips off blocked)
+    /// advances to the next in the queue. Never yanks while the CURRENT
+    /// session is itself waiting on Adrian, never during control mode.
+    private var followWork: DispatchWorkItem?
+
+    func scheduleAutoFollow() {
+        guard UserDefaults.standard.bool(forKey: "vigil.autofollow") else { return }
+        followWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.autoFollowNow() }
+        followWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    private func autoFollowNow() {
+        guard UserDefaults.standard.bool(forKey: "vigil.autofollow"), !controlMode else { return }
+        let manager = VigilSessionManager.shared
+        guard let target = manager.followTarget else { return }
+        guard NSApp.isActive,
+              let window = NSApp.keyWindow,
+              let controller = window.windowController as? TerminalController else { return }
+        let current = manager.sessionName(of: controller)
+        guard current != target else { return }
+        if let current, manager.sessionAgentState(current) == .blocked { return }
+        manager.vlog("auto-follow -> '\(target)'")
+        manager.shapeshift(in: controller, to: target)
     }
 
     // MARK: Control mode (step OUT of the terminal, helix-style)

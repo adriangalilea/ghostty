@@ -697,6 +697,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
 
+        // vigil viewport: ⌘W closes the TAB, never the window (the mounted
+        // tab buries and the next tab/session takes the viewport).
+        if VigilSessionManager.shared.closeViewportTab(self) { return }
+
         // 1 window, closing the window
         closeWindow(nil)
     }
@@ -1302,6 +1306,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @IBAction func closeTab(_ sender: Any?) {
         guard let window = window else { return }
         guard window.tabGroup?.windows.count ?? 0 > 1 else {
+            // vigil viewport: a lone window's "close tab" closes the
+            // MOUNTED tab; the next tab/session takes the viewport.
+            if VigilSessionManager.shared.closeViewportTab(self) { return }
             closeWindow(sender)
             return
         }

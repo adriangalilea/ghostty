@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 struct VigilSidebarView: View {
     @ObservedObject var model: VigilSidebarModel
     @State private var hovered: String?
+    @AppStorage("vigil.autofollow") private var autoFollow = false
 
     private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -40,10 +41,38 @@ struct VigilSidebarView: View {
             if !model.burials.isEmpty {
                 burialTray
             }
+            footer
         }
         .onReceive(ticker) { _ in model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.stateDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh() }
+    }
+
+    // MARK: Footer (auto-follow)
+
+    /// The viewport chases the attention queue: a session asks for input,
+    /// this window follows; answering advances to the next in line.
+    private var footer: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "arrow.right.circle")
+                .font(.system(size: 9))
+                .foregroundColor(autoFollow ? .orange : .secondary)
+            Text("auto-follow")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(autoFollow ? .primary : .secondary)
+            Spacer()
+            Toggle("", isOn: $autoFollow)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1)
+        }
+        .help("When a session asks for input, this window follows it; answering advances to the next in the queue.")
     }
 
     // MARK: Burial tray (sticky bottom: killed, still undoable)

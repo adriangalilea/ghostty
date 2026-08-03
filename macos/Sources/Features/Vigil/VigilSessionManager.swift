@@ -1611,6 +1611,14 @@ class VigilSessionManager {
 
         dockMap.object(forKey: controller)?.unmount()
         dockMap.removeObject(forKey: controller)
+        mountCapturedTab(target, name: name, in: controller)
+        persist()
+    }
+
+    /// Replace the window's tree with a captured tab, in place. The old
+    /// tree's views release (whoever captured them keeps their daemons).
+    private func mountCapturedTab(_ target: Tab, name: String, in controller: TerminalController) {
+        guard !target.panes.isEmpty, let app = ghosttyApp?.app else { return }
         let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [unowned self] in
             self.resurrectConfig(name: name, pane: $0)
         }
@@ -1620,7 +1628,123 @@ class VigilSessionManager {
         controller.surfaceTree = SplitTree(view: view)
         materializeSplits(controller, tab: target, configFor: configFor, delay: 0)
         materializeDockCapture(controller, target.dock, configFor: configFor)
+    }
+
+    // MARK: Viewport ⌘W (the tab closes; the window NEVER does)
+
+    /// Adrian 2026-08-03: "cmd+w always closes the TAB, never the window."
+    /// The mounted tab buries (structural edit, undo grace, confirm when a
+    /// process runs) and the session's next tab takes the viewport; the
+    /// LAST tab is the session's lifecycle (persistent sleeps, ephemeral
+    /// kills with the ⌘⇧⌫ confirm) and the next session takes the
+    /// viewport. Only with nothing left anywhere does the window truly
+    /// close. Window close stays reachable: red button / ⌘⇧W / ⌘M.
+    /// Returns false when this controller is not a lone viewport (native
+    /// multi-tab windows keep the old semantics).
+    func closeViewportTab(_ controller: TerminalController) -> Bool {
+        guard let name = sessionName(of: controller),
+              members(of: name).count <= 1 else { return false }
+        sessions[name]!.tabs = mergedCapture(name: name)
+        let live = liveAttachIds(of: name)
+        let cold = sessions[name]!.tabs.filter { tab in
+            let ids = tabPaneIds(tab)
+            return !ids.isEmpty && Set(ids).isDisjoint(with: live) && !tab.panes.isEmpty
+        }
+
+        if let next = cold.first {
+            let proceed = { [weak self, weak controller] in
+                guard let self, let controller else { return }
+                self.buryMountedTab(thenMount: next, name: name, in: controller)
+            }
+            if controller.surfaceTree.contains(where: { $0.needsConfirmQuit }) {
+                controller.confirmClose(
+                    messageText: "Close Tab?",
+                    informativeText: "The terminal still has a running process. Closing the tab will kill it (undo keeps it for \(Int(Self.killGrace))s).")
+                { proceed() }
+            } else {
+                proceed()
+            }
+            return true
+        }
+
+        // The LAST tab: session lifecycle; the viewport moves on.
+        let proceed = { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            self.closeLastTab(controller, name: name)
+        }
+        if sessions[name]!.persistent {
+            proceed()
+        } else {
+            confirmKill(name: name) { proceed() }
+        }
+        return true
+    }
+
+    private func buryMountedTab(thenMount next: Tab, name: String, in controller: TerminalController) {
+        let tree = controller.surfaceTree
+        let dock = dockMap.object(forKey: controller)
+        dockMap.removeObject(forKey: controller)
+        var mountedIds = Set<String>()
+        for view in tree { if let id = view.vigilAttachId { mountedIds.insert(id) } }
+        for view in dock?.views ?? [] { if let id = view.vigilAttachId { mountedIds.insert(id) } }
+        sessions[name]!.tabs.removeAll { !Set(tabPaneIds($0)).isDisjoint(with: mountedIds) }
+
+        if !tree.isEmpty {
+            let surface = controller.focusedSurface ?? tree.root?.leftmostLeaf()
+            let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
+            let cwd = surface?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+            var buried = Session(
+                name: newSessionId(),
+                label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
+                cwd: cwd,
+                state: .detached([tree]))
+            buried.ephemeral = true
+            buried.thumbnail = surface?.asImage
+            if let dock {
+                dock.unmount()
+                detachedDocks[buried.name] = [0: dock]
+                buried.tabs = captureTabs(name: buried.name, [tree], docks: [0: dock])
+            }
+            bury(buried)
+            vlog("closeViewportTab: mounted tab of '\(name)' buried as '\(buried.name)'")
+        }
+        mountCapturedTab(next, name: name, in: controller)
         persist()
+    }
+
+    private func closeLastTab(_ controller: TerminalController, name: String) {
+        vlog("closeViewportTab: last tab of '\(name)' -> lifecycle, viewport moves on")
+        releaseOccupant(of: controller)
+        let next = sessions.values
+            .filter { $0.name != name }
+            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
+            .first
+        guard let next, let ghostty = ghosttyApp else {
+            killController(controller) // nothing left to view: the window closes plain
+            persist()
+            return
+        }
+        sessions[next.name]!.attention = .none
+        sessions[next.name]!.attentionSince = nil
+        lastAck[next.name] = Date()
+        onAttentionChange?()
+        mount(next.name, into: controller, ghostty: ghostty)
+        persist()
+    }
+
+    /// Auto-follow's target: the attention FIFO's input head, else the
+    /// first session (overview order) sitting in a blocked state.
+    var followTarget: String? {
+        if let name = sessions.values
+            .filter({ $0.attention == .input })
+            .sorted(by: { ($0.attentionSince ?? .distantPast) < ($1.attentionSince ?? .distantPast) })
+            .first?.name {
+            return name
+        }
+        return sessions.values
+            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
+            .first { sessionAgentState($0.name) == .blocked }?
+            .name
     }
 
     // MARK: Sidebar navigation (rows resolve through shapeshift)
