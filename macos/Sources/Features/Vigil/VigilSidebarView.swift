@@ -251,8 +251,20 @@ struct VigilSidebarView: View {
             }
         }
         .help("\(row.label) (\(row.id)) · \(row.stateTag) · \(row.persistent ? "persistent" : "ephemeral")")
-        .opacity(hintFade(id))
+        .opacity(hintFade(id) * dragSourceFade(.session(id)))
+        .overlay {
+            if model.dropTarget == id {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(Color.accentColor, lineWidth: 1.5)
+            }
+        }
         .overlay(alignment: .leading) { hintChip(id, depth: 0) }
+    }
+
+    /// Drag affordances: the source dims while it travels, the row under
+    /// the cursor wears the accent ring (dropTarget).
+    private func dragSourceFade(_ item: VigilSidebarModel.DragItem) -> Double {
+        model.draggingItem == item ? 0.45 : 1
     }
 
     private func tabRow(_ tab: VigilSessionManager.SidebarTab, session: String) -> some View {
@@ -324,7 +336,14 @@ struct VigilSidebarView: View {
         .help(tab.cold
             ? "Cold tab: its processes run in their daemons; click to swap it into this window."
             : tab.title)
-        .opacity(hintFade(tab.id))
+        .opacity(hintFade(tab.id)
+            * (tab.anchor.map { dragSourceFade(.tab(session: session, anchor: $0)) } ?? 1))
+        .overlay {
+            if let anchor = tab.anchor, model.dropTarget == "tab-\(anchor)" {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(Color.accentColor, lineWidth: 1.5)
+            }
+        }
         .overlay(alignment: .leading) { hintChip(tab.id, depth: 1) }
     }
 
@@ -375,7 +394,8 @@ struct VigilSidebarView: View {
                     name: session, paneId: pane.paneId, in: model.hostController)
             }
         }
-        .opacity(hintFade(id))
+        .opacity(hintFade(id)
+            * (pane.paneId.map { dragSourceFade(.pane(session: session, paneId: $0, isDock: pane.isDock)) } ?? 1))
         .overlay(alignment: .leading) { hintChip(id, depth: level) }
     }
 

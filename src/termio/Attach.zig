@@ -378,9 +378,16 @@ fn readThreadMain(
 ) void {
     termio.Exec.ReadThread.threadMainPosix(fd, io, quit);
     if (closing.load(.acquire)) return;
-    _ = io.surface_mailbox.push(.{
+    // NEVER a blocking push: a surface mid-release drains no mailbox, and
+    // a .forever push parks this thread exactly when threadExit is about
+    // to join it — reader waits on the mailbox futex, the io thread waits
+    // on the reader, the main thread waits on the io thread: the whole
+    // app wedges (sampled live 2026-08-03). A dropped child_exited on a
+    // dying surface costs nothing; a live surface's mailbox has room.
+    const pushed = io.surface_mailbox.push(.{
         .child_exited = .{ .exit_code = 1, .runtime_ms = 0 },
-    }, .{ .forever = {} });
+    }, .{ .instant = {} });
+    if (pushed == 0) log.warn("attach child_exited dropped (mailbox full or dying)", .{});
 }
 
 /// Thread-local state: the socket and the reader.

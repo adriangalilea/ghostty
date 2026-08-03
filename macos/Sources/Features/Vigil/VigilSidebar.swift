@@ -333,6 +333,8 @@ final class VigilSidebarModel: ObservableObject {
     }
 
     @Published var draggingItem: DragItem?
+    /// The row currently under a move-drag: it wears the accent ring.
+    @Published var dropTarget: String?
     private var dragStarted: Date = .distantPast
 
     func beginDrag(_ item: DragItem) {
@@ -342,6 +344,7 @@ final class VigilSidebarModel: ObservableObject {
 
     func endDrag() {
         draggingItem = nil
+        dropTarget = nil
         refresh()
     }
 
@@ -467,16 +470,33 @@ struct VigilSessionDrop: DropDelegate {
 
     func dropEntered(info: DropInfo) {
         MainActor.assumeIsolated {
-            guard case .session(let dragging) = model.draggingItem else { return }
-            model.moveSession(dragging, over: target)
+            switch model.draggingItem {
+            case .session(let dragging):
+                model.moveSession(dragging, over: target)
+                if NSEvent.modifierFlags.contains(.option) { model.dropTarget = target }
+            case .tab, .pane:
+                model.dropTarget = target
+            case nil:
+                break
+            }
+        }
+    }
+
+    func dropExited(info: DropInfo) {
+        MainActor.assumeIsolated {
+            if model.dropTarget == target { model.dropTarget = nil }
         }
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         MainActor.assumeIsolated {
-            if case .session = model.draggingItem,
-               NSEvent.modifierFlags.contains(.option) {
-                return DropProposal(operation: .copy) // the merge badge
+            if case .session = model.draggingItem {
+                if NSEvent.modifierFlags.contains(.option) {
+                    model.dropTarget = target
+                    return DropProposal(operation: .copy) // the merge badge
+                }
+                model.dropTarget = nil
+                return DropProposal(operation: .move)
             }
             return DropProposal(operation: .move)
         }
@@ -484,21 +504,28 @@ struct VigilSessionDrop: DropDelegate {
 
     func performDrop(info: DropInfo) -> Bool {
         MainActor.assumeIsolated {
+            // Mutations DEFER out of the drag callback stack: tearing
+            // down/creating windows inside a live NSDraggingSession is
+            // asking AppKit for trouble.
             let manager = VigilSessionManager.shared
+            let target = self.target
             switch model.draggingItem {
             case .session(let source):
                 if NSEvent.modifierFlags.contains(.option), source != target {
                     model.endDrag()
-                    manager.mergeSession(source, into: target)
+                    DispatchQueue.main.async { manager.mergeSession(source, into: target) }
                 } else {
                     model.commitOrder()
+                    model.dropTarget = nil
                 }
             case .tab(let session, let anchor):
                 model.endDrag()
-                manager.moveTab(anchor: anchor, from: session, to: target)
+                DispatchQueue.main.async { manager.moveTab(anchor: anchor, from: session, to: target) }
             case .pane(let session, let paneId, let isDock):
                 model.endDrag()
-                manager.movePane(paneId: paneId, from: session, to: target, isDock: isDock)
+                DispatchQueue.main.async {
+                    manager.movePane(paneId: paneId, from: session, to: target, isDock: isDock)
+                }
             case nil:
                 break
             }
@@ -514,6 +541,20 @@ struct VigilTabDrop: DropDelegate {
     let anchor: String?
     let model: VigilSidebarModel
 
+    func dropEntered(info: DropInfo) {
+        MainActor.assumeIsolated {
+            if case .pane = model.draggingItem, let anchor {
+                model.dropTarget = "tab-\(anchor)"
+            }
+        }
+    }
+
+    func dropExited(info: DropInfo) {
+        MainActor.assumeIsolated {
+            if let anchor, model.dropTarget == "tab-\(anchor)" { model.dropTarget = nil }
+        }
+    }
+
     func dropUpdated(info: DropInfo) -> DropProposal? {
         MainActor.assumeIsolated {
             if case .pane = model.draggingItem { return DropProposal(operation: .move) }
@@ -525,9 +566,12 @@ struct VigilTabDrop: DropDelegate {
         MainActor.assumeIsolated {
             guard case .pane(let from, let paneId, _) = model.draggingItem,
                   let anchor else { return }
+            let session = self.session
             model.endDrag()
-            VigilSessionManager.shared.movePane(
-                paneId: paneId, from: from, intoTabAnchoredBy: anchor, of: session)
+            DispatchQueue.main.async {
+                VigilSessionManager.shared.movePane(
+                    paneId: paneId, from: from, intoTabAnchoredBy: anchor, of: session)
+            }
         }
         return true
     }
