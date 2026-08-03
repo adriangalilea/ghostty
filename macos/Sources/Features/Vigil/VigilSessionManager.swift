@@ -1175,8 +1175,10 @@ class VigilSessionManager {
                     self.registerMember(tabController, name: name)
                     self.materializeSplits(tabController, tab: tab, configFor: configFor)
                     self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
+                    self.focusLeftmost(tabController)
                 }
                 controller.window?.makeKeyAndOrderFront(nil)
+                self.focusLeftmost(controller)
             }
         }
         sessions[name]!.state = .embedded
@@ -1625,6 +1627,7 @@ class VigilSessionManager {
             }
             registerMember(controller, name: name)
             controller.surfaceTree = trees[chosenIndex]
+            focusLeftmost(controller)
             if let dock = detachedDocks[name]?[chosenIndex] {
                 dockMap.setObject(dock, forKey: controller)
             }
@@ -1639,12 +1642,14 @@ class VigilSessionManager {
                     for (index, tree) in rest {
                         let tab = TerminalController.vigilNewTab(ghostty, parent: controller, tree: tree)
                         self.registerMember(tab, name: name)
+                        self.focusLeftmost(tab)
                         if let dock = self.detachedDocks[name]?[index] {
                             self.dockMap.setObject(dock, forKey: tab)
                         }
                     }
                     self.detachedDocks[name] = nil
                     controller.window?.makeKeyAndOrderFront(nil)
+                    self.focusLeftmost(controller)
                     VigilBars.shared.syncAll()
                 }
             } else {
@@ -1674,6 +1679,7 @@ class VigilSessionManager {
             controller.surfaceTree = SplitTree(view: view)
             materializeSplits(controller, tab: first, configFor: configFor, delay: 0)
             materializeDockCapture(controller, first.dock, configFor: configFor)
+            focusLeftmost(controller)
             // Remaining tabs come back as NATIVE tabs behind this window,
             // ALL in one next tick (the window is presented; stagger was
             // pure trickle), focus returning to the anchored one once.
@@ -1689,8 +1695,10 @@ class VigilSessionManager {
                         self.registerMember(tabController, name: name)
                         self.materializeSplits(tabController, tab: tab, configFor: configFor, delay: 0)
                         self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
+                        self.focusLeftmost(tabController)
                     }
                     controller.window?.makeKeyAndOrderFront(nil)
+                    self.focusLeftmost(controller)
                 }
             }
             sessions[name]!.state = .embedded
@@ -1725,6 +1733,15 @@ class VigilSessionManager {
         persist()
     }
 
+    /// After ANY tree mount/swap, focus the new tree's leftmost leaf in
+    /// its own window: `focusedSurface` drives window AND tab titles, and
+    /// a nil/stale one leaves ghostty's literal 👻 default in the tab bar
+    /// (per-window first responder; background tabs never steal key).
+    private func focusLeftmost(_ controller: TerminalController) {
+        guard let leaf = controller.surfaceTree.root?.leftmostLeaf() else { return }
+        DispatchQueue.main.async { Ghostty.moveFocus(to: leaf) }
+    }
+
     /// Replace the window's tree with a captured tab, in place. The old
     /// tree's views release (whoever captured them keeps their daemons).
     private func mountCapturedTab(_ target: Tab, name: String, in controller: TerminalController) {
@@ -1738,6 +1755,7 @@ class VigilSessionManager {
         controller.surfaceTree = SplitTree(view: view)
         materializeSplits(controller, tab: target, configFor: configFor, delay: 0)
         materializeDockCapture(controller, target.dock, configFor: configFor)
+        focusLeftmost(controller)
     }
 
     // MARK: Viewport ⌘W (the tab closes; the window NEVER does)
