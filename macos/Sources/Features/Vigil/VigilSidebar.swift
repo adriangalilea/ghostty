@@ -335,11 +335,6 @@ final class VigilSidebarModel: ObservableObject {
     @Published var draggingItem: DragItem?
     private var dragStarted: Date = .distantPast
 
-    var draggingSession: String? {
-        if case .session(let name) = draggingItem { return name }
-        return nil
-    }
-
     func beginDrag(_ item: DragItem) {
         draggingItem = item
         dragStarted = Date()

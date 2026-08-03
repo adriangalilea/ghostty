@@ -2503,6 +2503,18 @@ class VigilSessionManager {
             vlog("sweep: unreachable daemon '\(stem)' -> kill")
             runFireAndForget(vigildBin, ["kill", stem])
         }
+
+        // AgentState files are per-pane facts; a pane whose daemon is GONE
+        // (no pidfile) would keep its last word forever otherwise. The
+        // same reachability sweep that owns daemon lifecycle prunes them.
+        for entry in (try? FileManager.default.contentsOfDirectory(atPath: agentStateDir.path)) ?? []
+        where entry.hasSuffix(".state") {
+            let pane = String(entry.dropLast(".state".count))
+            let pidfile = stateDir.appendingPathComponent("\(pane).pid")
+            if !FileManager.default.fileExists(atPath: pidfile.path) {
+                try? FileManager.default.removeItem(at: agentStateDir.appendingPathComponent(entry))
+            }
+        }
     }
 
     // MARK: Dock (the right bar: per-TAB stack of daemon-backed tool panes)
@@ -3644,21 +3656,3 @@ class VigilSessionManager {
     }
 }
 
-extension TerminalController {
-    /// A new tab in an existing window hosting an EXISTING split tree: the
-    /// re-embed primitive for multi-tab sessions (newWindow(tree:) is the
-    /// window half, this is the tab half).
-    static func vigilNewTab(
-        _ ghostty: Ghostty.App,
-        parent: TerminalController,
-        tree: SplitTree<Ghostty.SurfaceView>
-    ) -> TerminalController {
-        let controller = TerminalController(ghostty, withSurfaceTree: tree)
-        controller.isBackgroundOpaque = parent.isBackgroundOpaque
-        if let window = controller.window, let parentWindow = parent.window {
-            parentWindow.addTabbedWindowSafely(window, ordered: .above)
-            controller.showWindow(nil)
-        }
-        return controller
-    }
-}
