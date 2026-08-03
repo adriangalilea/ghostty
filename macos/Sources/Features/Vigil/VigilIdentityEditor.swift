@@ -122,13 +122,37 @@ enum VigilIdentity {
     static func editModal(name: String) {
         let manager = VigilSessionManager.shared
         guard let session = manager.sessions[name] else { return }
+        editModal(
+            title: "Session identity",
+            label: session.label,
+            emoji: session.emoji,
+            context: manager.identityContext(name: name)
+        ) { label, emoji in
+            manager.rename(
+                name: name,
+                label: label ?? session.label,
+                emoji: emoji)
+        }
+    }
 
-        let draft = VigilIdentityDraft(label: session.label, emoji: session.emoji ?? "")
+    /// The SAME editor for any identity (tabs, panes): alert chrome,
+    /// emoji well, sparkle. onCommit receives nil label for "unchanged/
+    /// cleared", nil emoji for none.
+    @MainActor
+    static func editModal(
+        title: String,
+        label: String,
+        emoji: String?,
+        context: String,
+        onCommit: @escaping (String?, String?) -> Void
+    ) {
+        let manager = VigilSessionManager.shared
+        let draft = VigilIdentityDraft(label: label, emoji: emoji ?? "")
         let alert = NSAlert()
-        alert.messageText = "Session identity"
+        alert.messageText = title
         let view = VigilIdentityEditor(
             draft: draft,
-            context: manager.identityContext(name: name),
+            context: context,
             recents: manager.recentEmoji(),
             onSubmit: { NSApp.stopModal(withCode: .alertFirstButtonReturn) })
         let hosting = NSHostingView(rootView: view)
@@ -140,11 +164,10 @@ enum VigilIdentity {
 
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let label = draft.label.trimmingCharacters(in: .whitespaces)
-        manager.rename(
-            name: name,
-            label: label.isEmpty ? session.label : label,
-            emoji: draft.emoji.isEmpty ? nil : draft.emoji)
+        let trimmed = draft.label.trimmingCharacters(in: .whitespaces)
+        onCommit(
+            trimmed.isEmpty ? nil : trimmed,
+            draft.emoji.isEmpty ? nil : draft.emoji)
     }
 }
 

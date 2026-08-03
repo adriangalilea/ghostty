@@ -276,11 +276,18 @@ struct VigilSidebarView: View {
             }
             // Same silhouette either way (no layout flash on swap): the
             // FILLED variant marks the tab the window displays right now,
-            // the outline is a tab resting cold (daemons running).
-            Image(systemName: tab.cold ? "rectangle.on.rectangle" : "rectangle.inset.filled.on.rectangle")
-                .font(.system(size: 9))
-                .foregroundColor(tab.cold ? .secondary : .primary.opacity(0.8))
-                .frame(width: Grid.icon)
+            // the outline is a tab resting cold (daemons running). A
+            // custom face takes the column over the glyph.
+            Group {
+                if let emoji = tab.emoji, let first = emoji.first {
+                    Text(String(first)).font(.system(size: 11))
+                } else {
+                    Image(systemName: tab.cold ? "rectangle.on.rectangle" : "rectangle.inset.filled.on.rectangle")
+                        .font(.system(size: 9))
+                        .foregroundColor(tab.cold ? .secondary : .primary.opacity(0.8))
+                }
+            }
+            .frame(width: Grid.icon)
             Text(tab.title)
                 .font(.system(size: 11, weight: tab.cold ? .regular : .medium))
                 .foregroundColor(tab.cold ? .secondary : .primary)
@@ -328,6 +335,19 @@ struct VigilSidebarView: View {
         }
         .onDrop(of: [UTType.text], delegate: VigilTabDrop(session: session, anchor: tab.anchor, model: model))
         .contextMenu {
+            if let anchor = tab.anchor {
+                Button("Rename…") {
+                    VigilIdentity.editModal(
+                        title: "Tab identity",
+                        label: tab.title,
+                        emoji: tab.emoji,
+                        context: "a terminal tab in this workspace, cwd basename: \(tab.title), running: \(tab.panes.map(\.title).joined(separator: ", "))"
+                    ) { label, emoji in
+                        VigilSessionManager.shared.setCustomIdentity(
+                            key: "tab:\(anchor)", label: label, emoji: emoji)
+                    }
+                }
+            }
             Button("Close Tab…", role: .destructive) {
                 VigilSessionManager.shared.closeTabFromSidebar(
                     name: session, anchor: tab.anchor, in: model.hostController)
@@ -355,10 +375,16 @@ struct VigilSidebarView: View {
     ) -> some View {
         let id = "\(tab.id)#\(pane.id)"
         return HStack(spacing: 4) {
-            Image(systemName: pane.isDock ? "sidebar.right" : "terminal")
-                .font(.system(size: 8))
-                .foregroundColor(Color.secondary.opacity(0.8))
-                .frame(width: Grid.icon)
+            Group {
+                if let emoji = pane.emoji, let first = emoji.first {
+                    Text(String(first)).font(.system(size: 11))
+                } else {
+                    Image(systemName: pane.isDock ? "sidebar.right" : "terminal")
+                        .font(.system(size: 8))
+                        .foregroundColor(Color.secondary.opacity(0.8))
+                }
+            }
+            .frame(width: Grid.icon)
             Text(pane.title)
                 .font(.system(size: 11))
                 .foregroundColor(.primary.opacity(0.85))
@@ -389,6 +415,19 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: id as NSString)
         }
         .contextMenu {
+            if let paneId = pane.paneId {
+                Button("Rename…") {
+                    VigilIdentity.editModal(
+                        title: "Pane identity",
+                        label: pane.title,
+                        emoji: pane.emoji,
+                        context: "a terminal pane, running: \(pane.program ?? "a shell")"
+                    ) { label, emoji in
+                        VigilSessionManager.shared.setCustomIdentity(
+                            key: paneId, label: label, emoji: emoji)
+                    }
+                }
+            }
             Button("Close Pane…", role: .destructive) {
                 VigilSessionManager.shared.closePaneFromSidebar(
                     name: session, paneId: pane.paneId, in: model.hostController)

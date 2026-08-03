@@ -75,6 +75,47 @@ class VigilSessionManager {
     /// seen-flip without storing a flag anywhere.
     private(set) var lastAck: [String: Date] = [:]
 
+    /// Custom identities for PANES and TABS (label + emoji, display-only
+    /// aliases, the id≠label rule one level down). Keyed by pane daemon id
+    /// (tabs by "tab:" + their anchor pane id): durable, so a renamed
+    /// claude keeps its name across moves, detach and reboot. Persisted
+    /// beside vigil.json; pruned by the reachability sweep with the
+    /// daemon.
+    struct CustomIdentity: Codable, Equatable {
+        var label: String?
+        var emoji: String?
+    }
+
+    private(set) var customIdentities: [String: CustomIdentity] = [:]
+
+    private var identitiesURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/wake/identities.json")
+    }
+
+    func customIdentity(_ key: String) -> CustomIdentity? {
+        customIdentities[key]
+    }
+
+    func setCustomIdentity(key: String, label: String?, emoji: String?) {
+        if label == nil, emoji == nil {
+            customIdentities[key] = nil
+        } else {
+            customIdentities[key] = CustomIdentity(label: label, emoji: emoji)
+        }
+        if let data = try? JSONEncoder().encode(customIdentities) {
+            try? data.write(to: identitiesURL)
+        }
+        NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+    }
+
+    private func loadCustomIdentities() {
+        guard let data = try? Data(contentsOf: identitiesURL),
+              let loaded = try? JSONDecoder().decode([String: CustomIdentity].self, from: data)
+        else { return }
+        customIdentities = loaded
+    }
+
     /// One leaf of the workspace. Every pane lives in a vigild daemon, so
     /// `command` is its attach sentinel and resurrection is native reattach;
     /// a pane that somehow lost its daemon resurrects as a bare shell in its
@@ -241,6 +282,7 @@ class VigilSessionManager {
 
     private init() {
         load()
+        loadCustomIdentities()
         sweepPaneDaemons()
         startEventWatcher()
         startStateDirWatcher()
@@ -2515,6 +2557,19 @@ class VigilSessionManager {
                 try? FileManager.default.removeItem(at: agentStateDir.appendingPathComponent(entry))
             }
         }
+
+        // Custom pane/tab identities die with their daemon, same rule.
+        let staleIdentities = customIdentities.keys.filter { key in
+            let pane = key.hasPrefix("tab:") ? String(key.dropFirst(4)) : key
+            return !FileManager.default.fileExists(
+                atPath: stateDir.appendingPathComponent("\(pane).pid").path)
+        }
+        if !staleIdentities.isEmpty {
+            for key in staleIdentities { customIdentities[key] = nil }
+            if let data = try? JSONEncoder().encode(customIdentities) {
+                try? data.write(to: identitiesURL)
+            }
+        }
     }
 
     // MARK: Dock (the right bar: per-TAB stack of daemon-backed tool panes)
@@ -2843,10 +2898,11 @@ class VigilSessionManager {
     struct SidebarPane: Identifiable, Equatable {
         let id: String            // attach id, or a synthetic id for daemon-less panes
         let paneId: String?       // vigild daemon id when daemon-backed
-        let title: String         // display: program (argv truth) or surface title
+        let title: String         // display: custom label, else program, else surface title
         let program: String?      // the argv truth alone; nil = just a shell
         let state: AgentState?
         let isDock: Bool
+        var emoji: String?        // the pane's custom face
     }
 
     struct SidebarTab: Identifiable, Equatable {
@@ -2859,6 +2915,8 @@ class VigilSessionManager {
         var anchor: String?
         /// Captured-but-unmounted (lazy shapeshift): daemons run, no views.
         var cold: Bool = false
+        /// The tab's custom face.
+        var emoji: String?
     }
 
     struct SidebarSessionRow: Identifiable, Equatable {
@@ -2896,7 +2954,9 @@ class VigilSessionManager {
         func paneRow(view: Ghostty.SurfaceView, session: String, isDock: Bool) -> SidebarPane {
             let paneId = view.vigilAttachId
             let program = paneId.flatMap { paneProgram($0) }
-            let title = program
+            let custom = paneId.flatMap { customIdentities[$0] }
+            let title = custom?.label
+                ?? program
                 ?? (view.title.isEmpty ? "shell" : view.title)
             return SidebarPane(
                 id: paneId ?? "view-\(ObjectIdentifier(view).hashValue)",
@@ -2904,13 +2964,16 @@ class VigilSessionManager {
                 title: title,
                 program: program,
                 state: paneId.flatMap { paneDisplayState($0, in: session) },
-                isDock: isDock)
+                isDock: isDock,
+                emoji: custom?.emoji)
         }
 
         func capturedPaneRow(_ pane: Pane, session: String, index: Int, tab: Int, isDock: Bool) -> SidebarPane {
             let paneId = self.paneId(of: pane)
             let program = paneId.flatMap { paneProgram($0) }
-            let title = program
+            let custom = paneId.flatMap { customIdentities[$0] }
+            let title = custom?.label
+                ?? program
                 ?? URL(fileURLWithPath: pane.cwd).lastPathComponent
             return SidebarPane(
                 id: paneId ?? "captured-\(session)-\(tab)-\(index)\(isDock ? "-d" : "")",
@@ -2918,7 +2981,13 @@ class VigilSessionManager {
                 title: title,
                 program: program,
                 state: paneId.flatMap { paneDisplayState($0, in: session) },
-                isDock: isDock)
+                isDock: isDock,
+                emoji: custom?.emoji)
+        }
+
+        /// The tab's face + label override, anchored by pane id.
+        func tabCustom(_ anchor: String?) -> CustomIdentity? {
+            anchor.flatMap { customIdentities["tab:\($0)"] }
         }
 
         /// A tab's skim label: WHERE it lives (cwd basename), never an echo
@@ -2952,11 +3021,14 @@ class VigilSessionManager {
                     }
                     let cwd = controller.focusedSurface?.pwd
                         ?? controller.surfaceTree.root?.leftmostLeaf().pwd
+                    let anchor = panes.first(where: { $0.paneId != nil })?.paneId
+                    let custom = tabCustom(anchor)
                     return SidebarTab(
                         id: "\(name)-t\(index)",
-                        title: tabTitle(cwd: cwd, fallback: "tab \(index + 1)"),
+                        title: custom?.label ?? tabTitle(cwd: cwd, fallback: "tab \(index + 1)"),
                         index: index, panes: panes,
-                        anchor: panes.first(where: { $0.paneId != nil })?.paneId)
+                        anchor: anchor,
+                        emoji: custom?.emoji)
                 }
 
                 func memberHosting(_ ids: Set<String>) -> TerminalController? {
@@ -2984,12 +3056,14 @@ class VigilSessionManager {
                             panes += (tab.dock?.panes ?? []).enumerated().map {
                                 capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
                             }
+                            let custom = tabCustom(idList.first)
                             tabs.append(SidebarTab(
                                 id: "\(name)-t\(index)",
-                                title: tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
+                                title: custom?.label ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                                 index: index,
                                 panes: panes,
-                                anchor: idList.first))
+                                anchor: idList.first,
+                                emoji: custom?.emoji))
                         } else {
                             tabs.append(liveTabRow(member, index: index))
                         }
@@ -3000,13 +3074,15 @@ class VigilSessionManager {
                         panes += (tab.dock?.panes ?? []).enumerated().map {
                             capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
                         }
+                        let custom = tabCustom(idList.first)
                         tabs.append(SidebarTab(
                             id: "\(name)-t\(index)",
-                            title: tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
+                            title: custom?.label ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                             index: index,
                             panes: panes,
                             anchor: idList.first,
-                            cold: true))
+                            cold: true,
+                            emoji: custom?.emoji))
                     }
                 }
                 // Members not represented in the captures yet (a fresh ⌘T
@@ -3021,12 +3097,15 @@ class VigilSessionManager {
                     if let dock = detachedDocks[name]?[index] {
                         panes += dock.views.map { paneRow(view: $0, session: name, isDock: true) }
                     }
+                    let anchor = panes.first(where: { $0.paneId != nil })?.paneId
+                    let custom = tabCustom(anchor)
                     tabs.append(SidebarTab(
                         id: "\(name)-t\(index)",
-                        title: tabTitle(cwd: tree.root?.leftmostLeaf().pwd, fallback: "tab \(index + 1)"),
+                        title: custom?.label ?? tabTitle(cwd: tree.root?.leftmostLeaf().pwd, fallback: "tab \(index + 1)"),
                         index: index,
                         panes: panes,
-                        anchor: panes.first(where: { $0.paneId != nil })?.paneId))
+                        anchor: anchor,
+                        emoji: custom?.emoji))
                 }
             case .asleep:
                 for (index, tab) in session.tabs.enumerated() {
@@ -3036,13 +3115,16 @@ class VigilSessionManager {
                     panes += (tab.dock?.panes ?? []).enumerated().map {
                         capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
                     }
+                    let anchor = panes.first(where: { $0.paneId != nil })?.paneId
+                    let custom = tabCustom(anchor)
                     tabs.append(SidebarTab(
                         id: "\(name)-t\(index)",
-                        title: tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
+                        title: custom?.label ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                         index: index,
                         panes: panes,
-                        anchor: panes.first(where: { $0.paneId != nil })?.paneId,
-                        cold: true))
+                        anchor: anchor,
+                        cold: true,
+                        emoji: custom?.emoji))
                 }
             }
             let tag: String

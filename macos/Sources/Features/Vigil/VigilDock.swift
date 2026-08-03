@@ -222,9 +222,17 @@ private struct VigilDockTenantLabel: View {
     }
 
     private var label: String {
-        if let pane = surface.vigilAttachId,
-           let program = VigilSessionManager.shared.paneProgram(pane) {
-            return program
+        if let pane = surface.vigilAttachId {
+            if let custom = VigilSessionManager.shared.customIdentity(pane) {
+                let face = custom.emoji.flatMap(\.first).map { "\($0) " } ?? ""
+                if let name = custom.label { return face + name }
+                if !face.isEmpty, let program = VigilSessionManager.shared.paneProgram(pane) {
+                    return face + program
+                }
+            }
+            if let program = VigilSessionManager.shared.paneProgram(pane) {
+                return program
+            }
         }
         let title = surface.title.trimmingCharacters(in: .whitespaces)
         return title.isEmpty ? "shell" : title
