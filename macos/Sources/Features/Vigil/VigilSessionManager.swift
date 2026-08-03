@@ -1173,6 +1173,10 @@ class VigilSessionManager {
                 self.registerMember(tabController, name: name)
                 self.materializeSplits(tabController, tab: tab, configFor: configFor)
                 self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
+            }
+        }
+        if tabDelay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay + 0.1) {
                 controller.window?.makeKeyAndOrderFront(nil)
             }
         }
@@ -1670,7 +1674,9 @@ class VigilSessionManager {
             controller.surfaceTree = SplitTree(view: view)
             materializeSplits(controller, tab: first, configFor: configFor, delay: 0)
             materializeDockCapture(controller, first.dock, configFor: configFor)
-            // Remaining tabs come back as NATIVE tabs behind this window.
+            // Remaining tabs come back as NATIVE tabs behind this window;
+            // focus returns to the anchored one ONCE, after the last
+            // attach (per-tab makeKey flashed focus around).
             var tabDelay: TimeInterval = 0
             for tab in usable where tabPaneIds(tab) != tabPaneIds(first) {
                 guard let parent = controller.window else { continue }
@@ -1684,6 +1690,10 @@ class VigilSessionManager {
                     self.registerMember(tabController, name: name)
                     self.materializeSplits(tabController, tab: tab, configFor: configFor)
                     self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
+                }
+            }
+            if tabDelay > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay + 0.1) {
                     controller.window?.makeKeyAndOrderFront(nil)
                 }
             }
@@ -3685,6 +3695,12 @@ class VigilSessionManager {
 
             let existing = window.titlebarAccessoryViewControllers.enumerated()
                 .first { $0.element is VigilTitlebarAccessory }
+
+            // The tab bar is ALWAYS visible (Adrian 2026-08-03): a lone
+            // tab shows as one tab + the native plus, so tabbed and
+            // tabless windows share one height and switching sessions
+            // never shifts the layout vertically.
+            window.tabbingMode = .preferred
 
             let name = sessionName(of: controller)
             let persistent = name.map { sessions[$0]?.persistent == true } ?? false
