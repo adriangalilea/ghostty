@@ -1552,35 +1552,32 @@ class VigilSessionManager {
     private func releaseOccupant(of controller: TerminalController) {
         if let current = sessionName(of: controller) {
             let ms = members(of: current)
-            let trees = ms.map(\.surfaceTree).filter { !$0.isEmpty }
+            var trees: [SplitTree<Ghostty.SurfaceView>] = []
+            var docks: [Int: VigilDockRuntime] = [:]
+            for member in ms where !member.surfaceTree.isEmpty {
+                if let runtime = dockMap.object(forKey: member) {
+                    docks[trees.count] = runtime
+                }
+                trees.append(member.surfaceTree)
+            }
             sessions[current]!.tabs = mergedCapture(name: current)
             if let pwd = controller.focusedSurface?.pwd { sessions[current]!.cwd = pwd }
             sessions[current]!.thumbnail = Self.windowSnapshot(controller)
-            // Dock runtimes release with their views: the captures + the
-            // daemons carry them; nothing is stashed.
             for member in ms {
                 dockMap.object(forKey: member)?.unmount()
                 dockMap.removeObject(forKey: member)
             }
-            detachedDocks[current] = nil
             for member in ms { memberships.removeObject(forKey: member) }
             for member in ms where member !== controller { member.surfaceTree = SplitTree() }
-            if sessions[current]!.persistent {
-                // Straight to ASLEEP: every released pane's daemon holds
-                // its exact state and the capture resurrects it; keeping
-                // detached trees in memory buys nothing and costs window
-                // churn on the way back. (A daemon-less pane dies here,
-                // the same honesty as app quit.)
-                sessions[current]!.state = .asleep
-                if let thumb = sessions[current]!.thumbnail {
-                    persistThumb(name: current, image: thumb)
-                }
-            } else {
-                // Looking away is NOT a close (Adrian 2026-08-01): an
-                // ephemeral session lives on detached-in-memory (trees
-                // held, daemons running), listed in the bar, and dies only
-                // on explicit ⌘W / ⌘⇧⌫ / ⌘Q.
-                sessions[current]!.state = .detached(trees)
+            // BOTH classes stay DETACHED with trees ALIVE: coming back
+            // re-embeds these exact surfaces (native tabs regroup from
+            // live trees, no VT replay, titles intact). The old
+            // straight-to-asleep shortcut made every return a full
+            // rebuild - the reported delay and the ghost-titled tabs.
+            sessions[current]!.state = .detached(trees)
+            detachedDocks[current] = docks.isEmpty ? nil : docks
+            if sessions[current]!.persistent, let thumb = sessions[current]!.thumbnail {
+                persistThumb(name: current, image: thumb)
             }
         } else if !controller.surfaceTree.isEmpty {
             // Safety-net stray: mint it a REAL ephemeral session (alive,
@@ -3698,8 +3695,13 @@ class VigilSessionManager {
             // The tab bar is ALWAYS visible (Adrian 2026-08-03): a lone
             // tab shows as one tab + the native plus, so tabbed and
             // tabless windows share one height and switching sessions
-            // never shifts the layout vertically.
+            // never shifts the layout vertically. `.preferred` only
+            // biases grouping; the bar itself is forced via the tab
+            // group's public visibility (idempotent at this chokepoint).
             window.tabbingMode = .preferred
+            if let group = window.tabGroup, !group.isTabBarVisible {
+                window.toggleTabBar(nil)
+            }
 
             let name = sessionName(of: controller)
             let persistent = name.map { sessions[$0]?.persistent == true } ?? false
