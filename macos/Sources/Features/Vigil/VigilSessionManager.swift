@@ -1160,23 +1160,22 @@ class VigilSessionManager {
         registerMember(controller, name: name)
         materializeSplits(controller, tab: first, configFor: configFor)
         materializeDockCapture(controller, first.dock, configFor: configFor)
-        var tabDelay: TimeInterval = 0
-        for tab in usable.dropFirst() {
-            guard let parent = controller.window else { continue }
-            tabDelay += 0.3
-            let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
-            let config = configFor(tab.panes[firstPane])
-            DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay) { [weak self] in
+        // A FRESH window needs one presentation beat (a tab attached to
+        // an unpresented window is born invisible); after it, the rest
+        // attach together - one wait, no per-tab trickle.
+        let rest = Array(usable.dropFirst())
+        if !rest.isEmpty, let parent = controller.window {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 guard let self else { return }
-                guard let tabController = TerminalController.newTab(
-                    ghostty, from: parent, withBaseConfig: config) else { return }
-                self.registerMember(tabController, name: name)
-                self.materializeSplits(tabController, tab: tab, configFor: configFor)
-                self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
-            }
-        }
-        if tabDelay > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay + 0.1) {
+                for tab in rest {
+                    let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
+                    guard let tabController = TerminalController.newTab(
+                        ghostty, from: parent, withBaseConfig: configFor(tab.panes[firstPane])
+                    ) else { continue }
+                    self.registerMember(tabController, name: name)
+                    self.materializeSplits(tabController, tab: tab, configFor: configFor)
+                    self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
+                }
                 controller.window?.makeKeyAndOrderFront(nil)
             }
         }
@@ -1634,7 +1633,11 @@ class VigilSessionManager {
             }
             let rest = trees.enumerated().filter { $0.offset != chosenIndex }
             if !rest.isEmpty {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                // This window is PRESENTED (it is the live viewport), so
+                // the rest attach in ONE next tick - no stagger, no
+                // trickle. The 0.3s beat exists only for freshly created
+                // windows (launch resurrect).
+                DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     for (index, tree) in rest {
                         let tab = TerminalController.vigilNewTab(ghostty, parent: controller, tree: tree)
@@ -1674,26 +1677,22 @@ class VigilSessionManager {
             controller.surfaceTree = SplitTree(view: view)
             materializeSplits(controller, tab: first, configFor: configFor, delay: 0)
             materializeDockCapture(controller, first.dock, configFor: configFor)
-            // Remaining tabs come back as NATIVE tabs behind this window;
-            // focus returns to the anchored one ONCE, after the last
-            // attach (per-tab makeKey flashed focus around).
-            var tabDelay: TimeInterval = 0
-            for tab in usable where tabPaneIds(tab) != tabPaneIds(first) {
-                guard let parent = controller.window else { continue }
-                tabDelay += 0.3
-                let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
-                let config = configFor(tab.panes[firstPane])
-                DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay) { [weak self] in
+            // Remaining tabs come back as NATIVE tabs behind this window,
+            // ALL in one next tick (the window is presented; stagger was
+            // pure trickle), focus returning to the anchored one once.
+            let rest = usable.filter { tabPaneIds($0) != tabPaneIds(first) }
+            if !rest.isEmpty, let parent = controller.window {
+                DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    guard let tabController = TerminalController.newTab(
-                        ghostty, from: parent, withBaseConfig: config) else { return }
-                    self.registerMember(tabController, name: name)
-                    self.materializeSplits(tabController, tab: tab, configFor: configFor)
-                    self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
-                }
-            }
-            if tabDelay > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + tabDelay + 0.1) {
+                    for tab in rest {
+                        let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
+                        guard let tabController = TerminalController.newTab(
+                            ghostty, from: parent, withBaseConfig: configFor(tab.panes[firstPane])
+                        ) else { continue }
+                        self.registerMember(tabController, name: name)
+                        self.materializeSplits(tabController, tab: tab, configFor: configFor, delay: 0)
+                        self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
+                    }
                     controller.window?.makeKeyAndOrderFront(nil)
                 }
             }
