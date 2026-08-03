@@ -145,12 +145,30 @@ pub const Mailbox = struct {
         // Surface message sending is actually implemented on the app
         // thread, so we have to rewrap the message with our surface
         // pointer and send it to the app thread.
-        return self.app.push(.{
+        //
+        // vigil: NEVER block, whatever the caller asked for. Pushers are
+        // worker threads (the IO parse stage among them) and the ONLY
+        // drainer is the main thread; when main blocks joining a worker
+        // (surface teardown) a .forever push here deadlocks the entire
+        // app (sampled live 2026-08-03: reader parked on this queue's
+        // futex, io thread joining the reader, main joining the io
+        // thread). A dropped surface message under a full queue is
+        // survivable and logged; a parked parser under a joining main
+        // thread is not.
+        _ = timeout;
+        const pushed = self.app.push(.{
             .surface_message = .{
                 .surface = self.surface,
                 .message = msg,
             },
-        }, timeout);
+        }, .{ .instant = {} });
+        if (pushed == 0) {
+            std.log.scoped(.surface_mailbox).warn(
+                "surface message dropped (app queue full), tag={s}",
+                .{@tagName(msg)},
+            );
+        }
+        return pushed;
     }
 };
 

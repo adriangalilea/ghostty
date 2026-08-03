@@ -1379,6 +1379,15 @@ pub const ReadThread = struct {
         /// remaining batches and then exits.
         done: bool = false,
 
+        /// Set by the gather stage on a DELIBERATE quit signal: the
+        /// parse stage abandons any remaining batches immediately.
+        /// A teardown join must never wait out a buffered backlog
+        /// (megabytes of a streaming agent = an unbounded stall on
+        /// whoever joins us, observed as a whole-app wedge
+        /// 2026-08-03); a process's last words only matter on EOF,
+        /// which keeps the drain via `done` alone.
+        quit: bool = false,
+
         /// The buffer storage itself.
         bufs: [buffer_count][buffer_capacity]u8 = undefined,
     };
@@ -1456,8 +1465,9 @@ pub const ReadThread = struct {
             const batch: []const u8 = batch: {
                 pipeline.mutex.lock();
                 defer pipeline.mutex.unlock();
+                if (pipeline.quit) return;
                 while (pipeline.count == 0) {
-                    if (pipeline.done) return;
+                    if (pipeline.done or pipeline.quit) return;
                     pipeline.batch_ready.wait(&pipeline.mutex);
                 }
                 const slot = pipeline.tail;
@@ -1611,6 +1621,9 @@ pub const ReadThread = struct {
                         // and stop.
                         if (pollfds[1].revents & posix.POLL.IN != 0) {
                             log.info("read thread got quit signal", .{});
+                            pipeline.mutex.lock();
+                            pipeline.quit = true;
+                            pipeline.mutex.unlock();
                             fatal = true;
                             break :gather;
                         }
@@ -1692,9 +1705,13 @@ pub const ReadThread = struct {
                 return;
             };
 
-            // If our quit fd is set, we're done.
+            // If our quit fd is set, we're done. The parse stage drops
+            // any remaining backlog (see Pipeline.quit).
             if (pollfds[1].revents & posix.POLL.IN != 0) {
                 log.info("read thread got quit signal", .{});
+                pipeline.mutex.lock();
+                pipeline.quit = true;
+                pipeline.mutex.unlock();
                 return;
             }
 
