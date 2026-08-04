@@ -1849,7 +1849,13 @@ class VigilSessionManager {
             sessions[name]!.state = .embedded
 
         case .embedded, .floating:
-            break
+            // Refusing is correct (the session lives elsewhere) but it
+            // must SCREAM: a caller that mounts blind leaves this window
+            // stray with the old tree still on screen, and the next
+            // release mints that tree as a duplicate session (the
+            // 2026-08-04 "Evaluate FFmpeg" twins). Callers route embedded
+            // targets to their home window or pick a mountable session.
+            vlog("mount REFUSED: '\(name)' is \(stateTag(session.state)) - window left as-is")
         }
     }
 
@@ -1988,9 +1994,25 @@ class VigilSessionManager {
 
     private func closeLastTab(_ controller: TerminalController, name: String) {
         vlog("closeViewportTab: last tab of '\(name)' -> lifecycle, viewport moves on")
+        let persistent = sessions[name]!.persistent
         releaseOccupant(of: controller)
+        // The LIFECYCLE, for real: persistent sleeps detached (the release
+        // above IS the detach); ephemeral dies (bury + undo grace). The
+        // confirm the caller showed promised a kill - honoring it here is
+        // what makes ⌘W actually close the session instead of leaving a
+        // detached ghost that auto-follow drags right back.
+        if !persistent { kill(name: name) }
+        // Only a session that can TAKE this viewport (mount refuses
+        // embedded/floating: they already live elsewhere). If everything
+        // else is on screen already, the window closes plain.
         let next = sessions.values
-            .filter { $0.name != name }
+            .filter { session in
+                guard session.name != name else { return false }
+                switch session.state {
+                case .detached, .asleep: return true
+                case .embedded, .floating: return false
+                }
+            }
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
             .first
         guard let next, let ghostty = ghosttyApp else {
