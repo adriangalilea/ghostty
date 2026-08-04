@@ -17,7 +17,10 @@ final class VigilBars {
         // ONE local monitor (app-internal, no Accessibility) is the modal
         // seam: the terminal owns every key, so stepping out needs an
         // interceptor that fires BEFORE the pty ever sees the event.
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        // Mouse-downs ride the same monitor for the auto-follow shield.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { event in
             MainActor.assumeIsolated { VigilBars.shared.route(event) }
         }
         NotificationCenter.default.addObserver(
@@ -66,6 +69,52 @@ final class VigilBars {
         if let current, manager.freshlyBlocked(current, within: 120) { return }
         manager.vlog("auto-follow -> '\(target)'")
         manager.shapeshift(in: controller, to: target)
+        // The content just changed UNDER the cursor: a click/keystroke in
+        // flight milliseconds later was aimed at the OLD content and must
+        // not land in the new terminal. Shield the swapped window's
+        // terminal briefly; the splash names the arrival and IS the
+        // cooldown indicator (a swallowed event re-flashes it).
+        followShieldUntil = Date().addingTimeInterval(0.4)
+        followShieldWindow = controller.window
+        let face: String = {
+            guard let session = manager.sessions[target] else { return target }
+            let emoji = session.emoji.map { "\($0) " } ?? ""
+            return emoji + session.label
+        }()
+        VigilFollowSplash.show(in: controller.window, text: face)
+    }
+
+    // MARK: Auto-follow input shield
+
+    private var followShieldUntil: Date = .distantPast
+    private weak var followShieldWindow: NSWindow?
+
+    /// True while the event races a just-fired auto-follow swap AND is
+    /// headed into the swapped window's TERMINAL content (sidebar rows,
+    /// titlebar and other windows are stable targets; only the terminal
+    /// changed under the cursor).
+    private func shouldShield(_ event: NSEvent) -> Bool {
+        guard Date() < followShieldUntil,
+              let window = event.window, window === followShieldWindow else { return false }
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            guard let content = window.contentView else { return false }
+            var view = content.hitTest(content.convert(event.locationInWindow, from: nil))
+            while let v = view {
+                if v is Ghostty.SurfaceView { return true }
+                view = v.superview
+            }
+            return false
+        case .keyDown:
+            var responder = window.firstResponder as? NSView
+            while let v = responder {
+                if v is Ghostty.SurfaceView { return true }
+                responder = v.superview
+            }
+            return false
+        default:
+            return false
+        }
     }
 
     // MARK: Control mode (step OUT of the terminal, helix-style)
@@ -78,6 +127,11 @@ final class VigilBars {
     private weak var controlHost: VigilSidebarHost?
 
     private func route(_ event: NSEvent) -> NSEvent? {
+        if shouldShield(event) {
+            VigilFollowSplash.reflash()
+            return nil
+        }
+        guard event.type == .keyDown else { return event }
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
         if event.keyCode == 53, mods == [.shift] { // ⇧Esc
             toggleControlMode()
