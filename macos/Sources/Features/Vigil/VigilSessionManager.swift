@@ -3888,19 +3888,36 @@ class VigilSessionManager {
     private func mergedCapture(name: String) -> [Tab] {
         var trees: [SplitTree<Ghostty.SurfaceView>] = []
         var docks: [Int: VigilDockRuntime] = [:]
+        var settling = Set<String>()
         for member in members(of: name) where !member.surfaceTree.isEmpty {
+            // A tree mid-materialization is NOT truth: its splits are
+            // still landing async. Capturing it wrote a THINNER tab than
+            // the capture it was born from - the sidebar's materializing
+            // guard then rendered that lie (a pane row vanished for a
+            // beat on first mount) and the still-cold panes' daemons were
+            // briefly disowned. The previous capture holds until settled.
+            if isMaterializing(member) {
+                for view in member.surfaceTree {
+                    if let id = view.vigilAttachId { settling.insert(id) }
+                }
+                continue
+            }
             if let runtime = dockMap.object(forKey: member) {
                 docks[trees.count] = runtime
             }
             trees.append(member.surfaceTree)
         }
-        return mergeTabs(name: name, liveTabs: captureTabs(name: name, trees, docks: docks))
+        return mergeTabs(
+            name: name,
+            liveTabs: captureTabs(name: name, trees, docks: docks),
+            settling: settling)
     }
 
     /// The merge half of mergedCapture, reusable by any path that already
     /// holds the live trees (reclaim): previous positions kept, cold tabs
-    /// carried, new live tabs appended.
-    private func mergeTabs(name: String, liveTabs: [Tab]) -> [Tab] {
+    /// carried, new live tabs appended; tabs overlapping a SETTLING tree
+    /// (mid-materialization) keep their previous capture untouched.
+    private func mergeTabs(name: String, liveTabs: [Tab], settling: Set<String> = []) -> [Tab] {
         guard let session = sessions[name] else { return liveTabs }
         let live = liveAttachIds(of: name)
 
@@ -3908,6 +3925,10 @@ class VigilSessionManager {
         var used = Set<Int>()
         for prev in session.tabs {
             let prevIds = Set(tabPaneIds(prev))
+            if !prevIds.isDisjoint(with: settling) {
+                out.append(prev) // mid-materialization: previous capture holds
+                continue
+            }
             if let index = liveTabs.indices.first(where: { candidate in
                 !used.contains(candidate)
                     && !prevIds.isDisjoint(with: Set(tabPaneIds(liveTabs[candidate])))
