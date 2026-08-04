@@ -1456,6 +1456,15 @@ class VigilSessionManager {
         dockMap.removeObject(forKey: controller)
         controller.surfaceTree = SplitTree()
         vlog("closeTab: one tab leaves '\(name)'")
+        // The tab leaves the SOURCE capture too. Without this, the next
+        // mergedCapture saw its panes as not-live and carried the tab as
+        // "still cold": a closed tab haunted the sidebar as a phantom
+        // cold row forever (buryMountedTab already strips; this path
+        // forgot).
+        var movedIds = Set<String>()
+        for view in tree { if let id = view.vigilAttachId { movedIds.insert(id) } }
+        for view in dock?.views ?? [] { if let id = view.vigilAttachId { movedIds.insert(id) } }
+        sessions[name]?.tabs.removeAll { !Set(tabPaneIds($0)).isDisjoint(with: movedIds) }
         guard !tree.isEmpty else { persist(); return }
 
         let surface = tree.root?.leftmostLeaf()
