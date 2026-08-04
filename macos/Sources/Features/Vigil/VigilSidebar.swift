@@ -205,9 +205,10 @@ final class VigilSidebarModel: ObservableObject {
         }
         lastRefresh = now
         // A live drag owns the row order; a snapshot would clobber the
-        // preview. Staleness guard: a cancelled drag never blocks forever.
+        // preview. Staleness guard: a drag cancelled OUTSIDE the bar (no
+        // delegate fires) un-dims and reverts within a tick or two.
         if draggingItem != nil {
-            if Date().timeIntervalSince(dragStarted) > 10 { draggingItem = nil }
+            if Date().timeIntervalSince(dragStarted) > 3 { draggingItem = nil }
             else { return }
         }
         let fresh = VigilSessionManager.shared.sidebarSnapshot()
@@ -388,6 +389,50 @@ final class VigilSidebarModel: ObservableObject {
         rows.insert(row, at: to)
     }
 
+    /// The tail zone's preview: dragged past the last row = last place.
+    func moveSessionToEnd() {
+        guard case .session(let dragged) = draggingItem,
+              let from = rows.firstIndex(where: { $0.id == dragged }),
+              from != rows.count - 1 else { return }
+        let row = rows.remove(at: from)
+        rows.append(row)
+    }
+
+    // Session-drag handling shared by EVERY drop surface in the bar
+    // (session rows, tab rows, pane rows, the tail): territory decides
+    // the target. A session dropped on a child row used to hit a delegate
+    // that refused it - the drag CANCELLED with draggingItem stuck (row
+    // dimmed, preview silently reverted) until the staleness timer.
+
+    func sessionDragEntered(over target: String) {
+        guard case .session(let dragging) = draggingItem else { return }
+        moveSession(dragging, over: target)
+        if NSEvent.modifierFlags.contains(.option) { dropTarget = target }
+    }
+
+    func sessionDragUpdated(over target: String) -> DropProposal {
+        if NSEvent.modifierFlags.contains(.option) {
+            dropTarget = target
+            return DropProposal(operation: .copy) // the merge badge
+        }
+        dropTarget = nil
+        return DropProposal(operation: .move)
+    }
+
+    func sessionDragPerform(target: String) {
+        guard case .session(let source) = draggingItem else { return }
+        if NSEvent.modifierFlags.contains(.option), source != target,
+           rows.contains(where: { $0.id == target }) { // gap/tail pass "": commit-only
+            endDrag()
+            DispatchQueue.main.async {
+                VigilSessionManager.shared.mergeSession(source, into: target)
+            }
+        } else {
+            commitOrder()
+            dropTarget = nil
+        }
+    }
+
     /// Drop: the preview order becomes THE order (persisted; the overview
     /// cycles in the same order).
     func commitOrder() {
@@ -510,8 +555,9 @@ final class VigilSidebarModel: ObservableObject {
     }
 }
 
-/// Session-row drag reorder: dropEntered previews the move live,
-/// performDrop commits it (persisted; the overview shares the order).
+/// Session-row drop: reorder preview + merge (⌥), tab/pane land in this
+/// session. Every case is handled - an unhandled drop CANCELS the drag
+/// with draggingItem stuck (dim + silent revert).
 struct VigilSessionDrop: DropDelegate {
     let target: String
     let model: VigilSidebarModel
@@ -519,9 +565,8 @@ struct VigilSessionDrop: DropDelegate {
     func dropEntered(info: DropInfo) {
         MainActor.assumeIsolated {
             switch model.draggingItem {
-            case .session(let dragging):
-                model.moveSession(dragging, over: target)
-                if NSEvent.modifierFlags.contains(.option) { model.dropTarget = target }
+            case .session:
+                model.sessionDragEntered(over: target)
             case .tab, .pane:
                 model.dropTarget = target
             case nil:
@@ -539,12 +584,7 @@ struct VigilSessionDrop: DropDelegate {
     func dropUpdated(info: DropInfo) -> DropProposal? {
         MainActor.assumeIsolated {
             if case .session = model.draggingItem {
-                if NSEvent.modifierFlags.contains(.option) {
-                    model.dropTarget = target
-                    return DropProposal(operation: .copy) // the merge badge
-                }
-                model.dropTarget = nil
-                return DropProposal(operation: .move)
+                return model.sessionDragUpdated(over: target)
             }
             return DropProposal(operation: .move)
         }
@@ -558,14 +598,8 @@ struct VigilSessionDrop: DropDelegate {
             let manager = VigilSessionManager.shared
             let target = self.target
             switch model.draggingItem {
-            case .session(let source):
-                if NSEvent.modifierFlags.contains(.option), source != target {
-                    model.endDrag()
-                    DispatchQueue.main.async { manager.mergeSession(source, into: target) }
-                } else {
-                    model.commitOrder()
-                    model.dropTarget = nil
-                }
+            case .session:
+                model.sessionDragPerform(target: target)
             case .tab(let session, let anchor):
                 model.endDrag()
                 DispatchQueue.main.async { manager.moveTab(anchor: anchor, from: session, to: target) }
@@ -582,8 +616,10 @@ struct VigilSessionDrop: DropDelegate {
     }
 }
 
-/// Tab-row drop: a dragged PANE lands INSIDE this tab (live target splits
-/// natively, cold target grows its capture).
+/// Tab-row (and pane-row) drop: a dragged PANE lands INSIDE this tab; a
+/// dragged SESSION reorders around this row's session (territory decides
+/// the target - refusing it here cancelled the drag into the stuck dim);
+/// a dragged TAB moves to this row's session.
 struct VigilTabDrop: DropDelegate {
     let session: String
     let anchor: String?
@@ -591,8 +627,15 @@ struct VigilTabDrop: DropDelegate {
 
     func dropEntered(info: DropInfo) {
         MainActor.assumeIsolated {
-            if case .pane = model.draggingItem, let anchor {
-                model.dropTarget = "tab-\(anchor)"
+            switch model.draggingItem {
+            case .pane:
+                if let anchor { model.dropTarget = "tab-\(anchor)" }
+            case .session:
+                model.sessionDragEntered(over: session)
+            case .tab:
+                model.dropTarget = session
+            case nil:
+                break
             }
         }
     }
@@ -600,25 +643,93 @@ struct VigilTabDrop: DropDelegate {
     func dropExited(info: DropInfo) {
         MainActor.assumeIsolated {
             if let anchor, model.dropTarget == "tab-\(anchor)" { model.dropTarget = nil }
+            if model.dropTarget == session { model.dropTarget = nil }
         }
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         MainActor.assumeIsolated {
-            if case .pane = model.draggingItem { return DropProposal(operation: .move) }
-            return DropProposal(operation: .forbidden)
+            if case .session = model.draggingItem {
+                return model.sessionDragUpdated(over: session)
+            }
+            return DropProposal(operation: .move)
         }
     }
 
     func performDrop(info: DropInfo) -> Bool {
         MainActor.assumeIsolated {
-            guard case .pane(let from, let paneId, _) = model.draggingItem,
-                  let anchor else { return }
+            let manager = VigilSessionManager.shared
             let session = self.session
-            model.endDrag()
-            DispatchQueue.main.async {
-                VigilSessionManager.shared.movePane(
-                    paneId: paneId, from: from, intoTabAnchoredBy: anchor, of: session)
+            switch model.draggingItem {
+            case .pane(let from, let paneId, let isDock):
+                model.endDrag()
+                if let anchor {
+                    DispatchQueue.main.async {
+                        manager.movePane(paneId: paneId, from: from, intoTabAnchoredBy: anchor, of: session)
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        manager.movePane(paneId: paneId, from: from, to: session, isDock: isDock)
+                    }
+                }
+            case .session:
+                model.sessionDragPerform(target: session)
+            case .tab(let from, let tabAnchor):
+                model.endDrag()
+                DispatchQueue.main.async {
+                    manager.moveTab(anchor: tabAnchor, from: from, to: session)
+                }
+            case nil:
+                break
+            }
+        }
+        return true
+    }
+}
+
+/// The gaps: row spacing, group padding - anywhere inside the list that
+/// no row delegate covers. A drop here commits the preview as shown
+/// instead of cancelling into the stuck dim.
+struct VigilGapDrop: DropDelegate {
+    let model: VigilSidebarModel
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        MainActor.assumeIsolated {
+            if case .session = model.draggingItem {
+                model.sessionDragPerform(target: "")
+            } else {
+                model.endDrag()
+            }
+        }
+        return true
+    }
+}
+
+/// The tail: the dead space BELOW the last row is a real drop zone - a
+/// session dragged to the bottom lands LAST (it used to cancel there:
+/// the preview stuck at penultimate, the source dimmed, then a silent
+/// revert).
+struct VigilTailDrop: DropDelegate {
+    let model: VigilSidebarModel
+
+    func dropEntered(info: DropInfo) {
+        MainActor.assumeIsolated { model.moveSessionToEnd() }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        MainActor.assumeIsolated {
+            if case .session = model.draggingItem {
+                model.sessionDragPerform(target: "")
+            } else {
+                model.endDrag()
             }
         }
         return true

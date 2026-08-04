@@ -25,17 +25,39 @@ struct VigilSidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 5) {
-                        ForEach(model.rows) { row in
-                            sessionGroup(row)
+                GeometryReader { geo in
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            LazyVStack(alignment: .leading, spacing: 5) {
+                                ForEach(model.rows) { row in
+                                    sessionGroup(row)
+                                }
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 6)
+                            // Gaps between rows/groups commit the preview
+                            // as shown; without a delegate they cancel the
+                            // drag (stuck dim + silent revert).
+                            .onDrop(of: [UTType.text], delegate: VigilGapDrop(model: model))
+                            // The tail fills the viewport below the last
+                            // row: dropping there lands LAST.
+                            Color.clear
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .frame(minHeight: 40)
+                                .contentShape(Rectangle())
+                                .onDrop(of: [UTType.text], delegate: VigilTailDrop(model: model))
                         }
+                        .frame(minHeight: geo.size.height, alignment: .top)
                     }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 6)
-                }
-                .onChange(of: model.selection) { selection in
-                    if let selection { proxy.scrollTo(selection) }
+                    .onChange(of: model.selection) { selection in
+                        if let selection { proxy.scrollTo(selection) }
+                    }
+                    .onChange(of: activeLeafId) { id in
+                        // The viewport moved (auto-follow, ⌘⇧J, a click):
+                        // the lit chain must be on screen, or the
+                        // spotlight lies.
+                        if let id { withAnimation { proxy.scrollTo(id) } }
+                    }
                 }
             }
             if !model.burials.isEmpty {
@@ -449,6 +471,9 @@ struct VigilSidebarView: View {
             }
             return NSItemProvider(object: id as NSString)
         }
+        // Pane rows are drop territory too (session reorder, pane into
+        // this tab): a refusing row cancelled the drag into the stuck dim.
+        .onDrop(of: [UTType.text], delegate: VigilTabDrop(session: session, anchor: tab.anchor, model: model))
         .contextMenu {
             if let paneId = pane.paneId {
                 Button("Rename…") {
