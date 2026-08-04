@@ -788,7 +788,14 @@ class VigilSessionManager {
             } else {
                 // mergeTabs, not captureTabs alone: a cold tab dropped from
                 // the capture is a daemon stranded for the sweep.
-                sessions[name]!.tabs = mergeTabs(name: name, liveTabs: captureTabs(name: name, trees))
+                // Evaluate BEFORE assigning: the RHS reads `sessions`, and
+                // evaluating it inside the subscript's exclusive modify
+                // access is a Swift exclusivity trap (the drag-move crash,
+                // 2026-08-04: `sessions[name]?.tabs = mergedCapture(...)`
+                // died in captureTabs' sessions read). Same rule at every
+                // capture-assignment site.
+                let freshTabs = mergeTabs(name: name, liveTabs: captureTabs(name: name, trees))
+                sessions[name]!.tabs = freshTabs
                 sessions[name]!.state = .detached(trees)
             }
         }
@@ -1861,7 +1868,8 @@ class VigilSessionManager {
     func closeViewportTab(_ controller: TerminalController) -> Bool {
         guard let name = sessionName(of: controller),
               members(of: name).count <= 1 else { return false }
-        sessions[name]!.tabs = mergedCapture(name: name)
+        let freshTabs = mergedCapture(name: name) // before the write access (exclusivity)
+        sessions[name]!.tabs = freshTabs
         let live = liveAttachIds(of: name)
         let cold = sessions[name]!.tabs.filter { tab in
             let ids = tabPaneIds(tab)
@@ -1979,7 +1987,8 @@ class VigilSessionManager {
             controller.closeTab(nil)
             return
         }
-        sessions[name]!.tabs = mergedCapture(name: name)
+        let freshTabs = mergedCapture(name: name) // before the write access (exclusivity)
+        sessions[name]!.tabs = freshTabs
         guard let tab = sessions[name]!.tabs.first(where: { tabPaneIds($0).contains(anchor) }) else { return }
         let running = tabPaneIds(tab).contains { paneProgram($0) != nil }
         let proceed = { [weak self] in
@@ -2076,7 +2085,12 @@ class VigilSessionManager {
     /// mounts the session's next tab, else the next session, else closes.
     /// Returns the captured tab (dock included).
     private func vacateMountedTab(_ controller: TerminalController, name: String) -> Tab? {
-        sessions[name]?.tabs = mergedCapture(name: name)
+        // THE 2026-08-04 drag-move crash: `?.` chain assignment evaluates
+        // the RHS INSIDE the exclusive modify access on `sessions`, and
+        // mergedCapture reads `sessions` -> exclusivity trap, guaranteed
+        // in -Onone. Evaluate first, then assign.
+        let freshTabs = mergedCapture(name: name)
+        sessions[name]?.tabs = freshTabs
         let tree = controller.surfaceTree
         guard !tree.isEmpty else { return nil }
         let dock = dockMap.object(forKey: controller)
@@ -2135,7 +2149,8 @@ class VigilSessionManager {
     /// session, where it lands as a cold tab.
     func moveTab(anchor: String, from source: String, to target: String) {
         guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
-        sessions[source]!.tabs = mergedCapture(name: source)
+        let freshSourceTabs = mergedCapture(name: source) // before the write access (exclusivity)
+        sessions[source]!.tabs = freshSourceTabs
         var moved: Tab?
         if let view = liveView(attachId: anchor),
            let controller = view.window?.windowController as? TerminalController,
@@ -2157,7 +2172,8 @@ class VigilSessionManager {
     /// first tab, live-appended when the target is mounted).
     func movePane(paneId: String, from source: String, to target: String, isDock: Bool) {
         guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
-        sessions[source]!.tabs = mergedCapture(name: source)
+        let freshSourceTabs = mergedCapture(name: source) // before the write access (exclusivity)
+        sessions[source]!.tabs = freshSourceTabs
         var pane: Pane?
 
         if let view = liveView(attachId: paneId),
@@ -2272,7 +2288,8 @@ class VigilSessionManager {
     /// clears through the tray.
     func mergeSession(_ source: String, into target: String) {
         guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
-        sessions[source]!.tabs = mergedCapture(name: source)
+        let freshSourceTabs = mergedCapture(name: source) // before the write access (exclusivity)
+        sessions[source]!.tabs = freshSourceTabs
         let ms = members(of: source)
         sessions[target]!.tabs.append(contentsOf: sessions[source]!.tabs)
         sessions[source]!.tabs = []
