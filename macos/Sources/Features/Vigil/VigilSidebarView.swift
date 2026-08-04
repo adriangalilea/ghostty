@@ -488,7 +488,7 @@ struct VigilSidebarView: View {
                 .lineLimit(1)
             Spacer(minLength: 4)
             followKeycap(id)
-            Color.clear.frame(width: Grid.classSlot, height: 1)
+            watchGlyph(pane)
             dotSlot(pane.state)
         }
         .frame(height: 20)
@@ -587,6 +587,31 @@ struct VigilSidebarView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// The sentry's antenna, in the pane row's class slot: something is
+    /// alive under this pane beyond its program, LISTENING for the
+    /// outside world. NOT an eye - the eye is vigil's own vocabulary
+    /// (menu-bar identity, attention badge): eye = vigil watching YOU,
+    /// antenna = a process watching the WORLD. Teal = a DECLARED lease
+    /// (the watcher's own note names what it awaits); dim = derived
+    /// truth alone (the daemon's process tree). Hidden while the agent
+    /// is actively working - tool churn would blink it; a survivor under
+    /// a QUIET pane is the signal.
+    private func watchGlyph(_ pane: VigilSessionManager.SidebarPane) -> some View {
+        let derived = pane.state != .working && !pane.watchProcs.isEmpty
+        let show = !pane.watchNotes.isEmpty || derived
+        return Group {
+            if show {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(pane.watchNotes.isEmpty
+                        ? Color.secondary.opacity(0.7)
+                        : .teal)
+                    .help((pane.watchNotes + pane.watchProcs).joined(separator: "\n"))
+            }
+        }
+        .frame(width: Grid.classSlot)
     }
 
     /// Fixed-width class column: hourglass marks ephemeral, persistence is

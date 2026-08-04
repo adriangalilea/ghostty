@@ -3058,6 +3058,69 @@ class VigilSessionManager {
         return out
     }
 
+    /// Background SENTRIES under a pane: labeled tree processes that are
+    /// neither the shell nor the pane's program - "something is keeping
+    /// watch under this quiet pane" (a tg watch under an idle claude, a
+    /// build, a server). Truth from the daemon's kqueue tree file, never
+    /// inferred from the screen.
+    func paneWatchers(_ pane: String) -> [String] {
+        let program = paneProgram(pane)
+        var out: [String] = []
+        for argv in paneCommands(pane, "tree") {
+            guard let label = Self.processLabel(argv), label != program else { continue }
+            let short = argv.count > 90 ? String(argv.prefix(87)) + "…" : argv
+            if !out.contains(short) { out.append(short) }
+        }
+        return out
+    }
+
+    // MARK: Watch leases (the declared layer over process-tree truth)
+
+    /// A watcher's self-declaration (sd_notify's shape on vigil's rails):
+    /// one JSON file in leases/, written by the watching process itself,
+    /// removed on exit. The lease says WHY (note) and UNTIL WHEN
+    /// (deadline); liveness is NEVER trusted from the file - the pid must
+    /// be alive. Spec: PROTOCOL.md.
+    struct WatchLease: Equatable {
+        let pane: String
+        let note: String
+        let deadline: Date?
+    }
+
+    private struct LeaseFile: Decodable {
+        let pane: String
+        let pid: Int32
+        let note: String
+        let deadline: Double?
+    }
+
+    private var leasesDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/wake/leases")
+    }
+
+    /// All live leases, grouped by pane. A lease whose pid is dead is
+    /// garbage (its process broke the remove-on-exit contract or was
+    /// SIGKILLed) and is swept here, the read path.
+    func watchLeases() -> [String: [WatchLease]] {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: leasesDir, includingPropertiesForKeys: nil) else { return [:] }
+        var out: [String: [WatchLease]] = [:]
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file),
+                  let lease = try? JSONDecoder().decode(LeaseFile.self, from: data) else { continue }
+            guard Darwin.kill(lease.pid, 0) == 0 else {
+                try? FileManager.default.removeItem(at: file)
+                continue
+            }
+            out[lease.pane, default: []].append(WatchLease(
+                pane: lease.pane,
+                note: lease.note,
+                deadline: lease.deadline.map { Date(timeIntervalSince1970: $0) }))
+        }
+        return out
+    }
+
     private var agentStateDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/wake/state")
@@ -3256,6 +3319,12 @@ class VigilSessionManager {
         /// DERIVED, never stored: this view is the key window's focused
         /// surface right now. Keystrokes land here.
         var focused: Bool = false
+        /// Declared watch leases (notes) on this pane - the sentry's own
+        /// words ("vigía de Carlos: awaiting his TG reply").
+        var watchNotes: [String] = []
+        /// Underived truth: background processes alive under the pane
+        /// beyond its program (tree file argv, shortened).
+        var watchProcs: [String] = []
     }
 
     struct SidebarTab: Identifiable, Equatable {
@@ -3311,6 +3380,7 @@ class VigilSessionManager {
         let front = (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController as? TerminalController
         let frontName = front.flatMap { sessionName(of: $0) }
         let focusedView = front?.focusedSurface
+        let leases = watchLeases()
 
         func paneRow(view: Ghostty.SurfaceView, session: String, isDock: Bool) -> SidebarPane {
             let paneId = view.vigilAttachId
@@ -3327,7 +3397,9 @@ class VigilSessionManager {
                 state: paneId.flatMap { paneDisplayState($0) },
                 isDock: isDock,
                 emoji: custom?.emoji,
-                focused: view === focusedView)
+                focused: view === focusedView,
+                watchNotes: paneId.flatMap { leases[$0]?.map(\.note) } ?? [],
+                watchProcs: paneId.map { paneWatchers($0) } ?? [])
         }
 
         func capturedPaneRow(_ pane: Pane, session: String, index: Int, tab: Int, isDock: Bool) -> SidebarPane {
@@ -3344,7 +3416,9 @@ class VigilSessionManager {
                 program: program,
                 state: paneId.flatMap { paneDisplayState($0) },
                 isDock: isDock,
-                emoji: custom?.emoji)
+                emoji: custom?.emoji,
+                watchNotes: paneId.flatMap { leases[$0]?.map(\.note) } ?? [],
+                watchProcs: paneId.map { paneWatchers($0) } ?? [])
         }
 
         /// The tab's face + label override, anchored by pane id.
