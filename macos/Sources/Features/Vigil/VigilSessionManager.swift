@@ -573,10 +573,27 @@ class VigilSessionManager {
             .first
     }
 
-    /// The attention FIFO: open the most urgent session.
+    /// The attention FIFO: open the most urgent session. IDEMPOTENT
+    /// (Adrian 2026-08-04): with the FIFO drained, fall back to STATE
+    /// truth - any session still asking (even one already seen/acked)
+    /// stays reachable, rotating past the current one so repeated
+    /// presses walk every open ask.
     func next() {
-        guard let session = mostUrgent else { return }
-        open(name: session.name)
+        if let session = mostUrgent {
+            open(name: session.name)
+            return
+        }
+        let asking = sessions.values
+            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
+            .filter { freshlyBlocked($0.name, within: 120) }
+            .map(\.name)
+        guard !asking.isEmpty else { return }
+        let current = (NSApp.keyWindow?.windowController as? TerminalController)
+            .flatMap { sessionName(of: $0) }
+        let target = current.flatMap { c in
+            asking.firstIndex(of: c).map { asking[($0 + 1) % asking.count] }
+        } ?? asking[0]
+        open(name: target)
     }
 
     /// The head of the attention FIFO by name (the sidebar's direct-access
@@ -2237,17 +2254,34 @@ class VigilSessionManager {
     /// tool approved through a hook confirmation leaves blocked STALE (no
     /// hook fires between the approval and the tool's end), so blocked is
     /// only trusted briefly.
+    /// A session actively asking for Adrian: any pane input-wait blocked
+    /// (valid at ANY age, only an answer clears it) or permission blocked
+    /// within the freshness window (stale = a hook-confirmed approval
+    /// with its tool still running).
     func freshlyBlocked(_ name: String, within seconds: TimeInterval) -> Bool {
         guard let session = sessions[name] else { return false }
         return ownedPaneIds(session).contains { pane in
             guard let s = paneAgentState(pane), s.state == .blocked else { return false }
-            return Date().timeIntervalSince(s.since) < seconds
+            return s.inputWait || Date().timeIntervalSince(s.since) < seconds
+        }
+    }
+
+    /// Asking AND not yet seen: the ask fired after the session was last
+    /// focused (mount = ack). Auto-follow's herdr seen-flip - visiting an
+    /// ask releases it; only a NEW ask (fresh state mtime) re-targets.
+    func blockedUnseen(_ name: String) -> Bool {
+        guard let session = sessions[name] else { return false }
+        let ack = lastAck[name] ?? .distantPast
+        return ownedPaneIds(session).contains { pane in
+            guard let s = paneAgentState(pane), s.state == .blocked, ack < s.since else { return false }
+            return s.inputWait || Date().timeIntervalSince(s.since) < 120
         }
     }
 
     /// Auto-follow's target: the attention FIFO's input head, else the
-    /// first session (overview order) FRESHLY blocked (stale blocked is a
-    /// long tool still running, not an ask).
+    /// first session (overview order) asking AND unseen. Seen asks never
+    /// re-yank (Adrian 2026-08-04: "if I already clicked away allow me
+    /// to"); they stay reachable through ⌘⇧J.
     var followTarget: String? {
         if let name = sessions.values
             .filter({ $0.attention == .input })
@@ -2257,7 +2291,7 @@ class VigilSessionManager {
         }
         return sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .first { freshlyBlocked($0.name, within: 120) }?
+            .first { blockedUnseen($0.name) }?
             .name
     }
 
@@ -2853,11 +2887,16 @@ class VigilSessionManager {
     }
 
     /// The pane's continuous program state as its adapter last wrote it.
-    func paneAgentState(_ pane: String) -> (state: AgentState, since: Date)? {
+    /// Format: one state word, optionally followed by a flavor -
+    /// "blocked input" = waiting for an ANSWER (nothing will fire until
+    /// Adrian does), vs plain "blocked" = a permission prompt that may
+    /// unblock silently through a hook confirmation.
+    func paneAgentState(_ pane: String) -> (state: AgentState, since: Date, inputWait: Bool)? {
         let url = agentStateDir.appendingPathComponent("\(pane).state")
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         let state: AgentState
-        switch raw.trimmingCharacters(in: .whitespacesAndNewlines) {
+        switch parts.first.map(String.init) ?? "" {
         case "working": state = .working
         case "blocked": state = .blocked
         case "done": state = .done
@@ -2865,20 +2904,21 @@ class VigilSessionManager {
         default: return nil
         }
         let since = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
-        return (state, since ?? .distantPast)
+        return (state, since ?? .distantPast, parts.dropFirst().first == "input")
     }
 
     /// Display state: `done` decays to idle once the session was focused
-    /// after it fired (looking at a finished turn IS seeing it), and
-    /// `blocked` decays to WORKING after 2 minutes — a permission answered
-    /// through a hook confirmation fires no hook until the tool ENDS, so
-    /// old blocked almost always means a long approved tool mid-run (the
-    /// same freshness rule auto-follow trusts). A real unanswered prompt
-    /// re-blocks the moment any hook fires again.
+    /// after it fired (looking at a finished turn IS seeing it), and a
+    /// PERMISSION `blocked` decays to WORKING after 2 minutes — a
+    /// permission answered through a hook confirmation fires no hook
+    /// until the tool ENDS, so old blocked almost always means a long
+    /// approved tool mid-run (the same freshness rule auto-follow
+    /// trusts). An INPUT-WAIT blocked never ages out: only an answer
+    /// clears it, orange at any age.
     func paneDisplayState(_ pane: String, in session: String) -> AgentState? {
         guard let s = paneAgentState(pane) else { return nil }
         if s.state == .done, let ack = lastAck[session], ack >= s.since { return .idle }
-        if s.state == .blocked, Date().timeIntervalSince(s.since) > 120 { return .working }
+        if s.state == .blocked, !s.inputWait, Date().timeIntervalSince(s.since) > 120 { return .working }
         return s.state
     }
 
