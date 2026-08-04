@@ -288,7 +288,41 @@ class VigilSessionManager {
             .appendingPathComponent(".local/state/wake/vigil.json")
     }
 
+    /// Held for the process lifetime; the kernel releases it on ANY death.
+    private static var instanceLockFD: Int32 = -1
+
+    /// TWO vigil instances sharing the state dir is corruption waiting
+    /// (both restore the same daemons, both persist vigil.json). The
+    /// script-side kill-then-launch cannot be trusted alone: macOS
+    /// relaunched the app on its own after a `pkill -9` straggler shot
+    /// (2026-08-04, two instances born the same second). First instance
+    /// wins the flock; a duplicate activates the holder and exits before
+    /// touching anything.
+    private func acquireInstanceLock() {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/wake")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fd = Darwin.open(dir.appendingPathComponent("app.lock").path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { return } // no lock support beats a bricked app
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            var buf = [CChar](repeating: 0, count: 32)
+            let n = pread(fd, &buf, 31, 0)
+            close(fd)
+            let holder = n > 0 ? String(cString: buf).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            FileHandle.standardError.write(
+                Data("vigil: instance lock held by pid \(holder); this duplicate exits\n".utf8))
+            if let pid = Int32(holder), let app = NSRunningApplication(processIdentifier: pid) {
+                app.activate()
+            }
+            exit(0)
+        }
+        ftruncate(fd, 0)
+        "\(getpid())\n".withCString { _ = pwrite(fd, $0, strlen($0), 0) }
+        Self.instanceLockFD = fd
+    }
+
     private init() {
+        acquireInstanceLock()
         load()
         loadCustomIdentities()
         sweepPaneDaemons()
