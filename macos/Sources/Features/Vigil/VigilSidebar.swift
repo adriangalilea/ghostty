@@ -474,6 +474,23 @@ final class VigilSidebarModel: ObservableObject {
         onLeaveControl?() // landing hands the keyboard back
     }
 
+    /// Tab-row click, idempotent toward VISIBILITY (Adrian 2026-08-04):
+    /// activate, and expand if collapsed - one click always ends with the
+    /// tab focused and its panes showing. Only a click on an already-
+    /// active, already-expanded tab collapses it (a toggle on the active
+    /// one; never a collapse surprise on first click).
+    func tabClicked(id: String, session: String, anchor: String?, isFront: Bool) {
+        if collapsedTabs.contains(id) {
+            collapsedTabs.remove(id)
+            if isFront { selection = id; return }
+        } else if isFront {
+            collapsedTabs.insert(id)
+            selection = id
+            return
+        }
+        activate(.init(id: id, kind: .tab(name: session, anchor: anchor, id: id)))
+    }
+
     func collapseSelection() {
         guard let item = visibleItems.first(where: { $0.id == selection }) else { return }
         switch item.kind {

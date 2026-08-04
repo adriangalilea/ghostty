@@ -350,16 +350,16 @@ struct VigilSidebarView: View {
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
-            selected: model.selection == tab.id,
+            id: tab.id,
             hovered: hovered == tab.id,
-            front: false,
+            activity: tab.isFront ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed
                 ? VigilSessionManager.clusterStates(tab.panes.compactMap(\.state)).first
                 : nil))
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? tab.id : (hovered == tab.id ? nil : hovered) }
         .onTapGesture {
-            model.activate(.init(id: tab.id, kind: .tab(name: session, anchor: tab.anchor, id: tab.id)))
+            model.tabClicked(id: tab.id, session: session, anchor: tab.anchor, isFront: tab.isFront)
         }
         .id(tab.id)
         .onDrag {

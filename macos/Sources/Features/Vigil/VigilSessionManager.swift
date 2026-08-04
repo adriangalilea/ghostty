@@ -3258,6 +3258,24 @@ class VigilSessionManager {
             return base.isEmpty ? fallback : base
         }
 
+        /// A LIVE tab wears the native tab bar's name (same tab, same
+        /// name - the cwd alias made the two bars disagree about one
+        /// tab), cleaned: claude's braille-spinner / idle-marker prefix
+        /// strips (it ticks several times a second and would flicker the
+        /// row), ghost/empty titles yield nil (cwd fallback). Row
+        /// identity is the anchor pane id, so a title change re-renders
+        /// text, never the subtree.
+        func liveTabTitle(_ raw: String?) -> String? {
+            guard var t = raw?.trimmingCharacters(in: .whitespaces),
+                  !t.isEmpty, t != "👻" else { return nil }
+            while let first = t.unicodeScalars.first,
+                  (0x2800...0x28FF).contains(first.value) || first == "✳" || first == "·" {
+                t = String(String.UnicodeScalarView(t.unicodeScalars.dropFirst()))
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            return t.isEmpty ? nil : t
+        }
+
         var rows: [SidebarSessionRow] = []
         let ordered = sessions.values.sorted { ($0.order, $0.label) < ($1.order, $1.label) }
         for session in ordered {
@@ -3279,18 +3297,17 @@ class VigilSessionManager {
                     if let dock = dockMap.object(forKey: controller) {
                         panes += dock.views.map { paneRow(view: $0, session: name, isDock: true) }
                     }
-                    // STABLE title: the root pane's cwd only. Deriving it
-                    // from focusedSurface re-titled the row on every
-                    // click, re-rendering the subtree (the "vanishes
-                    // briefly" flash).
                     let cwd = controller.surfaceTree.root?.leftmostLeaf().pwd
                     let anchor = panes.first(where: { $0.paneId != nil })?.paneId
                     let custom = tabCustom(anchor)
                     return SidebarTab(
                         id: tabRowId(name, anchor: anchor, index: index),
-                        title: custom?.label ?? tabTitle(cwd: cwd, fallback: "tab \(index + 1)"),
+                        title: custom?.label
+                            ?? liveTabTitle(controller.window?.title)
+                            ?? tabTitle(cwd: cwd, fallback: "tab \(index + 1)"),
                         index: index, panes: panes,
                         anchor: anchor,
+                        isFront: controller === front,
                         emoji: custom?.emoji)
                 }
 
@@ -3373,7 +3390,9 @@ class VigilSessionManager {
                     let custom = tabCustom(anchor)
                     return SidebarTab(
                         id: tabRowId(name, anchor: anchor, index: index),
-                        title: custom?.label ?? tabTitle(cwd: tree.root?.leftmostLeaf().pwd, fallback: "tab \(index + 1)"),
+                        title: custom?.label
+                            ?? liveTabTitle(tree.root?.leftmostLeaf().title)
+                            ?? tabTitle(cwd: tree.root?.leftmostLeaf().pwd, fallback: "tab \(index + 1)"),
                         index: index,
                         panes: panes,
                         anchor: anchor,
