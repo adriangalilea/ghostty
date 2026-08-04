@@ -63,6 +63,9 @@ struct VigilSidebarView: View {
             if !model.burials.isEmpty {
                 burialTray
             }
+            if !autoFollow, let hint = model.followHint {
+                upNext(hint)
+            }
             footer
         }
         .onReceive(ticker) { _ in model.refresh() }
@@ -88,6 +91,45 @@ struct VigilSidebarView: View {
         if model.collapsedTabs.contains(tab.id) { return tab.id }
         if let pane = tab.panes.first(where: \.focused) { return "\(tab.id)#\(pane.id)" }
         return tab.id
+    }
+
+    // MARK: Up next (the manual-follow affordance)
+
+    /// Auto-follow off, something waiting: show WHAT ⌘⇧J would visit -
+    /// the queue's head, one at a time; landing there re-derives the
+    /// next. Clicking is the same jump.
+    private func upNext(_ hint: VigilSessionManager.AskHint) -> some View {
+        Button {
+            VigilSessionManager.shared.next()
+        } label: {
+            HStack(spacing: 6) {
+                Text("⌘⇧J")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(RoundedRectangle(cornerRadius: 3).fill(Color.orange.opacity(0.18)))
+                    .overlay(RoundedRectangle(cornerRadius: 3)
+                        .strokeBorder(Color.orange.opacity(0.5), lineWidth: 1))
+                Text("\(face(hint.emoji)) \(hint.label)")
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                if hint.more > 0 {
+                    Text("+\(hint.more)")
+                        .font(.system(size: 9, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundColor(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1)
+        }
+        .help("Waiting for you. ⌘⇧J (or click) goes there; answering reveals the next in the queue.")
     }
 
     // MARK: Footer (auto-follow)

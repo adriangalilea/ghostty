@@ -2425,6 +2425,44 @@ class VigilSessionManager {
         }
     }
 
+    /// The manual-follow affordance: what ⌘⇧J would do RIGHT NOW.
+    struct AskHint: Equatable {
+        let name: String
+        let label: String
+        let emoji: String?
+        /// Sessions still waiting beyond the head (the queue's depth).
+        let more: Int
+    }
+
+    /// Mirrors next() exactly (attention FIFO head, else the rotation's
+    /// next asking session relative to the key window) WITHOUT executing:
+    /// the sidebar renders it as the ⌘⇧J affordance when auto-follow is
+    /// off, and visiting the head re-derives the next - the hint IS the
+    /// queue, one head at a time (Adrian 2026-08-04).
+    func nextAskHint() -> AskHint? {
+        let askingList = sessions.values
+            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
+            .filter { asking($0.name) }
+            .map(\.name)
+        let head: String?
+        if let urgent = mostUrgentName {
+            head = urgent
+        } else if !askingList.isEmpty {
+            let current = (NSApp.keyWindow?.windowController as? TerminalController)
+                .flatMap { sessionName(of: $0) }
+            head = current.flatMap { c in
+                askingList.firstIndex(of: c).map { askingList[($0 + 1) % askingList.count] }
+            } ?? askingList[0]
+        } else {
+            head = nil
+        }
+        guard let head, let session = sessions[head] else { return nil }
+        var pending = Set(askingList)
+        pending.insert(head)
+        for s in sessions.values where s.attention != .none { pending.insert(s.name) }
+        return AskHint(name: head, label: session.label, emoji: session.emoji, more: pending.count - 1)
+    }
+
     /// Auto-follow's target: the attention FIFO's input head, else the
     /// first session (overview order) asking AND unseen. Seen asks never
     /// re-yank (Adrian 2026-08-04: "if I already clicked away allow me

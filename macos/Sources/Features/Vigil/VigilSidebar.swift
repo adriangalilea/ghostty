@@ -215,7 +215,13 @@ final class VigilSidebarModel: ObservableObject {
         if fresh != rows { rows = fresh }
         let freshBurials = VigilSessionManager.shared.sidebarBurials()
         if freshBurials != burials { burials = freshBurials }
+        let hint = VigilSessionManager.shared.nextAskHint()
+        if hint != followHint { followHint = hint }
     }
+
+    /// The ⌘⇧J affordance (auto-follow off): the queue's head, re-derived
+    /// on every refresh, so visiting it rolls the hint to the next.
+    @Published private(set) var followHint: VigilSessionManager.AskHint?
 
     /// The sticky bottom tray: killed sessions living out their grace.
     @Published private(set) var burials: [VigilSessionManager.SidebarBurial] = []
