@@ -2907,17 +2907,19 @@ class VigilSessionManager {
         return (state, since ?? .distantPast, parts.dropFirst().first == "input")
     }
 
-    /// Display state: `done` decays to idle once the session was focused
-    /// after it fired (looking at a finished turn IS seeing it), and a
-    /// PERMISSION `blocked` decays to WORKING after 2 minutes — a
-    /// permission answered through a hook confirmation fires no hook
-    /// until the tool ENDS, so old blocked almost always means a long
-    /// approved tool mid-run (the same freshness rule auto-follow
-    /// trusts). An INPUT-WAIT blocked never ages out: only an answer
-    /// clears it, orange at any age.
+    /// Display state: `done` AND input-wait `blocked` decay to idle once
+    /// the session was SEEN after they fired (mount, focus, or presence -
+    /// the events tail acks the watched session, so an ask arriving under
+    /// your eyes clears the moment it lands). Unseen input-wait stays
+    /// orange at ANY age - only seeing or answering clears it, never
+    /// time. A PERMISSION `blocked` instead decays to WORKING after 2
+    /// minutes: an approval through a hook confirmation fires no hook
+    /// until the tool ENDS, so old perm-blocked almost always means a
+    /// long approved tool mid-run.
     func paneDisplayState(_ pane: String, in session: String) -> AgentState? {
         guard let s = paneAgentState(pane) else { return nil }
-        if s.state == .done, let ack = lastAck[session], ack >= s.since { return .idle }
+        if s.state == .done || (s.state == .blocked && s.inputWait),
+           let ack = lastAck[session], ack >= s.since { return .idle }
         if s.state == .blocked, !s.inputWait, Date().timeIntervalSince(s.since) > 120 { return .working }
         return s.state
     }
