@@ -312,6 +312,7 @@ class BaseTerminalController: NSWindowController,
                 surfaceView.isFirstResponder
             surfaceView.focusDidChange(focused)
         }
+        NotificationCenter.default.post(name: VigilSessionManager.focusDidChange, object: nil)
     }
 
     // Call this whenever the frame changes

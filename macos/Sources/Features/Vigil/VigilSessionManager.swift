@@ -69,10 +69,18 @@ class VigilSessionManager {
     /// Anything projecting session state (sidebar, overview) re-reads on
     /// this: posted from the persist/attention chokepoints.
     static let stateDidChange = Notification.Name("vigilStateDidChange")
+    /// Posted from the focus chokepoint (BaseTerminalController.
+    /// syncFocusToSurfaceTree): the sidebar re-derives its active chain
+    /// the moment keystroke destiny moves, instead of waiting for a tick.
+    static let focusDidChange = Notification.Name("vigilFocusDidChange")
 
-    /// When Adrian last looked at each session (focus ack): a pane's `done`
-    /// older than the ack displays as idle (finished-and-seen), herdr's
-    /// seen-flip without storing a flag anywhere.
+    /// When each PANE was last under the eyes (its view visible in the key
+    /// window), keyed by pane daemon id: blocked/done older than the pane's
+    /// ack display as idle (seen), herdr's seen-flip without a stored flag.
+    /// Pane-keyed because seen is a property of the CONSOLE, not the
+    /// session: the session-keyed ledger acked asks living in unmounted
+    /// tabs of the watched session sight-unseen (dot decayed, no attention,
+    /// no follow - an invisible console you could never have answered).
     private(set) var lastAck: [String: Date] = [:]
 
     /// Custom identities for PANES and TABS (label + emoji, display-only
@@ -322,10 +330,22 @@ class VigilSessionManager {
             queue: .main
         ) { notification in
             MainActor.assumeIsolated {
-                guard let window = notification.object as? NSWindow else { return }
+                guard notification.object is NSWindow else { return }
                 VigilSessionManager.shared.reconcileTabs()
-                VigilSessionManager.shared.ackFocus(window: window)
+                VigilSessionManager.shared.ackVisiblePanes()
                 VigilSessionManager.shared.syncWindowMarks()
+            }
+        }
+        // Focus moves WITHIN the key window (split clicks, follow landing
+        // on the asking pane) ride the focus chokepoint: presence acks the
+        // pane the moment it is actually on screen.
+        NotificationCenter.default.addObserver(
+            forName: Self.focusDidChange,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                VigilSessionManager.shared.ackVisiblePanes()
             }
         }
         // The quick terminal dismissing (any way: toggle, esc-out, focus
@@ -490,6 +510,7 @@ class VigilSessionManager {
     }
 
     private func drainEvents() {
+        ackVisiblePanes() // the 1s presence pulse rides the events tick
         guard let handle = try? FileHandle(forReadingFrom: eventsURL) else { return }
         defer { try? handle.close() }
         let size = handle.seekToEndOfFile()
@@ -514,10 +535,18 @@ class VigilSessionManager {
             } else {
                 continue
             }
-            // Presence beats attention: an event for the session you are
-            // LOOKING AT is already answered; only unwatched sessions queue.
-            if isWatching(name) {
-                lastAck[name] = Date() // a done that fired under your eyes is seen
+            // Presence beats attention, PANE-granular: only an event whose
+            // console is actually on screen is already answered. A watched
+            // session's hidden tab queues like any other (session-level
+            // presence acked those sight-unseen). Pane-less events keep
+            // the session-level rule (nothing finer to check).
+            if let pane = event.pane, !pane.isEmpty {
+                if paneVisible(pane) {
+                    lastAck[pane] = Date()
+                    changed = true
+                    continue
+                }
+            } else if isWatching(name) {
                 changed = true
                 continue
             }
@@ -547,18 +576,56 @@ class VigilSessionManager {
         return window.isKeyWindow
     }
 
-    /// Focusing a session's window IS the acknowledgement: whatever it
-    /// wanted, you are there now. Called on every key-window change.
-    func ackFocus(window: NSWindow) {
-        guard let controller = window.windowController as? TerminalController,
-              let name = sessionName(of: controller),
-              let session = sessions[name] else { return }
-        lastAck[name] = Date()
-        NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
-        guard session.attention != .none else { return }
-        sessions[name]!.attention = .none
-        sessions[name]!.attentionSince = nil
-        onAttentionChange?()
+    /// A pane is under the eyes RIGHT NOW: its view sits in the key
+    /// window's hierarchy, unhidden (a collapsed dock hides its tenants),
+    /// app active.
+    private func paneVisible(_ pane: String) -> Bool {
+        guard NSApp.isActive,
+              let view = liveView(attachId: pane),
+              let window = view.window, window.isKeyWindow else { return false }
+        return !view.isHiddenOrHasHiddenAncestor
+    }
+
+    /// THE seen-rule, one chokepoint, pane-granular: stamp every pane
+    /// visible in the key window; the key session's queued attention
+    /// resolves only once no blocked pane remains unseen - focusing tab 1
+    /// never forgives an ask living in cold tab 4 (its dot holds, follow
+    /// still targets it). Fired by key-window changes and focus syncs
+    /// (instant) and the 1s events tick (presence is continuous; the tick
+    /// is its pulse).
+    func ackVisiblePanes() {
+        guard NSApp.isActive, let window = NSApp.keyWindow else { return }
+        var name: String?
+        var views: [Ghostty.SurfaceView] = []
+        if let controller = window.windowController as? TerminalController {
+            name = sessionName(of: controller)
+            views = Array(controller.surfaceTree)
+            if let dock = dockMap.object(forKey: controller) { views += dock.views }
+        } else if let quick = window.windowController as? QuickTerminalController {
+            name = floatingName
+            views = Array(quick.surfaceTree)
+        } else {
+            return
+        }
+        let now = Date()
+        var changed = false
+        for view in views {
+            guard let pane = view.vigilAttachId,
+                  view.window === window,
+                  !view.isHiddenOrHasHiddenAncestor else { continue }
+            if let s = paneAgentState(pane),
+               s.state == .blocked || s.state == .done,
+               (lastAck[pane] ?? .distantPast) < s.since { changed = true }
+            lastAck[pane] = now
+        }
+        if let name, let session = sessions[name],
+           session.attention != .none, !blockedUnseen(name) {
+            sessions[name]!.attention = .none
+            sessions[name]!.attentionSince = nil
+            changed = true
+            onAttentionChange?()
+        }
+        if changed { NotificationCenter.default.post(name: Self.stateDidChange, object: nil) }
     }
 
     /// The head of the attention FIFO: input beats done, oldest first
@@ -581,8 +648,12 @@ class VigilSessionManager {
     /// stays reachable, rotating past the current one so repeated
     /// presses walk every open ask.
     func next() {
+        // Attention navigation is pane-precise: follow() lands on the
+        // asking console (shapeshifting the key terminal window when
+        // there is one; open() semantics remain the no-window fallback).
+        let controller = NSApp.keyWindow?.windowController as? TerminalController
         if let session = mostUrgent {
-            open(name: session.name)
+            follow(session.name, in: controller)
             return
         }
         let asking = sessions.values
@@ -590,12 +661,11 @@ class VigilSessionManager {
             .filter { self.asking($0.name) }
             .map(\.name)
         guard !asking.isEmpty else { return }
-        let current = (NSApp.keyWindow?.windowController as? TerminalController)
-            .flatMap { sessionName(of: $0) }
+        let current = controller.flatMap { sessionName(of: $0) }
         let target = current.flatMap { c in
             asking.firstIndex(of: c).map { asking[($0 + 1) % asking.count] }
         } ?? asking[0]
-        open(name: target)
+        follow(target, in: controller)
     }
 
     /// The head of the attention FIFO by name (the sidebar's direct-access
@@ -663,9 +733,7 @@ class VigilSessionManager {
             rest = trees
             rest.remove(at: floatedIndex)
         case .floating:
-            sessions[name]!.attention = .none
-            sessions[name]!.attentionSince = nil
-            onAttentionChange?()
+            // Presence acks once the quick terminal is key (chokepoint).
             quick.animateIn()
             return
         case .detached(let trees):
@@ -686,9 +754,6 @@ class VigilSessionManager {
         }
 
         sessions[name]!.state = .floating(rest: rest, floatedIndex: floatedIndex)
-        sessions[name]!.attention = .none
-        sessions[name]!.attentionSince = nil
-        onAttentionChange?()
         floatingName = name
         quickTreeSwap = true
         quick.surfaceTree = tree
@@ -1091,11 +1156,9 @@ class VigilSessionManager {
         guard let ghostty = ghosttyApp else { vlog("open: '\(name)' no ghosttyApp (noop)"); return }
         vlog("open: '\(name)' state=\(stateTag(session.state))")
 
-        // Opening is the acknowledge: attention clears here and only here.
-        sessions[name]!.attention = .none
-        sessions[name]!.attentionSince = nil
-        lastAck[name] = Date()
-        onAttentionChange?()
+        // No manual acknowledge: presence (ackVisiblePanes at the focus
+        // chokepoints) resolves attention once the asking console is
+        // actually on screen; a hidden ask survives the visit.
         becomeRegular()
 
         switch session.state {
@@ -1547,11 +1610,8 @@ class VigilSessionManager {
 
         releaseOccupant(of: controller)
 
-        // Mounting IS the acknowledge, same as open.
-        sessions[targetName]!.attention = .none
-        sessions[targetName]!.attentionSince = nil
-        lastAck[targetName] = Date()
-        onAttentionChange?()
+        // No manual acknowledge (see open): the mounted panes are stamped
+        // seen by the focus sync that follows the mount.
         mount(targetName, into: controller, ghostty: ghostty, anchor: anchor)
         // No focus theatre: the user is already IN this window; only pull
         // it forward when it is not key (menu/intent entry points).
@@ -1881,10 +1941,6 @@ class VigilSessionManager {
             persist()
             return
         }
-        sessions[next.name]!.attention = .none
-        sessions[next.name]!.attentionSince = nil
-        lastAck[next.name] = Date()
-        onAttentionChange?()
         mount(next.name, into: controller, ghostty: ghostty)
         persist()
     }
@@ -2242,8 +2298,6 @@ class VigilSessionManager {
         for member in ms {
             if first, let ghostty = ghosttyApp, members(of: target).isEmpty {
                 first = false
-                sessions[target]!.attention = .none
-                lastAck[target] = Date()
                 mount(target, into: member, ghostty: ghostty)
             } else {
                 killController(member)
@@ -2269,15 +2323,45 @@ class VigilSessionManager {
         }
     }
 
-    /// Asking AND not yet seen: the ask fired after the session was last
-    /// focused (mount = ack). Auto-follow's herdr seen-flip - visiting an
-    /// ask releases it; only a NEW ask (fresh state mtime) re-targets.
+    /// Asking AND not yet seen: the ask fired after its PANE was last on
+    /// screen. Auto-follow's herdr seen-flip - visiting the asking console
+    /// releases it; only a NEW ask (fresh state mtime) re-targets.
     func blockedUnseen(_ name: String) -> Bool {
         guard let session = sessions[name] else { return false }
-        let ack = lastAck[name] ?? .distantPast
         return ownedPaneIds(session).contains { pane in
             guard let s = paneAgentState(pane) else { return false }
-            return s.state == .blocked && ack < s.since
+            return s.state == .blocked && (lastAck[pane] ?? .distantPast) < s.since
+        }
+    }
+
+    /// WHERE the ask lives: the most recently blocked pane in the session
+    /// (state-file truth; session attention only knows WHO asked). Nil
+    /// when nothing is blocked (a done, or the ask was answered since).
+    func askingPane(_ name: String) -> String? {
+        guard let session = sessions[name] else { return nil }
+        return ownedPaneIds(session)
+            .compactMap { pane -> (pane: String, since: Date)? in
+                guard let s = paneAgentState(pane), s.state == .blocked else { return nil }
+                return (pane, s.since)
+            }
+            .max { $0.since < $1.since }?
+            .pane
+    }
+
+    /// Attention-driven landing, ONE primitive for every path that grabs
+    /// focus because a session asked (auto-follow, ⌘⇧J, the sidebar's ;):
+    /// land on the ASKING PANE (its tab mounts, it takes focus), not the
+    /// session. A session-level landing mounted the anchored/first tab:
+    /// with the ask in tab 4 you arrived at tab 1's console (Adrian
+    /// 2026-08-04, "often leads me to the wrong console").
+    func follow(_ name: String, in controller: TerminalController?) {
+        if let pane = askingPane(name) {
+            vlog("follow: '\(name)' -> asking pane \(pane)")
+            activatePane(name: name, paneId: pane, in: controller)
+        } else if let controller {
+            shapeshift(in: controller, to: name)
+        } else {
+            open(name: name)
         }
     }
 
@@ -2909,25 +2993,25 @@ class VigilSessionManager {
     }
 
     /// Display state, ONE rule: `done` and `blocked` decay to idle once
-    /// the session was SEEN after they fired (mount, focus, or presence -
-    /// the events tail acks the watched session, so an ask arriving under
-    /// your eyes clears the moment it lands); unseen they hold at ANY
-    /// age. No time-based decay anywhere: you cannot APPROVE a prompt
-    /// without seeing it, so seen-decay already covers the approved
-    /// long-tool case the old 120s "display as working" clock existed
-    /// for - and that clock made a genuinely stuck prompt invisible.
-    /// Unseen orange now always tells the truth.
-    func paneDisplayState(_ pane: String, in session: String) -> AgentState? {
+    /// the PANE was SEEN after they fired (its console visible in the key
+    /// window - an ask arriving under your eyes clears the moment it
+    /// lands); unseen they hold at ANY age. No time-based decay anywhere:
+    /// you cannot APPROVE a prompt without seeing it, so seen-decay
+    /// already covers the approved long-tool case the old 120s "display
+    /// as working" clock existed for - and that clock made a genuinely
+    /// stuck prompt invisible. Unseen orange now always tells the truth,
+    /// per console: focusing one tab no longer decays its siblings.
+    func paneDisplayState(_ pane: String) -> AgentState? {
         guard let s = paneAgentState(pane) else { return nil }
         if s.state == .done || s.state == .blocked,
-           let ack = lastAck[session], ack >= s.since { return .idle }
+           let ack = lastAck[pane], ack >= s.since { return .idle }
         return s.state
     }
 
     /// The tree rollup: max state over every pane the session owns.
     func sessionAgentState(_ name: String) -> AgentState? {
         guard let session = sessions[name] else { return nil }
-        return ownedPaneIds(session).compactMap { paneDisplayState($0, in: name) }.max()
+        return ownedPaneIds(session).compactMap { paneDisplayState($0) }.max()
     }
 
     /// What a session is RUNNING right now, compact and deduped, straight
@@ -3059,6 +3143,9 @@ class VigilSessionManager {
         let state: AgentState?
         let isDock: Bool
         var emoji: String?        // the pane's custom face
+        /// DERIVED, never stored: this view is the key window's focused
+        /// surface right now. Keystrokes land here.
+        var focused: Bool = false
     }
 
     struct SidebarTab: Identifiable, Equatable {
@@ -3071,6 +3158,9 @@ class VigilSessionManager {
         var anchor: String?
         /// Captured-but-unmounted (lazy shapeshift): daemons run, no views.
         var cold: Bool = false
+        /// DERIVED: this tab is mounted in the key window (the one the
+        /// eyes are on). At most one tab across the whole tree.
+        var isFront: Bool = false
         /// The tab's custom face.
         var emoji: String?
     }
@@ -3104,8 +3194,13 @@ class VigilSessionManager {
     /// AND dock tenants), each pane with its program (argv truth from the
     /// daemon's tree file) and its continuous AgentState.
     func sidebarSnapshot() -> [SidebarSessionRow] {
-        let front = NSApp.keyWindow?.windowController as? TerminalController
+        // The active chain is DERIVED here, never stored: whatever moved
+        // the viewport (a click, auto-follow, ⌘⇧J) is reflected by
+        // construction. mainWindow fallback keeps the chain lit while a
+        // panel (overview, alert) briefly holds key.
+        let front = (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController as? TerminalController
         let frontName = front.flatMap { sessionName(of: $0) }
+        let focusedView = front?.focusedSurface
 
         func paneRow(view: Ghostty.SurfaceView, session: String, isDock: Bool) -> SidebarPane {
             let paneId = view.vigilAttachId
@@ -3119,9 +3214,10 @@ class VigilSessionManager {
                 paneId: paneId,
                 title: title,
                 program: program,
-                state: paneId.flatMap { paneDisplayState($0, in: session) },
+                state: paneId.flatMap { paneDisplayState($0) },
                 isDock: isDock,
-                emoji: custom?.emoji)
+                emoji: custom?.emoji,
+                focused: view === focusedView)
         }
 
         func capturedPaneRow(_ pane: Pane, session: String, index: Int, tab: Int, isDock: Bool) -> SidebarPane {
@@ -3136,7 +3232,7 @@ class VigilSessionManager {
                 paneId: paneId,
                 title: title,
                 program: program,
-                state: paneId.flatMap { paneDisplayState($0, in: session) },
+                state: paneId.flatMap { paneDisplayState($0) },
                 isDock: isDock,
                 emoji: custom?.emoji)
         }

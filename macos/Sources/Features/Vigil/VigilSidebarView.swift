@@ -46,6 +46,26 @@ struct VigilSidebarView: View {
         .onReceive(ticker) { _ in model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.stateDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.focusDidChange)
+            .receive(on: DispatchQueue.main)) { _ in model.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
+            .receive(on: DispatchQueue.main)) { _ in model.refresh() }
+    }
+
+    /// The row standing in for "where keystrokes land": the focused pane,
+    /// or the deepest visible ancestor when collapse hides it. Drives the
+    /// keep-visible scroll.
+    private var activeLeafId: String? {
+        guard let row = model.rows.first(where: \.isFront) else { return nil }
+        if model.collapsedSessions.contains(row.id) { return row.id }
+        if row.tabs.count == 1, let tab = row.tabs.first {
+            if let pane = tab.panes.first(where: \.focused) { return "\(tab.id)#\(pane.id)" }
+            return row.id
+        }
+        guard let tab = row.tabs.first(where: \.isFront) else { return row.id }
+        if model.collapsedTabs.contains(tab.id) { return tab.id }
+        if let pane = tab.panes.first(where: \.focused) { return "\(tab.id)#\(pane.id)" }
+        return tab.id
     }
 
     // MARK: Footer (auto-follow)
@@ -131,7 +151,7 @@ struct VigilSidebarView: View {
         .frame(height: 22)
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(rowBackground(selected: false, hovered: hovered == id, front: false))
+        .background(rowBackground(id: id, hovered: hovered == id))
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
         .onTapGesture { VigilSessionManager.shared.exhume(burial.id) }
@@ -163,9 +183,24 @@ struct VigilSidebarView: View {
             }
         }
         .padding(.vertical, 2)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(row.persistent ? Color.teal.opacity(0.035) : Color.clear))
+        .background(ZStack {
+            if row.persistent {
+                RoundedRectangle(cornerRadius: 6).fill(Color.teal.opacity(0.035))
+            }
+            // The spotlight: the ACTIVE session's whole block lifts off
+            // the list (wash + border), cool accent against the warm
+            // state tints, so "where am I" is answered by the tree shape,
+            // not one row.
+            if row.isFront {
+                RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.06))
+            }
+        })
+        .overlay {
+            if row.isFront {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1)
+            }
+        }
         .overlay(alignment: .leading) {
             if row.persistent {
                 RoundedRectangle(cornerRadius: 1)
@@ -215,9 +250,9 @@ struct VigilSidebarView: View {
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
-            selected: model.selection == id,
+            id: id,
             hovered: hovered == id,
-            front: row.isFront,
+            activity: row.isFront ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed ? row.states.first : nil))
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
@@ -398,9 +433,9 @@ struct VigilSidebarView: View {
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
-            selected: model.selection == id,
+            id: id,
             hovered: hovered == id,
-            front: false,
+            activity: pane.focused ? .leaf : .none,
             state: pane.state))
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
@@ -538,8 +573,19 @@ struct VigilSidebarView: View {
         .frame(minWidth: Grid.dot, alignment: .trailing)
     }
 
+    /// A row's place in the DERIVED active chain: `leaf` = where keystrokes
+    /// land right now (or a collapsed row standing in for it), `chain` =
+    /// an ancestor of the leaf.
+    private enum RowActivity { case none, chain, leaf }
+
+    /// Two separate visual languages, never confused: the active chain is
+    /// FILL (accent wash, strong on the leaf — where you ARE, derived from
+    /// the key window, so auto-follow/⌘⇧J/clicks all move it for free);
+    /// the keyboard cursor is a RING (outline only, visible only while the
+    /// bar owns the keyboard — what enter/rename would hit).
     private func rowBackground(
-        selected: Bool, hovered: Bool, front: Bool,
+        id: String, hovered: Bool,
+        activity: RowActivity = .none,
         state: VigilSessionManager.AgentState? = nil
     ) -> some View {
         ZStack {
@@ -549,11 +595,21 @@ struct VigilSidebarView: View {
             if let tint = stateTint(state) {
                 RoundedRectangle(cornerRadius: 5).fill(tint)
             }
-            RoundedRectangle(cornerRadius: 5)
-                .fill(selected
-                    ? Color.accentColor.opacity(0.25)
-                    : hovered ? Color.primary.opacity(0.10)
-                    : front ? Color.primary.opacity(0.06) : Color.clear)
+            switch activity {
+            case .leaf:
+                RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.35))
+            case .chain:
+                RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.12))
+            case .none:
+                EmptyView()
+            }
+            if hovered {
+                RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08))
+            }
+            if model.keyboardActive, model.selection == id {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(Color.accentColor, lineWidth: 1.5)
+            }
         }
     }
 

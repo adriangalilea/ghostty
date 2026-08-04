@@ -68,7 +68,10 @@ final class VigilBars {
         // an ask Adrian is mid-answering, or an approved tool mid-run.
         if let current, manager.asking(current) { return }
         manager.vlog("auto-follow -> '\(target)'")
-        manager.shapeshift(in: controller, to: target)
+        // Pane-precise: the asking claude's TAB mounts and the pane takes
+        // focus (a session-level shapeshift mounted the anchored tab; the
+        // ask in tab 4 arrived at tab 1's console).
+        manager.follow(target, in: controller)
         // The content just changed UNDER the cursor: a click/keystroke in
         // flight milliseconds later was aimed at the OLD content and must
         // not land in the new terminal. Shield the swapped window's

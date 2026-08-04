@@ -75,6 +75,25 @@ final class VigilSidebarHost: NSVisualEffectView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    /// The cursor (selection ring) exists only while the bar owns the
+    /// keyboard: first-responder status IS the truth, so control mode,
+    /// ⌘⇧B and a background click all light it, and landing anywhere
+    /// (focus returns to the terminal) extinguishes it.
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok {
+            model.keyboardActive = true
+            model.ensureSelection()
+        }
+        return ok
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let ok = super.resignFirstResponder()
+        if ok { model.keyboardActive = false }
+        return ok
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         super.mouseDown(with: event)
@@ -124,7 +143,13 @@ final class VigilSidebarHost: NSVisualEffectView {
 @MainActor
 final class VigilSidebarModel: ObservableObject {
     @Published private(set) var rows: [VigilSessionManager.SidebarSessionRow] = []
+    /// The keyboard CURSOR: the row enter/collapse/expand would hit. It is
+    /// NOT "where you are" (that's the derived active chain in the rows);
+    /// it renders only while the bar owns the keyboard (keyboardActive).
     @Published var selection: String?
+    /// True while the bar is first responder (control mode, ⌘⇧B, or a
+    /// background click): the only time the cursor ring is visible.
+    @Published var keyboardActive = false
     @Published var collapsedSessions: Set<String> {
         didSet { UserDefaults.standard.set(Array(collapsedSessions), forKey: "vigil.sidebar.collapsed") }
     }
@@ -194,10 +219,12 @@ final class VigilSidebarModel: ObservableObject {
     /// The sticky bottom tray: killed sessions living out their grace.
     @Published private(set) var burials: [VigilSessionManager.SidebarBurial] = []
 
-    /// Keyboard entry (⌘⇧B lands here): something must be selected.
+    /// Keyboard entry (⌘⇧B lands here): something must be selected. A
+    /// dead or missing cursor snaps to where you ARE (the active session),
+    /// so navigation always starts from the room you're standing in.
     func ensureSelection() {
         if selection == nil || !visibleItems.contains(where: { $0.id == selection }) {
-            selection = visibleItems.first?.id
+            selection = rows.first(where: \.isFront)?.id ?? visibleItems.first?.id
         }
     }
 
@@ -324,11 +351,7 @@ final class VigilSidebarModel: ObservableObject {
             return
         }
         selection = name
-        if let host = hostController {
-            VigilSessionManager.shared.shapeshift(in: host, to: name)
-        } else {
-            VigilSessionManager.shared.open(name: name)
-        }
+        VigilSessionManager.shared.follow(name, in: hostController)
         onLeaveControl?()
     }
 
