@@ -2436,6 +2436,10 @@ class VigilSessionManager {
         let name: String
         let label: String
         let emoji: String?
+        /// The asking pane follow() would land on (nil for a done-head:
+        /// session-level landing). The sidebar co-locates the keycap on
+        /// this pane's row.
+        let pane: String?
         /// Sessions still waiting beyond the head (the queue's depth).
         let more: Int
     }
@@ -2466,7 +2470,9 @@ class VigilSessionManager {
         var pending = Set(askingList)
         pending.insert(head)
         for s in sessions.values where s.attention != .none { pending.insert(s.name) }
-        return AskHint(name: head, label: session.label, emoji: session.emoji, more: pending.count - 1)
+        return AskHint(
+            name: head, label: session.label, emoji: session.emoji,
+            pane: askingPane(head), more: pending.count - 1)
     }
 
     /// Auto-follow's target: the attention FIFO's input head, else the

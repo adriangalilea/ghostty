@@ -63,9 +63,6 @@ struct VigilSidebarView: View {
             if !model.burials.isEmpty {
                 burialTray
             }
-            if !autoFollow, let hint = model.followHint {
-                upNext(hint)
-            }
             footer
         }
         .onReceive(ticker) { _ in model.refresh() }
@@ -93,43 +90,42 @@ struct VigilSidebarView: View {
         return tab.id
     }
 
-    // MARK: Up next (the manual-follow affordance)
+    // MARK: Up next (the manual-follow affordance, CO-LOCATED)
 
-    /// Auto-follow off, something waiting: show WHAT ⌘⇧J would visit -
-    /// the queue's head, one at a time; landing there re-derives the
-    /// next. Clicking is the same jump.
-    private func upNext(_ hint: VigilSessionManager.AskHint) -> some View {
-        Button {
-            VigilSessionManager.shared.next()
-        } label: {
-            HStack(spacing: 6) {
-                Text("⌘⇧J")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(RoundedRectangle(cornerRadius: 3).fill(Color.orange.opacity(0.18)))
-                    .overlay(RoundedRectangle(cornerRadius: 3)
-                        .strokeBorder(Color.orange.opacity(0.5), lineWidth: 1))
-                Text("\(face(hint.emoji)) \(hint.label)")
-                    .font(.system(size: 10, weight: .medium))
-                    .lineLimit(1)
-                if hint.more > 0 {
-                    Text("+\(hint.more)")
-                        .font(.system(size: 9, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundColor(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
+    /// The row ⌘⇧J would land on, promoted to the deepest VISIBLE row
+    /// when collapse hides the pane - the active-leaf promotion rule
+    /// pointed at the future: blue chain = where you are, orange keycap
+    /// = where ⌘⇧J goes next. Visiting it re-derives the hint to the
+    /// queue's next head; clicking the row is the same jump.
+    private var hintRowId: String? {
+        guard !autoFollow, let hint = model.followHint,
+              let row = model.rows.first(where: { $0.id == hint.name }) else { return nil }
+        if model.collapsedSessions.contains(row.id) { return row.id }
+        guard let pane = hint.pane else { return row.id }
+        if row.tabs.count == 1, let tab = row.tabs.first {
+            guard tab.panes.contains(where: { $0.paneId == pane }) else { return row.id }
+            return "\(tab.id)#\(pane)"
         }
-        .buttonStyle(.plain)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1)
+        guard let tab = row.tabs.first(where: { t in t.panes.contains { $0.paneId == pane } })
+        else { return row.id }
+        if model.collapsedTabs.contains(tab.id) { return tab.id }
+        return "\(tab.id)#\(pane)"
+    }
+
+    /// The keycap itself: attention-orange so it reads with the dots.
+    @ViewBuilder
+    private func followKeycap(_ id: String) -> some View {
+        if hintRowId == id {
+            Text("⌘⇧J")
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .foregroundColor(.orange)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(RoundedRectangle(cornerRadius: 3).fill(Color.orange.opacity(0.14)))
+                .overlay(RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(Color.orange.opacity(0.45), lineWidth: 1))
+                .help("⌘⇧J (or click) lands here\(model.followHint.map { $0.more > 0 ? "; \($0.more) more waiting" : "" } ?? "").")
         }
-        .help("Waiting for you. ⌘⇧J (or click) goes there; answering reveals the next in the queue.")
     }
 
     // MARK: Footer (auto-follow)
@@ -299,6 +295,7 @@ struct VigilSidebarView: View {
                 .lineLimit(1)
                 .opacity(row.stateTag == "live" ? 1 : 0.85)
             Spacer(minLength: 4)
+            followKeycap(id)
             // No "asleep/detached" tag: every session is ALIVE by
             // construction (daemons carry it); the only honest distinction
             // is displayed-or-not, and the front tint + filled tab icons
@@ -400,6 +397,7 @@ struct VigilSidebarView: View {
                     .background(Capsule().fill(Color.primary.opacity(0.08)))
             }
             Spacer(minLength: 4)
+            followKeycap(tab.id)
             Color.clear.frame(width: Grid.classSlot, height: 1)
             Group {
                 if collapsed {
@@ -489,6 +487,7 @@ struct VigilSidebarView: View {
                 .foregroundColor(.primary.opacity(0.85))
                 .lineLimit(1)
             Spacer(minLength: 4)
+            followKeycap(id)
             Color.clear.frame(width: Grid.classSlot, height: 1)
             dotSlot(pane.state)
         }
