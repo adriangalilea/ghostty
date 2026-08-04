@@ -64,9 +64,9 @@ final class VigilBars {
               let controller = window.windowController as? TerminalController else { return }
         let current = manager.sessionName(of: controller)
         guard current != target else { return }
-        // Only a FRESH block in the current session vetoes the yank: a
-        // stale one is a long approved tool still running, not an ask.
-        if let current, manager.freshlyBlocked(current, within: 120) { return }
+        // Any raw block in the current session vetoes the yank: it may be
+        // an ask Adrian is mid-answering, or an approved tool mid-run.
+        if let current, manager.asking(current) { return }
         manager.vlog("auto-follow -> '\(target)'")
         manager.shapeshift(in: controller, to: target)
         // The content just changed UNDER the cursor: a click/keystroke in

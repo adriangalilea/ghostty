@@ -587,7 +587,7 @@ class VigilSessionManager {
         }
         let asking = sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .filter { freshlyBlocked($0.name, within: 120) }
+            .filter { self.asking($0.name) }
             .map(\.name)
         guard !asking.isEmpty else { return }
         let current = (NSApp.keyWindow?.windowController as? TerminalController)
@@ -1708,17 +1708,19 @@ class VigilSessionManager {
                     guard let self else { return }
                     var lastAfter = parent
                     for (offset, tab) in rest {
+                        // Silent append (vigilNewTab), NOT newTab: its
+                        // per-tab presentation makeKeys every joiner in
+                        // sequence - the same festival as the detached
+                        // regroup. Surfaces come from the resurrect
+                        // config directly.
                         let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
-                        guard let tabController = TerminalController.newTab(
-                            ghostty, from: parent, withBaseConfig: configFor(tab.panes[firstPane])
-                        ) else { continue }
-                        if let window = tabController.window {
-                            let before = offset < chosen.offset
-                            window.tabGroup?.removeWindow(window)
-                            (before ? parent : lastAfter)
-                                .addTabbedWindowSafely(window, ordered: before ? .below : .above)
-                            if !before { lastAfter = window }
-                        }
+                        let view = Ghostty.SurfaceView(app, baseConfig: configFor(tab.panes[firstPane]))
+                        let before = offset < chosen.offset
+                        let tabController = TerminalController.vigilNewTab(
+                            ghostty, parent: controller, tree: SplitTree(view: view),
+                            relativeTo: before ? parent : lastAfter,
+                            ordered: before ? .below : .above)
+                        if !before { lastAfter = tabController.window ?? lastAfter }
                         self.registerMember(tabController, name: name)
                         self.materializeSplits(tabController, tab: tab, configFor: configFor, delay: 0)
                         self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
@@ -2256,15 +2258,14 @@ class VigilSessionManager {
     /// tool approved through a hook confirmation leaves blocked STALE (no
     /// hook fires between the approval and the tool's end), so blocked is
     /// only trusted briefly.
-    /// A session actively asking for Adrian: any pane input-wait blocked
-    /// (valid at ANY age, only an answer clears it) or permission blocked
-    /// within the freshness window (stale = a hook-confirmed approval
-    /// with its tool still running).
-    func freshlyBlocked(_ name: String, within seconds: TimeInterval) -> Bool {
+    /// A session with any raw-blocked pane, at any age: still asking (or
+    /// mid-approved-tool). Used for the auto-follow veto (never yank
+    /// while the current session may be mid-answer) and ⌘⇧J's rotation
+    /// (every ask stays reachable, seen or not).
+    func asking(_ name: String) -> Bool {
         guard let session = sessions[name] else { return false }
         return ownedPaneIds(session).contains { pane in
-            guard let s = paneAgentState(pane), s.state == .blocked else { return false }
-            return s.inputWait || Date().timeIntervalSince(s.since) < seconds
+            paneAgentState(pane)?.state == .blocked
         }
     }
 
@@ -2275,8 +2276,8 @@ class VigilSessionManager {
         guard let session = sessions[name] else { return false }
         let ack = lastAck[name] ?? .distantPast
         return ownedPaneIds(session).contains { pane in
-            guard let s = paneAgentState(pane), s.state == .blocked, ack < s.since else { return false }
-            return s.inputWait || Date().timeIntervalSince(s.since) < 120
+            guard let s = paneAgentState(pane) else { return false }
+            return s.state == .blocked && ack < s.since
         }
     }
 
@@ -2889,11 +2890,9 @@ class VigilSessionManager {
     }
 
     /// The pane's continuous program state as its adapter last wrote it.
-    /// Format: one state word, optionally followed by a flavor -
-    /// "blocked input" = waiting for an ANSWER (nothing will fire until
-    /// Adrian does), vs plain "blocked" = a permission prompt that may
-    /// unblock silently through a hook confirmation.
-    func paneAgentState(_ pane: String) -> (state: AgentState, since: Date, inputWait: Bool)? {
+    /// First token only; trailing tokens tolerated (older files carried
+    /// a "blocked input" flavor).
+    func paneAgentState(_ pane: String) -> (state: AgentState, since: Date)? {
         let url = agentStateDir.appendingPathComponent("\(pane).state")
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
@@ -2906,23 +2905,22 @@ class VigilSessionManager {
         default: return nil
         }
         let since = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
-        return (state, since ?? .distantPast, parts.dropFirst().first == "input")
+        return (state, since ?? .distantPast)
     }
 
-    /// Display state: `done` AND input-wait `blocked` decay to idle once
+    /// Display state, ONE rule: `done` and `blocked` decay to idle once
     /// the session was SEEN after they fired (mount, focus, or presence -
     /// the events tail acks the watched session, so an ask arriving under
-    /// your eyes clears the moment it lands). Unseen input-wait stays
-    /// orange at ANY age - only seeing or answering clears it, never
-    /// time. A PERMISSION `blocked` instead decays to WORKING after 2
-    /// minutes: an approval through a hook confirmation fires no hook
-    /// until the tool ENDS, so old perm-blocked almost always means a
-    /// long approved tool mid-run.
+    /// your eyes clears the moment it lands); unseen they hold at ANY
+    /// age. No time-based decay anywhere: you cannot APPROVE a prompt
+    /// without seeing it, so seen-decay already covers the approved
+    /// long-tool case the old 120s "display as working" clock existed
+    /// for - and that clock made a genuinely stuck prompt invisible.
+    /// Unseen orange now always tells the truth.
     func paneDisplayState(_ pane: String, in session: String) -> AgentState? {
         guard let s = paneAgentState(pane) else { return nil }
-        if s.state == .done || (s.state == .blocked && s.inputWait),
+        if s.state == .done || s.state == .blocked,
            let ack = lastAck[session], ack >= s.since { return .idle }
-        if s.state == .blocked, !s.inputWait, Date().timeIntervalSince(s.since) > 120 { return .working }
         return s.state
     }
 
@@ -4027,8 +4025,14 @@ extension TerminalController {
         let controller = TerminalController(ghostty, withSurfaceTree: tree)
         controller.isBackgroundOpaque = parent.isBackgroundOpaque
         if let window = controller.window, let anchorWindow = relativeTo ?? parent.window {
+            // SILENT append: the tab joins the group's bar without
+            // showWindow - ordering a tabbed window front SELECTS its
+            // tab, and a batch regroup that shows each joiner flashes
+            // every terminal in sequence before the anchored one wins
+            // (the mount "layout-shift festival", Adrian 2026-08-04).
+            // The anchored tab stays selected throughout; a silent tab
+            // renders when first selected.
             anchorWindow.addTabbedWindowSafely(window, ordered: ordered)
-            controller.showWindow(nil)
         }
         return controller
     }
