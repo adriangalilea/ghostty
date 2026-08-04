@@ -38,6 +38,7 @@ final class VigilDockHost: NSView {
     private let content = NSView()
     private var handle: VigilDragHandle!
     private weak var mounted: Ghostty.SurfaceView?
+    private var mountedHost: NSHostingView<AnyView>?
 
     init(controller: TerminalController) {
         self.controller = controller
@@ -130,24 +131,35 @@ final class VigilDockHost: NSView {
         let target = runtime.views.indices.contains(runtime.active)
             ? runtime.views[runtime.active] : runtime.views.first
         guard mounted !== target else { return }
-        mounted?.removeFromSuperview()
-        mounted = nil
+        unmountActive()
         guard let target else { return }
         target.removeFromSuperview() // in case it was mounted elsewhere
-        target.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(target)
+        // Mount through the SAME wrapper real panes use: a naked
+        // SurfaceView never sizes itself from its frame (surface size
+        // flows GeometryReader -> SurfaceRepresentable -> sizeDidChange),
+        // so a raw mount rendered at a stale grid forever. SurfaceWrapper
+        // also brings the resize overlay, progress bar, badges and split
+        // dimming - the dock tenant IS a pane, just positionally special.
+        let hosting = NSHostingView(rootView: AnyView(
+            Ghostty.SurfaceWrapper(surfaceView: target, isSplit: true)
+                .environmentObject(controller.ghostty)))
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(hosting)
         NSLayoutConstraint.activate([
-            target.topAnchor.constraint(equalTo: content.topAnchor),
-            target.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            target.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            target.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            hosting.topAnchor.constraint(equalTo: content.topAnchor),
+            hosting.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            hosting.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
+        mountedHost = hosting
         mounted = target
     }
 
     /// Collapse/teardown: unmount the visible tenant (it lives on in the
     /// runtime) so a hidden dock holds no view in the window's hierarchy.
     func unmountActive() {
+        mountedHost?.removeFromSuperview()
+        mountedHost = nil
         mounted?.removeFromSuperview()
         mounted = nil
     }
