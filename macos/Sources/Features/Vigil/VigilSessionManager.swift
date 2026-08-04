@@ -521,7 +521,9 @@ class VigilSessionManager {
                 changed = true
                 continue
             }
-            let attention: Attention = event.event == "Notification" ? .input : .done
+            // Notification = permission prompt; Ask = the Stop classifier
+            // found a question at turn end (both need input NOW).
+            let attention: Attention = ["Notification", "Ask"].contains(event.event) ? .input : .done
             // Escalate only: an input request is not downgraded by a later Stop.
             if attention.rawValue > sessions[name]!.attention.rawValue {
                 sessions[name]!.attention = attention
