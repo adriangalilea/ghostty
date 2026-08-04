@@ -302,7 +302,13 @@ class VigilSessionManager {
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/wake")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let fd = Darwin.open(dir.appendingPathComponent("app.lock").path, O_CREAT | O_RDWR, 0o600)
+        // O_CLOEXEC or every spawned vigild inherits the fd and HOLDS THE
+        // FLOCK after the app dies (locked out of our own lock by a
+        // daemon, 2026-08-04 - the attach-socket FD_CLOEXEC lesson again;
+        // flock rides the file description, which fork shares and only
+        // exec+CLOEXEC severs). Path is app.flock because the original
+        // app.lock is still held by daemons born before this fix.
+        let fd = Darwin.open(dir.appendingPathComponent("app.flock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard fd >= 0 else { return } // no lock support beats a bricked app
         if flock(fd, LOCK_EX | LOCK_NB) != 0 {
             var buf = [CChar](repeating: 0, count: 32)
