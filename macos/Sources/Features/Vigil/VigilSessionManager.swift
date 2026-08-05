@@ -3200,6 +3200,15 @@ class VigilSessionManager {
         guard let s = paneAgentState(pane) else { return nil }
         if s.state == .done || s.state == .blocked,
            let ack = lastAck[pane], ack >= s.since { return .idle }
+        // Esc-interrupt fires NO hook (nothing rewrites the state file),
+        // so `working` would spin forever. The program's own title is the
+        // corrective: claude wears `✳ ` the moment it idles (braille
+        // spinner while working). Positive idle marker only - absence of
+        // a spinner proves nothing (title races the hook by a beat), and
+        // blocked/done stay untouched (an ask must hold orange unseen).
+        if s.state == .working,
+           let first = liveView(attachId: pane)?.title.unicodeScalars.first,
+           first == "✳" { return .idle }
         return s.state
     }
 
