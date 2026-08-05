@@ -1763,8 +1763,10 @@ class VigilSessionManager {
                 // CAPTURE position relative to the anchored viewport
                 // (before-anchor insert .below it, after-anchor chain
                 // .above), so the native bar never rotates anchored-first.
+                regroupsInFlight += 1
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
+                    defer { self.regroupsInFlight -= 1; self.syncWindowMarks() }
                     var lastAfter = controller.window
                     for (index, tree) in rest {
                         let before = index < chosenIndex
@@ -1820,8 +1822,10 @@ class VigilSessionManager {
             // decides here), focus returning to the anchored one once.
             let rest = usable.filter { $0.offset != chosen.offset }
             if !rest.isEmpty, let parent = controller.window {
+                regroupsInFlight += 1
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
+                    defer { self.regroupsInFlight -= 1; self.syncWindowMarks() }
                     var lastAfter = parent
                     for (offset, tab) in rest {
                         // Silent append (vigilNewTab), NOT newTab: its
@@ -4215,6 +4219,87 @@ class VigilSessionManager {
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
 
+    /// Tab regroups in flight (mount's one-tick native-tab batches): while
+    /// any is pending, the tab bar must NOT be force-toggled - see
+    /// enforceTabBar.
+    private var regroupsInFlight = 0
+
+    /// `.preferred` biases grouping; the bar itself is forced via the tab
+    /// group's public visibility. NEVER while a regroup is in flight:
+    /// toggleTabBar during the same transition AppKit uses to install the
+    /// group's own bar leaves TWO bars stacked on one titlebar (AX-verified
+    /// 2026-08-05: a stale solo bar occluding the real tabs, misrouting
+    /// every click on the strip by a few pixels). Existing duplicates heal
+    /// here - keep the newest, strip the rest, scream in the log - so a
+    /// race that slips through self-corrects at the next sync.
+    private func enforceTabBar(_ window: NSWindow) {
+        window.tabbingMode = .preferred
+        guard let group = window.tabGroup, let tw = window as? TerminalWindow else { return }
+        // Detection must be upstream's isTabBar: the accessory's TOP view
+        // is a plain NSView (AppKit installs the bar in stages - empty
+        // accessory first, NSTabBar nested later), so class-name checks
+        // on the accessory itself see nothing.
+        let bars = tw.titlebarAccessoryViewControllers.enumerated()
+            .filter { tw.isTabBar($0.element) }
+        if bars.count > 1 {
+            // A forced toggle raced that staged install: TWO bars stack
+            // on one titlebar, the stale solo bar occluding the real
+            // tabs - no hover feedback, dead clicks on the whole strip
+            // (AX-verified 2026-08-05). Keep the newest (add order),
+            // strip the rest; re-sync next tick re-forces if needed.
+            vlog("enforceTabBar: \(bars.count) tab bars stacked on one titlebar - healing")
+            for (index, _) in bars.dropLast().reversed() {
+                tw.removeTitlebarAccessoryViewController(at: index)
+            }
+            DispatchQueue.main.async { [weak self] in self?.syncWindowMarks() }
+            return
+        }
+        // A duplicate can ALSO live as a bare NSTabBar VIEW orphaned in
+        // the titlebar hierarchy (no accessory to remove). The live bar
+        // is the one whose tab-button count matches the group; any other
+        // is a corpse - remove the view itself. Ambiguity touches
+        // nothing and screams.
+        if let titlebar = tw.titlebarView {
+            var tabBars: [NSView] = []
+            Self.collectDescendants(of: titlebar, className: "NSTabBar", into: &tabBars)
+            if tabBars.count > 1 {
+                let census = tabBars.map { bar -> String in
+                    var buttons: [NSView] = []
+                    Self.collectDescendants(of: bar, className: "NSTabButton", into: &buttons)
+                    return "\(bar.frame) buttons=\(buttons.count) host=\(bar.superview?.className ?? "?")"
+                }
+                vlog("enforceTabBar: \(tabBars.count) NSTabBar views on one titlebar: \(census.joined(separator: " | "))")
+                let expected = group.windows.count
+                let live = tabBars.filter { bar in
+                    var buttons: [NSView] = []
+                    Self.collectDescendants(of: bar, className: "NSTabButton", into: &buttons)
+                    return buttons.count == expected
+                }
+                if live.count == 1 {
+                    for bar in tabBars where bar !== live[0] {
+                        vlog("enforceTabBar: removing corpse bar \(bar.frame)")
+                        bar.removeFromSuperview()
+                    }
+                } else {
+                    vlog("enforceTabBar: cannot pick the live bar (expected \(expected) tabs) - left alone")
+                }
+                return
+            }
+        }
+        // Force ONLY when no bar accessory exists at all: mid-install the
+        // group's visible flag lags the accessory, and toggling in that
+        // gap is exactly how the duplicate is born.
+        guard regroupsInFlight == 0, !group.isTabBarVisible, bars.isEmpty else { return }
+        window.toggleTabBar(nil)
+    }
+
+    private static func collectDescendants(of view: NSView, className: String, into out: inout [NSView]) {
+        for sub in view.subviews {
+            if sub.className == className { out.append(sub) }
+            collectDescendants(of: sub, className: className, into: &out)
+        }
+    }
+
     /// Idempotent: every window of a persistent session carries the
     /// vigilance mark (eye + label titlebar pill, colored by survival class)
     /// and a matching content border; every other window carries none. One
@@ -4234,13 +4319,8 @@ class VigilSessionManager {
             // The tab bar is ALWAYS visible (Adrian 2026-08-03): a lone
             // tab shows as one tab + the native plus, so tabbed and
             // tabless windows share one height and switching sessions
-            // never shifts the layout vertically. `.preferred` only
-            // biases grouping; the bar itself is forced via the tab
-            // group's public visibility (idempotent at this chokepoint).
-            window.tabbingMode = .preferred
-            if let group = window.tabGroup, !group.isTabBarVisible {
-                window.toggleTabBar(nil)
-            }
+            // never shifts the layout vertically.
+            enforceTabBar(window)
 
             let name = sessionName(of: controller)
             let persistent = name.map { sessions[$0]?.persistent == true } ?? false
