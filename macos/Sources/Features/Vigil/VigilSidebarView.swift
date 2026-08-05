@@ -9,6 +9,10 @@ import UniformTypeIdentifiers
 /// vertical line whatever the row type.
 struct VigilSidebarView: View {
     @ObservedObject var model: VigilSidebarModel
+    /// The app-wide collapse truth: observing it here is what makes a
+    /// chevron toggled in ANY window re-render THIS sidebar (the model
+    /// only proxies its values).
+    @ObservedObject private var collapse = VigilSidebarCollapse.shared
     @State private var hovered: String?
     @AppStorage("vigil.autofollow") private var autoFollow = false
 

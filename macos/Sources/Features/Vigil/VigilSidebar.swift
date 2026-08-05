@@ -138,8 +138,31 @@ final class VigilSidebarHost: NSVisualEffectView {
     }
 }
 
+/// Collapse state: ONE app-wide store, observed by every sidebar. Every
+/// window (native tabs included - each tab IS a window) hosts its own
+/// sidebar instance; per-model copies of this state diverged (each model
+/// read UserDefaults once at ITS init, didSet wrote the whole set back,
+/// last writer clobbered the rest), so landing in a sibling tab-window
+/// swapped in a sidebar with a different idea of what was collapsed -
+/// "a random session collapsed" on an unrelated click (2026-08-05).
+@MainActor
+final class VigilSidebarCollapse: ObservableObject {
+    static let shared = VigilSidebarCollapse()
+    @Published var sessions: Set<String> {
+        didSet { UserDefaults.standard.set(Array(sessions), forKey: "vigil.sidebar.collapsed") }
+    }
+    @Published var tabs: Set<String> {
+        didSet { UserDefaults.standard.set(Array(tabs), forKey: "vigil.sidebar.collapsedTabs") }
+    }
+
+    private init() {
+        sessions = Set(UserDefaults.standard.stringArray(forKey: "vigil.sidebar.collapsed") ?? [])
+        tabs = Set(UserDefaults.standard.stringArray(forKey: "vigil.sidebar.collapsedTabs") ?? [])
+    }
+}
+
 /// The sidebar's state: an immutable snapshot of the session tree plus the
-/// UI-only bits (selection, collapse sets, both persisted).
+/// UI-only bits (selection per window; collapse via the shared store).
 @MainActor
 final class VigilSidebarModel: ObservableObject {
     @Published private(set) var rows: [VigilSessionManager.SidebarSessionRow] = []
@@ -150,11 +173,15 @@ final class VigilSidebarModel: ObservableObject {
     /// True while the bar is first responder (control mode, ⌘⇧B, or a
     /// background click): the only time the cursor ring is visible.
     @Published var keyboardActive = false
-    @Published var collapsedSessions: Set<String> {
-        didSet { UserDefaults.standard.set(Array(collapsedSessions), forKey: "vigil.sidebar.collapsed") }
+    /// Views into the shared collapse store: every sidebar reads and
+    /// writes the same truth (the view observes the store for updates).
+    var collapsedSessions: Set<String> {
+        get { VigilSidebarCollapse.shared.sessions }
+        set { VigilSidebarCollapse.shared.sessions = newValue }
     }
-    @Published var collapsedTabs: Set<String> {
-        didSet { UserDefaults.standard.set(Array(collapsedTabs), forKey: "vigil.sidebar.collapsedTabs") }
+    var collapsedTabs: Set<String> {
+        get { VigilSidebarCollapse.shared.tabs }
+        set { VigilSidebarCollapse.shared.tabs = newValue }
     }
     var returnFocus: (() -> Void)?
     /// Set while control mode owns the keyboard: any landing (hint jump,
@@ -164,8 +191,6 @@ final class VigilSidebarModel: ObservableObject {
     weak var hostController: TerminalController?
 
     init() {
-        collapsedSessions = Set(UserDefaults.standard.stringArray(forKey: "vigil.sidebar.collapsed") ?? [])
-        collapsedTabs = Set(UserDefaults.standard.stringArray(forKey: "vigil.sidebar.collapsedTabs") ?? [])
         refresh()
     }
 
