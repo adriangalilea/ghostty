@@ -4290,7 +4290,21 @@ class VigilSessionManager {
         // group's visible flag lags the accessory, and toggling in that
         // gap is exactly how the duplicate is born.
         guard regroupsInFlight == 0, !group.isTabBarVisible, bars.isEmpty else { return }
-        window.toggleTabBar(nil)
+        // DEFERRED a tick and re-checked as still SOLO: a freshly born
+        // window often joins a group within the same breath (⌘T, moves,
+        // regroups) and AppKit brings the group's bar itself - toggling
+        // the pre-join solo window mints the corpse (heals at 10:41
+        // proved the creator survived the launch-path guards).
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, let tw = window as? TerminalWindow,
+                  let group = window.tabGroup else { return }
+            guard self.regroupsInFlight == 0,
+                  group.windows.count == 1,
+                  !group.isTabBarVisible,
+                  !tw.titlebarAccessoryViewControllers.contains(where: { tw.isTabBar($0) })
+            else { return }
+            window.toggleTabBar(nil)
+        }
     }
 
     private static func collectDescendants(of view: NSView, className: String, into out: inout [NSView]) {
