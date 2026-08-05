@@ -1874,12 +1874,15 @@ class VigilSessionManager {
         let tabs = mergedCapture(name: name)
         sessions[name]!.tabs = tabs
         let live = liveAttachIds(of: name)
-        guard !live.contains(anchor),
-              let target = tabs.first(where: { tab in
+        guard !live.contains(anchor) else { return } // already showing: no-op is honest
+        guard let target = tabs.first(where: { tab in
                   (tab.panes + (tab.dock?.panes ?? [])).contains { paneId(of: $0) == anchor }
               }),
               !target.panes.isEmpty,
-              let app = ghosttyApp?.app else { return }
+              let app = ghosttyApp?.app else {
+            vlog("shapeshiftTab: '\(name)' anchor \(anchor) matches NO captured tab - refused loud")
+            return
+        }
         vlog("shapeshiftTab: '\(name)' -> tab anchored at \(anchor)")
 
         dockMap.object(forKey: controller)?.unmount()
@@ -2535,7 +2538,13 @@ class VigilSessionManager {
             // then swapping again was a visible double-blink.
             shapeshift(in: controller, to: name, anchor: anchor)
         }
-        if let anchor, sessionName(of: controller) == name, liveView(attachId: anchor) == nil {
+        // Liveness is HAVING A WINDOW, never mere view existence: an
+        // undo corpse or a released tree can hold a windowless
+        // SurfaceView for this pane, and treating it as live made both
+        // branches skip - the click (and follow) died in silence
+        // (2026-08-05, the unclickable keycap row).
+        if let anchor, sessionName(of: controller) == name,
+           liveView(attachId: anchor)?.window == nil {
             shapeshiftTab(name: name, anchor: anchor, in: controller)
         }
     }
