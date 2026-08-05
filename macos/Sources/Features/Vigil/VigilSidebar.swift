@@ -362,6 +362,40 @@ final class VigilSidebarModel: ObservableObject {
         onLeaveControl?()
     }
 
+    // MARK: The geometry map (one source of truth for hover, click, drop)
+
+    /// Row frames in the "vigilTree" space, reported by the view on every
+    /// layout. All pointer questions resolve here: hover highlight, click
+    /// dispatch and drop targeting share this ONE lookup, so they cannot
+    /// disagree with each other or with the pixels.
+    var hitRows: [VigilHitRow] = []
+
+    func row(at point: CGPoint) -> VigilHitRow? {
+        hitRows.first { $0.frame.contains(point) }
+    }
+
+    /// True when the point is below every row: the tail, where a dragged
+    /// session lands LAST.
+    private func isPastEnd(_ point: CGPoint) -> Bool {
+        guard let maxY = hitRows.map(\.frame.maxY).max() else { return false }
+        return point.y > maxY
+    }
+
+    /// Click dispatch by row kind (the tap gesture resolves the row and
+    /// hands it here).
+    func clicked(_ row: VigilHitRow) {
+        switch row.kind {
+        case .session(let name):
+            activate(.init(id: row.id, kind: .session(name)))
+        case .tab(let session, let anchor):
+            let isFront = rows.first { $0.id == session }?
+                .tabs.first { $0.id == row.id }?.isFront ?? false
+            tabClicked(id: row.id, session: session, anchor: anchor, isFront: isFront)
+        case .pane(let session, _, let paneId):
+            activate(.init(id: row.id, kind: .pane(name: session, paneId: paneId)))
+        }
+    }
+
     // MARK: Drag (sessions reorder; panes/tabs MOVE between sessions)
 
     enum DragItem: Equatable {
@@ -447,6 +481,76 @@ final class VigilSidebarModel: ObservableObject {
             manager.setOrder(name: row.id, order: index)
         }
         draggingItem = nil
+    }
+
+    // MARK: Geometry-resolved drop (the whole tree is ONE drop surface)
+
+    /// Continuous retarget while a drag travels the bar: the row under the
+    /// point decides the semantics. There is no unhandled territory - the
+    /// delegate covers the entire tree, so the "refusing row cancels the
+    /// drag into a stuck dim" class is structurally gone.
+    func dragMoved(to point: CGPoint) -> DropProposal {
+        let row = row(at: point)
+        switch draggingItem {
+        case .session:
+            if let session = row?.sessionName {
+                sessionDragEntered(over: session)
+                return sessionDragUpdated(over: session)
+            }
+            if isPastEnd(point) { moveSessionToEnd() }
+            dropTarget = nil
+            return DropProposal(operation: .move)
+        case .tab:
+            dropTarget = row?.sessionName
+            return DropProposal(operation: .move)
+        case .pane:
+            // A tab-bearing row targets that tab; a session row targets
+            // the session (lands as its own cold tab).
+            if let anchor = row?.tabAnchor {
+                dropTarget = "tab-\(anchor)"
+            } else {
+                dropTarget = row?.sessionName
+            }
+            return DropProposal(operation: .move)
+        case nil:
+            return DropProposal(operation: .move)
+        }
+    }
+
+    /// The drop itself. Mutations DEFER out of the drag callback stack:
+    /// tearing down/creating windows inside a live NSDraggingSession is
+    /// asking AppKit for trouble.
+    func dragPerform(at point: CGPoint) {
+        let manager = VigilSessionManager.shared
+        let row = row(at: point)
+        switch draggingItem {
+        case .session:
+            // Gap/tail pass "": commit the preview as shown.
+            sessionDragPerform(target: row?.sessionName ?? "")
+        case .tab(let from, let anchor):
+            endDrag()
+            if let to = row?.sessionName {
+                DispatchQueue.main.async { manager.moveTab(anchor: anchor, from: from, to: to) }
+            }
+        case .pane(let from, let paneId, let isDock):
+            endDrag()
+            if let row, let session = row.sessionName {
+                if let tabAnchor = row.tabAnchor {
+                    DispatchQueue.main.async {
+                        manager.movePane(
+                            paneId: paneId, from: from,
+                            intoTabAnchoredBy: tabAnchor, of: session)
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        manager.movePane(paneId: paneId, from: from, to: session, isDock: isDock)
+                    }
+                }
+            }
+        case nil:
+            break
+        }
+        dropTarget = nil
     }
 
     // MARK: Navigation items (the flattened, currently-visible tree)
@@ -561,183 +665,64 @@ final class VigilSidebarModel: ObservableObject {
     }
 }
 
-/// Session-row drop: reorder preview + merge (⌥), tab/pane land in this
-/// session. Every case is handled - an unhandled drop CANCELS the drag
-/// with draggingItem stuck (dim + silent revert).
-struct VigilSessionDrop: DropDelegate {
-    let target: String
+/// One row of the geometry map: identity + semantics + frame in the
+/// "vigilTree" space. Reported by every row's background on layout,
+/// consumed by hover, click dispatch and the drop delegate alike.
+struct VigilHitRow: Equatable {
+    enum Kind: Equatable {
+        case session(String)
+        case tab(session: String, anchor: String?)
+        case pane(session: String, tabAnchor: String?, paneId: String?)
+    }
+
+    let id: String
+    let kind: Kind
+    var frame: CGRect = .zero
+
+    /// The session this row belongs to, whatever its depth: territory
+    /// decides drop targets.
+    var sessionName: String? {
+        switch kind {
+        case .session(let name): return name
+        case .tab(let session, _): return session
+        case .pane(let session, _, _): return session
+        }
+    }
+
+    /// The tab a dragged pane would land in when dropped on this row.
+    var tabAnchor: String? {
+        switch kind {
+        case .session: return nil
+        case .tab(_, let anchor): return anchor
+        case .pane(_, let tabAnchor, _): return tabAnchor
+        }
+    }
+}
+
+struct VigilHitRowsKey: PreferenceKey {
+    static let defaultValue: [VigilHitRow] = []
+    static func reduce(value: inout [VigilHitRow], nextValue: () -> [VigilHitRow]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+/// THE drop delegate: attached once to the whole tree, resolving targets
+/// through the geometry map. No other drop surface exists in the bar, so
+/// no drag can ever land on a refusing delegate (the old stuck-dim
+/// cancel) or on a gap nobody claimed.
+struct VigilTreeDrop: DropDelegate {
     let model: VigilSidebarModel
 
-    func dropEntered(info: DropInfo) {
-        MainActor.assumeIsolated {
-            switch model.draggingItem {
-            case .session:
-                model.sessionDragEntered(over: target)
-            case .tab, .pane:
-                model.dropTarget = target
-            case nil:
-                break
-            }
-        }
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        MainActor.assumeIsolated { model.dragMoved(to: info.location) }
     }
 
     func dropExited(info: DropInfo) {
-        MainActor.assumeIsolated {
-            if model.dropTarget == target { model.dropTarget = nil }
-        }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        MainActor.assumeIsolated {
-            if case .session = model.draggingItem {
-                return model.sessionDragUpdated(over: target)
-            }
-            return DropProposal(operation: .move)
-        }
+        MainActor.assumeIsolated { model.dropTarget = nil }
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        MainActor.assumeIsolated {
-            // Mutations DEFER out of the drag callback stack: tearing
-            // down/creating windows inside a live NSDraggingSession is
-            // asking AppKit for trouble.
-            let manager = VigilSessionManager.shared
-            let target = self.target
-            switch model.draggingItem {
-            case .session:
-                model.sessionDragPerform(target: target)
-            case .tab(let session, let anchor):
-                model.endDrag()
-                DispatchQueue.main.async { manager.moveTab(anchor: anchor, from: session, to: target) }
-            case .pane(let session, let paneId, let isDock):
-                model.endDrag()
-                DispatchQueue.main.async {
-                    manager.movePane(paneId: paneId, from: session, to: target, isDock: isDock)
-                }
-            case nil:
-                break
-            }
-        }
-        return true
-    }
-}
-
-/// Tab-row (and pane-row) drop: a dragged PANE lands INSIDE this tab; a
-/// dragged SESSION reorders around this row's session (territory decides
-/// the target - refusing it here cancelled the drag into the stuck dim);
-/// a dragged TAB moves to this row's session.
-struct VigilTabDrop: DropDelegate {
-    let session: String
-    let anchor: String?
-    let model: VigilSidebarModel
-
-    func dropEntered(info: DropInfo) {
-        MainActor.assumeIsolated {
-            switch model.draggingItem {
-            case .pane:
-                if let anchor { model.dropTarget = "tab-\(anchor)" }
-            case .session:
-                model.sessionDragEntered(over: session)
-            case .tab:
-                model.dropTarget = session
-            case nil:
-                break
-            }
-        }
-    }
-
-    func dropExited(info: DropInfo) {
-        MainActor.assumeIsolated {
-            if let anchor, model.dropTarget == "tab-\(anchor)" { model.dropTarget = nil }
-            if model.dropTarget == session { model.dropTarget = nil }
-        }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        MainActor.assumeIsolated {
-            if case .session = model.draggingItem {
-                return model.sessionDragUpdated(over: session)
-            }
-            return DropProposal(operation: .move)
-        }
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        MainActor.assumeIsolated {
-            let manager = VigilSessionManager.shared
-            let session = self.session
-            switch model.draggingItem {
-            case .pane(let from, let paneId, let isDock):
-                model.endDrag()
-                if let anchor {
-                    DispatchQueue.main.async {
-                        manager.movePane(paneId: paneId, from: from, intoTabAnchoredBy: anchor, of: session)
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        manager.movePane(paneId: paneId, from: from, to: session, isDock: isDock)
-                    }
-                }
-            case .session:
-                model.sessionDragPerform(target: session)
-            case .tab(let from, let tabAnchor):
-                model.endDrag()
-                DispatchQueue.main.async {
-                    manager.moveTab(anchor: tabAnchor, from: from, to: session)
-                }
-            case nil:
-                break
-            }
-        }
-        return true
-    }
-}
-
-/// The gaps: row spacing, group padding - anywhere inside the list that
-/// no row delegate covers. A drop here commits the preview as shown
-/// instead of cancelling into the stuck dim.
-struct VigilGapDrop: DropDelegate {
-    let model: VigilSidebarModel
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        MainActor.assumeIsolated {
-            if case .session = model.draggingItem {
-                model.sessionDragPerform(target: "")
-            } else {
-                model.endDrag()
-            }
-        }
-        return true
-    }
-}
-
-/// The tail: the dead space BELOW the last row is a real drop zone - a
-/// session dragged to the bottom lands LAST (it used to cancel there:
-/// the preview stuck at penultimate, the source dimmed, then a silent
-/// revert).
-struct VigilTailDrop: DropDelegate {
-    let model: VigilSidebarModel
-
-    func dropEntered(info: DropInfo) {
-        MainActor.assumeIsolated { model.moveSessionToEnd() }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        MainActor.assumeIsolated {
-            if case .session = model.draggingItem {
-                model.sessionDragPerform(target: "")
-            } else {
-                model.endDrag()
-            }
-        }
+        MainActor.assumeIsolated { model.dragPerform(at: info.location) }
         return true
     }
 }

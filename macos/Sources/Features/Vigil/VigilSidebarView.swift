@@ -27,27 +27,49 @@ struct VigilSidebarView: View {
             ScrollViewReader { proxy in
                 GeometryReader { geo in
                     ScrollView {
+                        // ONE geometry map drives hover, click and drop:
+                        // every row reports its frame into the "vigilTree"
+                        // space, one resolver answers "what is under this
+                        // point" for all three, so what highlights IS what
+                        // a click activates and what a drop targets. The
+                        // per-row tracking-area/gesture/delegate zoo let
+                        // those disagree (hover activating outside its
+                        // row, dead bands inside rows, drops cancelling in
+                        // gaps): one disease, cured structurally
+                        // (2026-08-05). Plain VStack on purpose - lazy
+                        // row realization is where stale hit geometry
+                        // lived, and this list is dozens of rows, not
+                        // thousands.
                         VStack(spacing: 0) {
-                            LazyVStack(alignment: .leading, spacing: 5) {
+                            VStack(alignment: .leading, spacing: 5) {
                                 ForEach(model.rows) { row in
                                     sessionGroup(row)
                                 }
                             }
                             .padding(.vertical, 8)
                             .padding(.horizontal, 6)
-                            // Gaps between rows/groups commit the preview
-                            // as shown; without a delegate they cancel the
-                            // drag (stuck dim + silent revert).
-                            .onDrop(of: [UTType.text], delegate: VigilGapDrop(model: model))
-                            // The tail fills the viewport below the last
-                            // row: dropping there lands LAST.
+                            // The tail below the last row: plain space to
+                            // the eye, resolved as "drop last" by the one
+                            // drop delegate (past-end = append).
                             Color.clear
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .frame(minHeight: 40)
-                                .contentShape(Rectangle())
-                                .onDrop(of: [UTType.text], delegate: VigilTailDrop(model: model))
                         }
                         .frame(minHeight: geo.size.height, alignment: .top)
+                        .coordinateSpace(name: "vigilTree")
+                        .contentShape(Rectangle())
+                        .onPreferenceChange(VigilHitRowsKey.self) { model.hitRows = $0 }
+                        .onContinuousHover(coordinateSpace: .named("vigilTree")) { phase in
+                            switch phase {
+                            case .active(let p): hovered = model.row(at: p)?.id
+                            case .ended: hovered = nil
+                            }
+                        }
+                        .gesture(SpatialTapGesture(coordinateSpace: .named("vigilTree"))
+                            .onEnded { value in
+                                if let row = model.row(at: value.location) { model.clicked(row) }
+                            })
+                        .onDrop(of: [UTType.text], delegate: VigilTreeDrop(model: model))
                     }
                     .onChange(of: model.selection) { selection in
                         if let selection { proxy.scrollTo(selection) }
@@ -72,6 +94,15 @@ struct VigilSidebarView: View {
             .receive(on: DispatchQueue.main)) { _ in model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
             .receive(on: DispatchQueue.main)) { _ in model.refresh() }
+    }
+
+    /// A row's report into the shared geometry map.
+    private func reportHit(id: String, kind: VigilHitRow.Kind) -> some View {
+        GeometryReader { g in
+            Color.clear.preference(
+                key: VigilHitRowsKey.self,
+                value: [VigilHitRow(id: id, kind: kind, frame: g.frame(in: .named("vigilTree")))])
+        }
     }
 
     /// The row standing in for "where keystrokes land": the focused pane,
@@ -315,16 +346,12 @@ struct VigilSidebarView: View {
             hovered: hovered == id,
             activity: row.isFront ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed ? row.states.first : nil))
+        .background(reportHit(id: id, kind: .session(id)))
         .contentShape(Rectangle())
-        .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
-        .onTapGesture {
-            model.activate(.init(id: id, kind: .session(id)))
-        }
         .onDrag {
             model.beginDrag(.session(id))
             return NSItemProvider(object: id as NSString)
         }
-        .onDrop(of: [UTType.text], delegate: VigilSessionDrop(target: id, model: model))
         .contextMenu {
             Button(row.persistent
                 ? "Make Ephemeral (dies on explicit close)"
@@ -418,11 +445,8 @@ struct VigilSidebarView: View {
             state: collapsed
                 ? VigilSessionManager.clusterStates(tab.panes.compactMap(\.state)).first
                 : nil))
+        .background(reportHit(id: tab.id, kind: .tab(session: session, anchor: tab.anchor)))
         .contentShape(Rectangle())
-        .onHover { inside in hovered = inside ? tab.id : (hovered == tab.id ? nil : hovered) }
-        .onTapGesture {
-            model.tabClicked(id: tab.id, session: session, anchor: tab.anchor, isFront: tab.isFront)
-        }
         .id(tab.id)
         .onDrag {
             if let anchor = tab.anchor {
@@ -430,7 +454,6 @@ struct VigilSidebarView: View {
             }
             return NSItemProvider(object: tab.id as NSString)
         }
-        .onDrop(of: [UTType.text], delegate: VigilTabDrop(session: session, anchor: tab.anchor, model: model))
         .contextMenu {
             if let anchor = tab.anchor {
                 Button("Rename…") {
@@ -500,11 +523,10 @@ struct VigilSidebarView: View {
             hovered: hovered == id,
             activity: pane.focused ? .leaf : .none,
             state: pane.state))
+        .background(reportHit(
+            id: id,
+            kind: .pane(session: session, tabAnchor: tab.anchor, paneId: pane.paneId)))
         .contentShape(Rectangle())
-        .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
-        .onTapGesture {
-            model.activate(.init(id: id, kind: .pane(name: session, paneId: pane.paneId)))
-        }
         .id(id)
         .onDrag {
             if let paneId = pane.paneId {
@@ -512,9 +534,6 @@ struct VigilSidebarView: View {
             }
             return NSItemProvider(object: id as NSString)
         }
-        // Pane rows are drop territory too (session reorder, pane into
-        // this tab): a refusing row cancelled the drag into the stuck dim.
-        .onDrop(of: [UTType.text], delegate: VigilTabDrop(session: session, anchor: tab.anchor, model: model))
         .contextMenu {
             if let paneId = pane.paneId {
                 Button("Rename…") {
