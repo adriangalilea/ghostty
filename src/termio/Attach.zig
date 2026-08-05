@@ -7,11 +7,17 @@
 //! Protocol (see vigild.zig): frames out ([1 byte type]['d' data | 'r'
 //! resize][u16 le len][payload]), raw pty bytes in. Reads reuse Exec's
 //! ReadThread over the socket fd — which flips the SHARED fd O_NONBLOCK,
-//! so writes can hit WouldBlock whenever a burst (a large paste) outruns
-//! the socket buffer. A frame abandoned mid-write desyncs the stream
-//! permanently; writeAll therefore blocks on POLLOUT until the daemon
-//! drains, and severs the socket on any unrecoverable error so the reader
-//! sees EOF and the surface learns the truth instead of going zombie.
+//! so writes can hit WouldBlock whenever a burst outruns the socket
+//! buffer. A frame abandoned mid-write desyncs the stream permanently, so
+//! frames are written whole — but NEVER from the io thread: every frame
+//! is queued and a dedicated writer thread absorbs the backpressure
+//! (blocking on POLLOUT until the daemon drains, severing on any
+//! unrecoverable error so the reader sees EOF). Blocking the io thread
+//! on a slow drain wedged the ENTIRE APP for 100s: a claude-code scroll
+//! storm (mouse-mode reports) outran the ~8KB sndbuf while claude redrew
+//! slowly, the io mailbox filled behind the stuck thread, and the main
+//! thread blocked pushing a focus message (Lulzx's hang report,
+//! 2026-08-05).
 const Attach = @This();
 
 const std = @import("std");
@@ -52,6 +58,15 @@ cached_tty: ?[:0]const u8 = null,
 /// Last known size, sent on connect and on change.
 grid_size: renderer.GridSize = .{ .columns = 80, .rows = 24 },
 
+/// Outbound frame queue: enqueueFrame appends (io thread, never blocks),
+/// the writer thread alone writes the socket. Order is total — resize and
+/// data frames share the one queue.
+write_mutex: std.Thread.Mutex = .{},
+write_cond: std.Thread.Condition = .{},
+write_buf: std.ArrayListUnmanaged(u8) = .{},
+write_closed: bool = false,
+write_thread: ?std.Thread = null,
+
 pub const Config = struct {
     id: []const u8,
     cwd: ?[]const u8 = null,
@@ -75,6 +90,7 @@ pub fn deinit(self: *Attach) void {
     if (self.session) |v| self.alloc.free(v);
     if (self.resume_line) |v| self.alloc.free(v);
     if (self.cached_tty) |v| self.alloc.free(v);
+    self.write_buf.deinit(self.alloc);
 }
 
 pub fn initTerminal(self: *Attach, term: *terminal.Terminal) void {
@@ -149,6 +165,13 @@ pub fn threadEnter(
     errdefer posix.close(fd);
     self.sock_fd = fd;
 
+    // The writer: sole owner of socket writes. Born before the first
+    // frame so nothing ever writes inline.
+    self.write_closed = false;
+    const write_thread = try std.Thread.spawn(.{}, writeThreadMain, .{ self, fd });
+    write_thread.setName("io-writer") catch {};
+    self.write_thread = write_thread;
+
     // First frame is our size: the daemon applies it (and jiggles on
     // reattach so full-screen TUIs repaint).
     self.sendResize();
@@ -194,6 +217,17 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
     };
     posix.shutdown(attach.sock_fd, .both) catch {};
     attach.read_thread.join();
+    // The writer: close the queue, wake it, join BEFORE the fd closes (a
+    // writer blocked in POLLOUT sees the shutdown as writable-then-EPIPE
+    // and severs its way out; it must never touch a closed fd).
+    self.write_mutex.lock();
+    self.write_closed = true;
+    self.write_cond.signal();
+    self.write_mutex.unlock();
+    if (self.write_thread) |t| {
+        t.join();
+        self.write_thread = null;
+    }
     posix.close(attach.sock_fd);
     self.sock_fd = -1;
 }
@@ -208,13 +242,17 @@ pub fn focusGained(
     _ = focused;
 }
 
-fn writeAll(fd: posix.fd_t, data: []const u8) void {
+/// Runs ONLY on the writer thread. Blocking on POLLOUT here is the whole
+/// design: this thread exists to absorb the stall the io thread must
+/// never feel. Returns false when the stream was severed.
+fn writeAll(fd: posix.fd_t, data: []const u8) bool {
     var off: usize = 0;
     while (off < data.len) {
         const n = posix.write(fd, data[off..]) catch |err| switch (err) {
             error.WouldBlock => {
-                // The daemon drains continuously; writability returns in
-                // microseconds. A full 10s stall means the stream is dead
+                // A drain stall is survivable for as long as the queue
+                // holds (a TUI chewing a storm reads slowly, not never).
+                // A full 10s with ZERO progress means the stream is dead
                 // — sever it rather than leave a half-written frame.
                 var pfds = [1]posix.pollfd{.{
                     .fd = fd,
@@ -225,29 +263,73 @@ fn writeAll(fd: posix.fd_t, data: []const u8) void {
                 if (ready == 0) {
                     log.warn("attach write stalled 10s -> sever", .{});
                     posix.shutdown(fd, .both) catch {};
-                    return;
+                    return false;
                 }
                 continue;
             },
             else => {
                 log.warn("attach write failed err={} -> sever", .{err});
                 posix.shutdown(fd, .both) catch {};
-                return;
+                return false;
             },
         };
         off += n;
     }
+    return true;
 }
 
-fn sendFrame(fd: posix.fd_t, typ: u8, payload: []const u8) void {
+/// Queue one whole frame (header + payload contiguous, order total).
+/// Never blocks beyond the mutex. A queue past 4MB means the daemon
+/// stopped draining for real: sever loudly rather than grow forever.
+fn enqueueFrame(self: *Attach, typ: u8, payload: []const u8) void {
     assert(payload.len <= 0xffff);
+    self.write_mutex.lock();
+    defer self.write_mutex.unlock();
+    if (self.write_closed) return;
+    if (self.write_buf.items.len > 4 << 20) {
+        log.warn("attach write queue past 4MB -> sever", .{});
+        posix.shutdown(self.sock_fd, .both) catch {};
+        self.write_closed = true;
+        self.write_cond.signal();
+        return;
+    }
     const hdr: [3]u8 = .{
         typ,
         @intCast(payload.len & 0xff),
         @intCast((payload.len >> 8) & 0xff),
     };
-    writeAll(fd, &hdr);
-    writeAll(fd, payload);
+    self.write_buf.appendSlice(self.alloc, &hdr) catch return;
+    self.write_buf.appendSlice(self.alloc, payload) catch return;
+    self.write_cond.signal();
+}
+
+fn writeThreadMain(self: *Attach, fd: posix.fd_t) void {
+    var local: std.ArrayListUnmanaged(u8) = .{};
+    defer local.deinit(self.alloc);
+    while (true) {
+        self.write_mutex.lock();
+        while (self.write_buf.items.len == 0 and !self.write_closed) {
+            self.write_cond.wait(&self.write_mutex);
+        }
+        if (self.write_buf.items.len == 0) {
+            // Closed and drained: done.
+            self.write_mutex.unlock();
+            return;
+        }
+        // Swap and drain OUTSIDE the lock: enqueue never waits on a write.
+        std.mem.swap(std.ArrayListUnmanaged(u8), &local, &self.write_buf);
+        self.write_mutex.unlock();
+
+        if (!writeAll(fd, local.items)) {
+            // Severed: everything still queued is dead bytes.
+            self.write_mutex.lock();
+            self.write_closed = true;
+            self.write_buf.clearAndFree(self.alloc);
+            self.write_mutex.unlock();
+            return;
+        }
+        local.clearRetainingCapacity();
+    }
 }
 
 fn sendResize(self: *Attach) void {
@@ -258,7 +340,7 @@ fn sendResize(self: *Attach) void {
         @intCast(rows & 0xff), @intCast((rows >> 8) & 0xff),
         @intCast(cols & 0xff), @intCast((cols >> 8) & 0xff),
     };
-    sendFrame(self.sock_fd, 'r', &payload);
+    self.enqueueFrame('r', &payload);
 }
 
 pub fn resize(
@@ -286,7 +368,7 @@ pub fn queueWrite(
         var i: usize = 0;
         while (i < data.len) {
             const end = @min(data.len, i + 0xffff);
-            sendFrame(self.sock_fd, 'd', data[i..end]);
+            self.enqueueFrame('d', data[i..end]);
             i = end;
         }
         return;
@@ -297,7 +379,7 @@ pub fn queueWrite(
     var buf_i: usize = 0;
     for (data) |ch| {
         if (buf_i >= buf.len - 1) {
-            sendFrame(self.sock_fd, 'd', buf[0..buf_i]);
+            self.enqueueFrame('d', buf[0..buf_i]);
             buf_i = 0;
         }
         buf[buf_i] = ch;
@@ -307,7 +389,7 @@ pub fn queueWrite(
             buf_i += 1;
         }
     }
-    if (buf_i > 0) sendFrame(self.sock_fd, 'd', buf[0..buf_i]);
+    if (buf_i > 0) self.enqueueFrame('d', buf[0..buf_i]);
 }
 
 pub fn childExitedAbnormally(
