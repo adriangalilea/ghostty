@@ -666,24 +666,16 @@ struct VigilSidebarView: View {
                 Color.clear.frame(width: 7, height: 7)
             } else {
                 // Per-PANE dots: duplicates are the point, so identity is
-                // positional, not by state. Each dot PUNCHES OUT what is
-                // beneath it in the cluster (destinationOut inside the
-                // compositing group): the front dot fully occludes the one
-                // behind - its translucency shows the sidebar, never the
-                // neighbour's border - and the oversized punch leaves a
-                // hairline gap that makes the count crisp.
+                // positional, not by state. Plain overlap - the ring
+                // borders keep overlapping same-colour dots countable
+                // (the old destinationOut punch-out cannot composite the
+                // CA-layer dots, and the borders were already doing the
+                // work).
                 ForEach(Array(states.enumerated()), id: \.offset) { _, state in
-                    ZStack {
-                        Circle()
-                            .fill(Color.black)
-                            .frame(width: 8.5, height: 8.5)
-                            .blendMode(.destinationOut)
-                        VigilStateDot(state: state)
-                    }
+                    VigilStateDot(state: state)
                 }
             }
         }
-        .compositingGroup()
         .frame(minWidth: Grid.dot, alignment: .trailing)
     }
 
@@ -742,57 +734,104 @@ struct VigilSidebarView: View {
 /// on you (it breathes until you answer), solid teal = done unseen,
 /// faint solid = idle. Identical 7pt footprint in every form: state
 /// changes never move layout.
+///
+/// The motion lives in CORE ANIMATION, never SwiftUI: `repeatForever`
+/// SwiftUI animations invalidated the hosting view's render loop every
+/// frame, and with one working claude visible the sidebar re-rendered
+/// continuously on the main thread - the terminal's scroll stutter,
+/// measured by sample 2026-08-06 (SwiftUI renderDisplayList dominating
+/// main during a pure Metal scroll). CABasicAnimation runs in the render
+/// server: zero app-side work per frame.
 struct VigilStateDot: View {
     let state: VigilSessionManager.AgentState?
-    @State private var spin = false
-    @State private var pulse = false
 
     var body: some View {
+        VigilDotLayer(state: state)
+            .frame(width: 7, height: 7)
+    }
+}
+
+private struct VigilDotLayer: NSViewRepresentable {
+    let state: VigilSessionManager.AgentState?
+
+    func makeNSView(context: Context) -> VigilDotNSView { VigilDotNSView() }
+    func updateNSView(_ view: VigilDotNSView, context: Context) {
+        view.apply(state)
+    }
+}
+
+final class VigilDotNSView: NSView {
+    private var current: VigilSessionManager.AgentState??
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 7, height: 7) }
+
+    func apply(_ state: VigilSessionManager.AgentState?) {
+        if current == state { return }
+        current = state
+        wantsLayer = true
+        guard let layer else { return }
+        layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        let rect = CGRect(x: 0, y: 0, width: 7, height: 7)
         switch state {
         case .working:
-            // A FILLED spinner: faint yellow body (so it holds its own
-            // next to solid dots in a cluster) with the bright arc
-            // spinning on top.
-            ZStack {
-                Circle().fill(Color.yellow.opacity(0.3))
-                Circle()
-                    .trim(from: 0.25, to: 1)
-                    .stroke(Color.yellow, style: StrokeStyle(lineWidth: 1, lineCap: .round))
-                    .padding(0.5)
-                    .rotationEffect(.degrees(spin ? 360 : 0))
-            }
-            .frame(width: 7, height: 7)
-            .onAppear {
-                withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
-                    spin = true
-                }
-            }
-            .onDisappear { spin = false }
+            // Faint body + bright arc, the arc rotating in the render
+            // server forever.
+            let body = CAShapeLayer()
+            body.frame = rect
+            body.path = CGPath(ellipseIn: rect, transform: nil)
+            body.fillColor = NSColor.systemYellow.withAlphaComponent(0.3).cgColor
+            layer.addSublayer(body)
+
+            let arc = CAShapeLayer()
+            arc.frame = rect
+            let path = CGMutablePath()
+            path.addArc(
+                center: CGPoint(x: 3.5, y: 3.5), radius: 3,
+                startAngle: 0, endAngle: .pi * 1.5, clockwise: false)
+            arc.path = path
+            arc.strokeColor = NSColor.systemYellow.cgColor
+            arc.fillColor = nil
+            arc.lineWidth = 1
+            arc.lineCap = .round
+            layer.addSublayer(arc)
+
+            let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+            spin.fromValue = 0
+            spin.toValue = -2 * Double.pi
+            spin.duration = 1.1
+            spin.repeatCount = .infinity
+            arc.add(spin, forKey: "spin")
         case .blocked:
-            ringDot(.orange)
-                .opacity(pulse ? 0.35 : 1)
-                .onAppear {
-                    withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                        pulse = true
-                    }
-                }
-                .onDisappear { pulse = false }
+            let dot = ringLayer(.systemOrange, in: rect)
+            layer.addSublayer(dot)
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1.0
+            pulse.toValue = 0.35
+            pulse.duration = 0.9
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            dot.add(pulse, forKey: "pulse")
         case .done:
-            ringDot(.teal)
+            layer.addSublayer(ringLayer(.systemTeal, in: rect))
         case .idle:
-            ringDot(Color.secondary.opacity(0.6))
+            layer.addSublayer(ringLayer(.secondaryLabelColor.withAlphaComponent(0.6), in: rect))
         case nil:
-            Color.clear.frame(width: 7, height: 7)
+            break
         }
     }
 
-    /// Every dot is a RING + translucent body (border at full colour,
-    /// body ~55%): two same-colour dots overlapping in a cluster stay
-    /// countable because the borders draw the boundary.
-    private func ringDot(_ color: Color) -> some View {
-        Circle()
-            .fill(color.opacity(0.55))
-            .overlay(Circle().stroke(color, lineWidth: 1))
-            .frame(width: 7, height: 7)
+    /// Ring + translucent body (border at full colour, body ~55%): two
+    /// same-colour dots overlapping in a cluster stay countable because
+    /// the borders draw the boundary.
+    private func ringLayer(_ color: NSColor, in rect: CGRect) -> CAShapeLayer {
+        let dot = CAShapeLayer()
+        dot.frame = rect
+        let inset = rect.insetBy(dx: 0.5, dy: 0.5)
+        dot.path = CGPath(ellipseIn: inset, transform: nil)
+        dot.fillColor = color.withAlphaComponent(0.55).cgColor
+        dot.strokeColor = color.cgColor
+        dot.lineWidth = 1
+        return dot
     }
 }
