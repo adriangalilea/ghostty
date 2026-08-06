@@ -691,21 +691,26 @@ class VigilSessionManager {
         // Attention navigation is pane-precise: follow() lands on the
         // asking console (shapeshifting the key terminal window when
         // there is one; open() semantics remain the no-window fallback).
+        // The session you are STANDING IN is never a target: being there
+        // IS having seen it, and a stuck attention head pinned ⌘⇧J to the
+        // current session forever - unable to reach any other ask
+        // (Adrian 2026-08-06). Rotation emerges from the exclusion:
+        // jumping somewhere makes it current, which excludes it from the
+        // next press.
         let controller = NSApp.keyWindow?.windowController as? TerminalController
-        if let session = mostUrgent {
+        let current = controller.flatMap { sessionName(of: $0) }
+        if let session = mostUrgent, session.name != current {
             follow(session.name, in: controller)
             return
         }
         let asking = sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .filter { self.asking($0.name) }
+            .filter { $0.name != current && self.asking($0.name) }
             .map(\.name)
         guard !asking.isEmpty else { return }
-        let current = controller.flatMap { sessionName(of: $0) }
-        let target = current.flatMap { c in
-            asking.firstIndex(of: c).map { asking[($0 + 1) % asking.count] }
-        } ?? asking[0]
-        follow(target, in: controller)
+        // Unseen asks outrank seen ones (seen stay reachable, after).
+        let unseen = asking.filter { blockedUnseen($0) }
+        follow((unseen.isEmpty ? asking : unseen)[0], in: controller)
     }
 
     /// The head of the attention FIFO by name (the sidebar's direct-access
@@ -2479,26 +2484,28 @@ class VigilSessionManager {
     /// off, and visiting the head re-derives the next - the hint IS the
     /// queue, one head at a time (Adrian 2026-08-04).
     func nextAskHint() -> AskHint? {
+        // Same exclusions as next(): never the session you are in, and
+        // unseen asks outrank seen ones. An affordance pointing at the
+        // room you are standing in is noise (Adrian 2026-08-06).
+        let current = (NSApp.keyWindow?.windowController as? TerminalController)
+            .flatMap { sessionName(of: $0) }
         let askingList = sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .filter { asking($0.name) }
+            .filter { $0.name != current && asking($0.name) }
             .map(\.name)
         let head: String?
-        if let urgent = mostUrgentName {
+        if let urgent = mostUrgentName, urgent != current {
             head = urgent
-        } else if !askingList.isEmpty {
-            let current = (NSApp.keyWindow?.windowController as? TerminalController)
-                .flatMap { sessionName(of: $0) }
-            head = current.flatMap { c in
-                askingList.firstIndex(of: c).map { askingList[($0 + 1) % askingList.count] }
-            } ?? askingList[0]
         } else {
-            head = nil
+            let unseen = askingList.filter { blockedUnseen($0) }
+            head = (unseen.isEmpty ? askingList : unseen).first
         }
         guard let head, let session = sessions[head] else { return nil }
         var pending = Set(askingList)
         pending.insert(head)
-        for s in sessions.values where s.attention != .none { pending.insert(s.name) }
+        for s in sessions.values where s.attention != .none && s.name != current {
+            pending.insert(s.name)
+        }
         return AskHint(
             name: head, label: session.label, emoji: session.emoji,
             pane: askingPane(head), more: pending.count - 1)
