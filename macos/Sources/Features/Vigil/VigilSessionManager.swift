@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import GhosttyKit
 
 /// vigil: sessions as a first-class native concept.
 ///
@@ -699,18 +700,18 @@ class VigilSessionManager {
         // next press.
         let controller = NSApp.keyWindow?.windowController as? TerminalController
         let current = controller.flatMap { sessionName(of: $0) }
-        if let session = mostUrgent, session.name != current {
+        // The head must EARN the jump like everyone else: a stuck
+        // attention entry on a seen session pinned ⌘⇧J once.
+        if let session = mostUrgent, session.name != current, unseenNeedy(session.name) {
             follow(session.name, in: controller)
             return
         }
-        let asking = sessions.values
+        let queue = sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .filter { $0.name != current && self.asking($0.name) }
+            .filter { $0.name != current && unseenNeedy($0.name) }
             .map(\.name)
-        guard !asking.isEmpty else { return }
-        // Unseen asks outrank seen ones (seen stay reachable, after).
-        let unseen = asking.filter { blockedUnseen($0) }
-        follow((unseen.isEmpty ? asking : unseen)[0], in: controller)
+        guard let target = queue.first else { return }
+        follow(target, in: controller)
     }
 
     /// The head of the attention FIFO by name (the sidebar's direct-access
@@ -1034,6 +1035,8 @@ class VigilSessionManager {
         for controller in ms { dockMap.removeObject(forKey: controller) }
         detachedDocks[name] = docks.isEmpty ? nil : docks
         sessions[name]!.state = .detached(trees)
+        setOcclusion(false, trees)
+        for runtime in docks.values { setOcclusion(false, views: runtime.views) }
         // Membership ends BEFORE the trees empty: the window-close cascade
         // must see these controllers as session-less.
         for controller in ms {
@@ -1687,6 +1690,32 @@ class VigilSessionManager {
     /// every tab is captured, sibling tab-windows close (trees emptied),
     /// and this controller's tree is left alone for mount to REPLACE
     /// (an emptied tree closes the window; a replaced one never does).
+    /// Rendering follows VISIBILITY, not liveness. Upstream pauses a
+    /// surface's renderer via its WINDOW's occlusion notifications - a
+    /// surface released to detached has no window, so nothing ever tells
+    /// it to stop: every detached tree kept drawing at display refresh
+    /// forever (~15 invisible renderers ticking at 120Hz = the scroll
+    /// stutter vanilla doesn't have, sampled 2026-08-06). Detach/bury
+    /// occlude; mount un-occludes (the window's own notifications take
+    /// over from there).
+    private func setOcclusion(_ visible: Bool, _ trees: [SplitTree<Ghostty.SurfaceView>]) {
+        for tree in trees {
+            for view in tree {
+                guard let surface = view.surface, view.isWindowVisible != visible else { continue }
+                ghostty_surface_set_occlusion(surface, visible)
+                view.isWindowVisible = visible
+            }
+        }
+    }
+
+    private func setOcclusion(_ visible: Bool, views: [Ghostty.SurfaceView]) {
+        for view in views {
+            guard let surface = view.surface, view.isWindowVisible != visible else { continue }
+            ghostty_surface_set_occlusion(surface, visible)
+            view.isWindowVisible = visible
+        }
+    }
+
     private func releaseOccupant(of controller: TerminalController) {
         if let current = sessionName(of: controller) {
             let ms = members(of: current)
@@ -1706,6 +1735,8 @@ class VigilSessionManager {
             // rebuild - the reported delay and the ghost-titled tabs.
             sessions[current]!.state = .detached(trees)
             detachedDocks[current] = docks.isEmpty ? nil : docks
+            setOcclusion(false, trees)
+            for dock in docks.values { setOcclusion(false, views: dock.views) }
             if sessions[current]!.persistent, let thumb = sessions[current]!.thumbnail {
                 persistThumb(name: current, image: thumb)
             }
@@ -1723,6 +1754,7 @@ class VigilSessionManager {
                 state: .detached([tree]))
             stray.thumbnail = surface?.asImage
             sessions[stray.name] = stray
+            setOcclusion(false, [tree])
         }
     }
 
@@ -1755,9 +1787,15 @@ class VigilSessionManager {
             }
             registerMember(controller, name: name)
             controller.surfaceTree = trees[chosenIndex]
+            // Wake the MOUNTED tree's renderers (the window's occlusion
+            // notifications take over from the next change); the rest
+            // regroup as unselected tab windows and stay occluded until
+            // AppKit reports them visible.
+            setOcclusion(true, [trees[chosenIndex]])
             focusLeftmost(controller)
             if let dock = detachedDocks[name]?[chosenIndex] {
                 dockMap.setObject(dock, forKey: controller)
+                setOcclusion(true, views: dock.views)
             }
             let rest = trees.enumerated().filter { $0.offset != chosenIndex }
             if !rest.isEmpty {
@@ -2434,6 +2472,20 @@ class VigilSessionManager {
         }
     }
 
+    /// The attention QUEUE's eligibility, ONE rule (Adrian 2026-08-06):
+    /// something happened here that has NOT BEEN SEEN - a pane finished
+    /// (done) or asked (blocked) after its console was last on screen.
+    /// Seen sessions are never queue material, however blocked they look
+    /// (a drafted-but-unsent reply reads as blocked forever).
+    func unseenNeedy(_ name: String) -> Bool {
+        guard let session = sessions[name] else { return false }
+        return ownedPaneIds(session).contains { pane in
+            guard let s = paneAgentState(pane),
+                  s.state == .blocked || s.state == .done else { return false }
+            return (lastAck[pane] ?? .distantPast) < s.since
+        }
+    }
+
     /// WHERE the ask lives: the most recently blocked pane in the session
     /// (state-file truth; session attention only knows WHO asked). Nil
     /// when nothing is blocked (a done, or the ask was answered since).
@@ -2484,28 +2536,26 @@ class VigilSessionManager {
     /// off, and visiting the head re-derives the next - the hint IS the
     /// queue, one head at a time (Adrian 2026-08-04).
     func nextAskHint() -> AskHint? {
-        // Same exclusions as next(): never the session you are in, and
-        // unseen asks outrank seen ones. An affordance pointing at the
-        // room you are standing in is noise (Adrian 2026-08-06).
+        // Mirrors next() exactly: the queue is UNSEEN work only (done or
+        // blocked after its console was last on screen), never the
+        // session you are in. An affordance pointing at the room you are
+        // standing in - or at anything already seen - is noise (Adrian
+        // 2026-08-06).
         let current = (NSApp.keyWindow?.windowController as? TerminalController)
             .flatMap { sessionName(of: $0) }
-        let askingList = sessions.values
+        let queue = sessions.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .filter { $0.name != current && asking($0.name) }
+            .filter { $0.name != current && unseenNeedy($0.name) }
             .map(\.name)
         let head: String?
-        if let urgent = mostUrgentName, urgent != current {
+        if let urgent = mostUrgentName, urgent != current, unseenNeedy(urgent) {
             head = urgent
         } else {
-            let unseen = askingList.filter { blockedUnseen($0) }
-            head = (unseen.isEmpty ? askingList : unseen).first
+            head = queue.first
         }
         guard let head, let session = sessions[head] else { return nil }
-        var pending = Set(askingList)
+        var pending = Set(queue)
         pending.insert(head)
-        for s in sessions.values where s.attention != .none && s.name != current {
-            pending.insert(s.name)
-        }
         return AskHint(
             name: head, label: session.label, emoji: session.emoji,
             pane: askingPane(head), more: pending.count - 1)
@@ -2680,6 +2730,9 @@ class VigilSessionManager {
     /// structural tab close).
     private func bury(_ session: Session) {
         let name = session.name
+        // A corpse never renders: its daemons stay alive for the grace,
+        // its renderers must not.
+        if case .detached(let trees) = session.state { setOcclusion(false, trees) }
         graveyard[name] = session
         graveyardDeadlines[name] = Date().addingTimeInterval(Self.killGrace)
 
