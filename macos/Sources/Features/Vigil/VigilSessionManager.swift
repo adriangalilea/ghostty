@@ -1413,6 +1413,13 @@ class VigilSessionManager {
         guard panes.count > 1 else { return }
         markMaterializing(controller)
         let layout = tab.layout
+        // The closure is BOUND to the tree it was scheduled for: a swap
+        // between schedule and fire (a rival mount racing this one) would
+        // otherwise graft this tab's splits onto whatever tree the
+        // controller holds at fire time - the twin-pane manufacturer
+        // (2026-08-07: click-mount + shapeshiftTab re-mount, each
+        // materializing pane 8 into the survivor's tree).
+        let bornAnchor = controller.surfaceTree.root?.leftmostLeaf()
         // The default delay exists for windows that have not PRESENTED yet
         // (splits against an unhosted surface drop); mounting into a live
         // window passes 0 and splits land on the next runloop tick.
@@ -1420,6 +1427,10 @@ class VigilSessionManager {
             defer { self?.clearMaterializing(controller) }
             guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else {
                 self?.vlog("resurrect: splits DROPPED (no anchor surface)")
+                return
+            }
+            guard anchor === bornAnchor else {
+                self?.vlog("!! materialize: tree swapped under the mount - stale splits aborted")
                 return
             }
             if let layout {
@@ -1462,6 +1473,7 @@ class VigilSessionManager {
                     at = controller.newSplit(at: anchorView, direction: .right, baseConfig: configFor(pane)) ?? at
                 }
             }
+            self?.assertInvariants("materialize")
         }
     }
 
@@ -1963,7 +1975,17 @@ class VigilSessionManager {
         guard sessionName(of: controller) == name, sessions[name] != nil else { return }
         let tabs = mergedCapture(name: name)
         sessions[name]!.tabs = tabs
-        let live = liveAttachIds(of: name)
+        var live = liveAttachIds(of: name)
+        // A MATERIALIZING member claims its whole captured tab: half its
+        // panes are still landing async, and judging "already showing" by
+        // realized views alone let a second mount race the first - the
+        // twin-pane manufacturer.
+        for member in members(of: name) where isMaterializing(member) {
+            let seed = Set(member.surfaceTree.compactMap(\.vigilAttachId))
+            for tab in tabs where !Set(tabPaneIds(tab)).isDisjoint(with: seed) {
+                live.formUnion(tabPaneIds(tab))
+            }
+        }
         guard !live.contains(anchor) else { return } // already showing: no-op is honest
         guard let target = tabs.first(where: { tab in
                   (tab.panes + (tab.dock?.panes ?? [])).contains { paneId(of: $0) == anchor }
