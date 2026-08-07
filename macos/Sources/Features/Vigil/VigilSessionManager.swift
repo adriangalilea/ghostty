@@ -3174,25 +3174,30 @@ class VigilSessionManager {
         }
     }
 
+    /// The label of the pane's deep foreground process (pidfile line 3,
+    /// the tty's e_tpgid); nil = the shell itself holds the tty (a pane
+    /// at its prompt).
+    private func paneForegroundLabel(_ pane: String) -> String? {
+        let pidLines = paneFileLines(pane, "pid")
+        guard pidLines.count >= 3,
+              let fg = Int(pidLines[2].trimmingCharacters(in: .whitespaces)) else { return nil }
+        for line in paneFileLines(pane, "tree").dropFirst() {
+            let parts = line.split(separator: "\t", maxSplits: 1)
+            guard parts.count == 2, Int(parts[0]) == fg else { continue }
+            return Self.processLabel(String(parts[1]))
+        }
+        return nil
+    }
+
     /// One pane's "program": what the user actually SEES. The deep
-    /// foreground process (pidfile line 3, the tty's e_tpgid) wins; only
-    /// when it has no label (a shell at its prompt) does the deepest
-    /// interesting descendant speak, so a background ssh mux or stray
-    /// daemon in the tree never masquerades as the pane's program.
+    /// foreground process wins; only when it has no label (a shell at its
+    /// prompt) does the deepest interesting descendant speak, so a
+    /// background ssh mux or stray daemon in the tree never masquerades
+    /// as the pane's program.
     func paneProgram(_ pane: String) -> String? {
         let lines = paneFileLines(pane, "tree")
         guard !lines.isEmpty else { return nil }
-
-        let pidLines = paneFileLines(pane, "pid")
-        if pidLines.count >= 3,
-           let fg = Int(pidLines[2].trimmingCharacters(in: .whitespaces)) {
-            for line in lines.dropFirst() {
-                let parts = line.split(separator: "\t", maxSplits: 1)
-                guard parts.count == 2, Int(parts[0]) == fg else { continue }
-                if let label = Self.processLabel(String(parts[1])) { return label }
-                break
-            }
-        }
+        if let fg = paneForegroundLabel(pane) { return fg }
         var out: String?
         for argv in paneCommands(pane, "tree") {
             if let label = Self.processLabel(argv) { out = label }
@@ -3204,8 +3209,16 @@ class VigilSessionManager {
     /// neither the shell nor the pane's program - "something is keeping
     /// watch under this quiet pane" (a tg watch under an idle claude, a
     /// build, a server). Truth from the daemon's kqueue tree file, never
-    /// inferred from the screen.
+    /// inferred from the screen. QUIET is the gate, per pane class: an
+    /// adapter-managed pane (agent state file exists) is quiet when the
+    /// agent isn't working - the view applies that; a PLAIN pane is quiet
+    /// only when the shell itself holds the tty. A foreground TUI's own
+    /// subprocess churn (lazygit's git calls) is the program working, not
+    /// a sentry - antenna semantics, not process accounting (Adrian
+    /// 2026-08-07). Declared leases are never gated: the watcher said why
+    /// it watches.
     func paneWatchers(_ pane: String) -> [String] {
+        if paneAgentState(pane) == nil, paneForegroundLabel(pane) != nil { return [] }
         let program = paneProgram(pane)
         var out: [String] = []
         for argv in paneCommands(pane, "tree") {
@@ -4025,6 +4038,16 @@ class VigilSessionManager {
                 vlog("!! IMPOSSIBLE [\(site)]: live pane '\(id)' owned by NOBODY (stranded by a move?)")
             }
         }
+        // One daemon = ONE live pane: twin surfaces on one socket replay
+        // interleaved frames into garbage (the duplicated-lazygit
+        // corruption).
+        var liveIds = Set<String>()
+        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
+            guard let id = view.vigilAttachId, view.window != nil else { continue }
+            if !liveIds.insert(id).inserted {
+                vlog("!! IMPOSSIBLE [\(site)]: TWO live surfaces attached to '\(id)'")
+            }
+        }
         #endif
     }
 
@@ -4539,6 +4562,38 @@ class VigilSessionManager {
         overlay.layer?.masksToBounds = false
     }
 
+    /// A capture claiming the same daemon TWICE would resurrect two
+    /// surfaces on one socket: twin panes both replaying the daemon's VT,
+    /// frames interleaving into garbage (the duplicated-lazygit corruption,
+    /// minted by pre-paneSeq index recycling). One daemon = one pane: the
+    /// first claim wins, later claims drop and their tab loses its layout
+    /// (a healed shape beats a corrupt one), screamed in the log.
+    private func dedupedTabs(_ tabs: [Tab], name: String) -> [Tab] {
+        var seen = Set<String>()
+        var healed: [Tab] = []
+        for var tab in tabs {
+            let before = tab.panes.count + (tab.dock?.panes.count ?? 0)
+            tab.panes = tab.panes.filter { pane in
+                guard let id = paneId(of: pane) else { return true }
+                return seen.insert(id).inserted
+            }
+            if var dock = tab.dock {
+                dock.panes = dock.panes.filter { pane in
+                    guard let id = paneId(of: pane) else { return true }
+                    return seen.insert(id).inserted
+                }
+                tab.dock = dock
+            }
+            let after = tab.panes.count + (tab.dock?.panes.count ?? 0)
+            if after != before {
+                vlog("!! heal[load]: '\(name)' capture claimed a daemon twice - \(before - after) duplicate pane(s) dropped, layout reset")
+                tab.layout = nil
+            }
+            if !tab.panes.isEmpty { healed.append(tab) }
+        }
+        return healed
+    }
+
     private func load() {
         guard let data = try? Data(contentsOf: persistURL) else { return }
         guard let entries = try? JSONDecoder().decode([PersistedSession].self, from: data) else { return }
@@ -4549,7 +4604,7 @@ class VigilSessionManager {
                 emoji: entry.emoji,
                 cwd: entry.cwd,
                 state: .asleep,
-                tabs: entry.tabs ?? [],
+                tabs: dedupedTabs(entry.tabs ?? [], name: entry.name),
                 order: entry.order ?? 0)
             // vigil.json only ever holds persistent sessions (persist filters).
             session.persistent = true
