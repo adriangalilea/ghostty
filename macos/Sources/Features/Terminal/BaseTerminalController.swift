@@ -615,9 +615,11 @@ class BaseTerminalController: NSWindowController,
 
     @objc private func ghosttyDidCloseSurface(_ notification: Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
-        guard let node = surfaceTree.root?.node(view: target) else { return }
+        // The view-level close resolves DOCK tenants before the tree: a
+        // shell `exit` inside a dock pane must close the tenant, not
+        // vanish into the tree-membership guard.
         closeSurface(
-            node,
+            target,
             withConfirmation: (notification.userInfo?["process_alive"] as? Bool) ?? false)
     }
 

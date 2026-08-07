@@ -191,7 +191,7 @@ pub fn threadEnter(
     const read_thread = try std.Thread.spawn(
         .{},
         readThreadMain,
-        .{ fd, io, pipe[0], closing },
+        .{ fd, io, pipe[0], closing, std.time.milliTimestamp() },
     );
     read_thread.setName("io-reader") catch {};
 
@@ -450,13 +450,18 @@ fn readPidfile(self: *Attach) ?[]u8 {
 
 /// The read thread body: Exec's loop over the socket fd, plus a death
 /// notice. Reaching EOF WITHOUT a deliberate teardown means the daemon
-/// died under us (external `vigild kill`, crash): tell the surface so it
-/// shows the session ended instead of freezing mute.
+/// ended under us (shell `exit`, external `vigild kill`, crash): tell the
+/// surface so it closes instead of freezing mute. runtime_ms carries the
+/// attach's TRUE age: the surface treats a sub-threshold exit as a failed
+/// launch (correct for a spawn that dies on contact) and anything older as
+/// a normal process exit, so a shell `exit` closes the pane exactly like
+/// vanilla ghostty instead of wearing the failed-to-launch screen.
 fn readThreadMain(
     fd: posix.fd_t,
     io: *termio.Termio,
     quit: posix.fd_t,
     closing: *std.atomic.Value(bool),
+    birth_ms: i64,
 ) void {
     termio.Exec.ReadThread.threadMainPosix(fd, io, quit);
     if (closing.load(.acquire)) return;
@@ -467,7 +472,10 @@ fn readThreadMain(
     // app wedges (sampled live 2026-08-03). A dropped child_exited on a
     // dying surface costs nothing; a live surface's mailbox has room.
     const pushed = io.surface_mailbox.push(.{
-        .child_exited = .{ .exit_code = 1, .runtime_ms = 0 },
+        .child_exited = .{
+            .exit_code = 1,
+            .runtime_ms = @intCast(@max(0, std.time.milliTimestamp() - birth_ms)),
+        },
     }, .{ .instant = {} });
     if (pushed == 0) log.warn("attach child_exited dropped (mailbox full or dying)", .{});
 }
