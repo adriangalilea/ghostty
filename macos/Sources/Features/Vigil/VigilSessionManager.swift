@@ -2213,13 +2213,50 @@ class VigilSessionManager {
 
     /// Right-click Close Pane: live panes ride the native close flow
     /// (dock tenants included); cold panes leave the capture, then their
-    /// daemon dies. Confirms exactly when something runs.
+    /// daemon dies. Confirms exactly when something runs. A LIVE view's
+    /// owner is resolved by RUNTIME, never by window: a collapsed dock's
+    /// tenant has a live view and NO window, and the old window-gated
+    /// dispatch fell through to the capture edit - killing the daemon
+    /// under the live view while mergedCapture resurrected the row from
+    /// the runtime ("Close Pane does nothing", 2026-08-07).
     func closePaneFromSidebar(name: String, paneId: String?, in host: TerminalController?) {
         guard let paneId else { return }
-        if let view = liveView(attachId: paneId),
-           let controller = view.window?.windowController as? TerminalController {
-            if closeDockTenantIfHosted(view, in: controller, withConfirmation: true) { return }
-            controller.closeSurface(view, withConfirmation: true)
+        if let view = liveView(attachId: paneId) {
+            for case let controller as TerminalController in dockMap.keyEnumerator() {
+                if closeDockTenantIfHosted(view, in: controller, withConfirmation: true) { return }
+            }
+            // The dock of a detached/floating session rides detachedDocks
+            // until re-embed; its tenants close there.
+            for (session, docks) in detachedDocks {
+                for (index, runtime) in docks {
+                    guard let vi = runtime.views.firstIndex(where: { $0 === view }) else { continue }
+                    let proceed = { [weak self] in
+                        guard let self else { return }
+                        runtime.views.remove(at: vi)
+                        runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
+                        if runtime.views.isEmpty { self.detachedDocks[session]?[index] = nil }
+                        self.persist()
+                        DispatchQueue.main.async { [weak self] in
+                            self?.killDaemons(paneIds: [paneId])
+                        }
+                        self.vlog("closePane(sidebar): detached dock tenant '\(paneId)' closed")
+                    }
+                    if view.needsConfirmQuit, let host {
+                        host.confirmClose(
+                            messageText: "Close Dock Pane?",
+                            informativeText: "The pane still has a running process. Closing it will kill it.")
+                        { proceed() }
+                    } else {
+                        proceed()
+                    }
+                    return
+                }
+            }
+            if let controller = view.window?.windowController as? TerminalController {
+                controller.closeSurface(view, withConfirmation: true)
+                return
+            }
+            vlog("!! closePane(sidebar): live view '\(paneId)' held by no dock and no window - refused loud")
             return
         }
         guard sessions[name] != nil else { return }
