@@ -335,7 +335,16 @@ struct VigilSidebarView: View {
             // construction (daemons carry it); the only honest distinction
             // is displayed-or-not, and the front tint + filled tab icons
             // already say that. Full state stays in the tooltip.
-            classGlyph(row.persistent)
+            // Collapsed, a descendant's antenna outranks the survival
+            // glyph in the shared class slot (a hidden listener must stay
+            // visible; the hourglass returns on expand).
+            Group {
+                if collapsed, row.tabs.flatMap(\.panes).contains(where: { watchActive($0) }) {
+                    watchRollup(row.tabs.flatMap(\.panes))
+                } else {
+                    classGlyph(row.persistent)
+                }
+            }
             // Expanded, the children speak for themselves; collapsed, the
             // parent peeks: one dot per distinct state, overlapped.
             Group {
@@ -429,7 +438,15 @@ struct VigilSidebarView: View {
             }
             Spacer(minLength: 4)
             followKeycap(tab.id)
-            Color.clear.frame(width: Grid.classSlot, height: 1)
+            // The tab's class slot is free; collapsed, it wears the
+            // descendants' antenna so a listener never vanishes.
+            Group {
+                if collapsed {
+                    watchRollup(tab.panes)
+                } else {
+                    Color.clear.frame(width: Grid.classSlot, height: 1)
+                }
+            }
             Group {
                 if collapsed {
                     dotCluster(VigilSessionManager.clusterStates(tab.panes.compactMap(\.state)))
@@ -612,26 +629,45 @@ struct VigilSidebarView: View {
         .buttonStyle(.plain)
     }
 
+    /// The sentry's antenna is LIT: a declared lease, or survivor
+    /// processes under a QUIET pane (hidden while the agent works - tool
+    /// churn would blink it; a survivor under a quiet pane is the signal).
+    private func watchActive(_ pane: VigilSessionManager.SidebarPane) -> Bool {
+        !pane.watchNotes.isEmpty || (pane.state != .working && !pane.watchProcs.isEmpty)
+    }
+
     /// The sentry's antenna, in the pane row's class slot: something is
     /// alive under this pane beyond its program, LISTENING for the
     /// outside world. NOT an eye - the eye is vigil's own vocabulary
     /// (menu-bar identity, attention badge): eye = vigil watching YOU,
-    /// antenna = a process watching the WORLD. Teal = a DECLARED lease
-    /// (the watcher's own note names what it awaits); dim = derived
-    /// truth alone (the daemon's process tree). Hidden while the agent
-    /// is actively working - tool churn would blink it; a survivor under
-    /// a QUIET pane is the signal.
+    /// antenna = a process watching the WORLD. Yellow: a live listener
+    /// must read at a glance, and yellow is free on this rail (working's
+    /// yellow dot never shares a row - the antenna hides while working).
+    /// Declared vs derived lives in the tooltip (lease notes first).
     private func watchGlyph(_ pane: VigilSessionManager.SidebarPane) -> some View {
-        let derived = pane.state != .working && !pane.watchProcs.isEmpty
-        let show = !pane.watchNotes.isEmpty || derived
+        Group {
+            if watchActive(pane) {
+                antennaGlyph(pane.watchNotes + pane.watchProcs)
+            }
+        }
+        .frame(width: Grid.classSlot)
+    }
+
+    private func antennaGlyph(_ what: [String]) -> some View {
+        Image(systemName: "antenna.radiowaves.left.and.right")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundColor(.yellow)
+            .help(what.joined(separator: "\n"))
+    }
+
+    /// Collapse must not hide a listener: the antenna rolls up to the
+    /// collapsed tab/session row (same slot, same yellow), carrying every
+    /// descendant's notes in one tooltip.
+    private func watchRollup(_ panes: [VigilSessionManager.SidebarPane]) -> some View {
+        let watching = panes.filter { watchActive($0) }
         return Group {
-            if show {
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundColor(pane.watchNotes.isEmpty
-                        ? Color.secondary.opacity(0.7)
-                        : .teal)
-                    .help((pane.watchNotes + pane.watchProcs).joined(separator: "\n"))
+            if !watching.isEmpty {
+                antennaGlyph(watching.flatMap { $0.watchNotes + $0.watchProcs })
             }
         }
         .frame(width: Grid.classSlot)
