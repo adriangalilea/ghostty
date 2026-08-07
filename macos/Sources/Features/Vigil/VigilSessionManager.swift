@@ -211,6 +211,13 @@ class VigilSessionManager {
         /// Live for embedded (refreshed on overview open), frozen at the
         /// moment of detach for detached. Runtime-only.
         var thumbnail: NSImage?
+        /// Next pane daemon index to mint, monotonic and persisted: a pane
+        /// index is IDENTITY and is never recycled. Deriving "next" from
+        /// currently-owned ids alone reused the index of a tab that had
+        /// just left (bury, drag-out) while its daemon still ran - the new
+        /// surface attached to the departed tab's socket and replayed it
+        /// (⌘T resurrecting a ⌘W-closed tab).
+        var paneSeq: Int = 0
 
         var paneCount: Int { tabs.reduce(0) { $0 + $1.panes.count } }
     }
@@ -889,6 +896,7 @@ class VigilSessionManager {
     func registerEphemeralSession(controller: TerminalController, name: String, cwd: String) {
         var session = Session(name: name, label: name, cwd: cwd, state: .embedded)
         session.tabs = [Tab(panes: [Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0")], layout: nil)]
+        session.paneSeq = 1 // index 0 consumed at birth
         sessions[name] = session
         registerMember(controller, name: name)
         vlog("born(window): '\(name)' cwd=\(cwd)")
@@ -909,6 +917,7 @@ class VigilSessionManager {
         let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
         var session = Session(name: name, label: name, cwd: cwd, state: .embedded)
         session.tabs = [Tab(panes: [Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0")], layout: nil)]
+        session.paneSeq = 1 // index 0 consumed at birth
         sessions[name] = session // persistent defaults false → ephemeral
         registerMember(controller, name: name)
         vlog("born(create): '\(name)' cwd=\(cwd)")
@@ -998,9 +1007,12 @@ class VigilSessionManager {
         return ids
     }
 
-    /// The next free daemon pane index for a session: max over every owned
-    /// pane id, plus one. Collision-free across tabs, resurrections and
-    /// upgrades.
+    /// Mint the next daemon pane index for a session: the persisted
+    /// monotonic counter, floored by the owned-id max (heals data recorded
+    /// before the counter existed). NEVER derived from owned ids alone: an
+    /// id whose tab left the session (bury, drag-out) is still a live
+    /// daemon elsewhere, and re-minting it attaches the new surface to
+    /// that daemon's socket - the departed tab replays into the new pane.
     private func nextPaneIndex(name: String) -> Int {
         guard let session = sessions[name] else { return 0 }
         var maxIndex = 0
@@ -1009,7 +1021,9 @@ class VigilSessionManager {
                 maxIndex = max(maxIndex, n)
             }
         }
-        return maxIndex + 1
+        let minted = max(session.paneSeq, maxIndex + 1)
+        sessions[name]!.paneSeq = minted + 1
+        return minted
     }
 
     /// Detach: every tab tree (ptys running) moves from the window to this
@@ -4111,6 +4125,8 @@ class VigilSessionManager {
         let buriedUntil: Date?
         /// Had a window at record time; launch restores it as one.
         let foreground: Bool?
+        /// Monotonic pane-index counter; indices are never recycled.
+        let paneSeq: Int?
     }
 
     /// Frozen foreground truth for the shutdown persist: the flags must
@@ -4273,10 +4289,10 @@ class VigilSessionManager {
     private func persist() {
         refreshEmbeddedCaptures()
         var entries = sessions.values.filter { $0.persistent }.map {
-            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0))
+            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq)
         }
         entries += graveyard.values.filter { !$0.ephemeral }.map {
-            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false)
+            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq)
         }
         entries.sort { $0.name < $1.name }
         let data = try! JSONEncoder().encode(entries)
@@ -4504,6 +4520,16 @@ class VigilSessionManager {
                 order: entry.order ?? 0)
             // vigil.json only ever holds persistent sessions (persist filters).
             session.persistent = true
+            // Heal data recorded before the counter existed: the counter
+            // must clear every captured index, or a bury after this load
+            // frees the top index for re-minting while its daemon lives.
+            var maxIndex = -1
+            for id in ownedPaneIds(session) {
+                if let n = id.split(separator: "-").last.flatMap({ Int($0) }) {
+                    maxIndex = max(maxIndex, n)
+                }
+            }
+            session.paneSeq = max(entry.paneSeq ?? 0, maxIndex + 1)
             session.pinned = entry.pinned ?? false
             session.foreground = entry.foreground ?? false
             session.thumbnail = NSImage(
