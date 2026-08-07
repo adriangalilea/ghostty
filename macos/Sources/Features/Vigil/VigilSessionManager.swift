@@ -82,7 +82,33 @@ class VigilSessionManager {
     /// session: the session-keyed ledger acked asks living in unmounted
     /// tabs of the watched session sight-unseen (dot decayed, no attention,
     /// no follow - an invisible console you could never have answered).
+    /// PERSISTED (acks.json): seen must survive an app restart, or every
+    /// already-answered pane re-lights and demands a visit. Race-free by
+    /// construction: seen = ack >= the state file's mtime, so a state that
+    /// changed while the app was down carries a newer mtime and correctly
+    /// reads unseen - time arbitrates, no flag can go stale.
     private(set) var lastAck: [String: Date] = [:]
+
+    private var acksURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/wake/acks.json")
+    }
+
+    private func loadAcks() {
+        guard let data = try? Data(contentsOf: acksURL),
+              let saved = try? JSONDecoder().decode([String: Date].self, from: data) else { return }
+        // Only a pane with a state file can decay; acks for dead panes
+        // are cruft, pruned here so the ledger never grows unbounded.
+        lastAck = saved.filter { pane, _ in
+            FileManager.default.fileExists(
+                atPath: agentStateDir.appendingPathComponent("\(pane).state").path)
+        }
+    }
+
+    private func saveAcks() {
+        guard let data = try? JSONEncoder().encode(lastAck) else { return }
+        try? data.write(to: acksURL)
+    }
 
     /// Custom identities for PANES and TABS (label + emoji, display-only
     /// aliases, the id≠label rule one level down). Keyed by pane daemon id
@@ -338,6 +364,7 @@ class VigilSessionManager {
     private init() {
         acquireInstanceLock()
         load()
+        loadAcks()
         loadCustomIdentities()
         sweepPaneDaemons()
         startEventWatcher()
@@ -673,7 +700,13 @@ class VigilSessionManager {
             changed = true
             onAttentionChange?()
         }
-        if changed { NotificationCenter.default.post(name: Self.stateDidChange, object: nil) }
+        if changed {
+            // Persist only on a seen-FLIP (a lit pane going seen), not on
+            // the 1s presence pulse: the flip is the fact worth surviving
+            // a restart; the pulse would be a write per second for free.
+            saveAcks()
+            NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+        }
     }
 
     /// The head of the attention FIFO: input beats done, oldest first
