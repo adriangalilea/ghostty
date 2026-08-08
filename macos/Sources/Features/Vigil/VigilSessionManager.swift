@@ -367,6 +367,24 @@ class VigilSessionManager {
         loadAcks()
         loadCustomIdentities()
         sweepPaneDaemons()
+        // A logout/restart/shutdown is starting. THE signal, and the only
+        // reliable one: the AppleEvent probe in applicationShouldTerminate
+        // (kAEShutDown/kAERestart) does not arrive on macOS 26, so every
+        // restart ran the ⌘Q intercept instead, which CANCELS termination
+        // into service mode — the app refused to quit, macOS waited on it,
+        // and the machine looked wedged until Adrian cut the power (twice,
+        // 2026-08-08, both with a shutdown_stall report). Freeze the
+        // workspace here, while the windows still show, and from now on
+        // termination can never be cancelled.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                let manager = VigilSessionManager.shared
+                manager.systemPoweringOff = true
+                manager.prepareForSystemShutdown()
+            }
+        }
         startEventWatcher()
         startStateDirWatcher()
         // SIGTERM means DIE (vigil-dev restarts, system tooling). Without
@@ -3970,12 +3988,23 @@ class VigilSessionManager {
     /// dying. Flipped by quitForReal (the eye menu's explicit kill).
     private var reallyQuit = false
 
+    /// The machine is going down. Cancelling termination now stalls the
+    /// shutdown itself, so service mode is off the table from here on.
+    fileprivate(set) var systemPoweringOff = false
+
     /// Cmd+Q with sessions alive: detach every persistent session, kill the
     /// ephemeral ones (their daemons die exactly as a normal quit would have
     /// killed their processes), vanish from the dock. Returns true when the
     /// termination must be cancelled.
     func interceptTermination() -> Bool {
         guard !reallyQuit else { return false }
+        // The machine is going down: DIE. prepareForSystemShutdown already
+        // froze and persisted the workspace at willPowerOff; anything that
+        // cancels here stalls the shutdown (see the observer in init).
+        guard !systemPoweringOff else {
+            vlog("quit(intercept): power-off in flight -> terminate now")
+            return false
+        }
         reconcile()
         // Freeze foreground truth NOW: the detach cascade below closes the
         // windows, and a termination that proceeds to death (vigil-dev
@@ -4037,6 +4066,9 @@ class VigilSessionManager {
     /// daemons left for the OS to kill (their specs survive; restore
     /// respawns them at login).
     func prepareForSystemShutdown() {
+        // Both signals may land (willPowerOff, then the terminate): the
+        // first one owns the truth, while the windows still show.
+        guard shutdownForeground == nil else { return }
         var frozen: [String: Bool] = [:]
         for (name, session) in sessions { frozen[name] = isForeground(session) }
         shutdownForeground = frozen
