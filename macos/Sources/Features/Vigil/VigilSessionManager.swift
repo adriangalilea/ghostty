@@ -3953,6 +3953,7 @@ class VigilSessionManager {
         var frozen: [String: Bool] = [:]
         for (name, session) in sessions { frozen[name] = isForeground(session) }
         shutdownForeground = frozen
+        vlog("quit(intercept): froze \(frozen.filter(\.value).count)/\(frozen.count) foreground -> \(frozen.filter(\.value).keys.sorted().joined(separator: ","))")
         defer { DispatchQueue.main.async { self.shutdownForeground = nil } }
 
         if let name = floatingName, let quick = quickController(create: false) {
@@ -4006,6 +4007,7 @@ class VigilSessionManager {
         var frozen: [String: Bool] = [:]
         for (name, session) in sessions { frozen[name] = isForeground(session) }
         shutdownForeground = frozen
+        vlog("shutdown(system): froze \(frozen.filter(\.value).count)/\(frozen.count) foreground -> \(frozen.filter(\.value).keys.sorted().joined(separator: ","))")
         for (name, session) in sessions where !session.persistent {
             killDaemons(of: session)
             for controller in members(of: name) { memberships.removeObject(forKey: controller) }
