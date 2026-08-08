@@ -42,11 +42,6 @@ cwd: ?[]const u8,
 /// VIGIL_SESSION value for the daemon's environment on create.
 session: ?[]const u8,
 
-/// VIGILD_RESUME line for the daemon on create: typed into the session
-/// once the shell truly booted (first attach + quiescence). The in-place
-/// upgrade rides this to replay frozen content and resume the program.
-resume_line: ?[]const u8,
-
 alloc: Allocator,
 
 /// Connected socket; -1 until threadEnter.
@@ -71,7 +66,6 @@ pub const Config = struct {
     id: []const u8,
     cwd: ?[]const u8 = null,
     session: ?[]const u8 = null,
-    resume_line: ?[]const u8 = null,
 };
 
 pub fn init(alloc: Allocator, cfg: Config) !Attach {
@@ -80,7 +74,6 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .id = try alloc.dupe(u8, cfg.id),
         .cwd = if (cfg.cwd) |v| try alloc.dupe(u8, v) else null,
         .session = if (cfg.session) |v| try alloc.dupe(u8, v) else null,
-        .resume_line = if (cfg.resume_line) |v| try alloc.dupe(u8, v) else null,
     };
 }
 
@@ -88,7 +81,6 @@ pub fn deinit(self: *Attach) void {
     self.alloc.free(self.id);
     if (self.cwd) |v| self.alloc.free(v);
     if (self.session) |v| self.alloc.free(v);
-    if (self.resume_line) |v| self.alloc.free(v);
     if (self.cached_tty) |v| self.alloc.free(v);
     self.write_buf.deinit(self.alloc);
 }
@@ -125,12 +117,11 @@ fn connectSock(self: *Attach) !posix.fd_t {
 fn spawnDaemon(self: *Attach) !void {
     var env = try internal_os.getEnvMap(self.alloc);
     defer env.deinit();
-    if (self.session) |s| try env.put("VIGIL_SESSION", s);
     // The surface config's env does NOT flow here by itself (this is the
     // APP's environment): anything the daemon must inherit is plumbed
-    // explicitly. Found live: VIGILD_RESUME set on the surface never
-    // reached the daemon and upgrades came back as bare shells.
-    if (self.resume_line) |r| try env.put("VIGILD_RESUME", r);
+    // explicitly. Program-state resurrection is NOT plumbed: the daemon
+    // reads its own `<id>.resume`, so it works on every spawn path.
+    if (self.session) |s| try env.put("VIGIL_SESSION", s);
 
     const home = posix.getenv("HOME") orelse return error.NoHome;
     const bin = try std.fmt.allocPrint(self.alloc, "{s}/.local/bin/vigild", .{home});

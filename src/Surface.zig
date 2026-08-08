@@ -655,7 +655,6 @@ pub fn init(
                     .id = attach_id,
                     .cwd = if (config.@"working-directory") |wd| wd.value() else null,
                     .session = config.env.map.get("VIGIL_SESSION"),
-                    .resume_line = config.env.map.get("VIGILD_RESUME"),
                 }) };
             };
 

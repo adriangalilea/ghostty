@@ -2055,10 +2055,11 @@ class VigilSessionManager {
                 guard let self, let controller else { return }
                 self.buryMountedTab(thenMount: next, name: name, in: controller)
             }
-            if controller.surfaceTree.contains(where: { $0.needsConfirmQuit }) {
+            let busy = busyPrograms(in: controller)
+            if !busy.isEmpty {
                 controller.confirmClose(
                     messageText: "Close Tab?",
-                    informativeText: "The terminal still has a running process. Closing the tab will kill it (undo keeps it for \(Int(Self.killGrace))s).")
+                    informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tab kills it (undo keeps it for \(Int(Self.killGrace))s).")
                 { proceed() }
             } else {
                 proceed()
@@ -2151,10 +2152,11 @@ class VigilSessionManager {
     ) -> Bool {
         guard let runtime = dockMap.object(forKey: controller),
               let index = runtime.views.firstIndex(where: { $0 === view }) else { return false }
-        if withConfirmation, view.needsConfirmQuit {
+        let busy = busyPrograms(panes: [view.vigilAttachId].compactMap { $0 })
+        if withConfirmation, !busy.isEmpty {
             controller.confirmClose(
                 messageText: "Close Dock Pane?",
-                informativeText: "The pane still has a running process. Closing it will kill it."
+                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it."
             ) { [weak self, weak controller] in
                 guard let self, let controller else { return }
                 self.closeDockTenant(controller, index: index)
@@ -2180,15 +2182,15 @@ class VigilSessionManager {
         let freshTabs = mergedCapture(name: name) // before the write access (exclusivity)
         sessions[name]!.tabs = freshTabs
         guard let tab = sessions[name]!.tabs.first(where: { tabPaneIds($0).contains(anchor) }) else { return }
-        let running = tabPaneIds(tab).contains { paneProgram($0) != nil }
+        let busy = busyPrograms(panes: tabPaneIds(tab))
         let proceed = { [weak self] in
             guard let self else { return }
             self.buryColdTab(tab, from: name)
         }
-        if running, let host {
+        if !busy.isEmpty, let host {
             host.confirmClose(
                 messageText: "Close Tab?",
-                informativeText: "The tab still has a running process. Closing it will kill it (undo keeps it for \(Int(Self.killGrace))s).")
+                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tab kills it (undo keeps it for \(Int(Self.killGrace))s).")
             { proceed() }
         } else {
             proceed()
@@ -2241,10 +2243,11 @@ class VigilSessionManager {
                         }
                         self.vlog("closePane(sidebar): detached dock tenant '\(paneId)' closed")
                     }
-                    if view.needsConfirmQuit, let host {
+                    let busy = busyPrograms(panes: [paneId])
+                    if !busy.isEmpty, let host {
                         host.confirmClose(
                             messageText: "Close Dock Pane?",
-                            informativeText: "The pane still has a running process. Closing it will kill it.")
+                            informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it.")
                         { proceed() }
                     } else {
                         proceed()
@@ -2260,15 +2263,15 @@ class VigilSessionManager {
             return
         }
         guard sessions[name] != nil else { return }
-        let program = paneProgram(paneId)
+        let busy = busyPrograms(panes: [paneId])
         let proceed = { [weak self] in
             guard let self else { return }
             self.removeColdPane(name: name, paneId: paneId)
         }
-        if program != nil, let host {
+        if !busy.isEmpty, let host {
             host.confirmClose(
                 messageText: "Close Pane?",
-                informativeText: "The pane still has a running process (\(program ?? "")). Closing it will kill it.")
+                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it.")
             { proceed() }
         } else {
             proceed()
@@ -2921,22 +2924,29 @@ class VigilSessionManager {
         if let name = sessionName(of: controller) {
             confirmKill(name: name) { self.kill(name: name) }
         } else {
+            let busy = busyPrograms(in: controller)
+            guard !busy.isEmpty else { killEphemeral(controller); return }
             let title = controller.focusedSurface?.title.trimmingCharacters(in: .whitespaces)
             confirmKill(
                 label: (title?.isEmpty == false ? title! : "this window"),
-                info: "The window closes and its processes die."
+                info: "\(busy.joined(separator: ", ")) still running. The window closes and it dies."
             ) { self.killEphemeral(controller) }
         }
     }
 
-    /// Confirmation before a kill fired from a keystroke (not the overview,
-    /// which has its own). Critical alert, Kill/Cancel; runs the kill only
-    /// on confirm. Shown from service mode too, hence the activate.
+    /// Confirmation before a kill fired from a keystroke or the sidebar
+    /// (not the overview, which has its own). A kill with NOTHING running
+    /// asks nothing: there is no work to lose, and asking anyway is the
+    /// friction vanilla ghostty never imposes. Otherwise a critical alert
+    /// naming what dies, Kill/Cancel, run only on confirm. Shown from
+    /// service mode too, hence the activate.
     private func confirmKill(name: String, _ doKill: @escaping () -> Void) {
+        let busy = busyPrograms(of: name)
+        guard !busy.isEmpty else { doKill(); return }
         let session = sessions[name]
         confirmKill(
             label: [session?.emoji, session?.label ?? name].compactMap { $0 }.joined(separator: " "),
-            info: "Its processes die. Undo within \(Int(Self.killGrace))s.",
+            info: "\(busy.joined(separator: ", ")) still running. Undo within \(Int(Self.killGrace))s.",
             thumbnail: session?.thumbnail,
             doKill)
     }
@@ -3236,6 +3246,29 @@ class VigilSessionManager {
     /// The label of the pane's deep foreground process (pidfile line 3,
     /// the tty's e_tpgid); nil = the shell itself holds the tty (a pane
     /// at its prompt).
+    /// What a close would actually destroy, and the ONLY test any close
+    /// confirm may use. Ghostty's `needsConfirmQuit` is meaningless here:
+    /// every surface is daemon-backed, so its child shell always reads as a
+    /// running process and EVERY close asked, including a bare shell no
+    /// vanilla ghostty would ever ask about (Adrian 2026-08-08, correctly
+    /// smelling two philosophies in one app). Vigil owns process truth (the
+    /// daemon's pidfile line 3 = the deep foreground pid): a pane is busy
+    /// only while a real program holds the tty, never a shell at its prompt.
+    func busyPrograms(panes: [String]) -> [String] {
+        panes.compactMap { paneForegroundLabel($0) }
+    }
+
+    /// The busy programs of everything a session owns.
+    func busyPrograms(of name: String) -> [String] {
+        guard let session = sessions[name] else { return [] }
+        return busyPrograms(panes: Array(ownedPaneIds(session)))
+    }
+
+    /// The busy programs of one window's tree (its dock rides `ownedPaneIds`).
+    private func busyPrograms(in controller: TerminalController) -> [String] {
+        busyPrograms(panes: controller.surfaceTree.compactMap(\.vigilAttachId))
+    }
+
     private func paneForegroundLabel(_ pane: String) -> String? {
         let pidLines = paneFileLines(pane, "pid")
         guard pidLines.count >= 3,

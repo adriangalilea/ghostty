@@ -481,11 +481,15 @@ class VigilOverview: NSObject {
 
         let alert = NSAlert()
         alert.messageText = "\(entry.removeVerb.capitalized) \(entry.title)?"
+        // Same truth as every other close: what actually dies is what holds
+        // a tty right now, never the shell sitting at its prompt.
+        let busy = manager.busyPrograms(of: entry.name)
+        let dying = busy.isEmpty ? "Nothing is running in it." : "\(busy.joined(separator: ", ")) still running; it dies."
         var info: String
         switch entry.state {
-        case .embedded: info = "The window closes and its processes die."
-        case .floating: info = "Floating in the quick terminal; this is the kill. Its processes die."
-        case .detached: info = "Detached but alive; this is the kill. Its processes die."
+        case .embedded: info = "The window closes. \(dying)"
+        case .floating: info = "Floating in the quick terminal; this is the kill. \(dying)"
+        case .detached: info = "Detached but alive; this is the kill. \(dying)"
         case .asleep: info = "Only the registry entry and its frozen state are dropped."
         }
         if entry.persistent, let session = manager.sessions[entry.name] {
