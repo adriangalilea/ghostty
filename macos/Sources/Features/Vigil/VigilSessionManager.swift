@@ -4411,15 +4411,21 @@ class VigilSessionManager {
     /// and ghostty's titleOverride is how it reaches the tab bar.
     func syncTabTitle(_ controller: TerminalController) {
         guard let key = tabIdentityKey(for: controller) else { return }
-        guard let custom = customIdentity(key) else {
-            controller.titleOverride = nil
-            return
+        if let custom = customIdentity(key) {
+            let name = [custom.emoji, custom.label]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            if !name.isEmpty {
+                controller.titleOverride = name
+                return
+            }
         }
-        let name = [custom.emoji, custom.label]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        controller.titleOverride = name.isEmpty ? nil : name
+        // No name given: the tab still knows what it IS. Fall back to the
+        // anchor's remembered title rather than leaving ghostty's literal
+        // 👻 default, which is what a tab bar full of ghosts was.
+        let anchor = String(key.dropFirst(4))
+        controller.titleOverride = capturedTitle(ofPane: anchor)
     }
 
     /// Rename the TAB shown in this window, through the one identity editor
@@ -4899,6 +4905,14 @@ class VigilSessionManager {
                 pinned: pinned,
                 dockOpen: dockMap.object(forKey: controller).map { !$0.collapsed } ?? false,
                 onEditIdentity: name.map { n in { VigilIdentity.editModal(name: n) } },
+                tabEmoji: tabIdentityKey(for: controller)
+                    .flatMap { customIdentity($0)?.emoji },
+                tabLabel: tabIdentityKey(for: controller)
+                    .flatMap { customIdentity($0)?.label } ?? controller.window?.title,
+                onEditTab: tabIdentityKey(for: controller) == nil ? nil : { [weak self, weak controller] in
+                    guard let self, let controller else { return }
+                    _ = self.promptTabIdentity(controller)
+                },
                 onTogglePersist: { [weak self] in
                     // Session scope IS the window: one flip covers every tab.
                     self?.toggleWindowPersist(controller)
