@@ -98,7 +98,7 @@ final class VigilTabFaceControl: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var acceptsFirstResponder: Bool { false }
 
-    @objc private func openPicker() {
+    @objc func openPicker() {
         popover?.close()
         let controller = NSHostingController(
             rootView: VigilEmojiPickerView(selected: currentEmoji) { [weak self] picked in
@@ -121,7 +121,44 @@ final class VigilTabFaceControl: NSButton {
 /// rebuilds AppKit's tab buttons just gets fresh controls on the next sync.
 @MainActor
 enum VigilTabFaces {
+    /// The tab strip swallows mouse events before subviews ever see them:
+    /// upstream's inline rename has the same problem and solves it the same
+    /// way, forwarding clicks from its event monitor by hand. Ours
+    /// hit-tests the mounted controls and triggers the picker directly.
+    private static var monitor: Any?
+
+    private static func installMonitorOnce() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+            MainActor.assumeIsolated {
+                handleClick(event) ? nil : event
+            }
+        }
+    }
+
+    private static func handleClick(_ event: NSEvent) -> Bool {
+        guard let window = event.window else { return false }
+        let buttons = window.tabButtonsInVisualOrder()
+        guard !buttons.isEmpty else { return false }
+        let screen = window.convertPoint(toScreen: event.locationInWindow)
+        for tabButton in buttons {
+            guard let control = tabButton.subviews
+                .compactMap({ $0 as? VigilTabFaceControl }).first,
+                !control.isHidden,
+                let controlWindow = control.window
+            else { continue }
+            let local = control.convert(
+                controlWindow.convertPoint(fromScreen: screen), from: nil)
+            if control.bounds.contains(local) {
+                control.openPicker()
+                return true
+            }
+        }
+        return false
+    }
+
     static func sync(_ window: NSWindow) {
+        installMonitorOnce()
         guard window.tabGroup != nil else { return }
         let host = window.tabGroup?.selectedWindow ?? window
         let buttons = host.tabButtonsInVisualOrder()
