@@ -378,6 +378,14 @@ class BaseTerminalController: NSWindowController,
     func promptTabTitle() {
         guard let window else { return }
 
+        // vigil: a tab has ONE name, stored with its emoji and shown in the
+        // sidebar too. Renaming here opens that editor rather than setting
+        // a second, unstored title that only the tab bar would know about.
+        if let terminal = self as? TerminalController,
+           VigilSessionManager.shared.promptTabIdentity(terminal) {
+            return
+        }
+
         let alert = NSAlert()
         alert.messageText = "Change Tab Title"
         alert.informativeText = "Leave blank to restore the default."

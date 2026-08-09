@@ -141,6 +141,11 @@ class VigilSessionManager {
         if let data = try? JSONEncoder().encode(customIdentities) {
             try? data.write(to: identitiesURL)
         }
+        // A tab renamed anywhere (sidebar row, tab bar, ⌘-rename) repaints
+        // every surface that shows it: one name, no drift.
+        if key.hasPrefix("tab:") {
+            for controller in TerminalController.all { syncTabTitle(controller) }
+        }
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
 
@@ -4314,6 +4319,52 @@ class VigilSessionManager {
         return id
     }
 
+    /// The identity key of the tab a window currently shows: its ANCHOR
+    /// pane, the same key the sidebar uses, so both surfaces name the same
+    /// thing.
+    func tabIdentityKey(for controller: TerminalController) -> String? {
+        controller.surfaceTree.compactMap(\.vigilAttachId).first.map { "tab:\($0)" }
+    }
+
+    /// ONE name per tab. The sidebar row and the native tab bar were two
+    /// independent names for the same tab: the row showed the stored
+    /// identity, the tab bar showed the raw terminal title (ghostty's 👻
+    /// default when a swap left it stale), and ghostty's own Change Tab
+    /// Title was a THIRD, unstored one. The stored identity is the name,
+    /// and ghostty's titleOverride is how it reaches the tab bar.
+    func syncTabTitle(_ controller: TerminalController) {
+        guard let key = tabIdentityKey(for: controller) else { return }
+        guard let custom = customIdentities[key] else {
+            controller.titleOverride = nil
+            return
+        }
+        let name = [custom.emoji, custom.label]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        controller.titleOverride = name.isEmpty ? nil : name
+    }
+
+    /// Rename the TAB shown in this window, through the one identity editor
+    /// (emoji picker, transcript-aware suggestion, persisted). Replaces
+    /// ghostty's plain text prompt for vigil windows.
+    func promptTabIdentity(_ controller: TerminalController) -> Bool {
+        guard let key = tabIdentityKey(for: controller) else { return false }
+        let anchor = String(key.dropFirst(4))
+        let current = customIdentities[key]
+        let panes = controller.surfaceTree.compactMap(\.vigilAttachId)
+        VigilIdentity.editModal(
+            title: "Tab identity",
+            label: current?.label ?? controller.window?.title ?? "",
+            emoji: current?.emoji,
+            context: "a terminal tab.\n" + workContext(panes: panes)
+        ) { [weak self, weak controller] label, emoji in
+            self?.setCustomIdentity(key: "tab:\(anchor)", label: label, emoji: emoji)
+            if let controller { self?.syncTabTitle(controller) }
+        }
+        return true
+    }
+
     /// What the sparkle (and the persist refinement) reasons from: cwd,
     /// current label, what the daemons actually run, the visible screen.
     func identityContext(name: String) -> String {
@@ -4750,6 +4801,10 @@ class VigilSessionManager {
             if let name, let session = sessions[name] {
                 applyPin(window, session.pinned)
             }
+            // The tab bar wears the stored tab identity, refreshed at the
+            // same chokepoint as every other window mark (mounts, swaps,
+            // focus changes) so it can never drift from the sidebar row.
+            syncTabTitle(controller)
             let pinned = name.map { sessionPinned($0) } ?? isPinned(controller)
 
             let mark = VigilWindowMark(
