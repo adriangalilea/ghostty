@@ -3271,6 +3271,24 @@ class VigilSessionManager {
             }
         }
 
+        // Resume pointers are per-pane facts too, and a stale one is WORSE
+        // than a stale state file: the daemon TYPES it into a fresh shell.
+        // An owned pane keeps its pointer through any daemon death (that is
+        // how an asleep session resumes its claude); an UNREACHABLE pane's
+        // pointer is a dead conversation waiting to be typed into whoever
+        // inherits the index, so it dies with the pane. 44 of these were
+        // lying in wait when rapid-lynx-4 got re-minted (2026-08-09).
+        for entry in (try? FileManager.default.contentsOfDirectory(atPath: stateDir.path)) ?? []
+        where entry.hasSuffix(".resume") && entry.hasPrefix("vigil-") {
+            let pane = String(entry.dropLast(".resume".count))
+            guard !owned.contains(pane),
+                  !FileManager.default.fileExists(
+                      atPath: stateDir.appendingPathComponent("\(pane).pid").path)
+            else { continue }
+            try? FileManager.default.removeItem(at: stateDir.appendingPathComponent(entry))
+            vlog("sweep: unreachable pane '\(pane)' -> resume pointer removed")
+        }
+
         // Names need no sweep at all: an identity lives ON its pane in the
         // capture, so it is dropped by whatever drops the pane and can
         // never be collected out from under a live one. (This is where a
@@ -5017,6 +5035,24 @@ class VigilSessionManager {
         return healed
     }
 
+    /// The highest pane index any state file on disk records for a session:
+    /// pidfiles, specs, resume pointers, trees, mail, tombstones alike.
+    private static func maxPaneIndexOnDisk(session: String) -> Int {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/vigild")
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
+        else { return -1 }
+        let prefix = "vigil-\(session)-"
+        var maxIndex = -1
+        for entry in entries where entry.hasPrefix(prefix) {
+            let stem = entry.split(separator: ".").first.map(String.init) ?? entry
+            if let n = Int(stem.dropFirst(prefix.count)) {
+                maxIndex = max(maxIndex, n)
+            }
+        }
+        return maxIndex
+    }
+
     private func load() {
         // The backup is a fallback, never a merge: whichever file decodes
         // is the workspace. A live file that decodes always wins, even if
@@ -5051,6 +5087,14 @@ class VigilSessionManager {
                     maxIndex = max(maxIndex, n)
                 }
             }
+            // The capture is NOT the whole story: panes from before the
+            // counter existed died leaving no capture but leaving state
+            // files (.resume above all), and a mint that reuses such an
+            // index inherits a dead pane's pointer - a fresh tab typed
+            // `claude --resume <uuid-of-a-long-dead-conversation>` into
+            // itself (rapid-lynx-4, 2026-08-09). The floor covers every
+            // index the STATE DIR has ever seen for this session.
+            maxIndex = max(maxIndex, Self.maxPaneIndexOnDisk(session: entry.name))
             session.paneSeq = max(entry.paneSeq ?? 0, maxIndex + 1)
             session.pinned = entry.pinned ?? false
             session.foreground = entry.foreground ?? false
