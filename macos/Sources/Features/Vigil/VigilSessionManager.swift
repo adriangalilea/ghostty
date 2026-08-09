@@ -121,39 +121,78 @@ class VigilSessionManager {
         var emoji: String?
     }
 
-    private(set) var customIdentities: [String: CustomIdentity] = [:]
-
-    private var identitiesURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/identities.json")
-    }
-
+    /// A name lives ON THE THING IT NAMES, in the one state file, and
+    /// nowhere else. It used to live in a side map keyed by pane id in its
+    /// own `identities.json`: a second store with its own lifecycle, its
+    /// own garbage collector (which deleted every hand-typed name whose
+    /// daemon lacked a pidfile) and no redundancy of any kind. Folding it
+    /// into the capture kills that entire class by construction: an
+    /// identity is now written, moved, buried and dropped by exactly the
+    /// same code that owns the pane, so it can never be collected while
+    /// the pane lives, and a drag carries the name with the pane for free.
+    ///
+    /// Key shape is unchanged so every call site reads the same: a pane id,
+    /// or `tab:<anchor pane id>` for its tab.
     func customIdentity(_ key: String) -> CustomIdentity? {
-        customIdentities[key]
+        let wantsTab = key.hasPrefix("tab:")
+        let target = wantsTab ? String(key.dropFirst(4)) : key
+        for session in sessions.values.map({ $0 }) + graveyard.values.map({ $0 }) {
+            for tab in session.tabs {
+                if wantsTab {
+                    guard tabPaneIds(tab).first == target else { continue }
+                    guard tab.label != nil || tab.emoji != nil else { return nil }
+                    return CustomIdentity(label: tab.label, emoji: tab.emoji)
+                }
+                for pane in tab.panes + (tab.dock?.panes ?? [])
+                where paneId(of: pane) == target {
+                    guard pane.label != nil || pane.emoji != nil else { return nil }
+                    return CustomIdentity(label: pane.label, emoji: pane.emoji)
+                }
+            }
+        }
+        return nil
     }
 
     func setCustomIdentity(key: String, label: String?, emoji: String?) {
-        if label == nil, emoji == nil {
-            customIdentities[key] = nil
-        } else {
-            customIdentities[key] = CustomIdentity(label: label, emoji: emoji)
+        let wantsTab = key.hasPrefix("tab:")
+        let target = wantsTab ? String(key.dropFirst(4)) : key
+        for (name, session) in sessions {
+            var tabs = session.tabs
+            var hit = false
+            for index in tabs.indices {
+                if wantsTab, tabPaneIds(tabs[index]).first == target {
+                    tabs[index].label = label
+                    tabs[index].emoji = emoji
+                    hit = true
+                } else if !wantsTab {
+                    for pindex in tabs[index].panes.indices
+                    where paneId(of: tabs[index].panes[pindex]) == target {
+                        tabs[index].panes[pindex].label = label
+                        tabs[index].panes[pindex].emoji = emoji
+                        hit = true
+                    }
+                    if var dock = tabs[index].dock {
+                        for dindex in dock.panes.indices
+                        where paneId(of: dock.panes[dindex]) == target {
+                            dock.panes[dindex].label = label
+                            dock.panes[dindex].emoji = emoji
+                            hit = true
+                        }
+                        tabs[index].dock = dock
+                    }
+                }
+            }
+            // Evaluate fully, THEN assign: an expression reading `sessions`
+            // inside a `sessions[...]` write is an exclusivity trap.
+            if hit { sessions[name]?.tabs = tabs }
         }
-        if let data = try? JSONEncoder().encode(customIdentities) {
-            try? data.write(to: identitiesURL)
-        }
+        persist()
         // A tab renamed anywhere (sidebar row, tab bar, ⌘-rename) repaints
         // every surface that shows it: one name, no drift.
-        if key.hasPrefix("tab:") {
+        if wantsTab {
             for controller in TerminalController.all { syncTabTitle(controller) }
         }
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
-    }
-
-    private func loadCustomIdentities() {
-        guard let data = try? Data(contentsOf: identitiesURL),
-              let loaded = try? JSONDecoder().decode([String: CustomIdentity].self, from: data)
-        else { return }
-        customIdentities = loaded
     }
 
     /// One leaf of the workspace. Every pane lives in a vigild daemon, so
@@ -170,11 +209,18 @@ class VigilSessionManager {
         /// told apart (2026-08-08). Stored here, a name survives detach,
         /// quit, reboot and resurrection, exactly like the identity does.
         var title: String?
+        /// The name and face YOU gave this pane. Stored here, with the pane,
+        /// so it is owned by one writer and moves with the pane on a drag.
+        var label: String?
+        var emoji: String?
 
-        init(cwd: String, command: String?, title: String? = nil) {
+        init(cwd: String, command: String?, title: String? = nil,
+             label: String? = nil, emoji: String? = nil) {
             self.cwd = cwd
             self.command = command
             self.title = title
+            self.label = label
+            self.emoji = emoji
         }
     }
 
@@ -200,11 +246,19 @@ class VigilSessionManager {
         var panes: [Pane]
         var layout: Layout?
         var dock: DockCapture?
+        /// The tab's own name and face, anchored to the tab, not to a
+        /// side map: the sidebar row, the native tab bar and the rename
+        /// prompt all read this one value.
+        var label: String?
+        var emoji: String?
 
-        init(panes: [Pane], layout: Layout?, dock: DockCapture? = nil) {
+        init(panes: [Pane], layout: Layout?, dock: DockCapture? = nil,
+             label: String? = nil, emoji: String? = nil) {
             self.panes = panes
             self.layout = layout
             self.dock = dock
+            self.label = label
+            self.emoji = emoji
         }
     }
 
@@ -340,6 +394,13 @@ class VigilSessionManager {
             .appendingPathComponent(".local/state/wake/vigil.json")
     }
 
+    /// The last good workspace, kept beside the live one. Loaded only when
+    /// the live file is missing or unreadable, so a truncated or corrupt
+    /// write costs one persist, never the workspace.
+    private var persistBackupURL: URL {
+        persistURL.appendingPathExtension("bak")
+    }
+
     /// Held for the process lifetime; the kernel releases it on ANY death.
     private static var instanceLockFD: Int32 = -1
 
@@ -383,7 +444,6 @@ class VigilSessionManager {
         acquireInstanceLock()
         load()
         loadAcks()
-        loadCustomIdentities()
         sweepPaneDaemons()
         // A logout/restart/shutdown is starting. THE signal, and the only
         // reliable one: the AppleEvent probe in applicationShouldTerminate
@@ -1191,6 +1251,22 @@ class VigilSessionManager {
             .appendingPathComponent(".local/state/wake/dumps/\(name)")
     }
 
+    /// One live view as a captured pane. THE single place a Pane is built
+    /// from a surface, because a capture is a rewrite: anything the pane
+    /// carries that the view does not know about - the name and face YOU
+    /// gave it - must be carried across or every persist would silently
+    /// erase it.
+    private func capturedPane(_ view: Ghostty.SurfaceView) -> Pane {
+        let id = view.vigilAttachId
+        let existing = id.flatMap { customIdentity($0) }
+        return Pane(
+            cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
+            command: id.map { "\(Self.attachSentinel)\($0)" },
+            title: capturedTitle(of: view),
+            label: existing?.label,
+            emoji: existing?.emoji)
+    }
+
     /// Capture every tab of the workspace: panes + split shape per tree.
     /// Daemon panes need only their attach sentinel (the daemon IS the
     /// state); a daemon-less pane records its cwd and comes back as a bare
@@ -1198,10 +1274,7 @@ class VigilSessionManager {
     private func captureDock(_ runtime: VigilDockRuntime) -> DockCapture? {
         guard !runtime.views.isEmpty else { return nil }
         let panes = runtime.views.map { view -> Pane in
-            Pane(
-                cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
-                command: view.vigilAttachId.map { "\(Self.attachSentinel)\($0)" },
-                title: capturedTitle(of: view))
+            capturedPane(view)
         }
         return DockCapture(
             panes: panes,
@@ -1254,11 +1327,7 @@ class VigilSessionManager {
     ) -> [Tab] {
         let previous = sessions[name]?.tabs ?? []
         return trees.enumerated().map { (index, tree) in
-            let panes = tree.map { view -> Pane in
-                let cwd = view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-                let command = view.vigilAttachId.map { "\(Self.attachSentinel)\($0)" }
-                return Pane(cwd: cwd, command: command, title: capturedTitle(of: view))
-            }
+            let panes = tree.map { view -> Pane in capturedPane(view) }
             let dock: DockCapture?
             if let docks {
                 dock = docks[index].flatMap { captureDock($0) }
@@ -1267,7 +1336,12 @@ class VigilSessionManager {
             } else {
                 dock = index < previous.count ? previous[index].dock : nil
             }
-            return Tab(panes: panes, layout: Self.captureLayout(tree), dock: dock)
+            // The tab's own name follows its ANCHOR pane, not its position:
+            // a recapture, a reorder or a swap must never rename a tab.
+            let anchorId = panes.compactMap { paneId(of: $0) }.first
+            let identity = anchorId.flatMap { customIdentity("tab:\($0)") }
+            return Tab(panes: panes, layout: Self.captureLayout(tree), dock: dock,
+                       label: identity?.label, emoji: identity?.emoji)
         }
     }
 
@@ -3180,25 +3254,11 @@ class VigilSessionManager {
             }
         }
 
-        // A name YOU typed is user data, and user data is never collected
-        // by liveness. This keyed off the daemon's pidfile, so the moment a
-        // daemon was absent - a reboot, a respawn, any repair - every
-        // custom pane and tab identity on the machine was deleted (Adrian
-        // lost a named+emoji'd tab this way, 2026-08-08, unrecoverable: the
-        // file was the only copy). An identity dies with its PANE, judged
-        // by the same reachability `owned` set the daemons use, so it
-        // outlives every daemon death. Pane indices are minted monotonic,
-        // so the key can never be inherited by a different pane.
-        let staleIdentities = customIdentities.keys.filter { key in
-            let pane = key.hasPrefix("tab:") ? String(key.dropFirst(4)) : key
-            return !owned.contains(pane)
-        }
-        if !staleIdentities.isEmpty {
-            for key in staleIdentities { customIdentities[key] = nil }
-            if let data = try? JSONEncoder().encode(customIdentities) {
-                try? data.write(to: identitiesURL)
-            }
-        }
+        // Names need no sweep at all: an identity lives ON its pane in the
+        // capture, so it is dropped by whatever drops the pane and can
+        // never be collected out from under a live one. (This is where a
+        // pidfile-keyed collector used to delete every hand-typed name the
+        // moment its daemon was absent - a reboot, a respawn, any repair.)
     }
 
     // MARK: Dock (the right bar: per-TAB stack of daemon-backed tool panes)
@@ -3720,7 +3780,7 @@ class VigilSessionManager {
         func paneRow(view: Ghostty.SurfaceView, session: String, isDock: Bool) -> SidebarPane {
             let paneId = view.vigilAttachId
             let program = paneId.flatMap { paneProgram($0) }
-            let custom = paneId.flatMap { customIdentities[$0] }
+            let custom = paneId.flatMap { customIdentity($0) }
             let title = custom?.label
                 ?? program
                 ?? (view.title.isEmpty ? "shell" : view.title)
@@ -3740,7 +3800,7 @@ class VigilSessionManager {
         func capturedPaneRow(_ pane: Pane, session: String, index: Int, tab: Int, isDock: Bool) -> SidebarPane {
             let paneId = self.paneId(of: pane)
             let program = paneId.flatMap { paneProgram($0) }
-            let custom = paneId.flatMap { customIdentities[$0] }
+            let custom = paneId.flatMap { customIdentity($0) }
             // The REMEMBERED name outranks the cwd basename: a cold pane
             // still knows what it was ("Buscar versión en castellano"),
             // where the cwd only ever said "adrian".
@@ -3762,7 +3822,7 @@ class VigilSessionManager {
 
         /// The tab's face + label override, anchored by pane id.
         func tabCustom(_ anchor: String?) -> CustomIdentity? {
-            anchor.flatMap { customIdentities["tab:\($0)"] }
+            anchor.flatMap { customIdentity("tab:\($0)") }
         }
 
         /// Row identity FOLLOWS THE TAB (its anchor pane), never its
@@ -4334,7 +4394,7 @@ class VigilSessionManager {
     /// and ghostty's titleOverride is how it reaches the tab bar.
     func syncTabTitle(_ controller: TerminalController) {
         guard let key = tabIdentityKey(for: controller) else { return }
-        guard let custom = customIdentities[key] else {
+        guard let custom = customIdentity(key) else {
             controller.titleOverride = nil
             return
         }
@@ -4351,7 +4411,7 @@ class VigilSessionManager {
     func promptTabIdentity(_ controller: TerminalController) -> Bool {
         guard let key = tabIdentityKey(for: controller) else { return false }
         let anchor = String(key.dropFirst(4))
-        let current = customIdentities[key]
+        let current = customIdentity(key)
         let panes = controller.surfaceTree.compactMap(\.vigilAttachId)
         VigilIdentity.editModal(
             title: "Tab identity",
@@ -4670,7 +4730,15 @@ class VigilSessionManager {
         try? FileManager.default.createDirectory(
             at: persistURL.deletingLastPathComponent(),
             withIntermediateDirectories: true)
-        try! data.write(to: persistURL)
+        // This file is now the ONLY copy of everything you named. It is
+        // rewritten wholesale many times a minute, so it gets the two
+        // cheap guarantees that failure mode deserves: the previous good
+        // version is kept beside it, and the new one lands ATOMICALLY (a
+        // crash mid-write can truncate a plain write to nothing).
+        if let previous = try? Data(contentsOf: persistURL), !previous.isEmpty {
+            try? previous.write(to: persistBackupURL, options: .atomic)
+        }
+        try! data.write(to: persistURL, options: .atomic)
         syncWindowMarks()
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
@@ -4914,8 +4982,19 @@ class VigilSessionManager {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: persistURL) else { return }
-        guard let entries = try? JSONDecoder().decode([PersistedSession].self, from: data) else { return }
+        // The backup is a fallback, never a merge: whichever file decodes
+        // is the workspace. A live file that decodes always wins, even if
+        // the backup is newer, because the backup IS an older live file.
+        var payload = try? Data(contentsOf: persistURL)
+        var decoded = payload.flatMap { try? JSONDecoder().decode([PersistedSession].self, from: $0) }
+        if decoded == nil {
+            payload = try? Data(contentsOf: persistBackupURL)
+            decoded = payload.flatMap { try? JSONDecoder().decode([PersistedSession].self, from: $0) }
+            if decoded != nil {
+                vlog("!! load: vigil.json unreadable, recovered the workspace from vigil.json.bak")
+            }
+        }
+        guard let entries = decoded else { return }
         for entry in entries {
             var session = Session(
                 name: entry.name,
