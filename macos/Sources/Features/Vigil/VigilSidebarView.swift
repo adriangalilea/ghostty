@@ -482,7 +482,9 @@ struct VigilSidebarView: View {
                         title: "Tab identity",
                         label: tab.title,
                         emoji: tab.emoji,
-                        context: "a terminal tab in this workspace, cwd basename: \(tab.title), running: \(tab.panes.map(\.title).joined(separator: ", "))"
+                        context: "a terminal tab. running: \(tab.panes.map(\.title).joined(separator: ", "))\n"
+                            + VigilSessionManager.shared.workContext(
+                                panes: tab.panes.compactMap(\.paneId))
                     ) { label, emoji in
                         VigilSessionManager.shared.setCustomIdentity(
                             key: "tab:\(anchor)", label: label, emoji: emoji)
@@ -562,7 +564,8 @@ struct VigilSidebarView: View {
                         title: "Pane identity",
                         label: pane.title,
                         emoji: pane.emoji,
-                        context: "a terminal pane, running: \(pane.program ?? "a shell")"
+                        context: "a terminal pane, running: \(pane.program ?? "a shell")\n"
+                            + VigilSessionManager.shared.workContext(panes: [paneId])
                     ) { label, emoji in
                         VigilSessionManager.shared.setCustomIdentity(
                             key: paneId, label: label, emoji: emoji)

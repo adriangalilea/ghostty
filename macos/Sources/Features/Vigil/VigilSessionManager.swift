@@ -158,6 +158,19 @@ class VigilSessionManager {
     struct Pane: Codable {
         let cwd: String
         let command: String?
+        /// The pane's last known terminal title, RECORDED at capture time.
+        /// A name that lives only in a live terminal is not state: it is a
+        /// side effect, and it vanishes the moment the pane goes cold or
+        /// the app restarts, leaving a workspace of "~" rows that cannot be
+        /// told apart (2026-08-08). Stored here, a name survives detach,
+        /// quit, reboot and resurrection, exactly like the identity does.
+        var title: String?
+
+        init(cwd: String, command: String?, title: String? = nil) {
+            self.cwd = cwd
+            self.command = command
+            self.title = title
+        }
     }
 
     /// Recursive shape of one tab's splits. Pane indices refer to Tab.panes,
@@ -1182,7 +1195,8 @@ class VigilSessionManager {
         let panes = runtime.views.map { view -> Pane in
             Pane(
                 cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
-                command: view.vigilAttachId.map { "\(Self.attachSentinel)\($0)" })
+                command: view.vigilAttachId.map { "\(Self.attachSentinel)\($0)" },
+                title: capturedTitle(of: view))
         }
         return DockCapture(
             panes: panes,
@@ -1196,6 +1210,39 @@ class VigilSessionManager {
     /// runtime, else the previous capture), so paths that never see docks
     /// (reclaim from the quick terminal) cannot silently drop them: a
     /// dropped capture is an unreachable daemon, and the sweep kills those.
+    /// The name to REMEMBER for a live pane: its terminal title, which is
+    /// what the program calls itself ("Buscar versión en castellano", not
+    /// "adrian"). Ghostty's own default (a bare "👻") and an empty title
+    /// are noise, never worth persisting over a real remembered name.
+    private func capturedTitle(of view: Ghostty.SurfaceView) -> String? {
+        // Claude prefixes its title with a live STATE marker: a braille
+        // spinner while working, `✳` when idle. That is a status light, not
+        // part of the name, and freezing it into stored state would pin a
+        // stale spinner onto a cold pane forever.
+        var title = view.title.trimmingCharacters(in: .whitespaces)
+        while let first = title.unicodeScalars.first,
+              (0x2800...0x28FF).contains(first.value) || first == "✳" || first == "·" {
+            title = String(title.dropFirst()).trimmingCharacters(in: .whitespaces)
+        }
+        guard !title.isEmpty, title != "👻" else {
+            return view.vigilAttachId.flatMap { capturedTitle(ofPane: $0) }
+        }
+        return title
+    }
+
+    /// A pane's remembered name, from whichever capture currently holds it.
+    func capturedTitle(ofPane paneId: String) -> String? {
+        for session in sessions.values {
+            for tab in session.tabs {
+                for pane in tab.panes + (tab.dock?.panes ?? [])
+                where self.paneId(of: pane) == paneId {
+                    return pane.title
+                }
+            }
+        }
+        return nil
+    }
+
     private func captureTabs(
         name: String, _ trees: [SplitTree<Ghostty.SurfaceView>],
         docks: [Int: VigilDockRuntime]? = nil
@@ -1205,7 +1252,7 @@ class VigilSessionManager {
             let panes = tree.map { view -> Pane in
                 let cwd = view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
                 let command = view.vigilAttachId.map { "\(Self.attachSentinel)\($0)" }
-                return Pane(cwd: cwd, command: command)
+                return Pane(cwd: cwd, command: command, title: capturedTitle(of: view))
             }
             let dock: DockCapture?
             if let docks {
@@ -2429,7 +2476,8 @@ class VigilSessionManager {
             if let runtime = dockMap.object(forKey: controller),
                let index = runtime.views.firstIndex(where: { $0 === view }) {
                 pane = Pane(cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
-                            command: sentinelCommand(paneId))
+                            command: sentinelCommand(paneId),
+                            title: capturedTitle(of: view))
                 let released = runtime.views.remove(at: index)
                 released.removeFromSuperview()
                 runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
@@ -2437,7 +2485,8 @@ class VigilSessionManager {
                 VigilBars.shared.sync(controller)
             } else if let node = controller.surfaceTree.root?.node(view: view) {
                 pane = Pane(cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
-                            command: sentinelCommand(paneId))
+                            command: sentinelCommand(paneId),
+                            title: capturedTitle(of: view))
                 if controller.surfaceTree.root == node {
                     // Last pane of the mounted tab: this IS a tab move.
                     _ = vacateMountedTab(controller, name: source)
@@ -3126,11 +3175,18 @@ class VigilSessionManager {
             }
         }
 
-        // Custom pane/tab identities die with their daemon, same rule.
+        // A name YOU typed is user data, and user data is never collected
+        // by liveness. This keyed off the daemon's pidfile, so the moment a
+        // daemon was absent - a reboot, a respawn, any repair - every
+        // custom pane and tab identity on the machine was deleted (Adrian
+        // lost a named+emoji'd tab this way, 2026-08-08, unrecoverable: the
+        // file was the only copy). An identity dies with its PANE, judged
+        // by the same reachability `owned` set the daemons use, so it
+        // outlives every daemon death. Pane indices are minted monotonic,
+        // so the key can never be inherited by a different pane.
         let staleIdentities = customIdentities.keys.filter { key in
             let pane = key.hasPrefix("tab:") ? String(key.dropFirst(4)) : key
-            return !FileManager.default.fileExists(
-                atPath: stateDir.appendingPathComponent("\(pane).pid").path)
+            return !owned.contains(pane)
         }
         if !staleIdentities.isEmpty {
             for key in staleIdentities { customIdentities[key] = nil }
@@ -3680,7 +3736,11 @@ class VigilSessionManager {
             let paneId = self.paneId(of: pane)
             let program = paneId.flatMap { paneProgram($0) }
             let custom = paneId.flatMap { customIdentities[$0] }
+            // The REMEMBERED name outranks the cwd basename: a cold pane
+            // still knows what it was ("Buscar versión en castellano"),
+            // where the cwd only ever said "adrian".
             let title = custom?.label
+                ?? pane.title
                 ?? program
                 ?? URL(fileURLWithPath: pane.cwd).lastPathComponent
             return SidebarPane(
@@ -3760,8 +3820,12 @@ class VigilSessionManager {
                     let custom = tabCustom(anchor)
                     return SidebarTab(
                         id: tabRowId(name, anchor: anchor, index: index),
+                        // A swap can leave the window title stale or on
+                        // ghostty's literal 👻 default; the anchor's
+                        // remembered name is truer than either.
                         title: custom?.label
                             ?? liveTabTitle(controller.window?.title)
+                            ?? anchor.flatMap { capturedTitle(ofPane: $0) }
                             ?? tabTitle(cwd: cwd, fallback: "tab \(index + 1)"),
                         index: index, panes: panes,
                         anchor: anchor,
@@ -3797,7 +3861,9 @@ class VigilSessionManager {
                             let custom = tabCustom(idList.first)
                             tabs.append(SidebarTab(
                                 id: tabRowId(name, anchor: idList.first, index: index),
-                                title: custom?.label ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
+                                title: custom?.label
+                                ?? tab.panes.first?.title
+                                ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                                 index: index,
                                 panes: panes,
                                 anchor: idList.first,
@@ -3815,7 +3881,9 @@ class VigilSessionManager {
                         let custom = tabCustom(idList.first)
                         tabs.append(SidebarTab(
                             id: tabRowId(name, anchor: idList.first, index: index),
-                            title: custom?.label ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
+                            title: custom?.label
+                                ?? tab.panes.first?.title
+                                ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                             index: index,
                             panes: panes,
                             anchor: idList.first,
@@ -3877,7 +3945,9 @@ class VigilSessionManager {
                         let custom = tabCustom(idList.first)
                         tabs.append(SidebarTab(
                             id: tabRowId(name, anchor: idList.first, index: index),
-                            title: custom?.label ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
+                            title: custom?.label
+                                ?? tab.panes.first?.title
+                                ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                             index: index,
                             panes: panes,
                             anchor: idList.first,
@@ -3900,7 +3970,9 @@ class VigilSessionManager {
                     let custom = tabCustom(anchor)
                     tabs.append(SidebarTab(
                         id: tabRowId(name, anchor: anchor, index: index),
-                        title: custom?.label ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
+                        title: custom?.label
+                            ?? tab.panes.first?.title
+                            ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                         index: index,
                         panes: panes,
                         anchor: anchor,
@@ -4248,7 +4320,73 @@ class VigilSessionManager {
         guard let session = sessions[name] else { return "" }
         let screen = anchorController(of: name)?.focusedSurface?.cachedScreenContents.get() ?? ""
         let running = runningSummary(of: name).joined(separator: ", ")
-        return "cwd: \(session.cwd)\ntitle: \(session.label)\nrunning: \(running)\nscreen:\n\(screen.suffix(1500))"
+        let work = workContext(panes: Array(ownedPaneIds(session)))
+        return "cwd: \(session.cwd)\ntitle: \(session.label)\nrunning: \(running)\n"
+            + (work.isEmpty ? "" : "what is being worked on:\n\(work)\n")
+            + "screen:\n\(screen.suffix(1500))"
+    }
+
+    /// The ACTUAL WORK in these panes, straight from the agent's transcript:
+    /// what was asked, in the user's own words. A screen scrape only ever
+    /// caught whatever happened to be painted, and a cwd basename named
+    /// every $HOME pane "adrian" - neither can name a task. Cheap: the last
+    /// lines of a JSONL file, only when a rename is actually requested.
+    func workContext(panes: [String]) -> String {
+        var out: [String] = []
+        for pane in panes.sorted() {
+            guard let transcript = transcriptPath(ofPane: pane) else { continue }
+            let asks = userAsks(inTranscript: transcript, limit: 6)
+            guard !asks.isEmpty else { continue }
+            out.append("- pane \(pane):\n  " + asks.joined(separator: "\n  "))
+        }
+        return out.joined(separator: "\n")
+    }
+
+    /// The claude transcript backing a pane, via the hook's registry entry
+    /// (the hook rewrites it on every resume, so it always points at the
+    /// CURRENT conversation - identity is a pointer, not a value).
+    private func transcriptPath(ofPane pane: String) -> URL? {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/wake/sessions")
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
+        else { return nil }
+        for entry in entries where entry.hasSuffix("--\(pane).json") {
+            guard let data = try? Data(contentsOf: dir.appendingPathComponent(entry)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let path = json["transcript"] as? String
+            else { continue }
+            return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        }
+        return nil
+    }
+
+    /// The human's asks in a transcript, oldest first: the opening request
+    /// (what the conversation IS) plus the most recent ones (where it went).
+    private func userAsks(inTranscript url: URL, limit: Int) -> [String] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        var asks: [String] = []
+        for line in text.components(separatedBy: .newlines) {
+            guard let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["type"] as? String == "user",
+                  let message = json["message"] as? [String: Any]
+            else { continue }
+            var body = ""
+            if let s = message["content"] as? String {
+                body = s
+            } else if let blocks = message["content"] as? [[String: Any]] {
+                body = blocks.compactMap { $0["text"] as? String }.joined(separator: " ")
+            }
+            body = body.replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            // Hook injections and tool results wear XML-ish wrappers; the
+            // point is what the HUMAN typed.
+            guard !body.isEmpty, !body.hasPrefix("<"), body.count > 3 else { continue }
+            asks.append(String(body.prefix(160)))
+        }
+        guard !asks.isEmpty else { return [] }
+        if asks.count <= limit { return asks }
+        return [asks[0]] + asks.suffix(limit - 1)
     }
 
     /// Emoji already chosen across sessions, deduped: the editor's one-click

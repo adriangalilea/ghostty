@@ -80,8 +80,10 @@ enum VigilIdentity {
         return false
     }
 
-    /// Emoji-only clusters, at most three: the well accepts anything (typed,
-    /// pasted, character palette) and keeps just the faces.
+    /// Emoji-only, exactly ONE: every surface (card, tab row, pane row,
+    /// menu, kill confirm) renders a single face, so accepting more stored
+    /// a name nothing could ever show. The well accepts anything (typed,
+    /// pasted, character palette) and keeps the first face.
     static func filterEmoji(_ s: String) -> String {
         let clusters = s.filter { ch in
             let scalars = ch.unicodeScalars
@@ -89,7 +91,7 @@ enum VigilIdentity {
                 || (scalars.contains { $0.properties.isEmoji }
                     && scalars.contains { $0.value == 0xFE0F })
         }
-        return String(clusters.prefix(3))
+        return String(clusters.prefix(1))
     }
 
     /// One coherent suggestion: emoji chosen WITH the name. Guided
@@ -176,7 +178,7 @@ enum VigilIdentity {
 @available(macOS 26.0, *)
 @Generable(description: "An identity for a terminal workspace session")
 private struct SuggestedIdentity {
-    @Guide(description: "emoji evoking the task", .count(1...2), .element(.anyOf(VigilIdentity.palette)))
+    @Guide(description: "emoji evoking the task", .count(1), .element(.anyOf(VigilIdentity.palette)))
     var emoji: [String]
     @Guide(description: "short evocative name: 2 to 4 lowercase words, no punctuation, the task not the tools")
     var label: String
@@ -192,6 +194,7 @@ struct VigilIdentityEditor: View {
     let onSubmit: () -> Void
 
     @State private var thinking = false
+    @State private var picking = false
     @State private var rejected: [String] = []
     @FocusState private var focus: Field?
     private enum Field { case emoji, name }
@@ -249,6 +252,16 @@ struct VigilIdentityEditor: View {
                     .buttonStyle(.plain)
                 }
                 Spacer(minLength: 0)
+                Button(action: { picking.toggle() }) {
+                    Image(systemName: "face.smiling")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Pick an emoji.")
+                .popover(isPresented: $picking, arrowEdge: .bottom) {
+                    emojiPicker
+                }
                 Button(action: {
                     focus = .emoji
                     NSApp.orderFrontCharacterPalette(nil)
@@ -258,7 +271,7 @@ struct VigilIdentityEditor: View {
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Open the system emoji palette (inserts into the emoji well).")
+                .help("Open the system emoji palette, for anything outside the picker.")
             }
         }
         .padding(10)
@@ -266,6 +279,35 @@ struct VigilIdentityEditor: View {
         .onAppear {
             DispatchQueue.main.async { focus = .name }
         }
+    }
+
+    /// The curated palette as a grid: one click IS the choice (a face is a
+    /// single character, so there is nothing to confirm). Same list the
+    /// on-device model draws from, so picked and suggested faces look like
+    /// one family.
+    private var emojiPicker: some View {
+        ScrollView {
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 2), count: 10),
+                      spacing: 2) {
+                ForEach(VigilIdentity.palette, id: \.self) { emoji in
+                    Button(action: {
+                        draft.emoji = emoji
+                        picking = false
+                    }) {
+                        Text(emoji)
+                            .font(.system(size: 16))
+                            .frame(width: 26, height: 26)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(draft.emoji == emoji
+                                          ? Color.accentColor.opacity(0.35) : .clear))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(8)
+        }
+        .frame(width: 300, height: 240)
     }
 
     private func suggest() {
