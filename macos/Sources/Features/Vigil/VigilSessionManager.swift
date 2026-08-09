@@ -4428,18 +4428,7 @@ class VigilSessionManager {
         let name = tabDisplayName(anchor: String(key.dropFirst(4)))
         controller.titleOverride = (name.label?.isEmpty == false) ? name.label : nil
 
-        if let tw = controller.window as? TerminalWindow {
-            tw.vigilTabFace.isHidden = false
-            tw.vigilTabFace.update(emoji: customIdentity(key)?.emoji)
-            tw.vigilTabFace.onPick = { [weak self, weak controller] picked in
-                guard let self, let controller,
-                      let key = self.tabIdentityKey(for: controller) else { return }
-                self.setCustomIdentity(
-                    key: key,
-                    label: self.customIdentity(key)?.label,
-                    emoji: picked)
-            }
-        }
+        if let window = controller.window { VigilTabFaces.sync(window) }
     }
 
     /// The inline tab-title editor's commit, kept in the one store so it
