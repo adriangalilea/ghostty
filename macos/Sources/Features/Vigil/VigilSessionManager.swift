@@ -156,11 +156,21 @@ class VigilSessionManager {
     func setCustomIdentity(key: String, label: String?, emoji: String?) {
         let wantsTab = key.hasPrefix("tab:")
         let target = wantsTab ? String(key.dropFirst(4)) : key
+        // The capture must be CURRENT before we write into it: a tab that
+        // is live but not yet captured (a fresh split, a ⌘T between
+        // persists) exists only on screen, and a name written into a stale
+        // capture lands nowhere.
+        refreshEmbeddedCaptures()
+        var landed = false
         for (name, session) in sessions {
             var tabs = session.tabs
             var hit = false
             for index in tabs.indices {
-                if wantsTab, tabPaneIds(tabs[index]).first == target {
+                // CONTAINS, not "is first": the anchor is the tab's stable
+                // handle, but live tree order and capture order can differ
+                // for a beat, and requiring first position made a rename
+                // silently do nothing (Adrian, naming a tab '*-utils').
+                if wantsTab, tabPaneIds(tabs[index]).contains(target) {
                     tabs[index].label = label
                     tabs[index].emoji = emoji
                     hit = true
@@ -184,7 +194,14 @@ class VigilSessionManager {
             }
             // Evaluate fully, THEN assign: an expression reading `sessions`
             // inside a `sessions[...]` write is an exclusivity trap.
-            if hit { sessions[name]?.tabs = tabs }
+            if hit {
+                sessions[name]?.tabs = tabs
+                landed = true
+            }
+        }
+        // A name the user typed must never vanish quietly.
+        if !landed {
+            vlog("!! rename: nothing owns '\(key)' - the name was NOT stored")
         }
         persist()
         // A tab renamed anywhere (sidebar row, tab bar, ⌘-rename) repaints

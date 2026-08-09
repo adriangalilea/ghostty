@@ -158,6 +158,13 @@ enum VigilIdentity {
             recents: manager.recentEmoji(),
             onSubmit: { NSApp.stopModal(withCode: .alertFirstButtonReturn) })
         let hosting = NSHostingView(rootView: view)
+        // Size in TWO passes: fittingSize is measured against the current
+        // frame, so asking before the width is applied returns a height for
+        // some other layout and the bottom row (the emoji strip and its
+        // pickers) is clipped out of the alert entirely - it is there, you
+        // just cannot see it.
+        hosting.setFrameSize(NSSize(width: 320, height: 1))
+        hosting.layoutSubtreeIfNeeded()
         hosting.setFrameSize(NSSize(width: 320, height: hosting.fittingSize.height))
         alert.accessoryView = hosting
         alert.addButton(withTitle: "Save")
