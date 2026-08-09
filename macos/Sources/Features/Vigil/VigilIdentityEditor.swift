@@ -471,6 +471,11 @@ extension VigilIdentity {
     static func pickerController(
         selected: String?, onPick: @escaping (String?) -> Void
     ) -> NSViewController {
-        NSHostingController(rootView: VigilEmojiPickerView(selected: selected, onPick: onPick))
+        let controller = NSHostingController(
+            rootView: VigilEmojiPickerView(selected: selected, onPick: onPick))
+        // Without this the popover sizes itself from a pre-layout guess and
+        // eats the top of the content: the search field was clipped away.
+        controller.preferredContentSize = NSSize(width: 300, height: 320)
+        return controller
     }
 }

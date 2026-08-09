@@ -86,12 +86,6 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
     /// The face button drawn inside the inline editor, and its open picker.
     private weak var emojiButton: NSButton?
     private var emojiPopover: NSPopover?
-    /// True from the mousedown on the face button until its picker closes.
-    /// Clicking the button pulls first responder off the text field, which
-    /// ends editing, which tears the button down before the click can even
-    /// land: the picker was unopenable no matter where you clicked. While
-    /// this is set, the rename stays open.
-    private var faceInteraction = false
 
     /// Open the face picker anchored to the button, without ending the
     /// rename: picking a face and typing a name are the same edit.
@@ -106,7 +100,6 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
                 sender.alphaValue = (emoji?.isEmpty == false) ? 1.0 : 0.45
                 self.emojiPopover?.close()
                 self.emojiPopover = nil
-                self.faceInteraction = false
                 // Straight back to the name field: one gesture, not two.
                 if let editor = self.inlineTitleEditor {
                     editor.window?.makeFirstResponder(editor)
@@ -115,26 +108,14 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
 
         let popover = NSPopover()
         popover.contentViewController = controller
-        // NOT .transient: a transient popover anchored in the titlebar dies
-        // on the first stray event on the way to it (a focus-follows-mouse
-        // move, the field editor blinking) - it vanished as you reached for
-        // it. This one closes when you pick, when you press esc, or when
-        // the rename ends.
-        popover.behavior = .applicationDefined
+        // Transient is right now that the button no longer steals focus:
+        // AppKit dismisses it on an outside click or esc, so it can never
+        // get stuck open.
+        popover.behavior = .transient
         // Below the button in AppKit's unflipped titlebar space; .maxY put
         // it a titlebar's height away with dead space in between.
         popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
         emojiPopover = popover
-    }
-
-    /// Dismiss the picker and return the keyboard to the name field.
-    private func closeFacePicker() {
-        emojiPopover?.close()
-        emojiPopover = nil
-        faceInteraction = false
-        if let editor = inlineTitleEditor {
-            editor.window?.makeFirstResponder(editor)
-        }
     }
 
     /// Creates a coordinator bound to a host window and rename delegate.
@@ -164,21 +145,6 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
     func handleMouseDown(_ event: NSEvent) -> Bool {
         guard event.type == .leftMouseDown else { return false }
 
-        // The picker holds the rename open, so it MUST have a way out: any
-        // click that is not inside it (its own window) dismisses it and
-        // hands the keyboard back to the name field. Without this, opening
-        // the picker and clicking away would wedge the editor open forever.
-        if let popover = emojiPopover, popover.isShown,
-           event.window !== popover.contentViewController?.view.window {
-            let onButton = emojiButton.map { button -> Bool in
-                guard let window = button.window else { return false }
-                let screen = (event.window ?? window).convertPoint(toScreen: event.locationInWindow)
-                let local = button.convert(window.convertPoint(fromScreen: screen), from: nil)
-                return button.bounds.contains(local)
-            } ?? false
-            if !onButton { closeFacePicker() }
-        }
-
         // If we don't have a host window to look up the click, we do nothing.
         guard let hostWindow else { return false }
 
@@ -202,10 +168,7 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
         if let button = emojiButton, button.window != nil {
             let inButton = button.convert(
                 button.window!.convertPoint(fromScreen: locationInScreen), from: nil)
-            if button.bounds.contains(inButton) {
-                faceInteraction = true
-                return false
-            }
+            if button.bounds.contains(inButton) { return false }
         }
 
         guard !isMouseEventWithinEditor(event) else {
@@ -333,13 +296,19 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
                 .withSymbolConfiguration(.init(pointSize: 7, weight: .semibold))
             button.imagePosition = .imageTrailing
             button.imageHugsTitle = true
-            button.alphaValue = (face?.isEmpty == false) ? 1.0 : 0.7
-            // A real control: the bezel appears under the cursor so the
-            // whole emoji-plus-chevron reads as one clickable thing, and
-            // you can see exactly where it triggers before you click.
+            button.alphaValue = 1.0
+            // A standard bordered control, always visible so you can see
+            // what you are aiming at, with the emoji and the chevron
+            // separated like every pull-down on this platform.
             button.isBordered = true
             button.bezelStyle = .roundRect
-            button.showsBorderOnlyWhileMouseInside = true
+            button.controlSize = .small
+            // THE fix for "it dismisses wherever I click": a click used to
+            // pull first responder off the name field, which ended the
+            // rename and tore this button down mid-click. Refusing first
+            // responder keeps the field focused, so the rename simply
+            // stays open and no hold-it-open hack is needed.
+            button.refusesFirstResponder = true
             button.font = .systemFont(ofSize: 12)
             button.contentTintColor = .secondaryLabelColor
             button.target = self
@@ -401,9 +370,6 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
                 responderWindow.makeFirstResponder(nil)
             }
         }
-
-        // Picking a face is part of THIS rename, not the end of it.
-        if faceInteraction { return }
 
         editor.removeFromSuperview()
         emojiPopover?.close()
