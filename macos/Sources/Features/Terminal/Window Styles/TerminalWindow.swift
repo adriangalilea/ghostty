@@ -837,39 +837,6 @@ extension TerminalWindow: TabTitleEditorDelegate {
         targetController.titleOverride = editedTitle.isEmpty ? nil : editedTitle
     }
 
-    // vigil: the face is edited WHERE THE NAME IS, inside the inline editor.
-    func tabTitleEditor(_ editor: TabTitleEditor, emojiFor targetWindow: NSWindow) -> String? {
-        guard let terminal = targetWindow.windowController as? TerminalController,
-              let key = VigilSessionManager.shared.tabIdentityKey(for: terminal)
-        else { return nil }
-        return VigilSessionManager.shared.customIdentity(key)?.emoji
-    }
-
-    func tabTitleEditor(
-        _ editor: TabTitleEditor, didPickEmoji emoji: String?, for targetWindow: NSWindow
-    ) {
-        guard let terminal = targetWindow.windowController as? TerminalController,
-              let key = VigilSessionManager.shared.tabIdentityKey(for: terminal)
-        else { return }
-        VigilSessionManager.shared.setCustomIdentity(
-            key: key,
-            label: VigilSessionManager.shared.customIdentity(key)?.label,
-            emoji: emoji)
-    }
-
-    func tabTitleEditorEmojiPicker(
-        _ editor: TabTitleEditor,
-        for targetWindow: NSWindow,
-        onPick: @escaping (String?) -> Void
-    ) -> NSViewController? {
-        guard let terminal = targetWindow.windowController as? TerminalController,
-              let key = VigilSessionManager.shared.tabIdentityKey(for: terminal)
-        else { return nil }
-        return VigilIdentity.pickerController(
-            selected: VigilSessionManager.shared.customIdentity(key)?.emoji,
-            onPick: onPick)
-    }
-
     func tabTitleEditor(
         _ editor: TabTitleEditor,
         performFallbackRenameFor targetWindow: NSWindow

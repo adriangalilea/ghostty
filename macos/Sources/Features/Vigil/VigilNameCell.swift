@@ -53,44 +53,12 @@ struct VigilNameCell<Fallback: View>: View {
         }
     }
 
-    /// The classic pull-down shape: content, a hairline separator, a
-    /// chevron, all inside one container that lights up under the cursor so
-    /// the hit area is never a guess.
     private var face: some View {
         Group {
-            if onPickEmoji == nil {
-                slot
+            if let onPickEmoji {
+                VigilFaceButton(emoji: emoji, onPick: onPickEmoji) { fallback() }
             } else {
-                Button(action: { picking = true }) {
-                    HStack(spacing: 3) {
-                        slot
-                        Divider().frame(height: 10)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 7, weight: .semibold))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 1)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color.primary.opacity(hoveringFace ? 0.14 : 0.06))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.primary.opacity(hoveringFace ? 0.25 : 0.10),
-                                    lineWidth: 0.5)
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .onHover { hoveringFace = $0 }
-                .help("Pick a face")
-                .popover(isPresented: $picking, arrowEdge: .bottom) {
-                    VigilEmojiPickerView(selected: emoji) { picked in
-                        onPickEmoji?(picked)
-                        picking = false
-                    }
-                }
+                slot
             }
         }
     }

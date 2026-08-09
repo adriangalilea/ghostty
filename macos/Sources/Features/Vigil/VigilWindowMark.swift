@@ -35,10 +35,10 @@ struct VigilWindowMark: View {
     /// Opens the identity editor; nil for session-less windows (safety-net
     /// strays have no identity to edit) which then show no chip at all.
     var onEditIdentity: (() -> Void)?
-    /// The mounted TAB's face and name, and the door to its editor.
+    /// The mounted TAB's face and name; picking writes straight to the store.
     var tabEmoji: String?
     var tabLabel: String?
-    var onEditTab: (() -> Void)?
+    var onPickTabEmoji: ((String?) -> Void)?
     var onTogglePersist: () -> Void
     var onTogglePin: () -> Void
     /// Toggles the tab's dock; nil for session-less windows.
@@ -73,30 +73,20 @@ struct VigilWindowMark: View {
                 .help(identityHelp)
             }
 
-            // The TAB's own face, right where the tab bar is: the session
-            // chip names the workspace, this names the tab you are looking
-            // at. Clicking either opens the same editor (emoji picker
-            // included) on the thing it belongs to, so a name is never
-            // something you have to hunt through a context menu for.
-            if let onEditTab {
-                Button(action: onEditTab) {
-                    Group {
-                        if let tabEmoji, !tabEmoji.isEmpty {
-                            Text(tabEmoji).font(.system(size: 11))
-                        } else {
-                            Image(systemName: "rectangle.and.pencil.and.ellipsis")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .frame(minWidth: 18)
-                    .frame(height: 18)
-                    .padding(.horizontal, 2)
-                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+            // The TAB's face: the ONE face component (same as every sidebar
+            // row), always visible up here. The tab strip itself is
+            // Apple-private UI - a guest view there overlapped the close
+            // button and could not receive clicks - so the face RENDERS in
+            // the tab through ghostty's own titleOverride ("emoji name"),
+            // and the picker lives here, on a surface vigil owns. Renaming
+            // stays vanilla: double-click the tab text.
+            if let onPickTabEmoji {
+                VigilFaceButton(emoji: tabEmoji, onPick: onPickTabEmoji) {
+                    Image(systemName: "face.dashed")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.plain)
-                .help(tabLabel.map { "Tab: \($0). Click to rename it or give it a face." }
-                      ?? "Name this tab, or give it a face.")
+                .help(tabLabel.map { "Tab: \($0). Pick its face." } ?? "Pick this tab's face.")
             }
 
             roundButton(

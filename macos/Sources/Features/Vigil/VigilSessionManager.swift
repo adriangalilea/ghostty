@@ -4920,9 +4920,13 @@ class VigilSessionManager {
                     .flatMap { customIdentity($0)?.emoji },
                 tabLabel: tabIdentityKey(for: controller)
                     .flatMap { customIdentity($0)?.label } ?? controller.window?.title,
-                onEditTab: tabIdentityKey(for: controller) == nil ? nil : { [weak self, weak controller] in
-                    guard let self, let controller else { return }
-                    _ = self.promptTabIdentity(controller)
+                onPickTabEmoji: tabIdentityKey(for: controller) == nil ? nil : { [weak self, weak controller] emoji in
+                    guard let self, let controller,
+                          let key = self.tabIdentityKey(for: controller) else { return }
+                    self.setCustomIdentity(
+                        key: key,
+                        label: self.customIdentity(key)?.label,
+                        emoji: emoji)
                 },
                 onTogglePersist: { [weak self] in
                     // Session scope IS the window: one flip covers every tab.

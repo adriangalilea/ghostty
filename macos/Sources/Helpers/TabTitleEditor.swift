@@ -32,38 +32,6 @@ protocol TabTitleEditorDelegate: AnyObject {
     func tabTitleEditor(
         _ editor: TabTitleEditor,
         didFinishEditing targetWindow: NSWindow)
-
-    /// The tab's face, shown as a button inside the inline editor. nil means
-    /// this tab has no notion of a face and no button is drawn.
-    func tabTitleEditor(
-        _ editor: TabTitleEditor,
-        emojiFor targetWindow: NSWindow
-    ) -> String?
-
-    /// Commit a face picked inside the inline editor.
-    func tabTitleEditor(
-        _ editor: TabTitleEditor,
-        didPickEmoji emoji: String?,
-        for targetWindow: NSWindow
-    )
-
-    /// The picker UI to show when the face button is clicked. Returning nil
-    /// draws no button at all.
-    func tabTitleEditorEmojiPicker(
-        _ editor: TabTitleEditor,
-        for targetWindow: NSWindow,
-        onPick: @escaping (String?) -> Void
-    ) -> NSViewController?
-}
-
-extension TabTitleEditorDelegate {
-    func tabTitleEditor(_ editor: TabTitleEditor, emojiFor targetWindow: NSWindow) -> String? { nil }
-    func tabTitleEditor(_ editor: TabTitleEditor, didPickEmoji emoji: String?, for targetWindow: NSWindow) {}
-    func tabTitleEditorEmojiPicker(
-        _ editor: TabTitleEditor,
-        for targetWindow: NSWindow,
-        onPick: @escaping (String?) -> Void
-    ) -> NSViewController? { nil }
 }
 
 /// Handles inline tab title editing for native AppKit window tabs.
@@ -83,40 +51,6 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
     private var previousTabState: TabUIState?
     /// Deferred begin-editing work used to avoid visual flicker on double-click.
     private var pendingEditWorkItem: DispatchWorkItem?
-    /// The face button drawn inside the inline editor, and its open picker.
-    private weak var emojiButton: NSButton?
-    private var emojiPopover: NSPopover?
-
-    /// Open the face picker anchored to the button, without ending the
-    /// rename: picking a face and typing a name are the same edit.
-    @objc private func emojiButtonClicked(_ sender: NSButton) {
-        guard let targetWindow = inlineTitleTargetWindow else { return }
-        emojiPopover?.close()
-        guard let controller = delegate?.tabTitleEditorEmojiPicker(
-            self, for: targetWindow, onPick: { [weak self] emoji in
-                guard let self else { return }
-                self.delegate?.tabTitleEditor(self, didPickEmoji: emoji, for: targetWindow)
-                sender.title = (emoji?.isEmpty == false) ? emoji! : "🙂"
-                sender.alphaValue = (emoji?.isEmpty == false) ? 1.0 : 0.45
-                self.emojiPopover?.close()
-                self.emojiPopover = nil
-                // Straight back to the name field: one gesture, not two.
-                if let editor = self.inlineTitleEditor {
-                    editor.window?.makeFirstResponder(editor)
-                }
-            }) else { return }
-
-        let popover = NSPopover()
-        popover.contentViewController = controller
-        // Transient is right now that the button no longer steals focus:
-        // AppKit dismisses it on an outside click or esc, so it can never
-        // get stuck open.
-        popover.behavior = .transient
-        // Below the button in AppKit's unflipped titlebar space; .maxY put
-        // it a titlebar's height away with dead space in between.
-        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
-        emojiPopover = popover
-    }
 
     /// Creates a coordinator bound to a host window and rename delegate.
     init(hostWindow: NSWindow, delegate: TabTitleEditorDelegate) {
@@ -161,15 +95,6 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
               let targetWindow = hostWindow.tabbedWindows?[safe: tabIndex],
               delegate?.tabTitleEditor(self, canRenameTabFor: targetWindow) == true
         else { return false }
-
-        // The face button is part of the editor, not the tab: let AppKit
-        // deliver the click to it. Without this the monitor swallowed the
-        // event and the picker could never be opened.
-        if let button = emojiButton, button.window != nil {
-            let inButton = button.convert(
-                button.window!.convertPoint(fromScreen: locationInScreen), from: nil)
-            if button.bounds.contains(inButton) { return false }
-        }
 
         guard !isMouseEventWithinEditor(event) else {
             // If the click lies within the editor,
@@ -284,46 +209,6 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
             editor.heightAnchor.constraint(equalToConstant: editorHeight),
         ])
 
-        let face = delegate?.tabTitleEditor(self, emojiFor: targetWindow)
-        if delegate?.tabTitleEditorEmojiPicker(self, for: targetWindow, onPick: { _ in }) != nil {
-            let button = NSButton(frame: .zero)
-            button.title = (face?.isEmpty == false) ? face! : "🙂"
-            // The face, then a chevron: the classic "there are others"
-            // affordance, so it reads as a picker and not as decoration.
-            button.image = NSImage(
-                systemSymbolName: "chevron.down",
-                accessibilityDescription: "Pick a face")?
-                .withSymbolConfiguration(.init(pointSize: 7, weight: .semibold))
-            button.imagePosition = .imageTrailing
-            button.imageHugsTitle = true
-            button.alphaValue = 1.0
-            // A standard bordered control, always visible so you can see
-            // what you are aiming at, with the emoji and the chevron
-            // separated like every pull-down on this platform.
-            button.isBordered = true
-            button.bezelStyle = .roundRect
-            button.controlSize = .small
-            // THE fix for "it dismisses wherever I click": a click used to
-            // pull first responder off the name field, which ended the
-            // rename and tore this button down mid-click. Refusing first
-            // responder keeps the field focused, so the rename simply
-            // stays open and no hold-it-open hack is needed.
-            button.refusesFirstResponder = true
-            button.font = .systemFont(ofSize: 12)
-            button.contentTintColor = .secondaryLabelColor
-            button.target = self
-            button.action = #selector(emojiButtonClicked(_:))
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.toolTip = "Pick a face for this tab"
-            tabButton.addSubview(button)
-            NSLayoutConstraint.activate([
-                button.centerYAnchor.constraint(equalTo: tabButton.centerYAnchor),
-                button.leadingAnchor.constraint(
-                    equalTo: tabButton.leadingAnchor, constant: horizontalInset),
-                button.heightAnchor.constraint(equalToConstant: 18),
-            ])
-            emojiButton = button
-        }
         CATransaction.commit()
 
         // Focus after insertion so AppKit has created the field editor for this text field.
@@ -372,10 +257,6 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
         }
 
         editor.removeFromSuperview()
-        emojiPopover?.close()
-        emojiPopover = nil
-        emojiButton?.removeFromSuperview()
-        emojiButton = nil
 
         previousTabState?.restore()
         previousTabState = nil
