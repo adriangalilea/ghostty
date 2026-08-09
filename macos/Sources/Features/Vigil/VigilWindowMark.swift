@@ -35,10 +35,6 @@ struct VigilWindowMark: View {
     /// Opens the identity editor; nil for session-less windows (safety-net
     /// strays have no identity to edit) which then show no chip at all.
     var onEditIdentity: (() -> Void)?
-    /// The mounted TAB's face and name; picking writes straight to the store.
-    var tabEmoji: String?
-    var tabLabel: String?
-    var onPickTabEmoji: ((String?) -> Void)?
     var onTogglePersist: () -> Void
     var onTogglePin: () -> Void
     /// Toggles the tab's dock; nil for session-less windows.
@@ -71,22 +67,6 @@ struct VigilWindowMark: View {
                 }
                 .buttonStyle(.plain)
                 .help(identityHelp)
-            }
-
-            // The TAB's face: the ONE face component (same as every sidebar
-            // row), always visible up here. The tab strip itself is
-            // Apple-private UI - a guest view there overlapped the close
-            // button and could not receive clicks - so the face RENDERS in
-            // the tab through ghostty's own titleOverride ("emoji name"),
-            // and the picker lives here, on a surface vigil owns. Renaming
-            // stays vanilla: double-click the tab text.
-            if let onPickTabEmoji {
-                VigilFaceButton(emoji: tabEmoji, onPick: onPickTabEmoji) {
-                    Image(systemName: "face.dashed")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.secondary)
-                }
-                .help(tabLabel.map { "Tab: \($0). Pick its face." } ?? "Pick this tab's face.")
             }
 
             roundButton(

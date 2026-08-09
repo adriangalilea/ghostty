@@ -481,6 +481,7 @@ class VigilSessionManager {
             }
         }
         startEventWatcher()
+        VigilTabFacePicker.install()
         startStateDirWatcher()
         // SIGTERM means DIE (vigil-dev restarts, system tooling). Without
         // this, AppKit routed it into the ⌘Q intercept, which CANCELS
@@ -4916,18 +4917,6 @@ class VigilSessionManager {
                 pinned: pinned,
                 dockOpen: dockMap.object(forKey: controller).map { !$0.collapsed } ?? false,
                 onEditIdentity: name.map { n in { VigilIdentity.editModal(name: n) } },
-                tabEmoji: tabIdentityKey(for: controller)
-                    .flatMap { customIdentity($0)?.emoji },
-                tabLabel: tabIdentityKey(for: controller)
-                    .flatMap { customIdentity($0)?.label } ?? controller.window?.title,
-                onPickTabEmoji: tabIdentityKey(for: controller) == nil ? nil : { [weak self, weak controller] emoji in
-                    guard let self, let controller,
-                          let key = self.tabIdentityKey(for: controller) else { return }
-                    self.setCustomIdentity(
-                        key: key,
-                        label: self.customIdentity(key)?.label,
-                        emoji: emoji)
-                },
                 onTogglePersist: { [weak self] in
                     // Session scope IS the window: one flip covers every tab.
                     self?.toggleWindowPersist(controller)
