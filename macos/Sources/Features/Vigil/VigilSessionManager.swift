@@ -481,7 +481,6 @@ class VigilSessionManager {
             }
         }
         startEventWatcher()
-        VigilTabFacePicker.install()
         startStateDirWatcher()
         // SIGTERM means DIE (vigil-dev restarts, system tooling). Without
         // this, AppKit routed it into the ⌘Q intercept, which CANCELS
@@ -4422,12 +4421,25 @@ class VigilSessionManager {
 
     func syncTabTitle(_ controller: TerminalController) {
         guard let key = tabIdentityKey(for: controller) else { return }
+        // The title carries the NAME alone. The face renders in the face
+        // control (tab accessory, sidebar), never inline in the label: an
+        // emoji inside the title text inherited the label's dimmed color
+        // and washed out, and the titlebar center is session territory.
         let name = tabDisplayName(anchor: String(key.dropFirst(4)))
-        let rendered = [name.emoji, name.label]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        controller.titleOverride = rendered.isEmpty ? nil : rendered
+        controller.titleOverride = (name.label?.isEmpty == false) ? name.label : nil
+
+        if let tw = controller.window as? TerminalWindow {
+            tw.vigilTabFace.isHidden = false
+            tw.vigilTabFace.update(emoji: customIdentity(key)?.emoji)
+            tw.vigilTabFace.onPick = { [weak self, weak controller] picked in
+                guard let self, let controller,
+                      let key = self.tabIdentityKey(for: controller) else { return }
+                self.setCustomIdentity(
+                    key: key,
+                    label: self.customIdentity(key)?.label,
+                    emoji: picked)
+            }
+        }
     }
 
     /// The inline tab-title editor's commit, kept in the one store so it
