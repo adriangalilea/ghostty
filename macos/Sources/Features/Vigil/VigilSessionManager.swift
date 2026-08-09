@@ -3905,9 +3905,8 @@ class VigilSessionManager {
                         // A swap can leave the window title stale or on
                         // ghostty's literal 👻 default; the anchor's
                         // remembered name is truer than either.
-                        title: custom?.label
+                        title: anchor.flatMap { tabDisplayName(anchor: $0).label }
                             ?? liveTabTitle(controller.window?.title)
-                            ?? anchor.flatMap { capturedTitle(ofPane: $0) }
                             ?? tabTitle(cwd: cwd, fallback: "tab \(index + 1)"),
                         index: index, panes: panes,
                         anchor: anchor,
@@ -3943,8 +3942,7 @@ class VigilSessionManager {
                             let custom = tabCustom(idList.first)
                             tabs.append(SidebarTab(
                                 id: tabRowId(name, anchor: idList.first, index: index),
-                                title: custom?.label
-                                ?? tab.panes.first?.title
+                                title: idList.first.flatMap { tabDisplayName(anchor: $0).label }
                                 ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                                 index: index,
                                 panes: panes,
@@ -3963,8 +3961,7 @@ class VigilSessionManager {
                         let custom = tabCustom(idList.first)
                         tabs.append(SidebarTab(
                             id: tabRowId(name, anchor: idList.first, index: index),
-                            title: custom?.label
-                                ?? tab.panes.first?.title
+                            title: idList.first.flatMap { tabDisplayName(anchor: $0).label }
                                 ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                             index: index,
                             panes: panes,
@@ -4027,8 +4024,7 @@ class VigilSessionManager {
                         let custom = tabCustom(idList.first)
                         tabs.append(SidebarTab(
                             id: tabRowId(name, anchor: idList.first, index: index),
-                            title: custom?.label
-                                ?? tab.panes.first?.title
+                            title: idList.first.flatMap { tabDisplayName(anchor: $0).label }
                                 ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                             index: index,
                             panes: panes,
@@ -4052,8 +4048,7 @@ class VigilSessionManager {
                     let custom = tabCustom(anchor)
                     tabs.append(SidebarTab(
                         id: tabRowId(name, anchor: anchor, index: index),
-                        title: custom?.label
-                            ?? tab.panes.first?.title
+                        title: anchor.flatMap { tabDisplayName(anchor: $0).label }
                             ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
                         index: index,
                         panes: panes,
@@ -4409,23 +4404,39 @@ class VigilSessionManager {
     /// default when a swap left it stale), and ghostty's own Change Tab
     /// Title was a THIRD, unstored one. The stored identity is the name,
     /// and ghostty's titleOverride is how it reaches the tab bar.
+    /// What a tab is CALLED, one answer for every surface that shows it
+    /// (the native tab bar, the sidebar row, the rename prompt's seed).
+    /// Two surfaces computing this separately is how a tab ends up as
+    /// "Auto-play video thumbnails" in the tab bar and "tab 3" in the
+    /// sidebar at the same time.
+    func tabDisplayName(anchor: String) -> (emoji: String?, label: String?) {
+        let custom = customIdentity("tab:\(anchor)")
+        if let label = custom?.label, !label.isEmpty {
+            return (custom?.emoji, label)
+        }
+        // Nothing typed: the tab still knows what it IS - its anchor's
+        // remembered terminal title, then the program running there.
+        return (custom?.emoji, capturedTitle(ofPane: anchor) ?? paneProgram(anchor))
+    }
+
     func syncTabTitle(_ controller: TerminalController) {
         guard let key = tabIdentityKey(for: controller) else { return }
-        if let custom = customIdentity(key) {
-            let name = [custom.emoji, custom.label]
-                .compactMap { $0 }
-                .filter { !$0.isEmpty }
-                .joined(separator: " ")
-            if !name.isEmpty {
-                controller.titleOverride = name
-                return
-            }
-        }
-        // No name given: the tab still knows what it IS. Fall back to the
-        // anchor's remembered title rather than leaving ghostty's literal
-        // 👻 default, which is what a tab bar full of ghosts was.
-        let anchor = String(key.dropFirst(4))
-        controller.titleOverride = capturedTitle(ofPane: anchor)
+        let name = tabDisplayName(anchor: String(key.dropFirst(4)))
+        let rendered = [name.emoji, name.label]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        controller.titleOverride = rendered.isEmpty ? nil : rendered
+    }
+
+    /// The inline tab-title editor's commit, kept in the one store so it
+    /// survives, shows in the sidebar, and is never clobbered by a sync.
+    /// Preserves the tab's face: renaming is not un-emoji-ing.
+    @discardableResult
+    func setTabLabel(_ controller: TerminalController, _ label: String?) -> Bool {
+        guard let key = tabIdentityKey(for: controller) else { return false }
+        setCustomIdentity(key: key, label: label, emoji: customIdentity(key)?.emoji)
+        return true
     }
 
     /// Rename the TAB shown in this window, through the one identity editor

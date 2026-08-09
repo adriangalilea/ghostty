@@ -824,6 +824,16 @@ extension TerminalWindow: TabTitleEditorDelegate {
         for targetWindow: NSWindow
     ) {
         guard let targetController = targetWindow.windowController as? BaseTerminalController else { return }
+        // vigil: a tab's name is STORED state. Writing titleOverride here
+        // made the inline editor a second writer of the same field, and the
+        // next window-mark sync overwrote it with the stored name: the text
+        // you just typed vanished a moment later. Route it into the store,
+        // which then renders back through titleOverride.
+        if let terminal = targetController as? TerminalController,
+           VigilSessionManager.shared.setTabLabel(
+               terminal, editedTitle.isEmpty ? nil : editedTitle) {
+            return
+        }
         targetController.titleOverride = editedTitle.isEmpty ? nil : editedTitle
     }
 
