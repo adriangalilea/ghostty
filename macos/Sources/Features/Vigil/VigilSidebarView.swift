@@ -322,13 +322,25 @@ struct VigilSidebarView: View {
             } else {
                 Color.clear.frame(width: Grid.chevron, height: 1)
             }
-            Text(face(row.emoji))
-                .font(.system(size: 13))
-                .frame(width: Grid.icon)
-            Text(row.label)
-                .font(.system(size: 12, weight: .semibold))
-                .lineLimit(1)
-                .opacity(row.stateTag == "live" ? 1 : 0.85)
+            VigilNameCell(
+                emoji: row.emoji,
+                title: row.label,
+                font: .system(size: 12, weight: .semibold),
+                color: .primary,
+                onRename: { label in
+                    let manager = VigilSessionManager.shared
+                    guard let session = manager.sessions[id] else { return }
+                    manager.rename(name: id, label: label ?? session.label, emoji: session.emoji)
+                },
+                onPickEmoji: { emoji in
+                    let manager = VigilSessionManager.shared
+                    guard let session = manager.sessions[id] else { return }
+                    manager.rename(name: id, label: session.label, emoji: emoji)
+                }
+            ) {
+                Text("·").font(.system(size: 13))
+            }
+            .opacity(row.stateTag == "live" ? 1 : 0.85)
             Spacer(minLength: 4)
             followKeycap(id)
             // No "asleep/detached" tag: every session is ALIVE by
@@ -414,20 +426,31 @@ struct VigilSidebarView: View {
             // FILLED variant marks the tab the window displays right now,
             // the outline is a tab resting cold (daemons running). A
             // custom face takes the column over the glyph.
-            Group {
-                if let emoji = tab.emoji, let first = emoji.first {
-                    Text(String(first)).font(.system(size: 11))
-                } else {
-                    Image(systemName: tab.cold ? "rectangle.on.rectangle" : "rectangle.inset.filled.on.rectangle")
-                        .font(.system(size: 9))
-                        .foregroundColor(tab.cold ? .secondary : .primary.opacity(0.8))
+            VigilNameCell(
+                emoji: tab.emoji,
+                title: tab.title,
+                font: .system(size: 11, weight: tab.cold ? .regular : .medium),
+                color: tab.cold ? .secondary : .primary,
+                onRename: tab.anchor.map { anchor in
+                    { label in
+                        VigilSessionManager.shared.setCustomIdentity(
+                            key: "tab:\(anchor)", label: label,
+                            emoji: VigilSessionManager.shared.customIdentity("tab:\(anchor)")?.emoji)
+                    }
+                },
+                onPickEmoji: tab.anchor.map { anchor in
+                    { emoji in
+                        VigilSessionManager.shared.setCustomIdentity(
+                            key: "tab:\(anchor)",
+                            label: VigilSessionManager.shared.customIdentity("tab:\(anchor)")?.label,
+                            emoji: emoji)
+                    }
                 }
+            ) {
+                Image(systemName: tab.cold ? "rectangle.on.rectangle" : "rectangle.inset.filled.on.rectangle")
+                    .font(.system(size: 9))
+                    .foregroundColor(tab.cold ? .secondary : .primary.opacity(0.8))
             }
-            .frame(width: Grid.icon)
-            Text(tab.title)
-                .font(.system(size: 11, weight: tab.cold ? .regular : .medium))
-                .foregroundColor(tab.cold ? .secondary : .primary)
-                .lineLimit(1)
             if tab.panes.count > 1 {
                 Text("\(tab.panes.count)")
                     .font(.system(size: 9, weight: .medium))
@@ -518,20 +541,31 @@ struct VigilSidebarView: View {
     ) -> some View {
         let id = "\(tab.id)#\(pane.id)"
         return HStack(spacing: 4) {
-            Group {
-                if let emoji = pane.emoji, let first = emoji.first {
-                    Text(String(first)).font(.system(size: 11))
-                } else {
-                    Image(systemName: pane.isDock ? "sidebar.right" : "terminal")
-                        .font(.system(size: 8))
-                        .foregroundColor(Color.secondary.opacity(0.8))
+            VigilNameCell(
+                emoji: pane.emoji,
+                title: pane.title,
+                font: .system(size: 11),
+                color: .primary.opacity(0.85),
+                onRename: pane.paneId.map { id in
+                    { label in
+                        VigilSessionManager.shared.setCustomIdentity(
+                            key: id, label: label,
+                            emoji: VigilSessionManager.shared.customIdentity(id)?.emoji)
+                    }
+                },
+                onPickEmoji: pane.paneId.map { id in
+                    { emoji in
+                        VigilSessionManager.shared.setCustomIdentity(
+                            key: id,
+                            label: VigilSessionManager.shared.customIdentity(id)?.label,
+                            emoji: emoji)
+                    }
                 }
+            ) {
+                Image(systemName: pane.isDock ? "sidebar.right" : "terminal")
+                    .font(.system(size: 8))
+                    .foregroundColor(Color.secondary.opacity(0.8))
             }
-            .frame(width: Grid.icon)
-            Text(pane.title)
-                .font(.system(size: 11))
-                .foregroundColor(.primary.opacity(0.85))
-                .lineLimit(1)
             Spacer(minLength: 4)
             followKeycap(id)
             watchGlyph(pane)

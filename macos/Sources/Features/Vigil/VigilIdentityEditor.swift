@@ -331,3 +331,146 @@ struct VigilIdentityEditor: View {
         }
     }
 }
+
+/// The face picker as a standalone popover body, so it can appear ANYWHERE a
+/// name is edited: the identity editor, and the inline tab-title editor in
+/// the tab bar (renaming a tab and giving it a face are one gesture, and a
+/// picker reachable only through a context menu is a picker nobody finds).
+struct VigilEmojiPickerView: View {
+    let selected: String?
+    let onPick: (String?) -> Void
+
+    @State private var query = ""
+    @FocusState private var searching: Bool
+
+    /// Whatever the user typed or pasted, if it IS a face: the palette is a
+    /// shortcut, never a cage - any emoji in Unicode can be used.
+    private var typed: String? {
+        let face = VigilIdentity.filterEmoji(query)
+        return face.isEmpty ? nil : face
+    }
+
+    private var matches: [String] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty, typed == nil else { return VigilIdentity.palette }
+        return VigilIdentity.palette.filter { VigilIdentity.keywords(for: $0).contains(q) }
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 5) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                TextField("search, or paste any emoji", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .focused($searching)
+                    .onSubmit {
+                        if let typed { onPick(typed) }
+                        else if let first = matches.first { onPick(first) }
+                    }
+                if !query.isEmpty {
+                    Button(action: { query = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+
+            // A pasted or typed face is offered as itself, first.
+            if let typed {
+                Button(action: { onPick(typed) }) {
+                    HStack(spacing: 6) {
+                        Text(typed).font(.system(size: 18))
+                        Text("use this one").font(.system(size: 11)).foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.accentColor.opacity(0.18)))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+            }
+
+            ScrollView {
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 2), count: 10),
+                          spacing: 2) {
+                    ForEach(matches, id: \.self) { emoji in
+                        Button(action: { onPick(emoji) }) {
+                            Text(emoji)
+                                .font(.system(size: 16))
+                                .frame(width: 26, height: 26)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .fill(selected == emoji
+                                              ? Color.accentColor.opacity(0.35) : .clear))
+                        }
+                        .buttonStyle(.plain)
+                        .help(VigilIdentity.name(for: emoji))
+                    }
+                }
+                .padding(8)
+            }
+            HStack {
+                Button("No face") { onPick(nil) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Spacer()
+                if matches.isEmpty, typed == nil {
+                    Text("no match").font(.system(size: 11)).foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 8)
+        }
+        .frame(width: 300, height: 300)
+        .onAppear { DispatchQueue.main.async { searching = true } }
+    }
+}
+
+extension VigilIdentity {
+    /// An emoji's official Unicode name, lowercased ("dog face", "rocket").
+    /// Free keywords: no table to hand-maintain and drift out of date.
+    static func name(for emoji: String) -> String {
+        emojiNames[emoji] ?? emoji
+    }
+
+    static func keywords(for emoji: String) -> String {
+        name(for: emoji)
+    }
+
+    private static let emojiNames: [String: String] = {
+        var out: [String: String] = [:]
+        for emoji in palette {
+            let mutable = NSMutableString(string: emoji) as CFMutableString
+            if CFStringTransform(mutable, nil, kCFStringTransformToUnicodeName, false) {
+                out[emoji] = (mutable as String)
+                    .replacingOccurrences(of: "\\N{", with: " ")
+                    .replacingOccurrences(of: "}", with: " ")
+                    .replacingOccurrences(of: "VARIATION SELECTOR-16", with: "")
+                    .lowercased()
+                    .trimmingCharacters(in: .whitespaces)
+            } else {
+                out[emoji] = emoji
+            }
+        }
+        return out
+    }()
+}
+
+extension VigilIdentity {
+    /// The picker wrapped for AppKit popovers (the tab bar's inline editor).
+    static func pickerController(
+        selected: String?, onPick: @escaping (String?) -> Void
+    ) -> NSViewController {
+        NSHostingController(rootView: VigilEmojiPickerView(selected: selected, onPick: onPick))
+    }
+}
