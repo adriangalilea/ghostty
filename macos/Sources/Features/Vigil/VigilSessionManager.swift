@@ -2566,6 +2566,8 @@ class VigilSessionManager {
         let freshSourceTabs = mergedCapture(name: source) // before the write access (exclusivity)
         sessions[source]!.tabs = freshSourceTabs
         var pane: Pane?
+        var inheritedLabel: String?
+        var inheritedEmoji: String?
 
         if let view = liveView(attachId: paneId),
            let controller = view.window?.windowController as? TerminalController {
@@ -2584,8 +2586,12 @@ class VigilSessionManager {
                             command: sentinelCommand(paneId),
                             title: capturedTitle(of: view))
                 if controller.surfaceTree.root == node {
-                    // Last pane of the mounted tab: this IS a tab move.
-                    _ = vacateMountedTab(controller, name: source)
+                    // Last pane of the mounted tab: this IS a tab move, and
+                    // the tab's NAME AND FACE move with it (a ♠️ typed onto
+                    // a tab evaporated here, 2026-08-10).
+                    let vacated = vacateMountedTab(controller, name: source)
+                    inheritedLabel = vacated?.label
+                    inheritedEmoji = vacated?.emoji
                 } else {
                     controller.surfaceTree = controller.surfaceTree.removing(node)
                 }
@@ -2597,6 +2603,12 @@ class VigilSessionManager {
                 if let paneIndex = sessions[source]!.tabs[index].panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
                     pane = sessions[source]!.tabs[index].panes.remove(at: paneIndex)
                     sessions[source]!.tabs[index].layout = nil
+                    if sessions[source]!.tabs[index].panes.isEmpty {
+                        // The lift emptied the tab: its identity travels
+                        // with its only pane instead of dying with the husk.
+                        inheritedLabel = sessions[source]!.tabs[index].label
+                        inheritedEmoji = sessions[source]!.tabs[index].emoji
+                    }
                     break outer
                 }
                 if var dock = sessions[source]!.tabs[index].dock,
@@ -2634,7 +2646,9 @@ class VigilSessionManager {
                 sessions[target]!.tabs[0].dock = dock
             }
         } else {
-            sessions[target]!.tabs.append(Tab(panes: [pane], layout: nil))
+            sessions[target]!.tabs.append(Tab(
+                panes: [pane], layout: nil,
+                label: inheritedLabel, emoji: inheritedEmoji))
         }
         vlog("movePane: \(paneId): '\(source)' -> '\(target)' dock=\(isDock)")
         clearIfEmpty(source)
@@ -3199,10 +3213,69 @@ class VigilSessionManager {
     /// Kill pane daemons by id (resolved by the caller while its references
     /// were still alive).
     private func killDaemons(paneIds: Set<String>) {
+        expectedUnclaims.formUnion(paneIds)
         let vigildBin = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/bin/vigild").path
         for id in paneIds {
             runFireAndForget(vigildBin, ["kill", id])
+        }
+    }
+
+    /// Panes whose claims are ALLOWED to vanish (their daemons were
+    /// deliberately killed). Everything else is protected by the persist
+    /// net below.
+    private var expectedUnclaims = Set<String>()
+
+    /// The claimed set of the last persist, pane id -> owning session.
+    private var lastClaims: [String: String] = [:]
+
+    /// The anti-orphan net. A pane that was claimed, whose daemon still
+    /// runs, and that nobody deliberately killed, must NEVER leave the
+    /// capture silently: the sweep would judge the daemon unreachable and
+    /// destroy it - a claude moved between sessions died exactly this way
+    /// (2026-08-10: movePane -> claim lost somewhere -> sweep killed the
+    /// daemon and its resume pointer 2 minutes later). Scream and restore
+    /// as a cold tab; losing a tab to a bug should cost a log line, never
+    /// a conversation.
+    private func restoreLostClaims(_ entries: inout [PersistedSession]) {
+        let stateDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/vigild")
+        var claimed: [String: String] = [:]
+        for entry in entries {
+            for tab in entry.tabs ?? [] {
+                for pane in tab.panes + (tab.dock?.panes ?? []) {
+                    if let id = paneId(of: pane) { claimed[id] = entry.name }
+                }
+            }
+        }
+        for (id, owner) in lastClaims where claimed[id] == nil {
+            if expectedUnclaims.contains(id) { continue }
+            guard FileManager.default.fileExists(
+                atPath: stateDir.appendingPathComponent("\(id).pid").path)
+            else { continue }
+            guard let index = entries.firstIndex(where: { $0.name == owner })
+                ?? entries.indices.first
+            else { continue }
+            var tabs = entries[index].tabs ?? []
+            tabs.append(Tab(
+                panes: [Pane(cwd: FileManager.default.homeDirectoryForCurrentUser.path,
+                             command: "\(Self.attachSentinel)\(id)")],
+                layout: nil))
+            entries[index] = entries[index].withTabs(tabs)
+            vlog("!! persist: '\(id)' lost its claim with a LIVE daemon - restored as a cold tab in '\(entries[index].name)'")
+        }
+        // Prune the expectation set once a pane's daemon is truly gone.
+        expectedUnclaims = expectedUnclaims.filter {
+            FileManager.default.fileExists(
+                atPath: stateDir.appendingPathComponent("\($0).pid").path)
+        }
+        lastClaims = claimed
+        for entry in entries {
+            for tab in entry.tabs ?? [] {
+                for pane in tab.panes + (tab.dock?.panes ?? []) {
+                    if let id = paneId(of: pane) { lastClaims[id] = entry.name }
+                }
+            }
         }
     }
 
@@ -4612,6 +4685,13 @@ class VigilSessionManager {
         let foreground: Bool?
         /// Monotonic pane-index counter; indices are never recycled.
         let paneSeq: Int?
+
+        func withTabs(_ tabs: [Tab]) -> PersistedSession {
+            PersistedSession(
+                name: name, label: label, emoji: emoji, cwd: cwd, tabs: tabs,
+                order: order, pinned: pinned, buriedUntil: buriedUntil,
+                foreground: foreground, paneSeq: paneSeq)
+        }
     }
 
     /// Frozen foreground truth for the shutdown persist: the flags must
@@ -4780,6 +4860,7 @@ class VigilSessionManager {
             PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq)
         }
         entries.sort { $0.name < $1.name }
+        restoreLostClaims(&entries)
         let data = try! JSONEncoder().encode(entries)
         try? FileManager.default.createDirectory(
             at: persistURL.deletingLastPathComponent(),
