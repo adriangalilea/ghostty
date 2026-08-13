@@ -26,7 +26,7 @@ import GhosttyKit
 /// by parsing their id.
 ///
 /// Durable state lives in the wake registry (~/.local/state/wake), maintained
-/// event-driven by Claude Code hooks. This manager persists name + label +
+/// event-driven by agent adapters. This manager persists name + label +
 /// cwd + captured tabs so asleep sessions are listable and resurrectable.
 @MainActor
 class VigilSessionManager {
@@ -43,8 +43,8 @@ class VigilSessionManager {
         case asleep
     }
 
-    /// Why a session wants Adrian. `input` (claude Notification: permission or
-    /// question) outranks `done` (turn finished); FIFO within a rank. Cleared
+    /// Why a session wants Adrian. `input` (adapter permission or question)
+    /// outranks `done` (turn finished); FIFO within a rank. Cleared
     /// on open/next, never on mere glancing.
     enum Attention: Int {
         case none = 0
@@ -57,7 +57,7 @@ class VigilSessionManager {
     /// this is the always-current answer to "what is this pane's program
     /// doing". Written by the hook adapter as a one-word file per pane
     /// (~/.local/state/wake/state/<pane>.state, mtime = since); any program
-    /// may adopt the contract (claude does today). Ranked for the sidebar
+    /// may adopt the contract (Claude and Codex do today). Ranked for the sidebar
     /// tree rollup: a collapsed node shows the max over its descendants.
     enum AgentState: Int, Comparable {
         case idle = 0
@@ -623,7 +623,7 @@ class VigilSessionManager {
         }
     }
 
-    // MARK: Attention (fed by claude hooks through the wake events log)
+    // MARK: Attention (fed by agent adapters through the wake events log)
 
     private var eventsURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -634,7 +634,7 @@ class VigilSessionManager {
     private var eventsTimer: Timer?
 
     /// The drain offset survives relaunches: attention that fired while the
-    /// app was CLOSED (a watcher verdict, a headless claude finishing in its
+    /// app was CLOSED (a watcher verdict, a headless agent finishing in its
     /// daemon) is exactly the attention a relaunch must surface. Only ancient
     /// history (pre-truncation) is not pending.
     private var eventsOffsetURL: URL {
@@ -645,7 +645,7 @@ class VigilSessionManager {
     private struct WakeEvent: Decodable {
         let container: String
         let event: String
-        /// The vigild pane daemon the claude lives in. Ground truth for
+        /// The vigild pane daemon the agent lives in. Ground truth for
         /// ownership: VIGIL_SESSION in the process env is stamped at birth
         /// and goes stale when a tab is dragged into another session.
         let pane: String?
@@ -657,7 +657,7 @@ class VigilSessionManager {
         sessions.first { ownedPaneIds($0.value).contains(pane) }?.key
     }
 
-    /// Tail the events log the claude hooks append to. A 1s poll is honest
+    /// Tail the events log agent adapters append to. A 1s poll is honest
     /// enough for human attention; the log is small and offset-read.
     private func startEventWatcher() {
         // Bound the attention log: it is append-only and offset-tailed, so
@@ -713,7 +713,7 @@ class VigilSessionManager {
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
             guard let event = try? JSONDecoder().decode(WakeEvent.self, from: Data(line.utf8)) else { continue }
             // Ownership resolution, strongest first: the pane daemon the
-            // claude lives in (survives drag-out; env container goes
+            // agent lives in (survives drag-out; env container goes
             // stale), then the birth container.
             let name: String
             if let pane = event.pane, !pane.isEmpty, let owner = sessionOwning(pane: pane) {
@@ -738,7 +738,7 @@ class VigilSessionManager {
                 changed = true
                 continue
             }
-            // Notification = permission prompt; Ask = the Stop classifier
+            // Notification = permission prompt; Ask = the adapter classifier
             // found a question at turn end (both need input NOW).
             let attention: Attention = ["Notification", "Ask"].contains(event.event) ? .input : .done
             // Escalate only: an input request is not downgraded by a later Stop.
@@ -3674,7 +3674,7 @@ class VigilSessionManager {
     /// Event-driven state, not polled: any hook write into the state dir
     /// repaints the projections within the refresh throttle, instead of
     /// waiting for the sidebar's 2s ticker. (Whatever latency remains on a
-    /// permission prompt is claude firing its Notification late, upstream.)
+    /// permission prompt latency is whatever its adapter/source reports.)
     private var stateDirWatcher: DispatchSourceFileSystemObject?
 
     private func startStateDirWatcher() {
@@ -3723,7 +3723,7 @@ class VigilSessionManager {
         guard let s = paneAgentState(pane) else { return nil }
         if s.state == .done || s.state == .blocked,
            let ack = lastAck[pane], ack >= s.since { return .idle }
-        // Esc-interrupt fires NO hook (nothing rewrites the state file),
+        // Claude Esc-interrupt fires NO hook (nothing rewrites the state file),
         // so `working` would spin forever. The program's own title is the
         // corrective: claude wears `✳ ` the moment it idles (braille
         // spinner while working). Positive idle marker only - absence of
@@ -3762,16 +3762,19 @@ class VigilSessionManager {
     }
 
     /// What died with the machine and nobody re-armed: tombstones still on
-    /// disk for this session's panes. Claude panes consume their own via
-    /// the SessionStart hook, so what remains is exactly what needs a
+    /// disk for this session's panes. Agent panes consume their own via
+    /// their SessionStart hook, so what remains is exactly what needs a
     /// human decision.
     func diedProcesses(of name: String) -> [DiedProcess] {
         guard let session = sessions[name] else { return [] }
         var out: [DiedProcess] = []
         for pane in ownedPaneIds(session).sorted() {
             for argv in paneCommands(pane, "died") {
-                guard Self.processLabel(argv) != nil else { continue }
-                guard !argv.hasPrefix("claude"), !argv.contains("/claude") else { continue }
+                guard let label = Self.processLabel(argv),
+                      !["claude", "codex"].contains(label) else { continue }
+                guard !["claude", "codex"].contains(where: {
+                    argv.hasPrefix($0) || argv.contains("/\($0)")
+                }) else { continue }
                 out.append(DiedProcess(pane: pane, command: argv))
             }
         }
@@ -4615,67 +4618,39 @@ class VigilSessionManager {
             + "screen:\n\(screen.suffix(1500))"
     }
 
-    /// The ACTUAL WORK in these panes, straight from the agent's transcript:
-    /// what was asked, in the user's own words. A screen scrape only ever
-    /// caught whatever happened to be painted, and a cwd basename named
-    /// every $HOME pane "adrian" - neither can name a task. Cheap: the last
-    /// lines of a JSONL file, only when a rename is actually requested.
+    /// The ACTUAL WORK in these panes, captured by the adapter from the
+    /// agent's prompt event: what was asked, in the user's own words. A
+    /// screen scrape only ever caught whatever happened to be painted, and
+    /// a cwd basename named every $HOME pane "adrian". Legacy Claude entries
+    /// without an asks cache fall back to their transcript.
     func workContext(panes: [String]) -> String {
         var out: [String] = []
         for pane in panes.sorted() {
-            guard let transcript = transcriptPath(ofPane: pane) else { continue }
-            let asks = userAsks(inTranscript: transcript, limit: 6)
+            let asks = agentAsks(ofPane: pane, limit: 6)
             guard !asks.isEmpty else { continue }
             out.append("- pane \(pane):\n  " + asks.joined(separator: "\n  "))
         }
         return out.joined(separator: "\n")
     }
 
-    /// The claude transcript backing a pane, via the hook's registry entry
-    /// (the hook rewrites it on every resume, so it always points at the
-    /// CURRENT conversation - identity is a pointer, not a value).
-    private func transcriptPath(ofPane pane: String) -> URL? {
+    /// Opening ask + latest asks for one pane. Current adapters write this
+    /// bounded cache from their stable prompt hook, so Vigil never depends on
+    /// an agent vendor's private transcript schema.
+    private func agentAsks(ofPane pane: String, limit: Int) -> [String] {
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/wake/sessions")
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
-        else { return nil }
+        else { return [] }
         for entry in entries where entry.hasSuffix("--\(pane).json") {
             guard let data = try? Data(contentsOf: dir.appendingPathComponent(entry)),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let path = json["transcript"] as? String
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
-            return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        }
-        return nil
-    }
-
-    /// The human's asks in a transcript, oldest first: the opening request
-    /// (what the conversation IS) plus the most recent ones (where it went).
-    private func userAsks(inTranscript url: URL, limit: Int) -> [String] {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        var asks: [String] = []
-        for line in text.components(separatedBy: .newlines) {
-            guard let data = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  json["type"] as? String == "user",
-                  let message = json["message"] as? [String: Any]
-            else { continue }
-            var body = ""
-            if let s = message["content"] as? String {
-                body = s
-            } else if let blocks = message["content"] as? [[String: Any]] {
-                body = blocks.compactMap { $0["text"] as? String }.joined(separator: " ")
+            if let asks = json["asks"] as? [String], !asks.isEmpty {
+                if asks.count <= limit { return asks }
+                return [asks[0]] + asks.suffix(limit - 1)
             }
-            body = body.replacingOccurrences(of: "\n", with: " ")
-                .trimmingCharacters(in: .whitespaces)
-            // Hook injections and tool results wear XML-ish wrappers; the
-            // point is what the HUMAN typed.
-            guard !body.isEmpty, !body.hasPrefix("<"), body.count > 3 else { continue }
-            asks.append(String(body.prefix(160)))
         }
-        guard !asks.isEmpty else { return [] }
-        if asks.count <= limit { return asks }
-        return [asks[0]] + asks.suffix(limit - 1)
+        return []
     }
 
     /// Emoji already chosen across sessions, deduped: the editor's one-click
