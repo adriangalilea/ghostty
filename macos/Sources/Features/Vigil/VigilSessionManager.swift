@@ -2472,8 +2472,13 @@ class VigilSessionManager {
         "\(Self.attachSentinel)\(paneId)"
     }
 
-    /// Capture the mounted tab OUT of its window for a move: the viewport
-    /// mounts the session's next tab, else the next session, else closes.
+    /// Capture the mounted tab OUT of its window for a move. If the source
+    /// still has a tab, the viewport mounts it. If the source is empty, the
+    /// controller deliberately stays unclaimed with its moved tree intact;
+    /// `settleVacatedController` atomically hands that viewport to the move
+    /// target after the target capture owns the pane. Choosing an arbitrary
+    /// session here used to leave a live tree sessionless when that session
+    /// was already embedded and `mount` refused (2026-08-12).
     /// Returns the captured tab (dock included).
     private func vacateMountedTab(_ controller: TerminalController, name: String) -> Tab? {
         // THE 2026-08-04 drag-move crash: `?.` chain assignment evaluates
@@ -2501,17 +2506,54 @@ class VigilSessionManager {
             mountCapturedTab(next, name: name, in: controller)
         } else {
             memberships.removeObject(forKey: controller)
-            let nextSession = sessions.values
-                .filter { $0.name != name }
-                .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-                .first
-            if let nextSession, let ghostty = ghosttyApp {
-                mount(nextSession.name, into: controller, ghostty: ghostty)
-            } else {
-                killController(controller)
-            }
         }
         return captured
+    }
+
+    /// Finish the empty-source half of a move. The moved tree is still in
+    /// `controller`, and the target capture now claims every daemon in it.
+    /// A mountable target adopts this exact viewport (no extra window, no
+    /// second attach); a target already visible elsewhere keeps its home and
+    /// this now-redundant viewport closes empty.
+    private func settleVacatedController(
+        _ controller: TerminalController,
+        movedTo target: String
+    ) {
+        guard sessionName(of: controller) == nil,
+              !controller.surfaceTree.isEmpty,
+              let targetSession = sessions[target] else { return }
+
+        switch targetSession.state {
+        case .detached(let trees):
+            // The capture is the durable representation of these cold tabs.
+            // Release the old detached views before promoting the moved live
+            // tree, otherwise the target would have two runtime owners.
+            if let docks = detachedDocks[target] {
+                for dock in docks.values { dock.unmount() }
+            }
+            detachedDocks[target] = nil
+            setOcclusion(false, trees)
+            registerMember(controller, name: target)
+            sessions[target]!.state = .embedded
+            setOcclusion(true, [controller.surfaceTree])
+            focusLeftmost(controller)
+            vlog("move viewport: unclaimed controller -> detached target '\(target)'")
+
+        case .asleep:
+            registerMember(controller, name: target)
+            sessions[target]!.state = .embedded
+            setOcclusion(true, [controller.surfaceTree])
+            focusLeftmost(controller)
+            vlog("move viewport: unclaimed controller -> asleep target '\(target)'")
+
+        case .embedded, .floating:
+            // The target already owns another live window. Its capture now
+            // owns this pane, so releasing this duplicate viewport is safe.
+            controller.surfaceTree = SplitTree()
+            killController(controller)
+            open(name: target)
+            vlog("move viewport: target '\(target)' already live -> closed source viewport")
+        }
     }
 
     /// A source emptied by moves clears: identity through the tray
@@ -2552,6 +2594,10 @@ class VigilSessionManager {
         }
         guard let moved else { return }
         sessions[target]!.tabs.append(moved)
+        if let view = liveView(attachId: anchor),
+           let controller = view.window?.windowController as? TerminalController {
+            settleVacatedController(controller, movedTo: target)
+        }
         vlog("moveTab: \(anchor): '\(source)' -> '\(target)'")
         clearIfEmpty(source)
         persist()
@@ -2568,6 +2614,7 @@ class VigilSessionManager {
         var pane: Pane?
         var inheritedLabel: String?
         var inheritedEmoji: String?
+        var vacatedController: TerminalController?
 
         if let view = liveView(attachId: paneId),
            let controller = view.window?.windowController as? TerminalController {
@@ -2592,6 +2639,7 @@ class VigilSessionManager {
                     let vacated = vacateMountedTab(controller, name: source)
                     inheritedLabel = vacated?.label
                     inheritedEmoji = vacated?.emoji
+                    vacatedController = controller
                 } else {
                     controller.surfaceTree = controller.surfaceTree.removing(node)
                 }
@@ -2649,6 +2697,9 @@ class VigilSessionManager {
             sessions[target]!.tabs.append(Tab(
                 panes: [pane], layout: nil,
                 label: inheritedLabel, emoji: inheritedEmoji))
+        }
+        if let vacatedController {
+            settleVacatedController(vacatedController, movedTo: target)
         }
         vlog("movePane: \(paneId): '\(source)' -> '\(target)' dock=\(isDock)")
         clearIfEmpty(source)
