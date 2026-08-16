@@ -3273,60 +3273,67 @@ class VigilSessionManager {
     }
 
     /// Panes whose claims are ALLOWED to vanish (their daemons were
-    /// deliberately killed). Everything else is protected by the persist
-    /// net below.
+    /// deliberately killed). Pruned once the kill's spec unlink lands.
     private var expectedUnclaims = Set<String>()
 
-    /// The claimed set of the last persist, pane id -> owning session.
-    private var lastClaims: [String: String] = [:]
+    /// The pane's cwd + owning session, straight from the LEDGER: line 1
+    /// and 2 of its daemon's spec (`~/.local/state/vigild/<pane>.spec`),
+    /// rewritten atomically by `vigild chown`, removed only by a
+    /// deliberate kill.
+    private func ledgerEntry(of pane: String) -> (cwd: String, owner: String)? {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/vigild/\(pane).spec")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let lines = text.components(separatedBy: "\n")
+        guard lines.count >= 2, !lines[1].isEmpty else { return nil }
+        return (lines[0], lines[1])
+    }
 
-    /// The anti-orphan net. A pane that was claimed, whose daemon still
-    /// runs, and that nobody deliberately killed, must NEVER leave the
-    /// capture silently: the sweep would judge the daemon unreachable and
-    /// destroy it - a claude moved between sessions died exactly this way
-    /// (2026-08-10: movePane -> claim lost somewhere -> sweep killed the
-    /// daemon and its resume pointer 2 minutes later). Scream and restore
-    /// as a cold tab; losing a tab to a bug should cost a log line, never
-    /// a conversation.
-    private func restoreLostClaims(_ entries: inout [PersistedSession]) {
-        let stateDir = FileManager.default.homeDirectoryForCurrentUser
+    /// Ownership is a fact ON the pane (the ledger), and captures are a
+    /// LAYOUT CACHE that reconciles into it here, at the persist
+    /// chokepoint. Two passes:
+    ///  - heal: a live daemon whose ledger owner is a live session but
+    ///    that NO capture claims was dropped by bookkeeping. Restore it as
+    ///    a cold tab in its owner, IN MEMORY, and scream. (The first net
+    ///    restored into the serialized copy only: memory disagreed, every
+    ///    persist re-screamed, and the sweep - which reads memory - killed
+    ///    two daemons straight through the net, 2026-08-13.)
+    ///  - stamp: every capture claim whose ledger disagrees is chowned, so
+    ///    a legitimate move is one field rewrite and pre-ledger daemons
+    ///    migrate on the first persist after launch.
+    /// A capture error now costs a reshuffle, never a conversation.
+    private func reconcileLedger() {
+        let fm = FileManager.default
+        let stateDir = fm.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/vigild")
+        let vigildBin = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/vigild").path
+
         var claimed: [String: String] = [:]
-        for entry in entries {
-            for tab in entry.tabs ?? [] {
-                for pane in tab.panes + (tab.dock?.panes ?? []) {
-                    if let id = paneId(of: pane) { claimed[id] = entry.name }
-                }
-            }
-        }
-        for (id, owner) in lastClaims where claimed[id] == nil {
-            if expectedUnclaims.contains(id) { continue }
-            guard FileManager.default.fileExists(
-                atPath: stateDir.appendingPathComponent("\(id).pid").path)
+        for (name, session) in sessions { for id in ownedPaneIds(session) { claimed[id] = name } }
+        for (name, session) in graveyard { for id in ownedPaneIds(session) { claimed[id] = name } }
+
+        for file in (try? fm.contentsOfDirectory(atPath: stateDir.path)) ?? []
+        where file.hasSuffix(".spec") && file.hasPrefix("vigil-") {
+            let pane = String(file.dropLast(".spec".count))
+            guard claimed[pane] == nil, !expectedUnclaims.contains(pane) else { continue }
+            guard fm.fileExists(atPath: stateDir.appendingPathComponent("\(pane).pid").path)
             else { continue }
-            guard let index = entries.firstIndex(where: { $0.name == owner })
-                ?? entries.indices.first
-            else { continue }
-            var tabs = entries[index].tabs ?? []
-            tabs.append(Tab(
-                panes: [Pane(cwd: FileManager.default.homeDirectoryForCurrentUser.path,
-                             command: "\(Self.attachSentinel)\(id)")],
+            guard let entry = ledgerEntry(of: pane), sessions[entry.owner] != nil else { continue }
+            sessions[entry.owner]!.tabs.append(Tab(
+                panes: [Pane(cwd: entry.cwd, command: "\(Self.attachSentinel)\(pane)")],
                 layout: nil))
-            entries[index] = entries[index].withTabs(tabs)
-            vlog("!! persist: '\(id)' lost its claim with a LIVE daemon - restored as a cold tab in '\(entries[index].name)'")
+            claimed[pane] = entry.owner
+            vlog("!! ledger: '\(pane)' lost every capture claim with a LIVE daemon -> restored as a cold tab in '\(entry.owner)'")
         }
-        // Prune the expectation set once a pane's daemon is truly gone.
+
+        for (pane, owner) in claimed {
+            guard let entry = ledgerEntry(of: pane), entry.owner != owner else { continue }
+            runFireAndForget(vigildBin, ["chown", pane, owner])
+        }
+
         expectedUnclaims = expectedUnclaims.filter {
-            FileManager.default.fileExists(
-                atPath: stateDir.appendingPathComponent("\($0).pid").path)
-        }
-        lastClaims = claimed
-        for entry in entries {
-            for tab in entry.tabs ?? [] {
-                for pane in tab.panes + (tab.dock?.panes ?? []) {
-                    if let id = paneId(of: pane) { lastClaims[id] = entry.name }
-                }
-            }
+            fm.fileExists(atPath: stateDir.appendingPathComponent("\($0).spec").path)
         }
     }
 
@@ -3375,6 +3382,18 @@ class VigilSessionManager {
         where entry.hasSuffix(".pid") && entry.hasPrefix("vigil-") {
             let stem = String(entry.dropLast(4))
             guard !owned.contains(stem) else { continue }
+            // The LEDGER outranks capture bookkeeping: captures are a
+            // cache and may be wrong, the spec's owner is not. A daemon
+            // whose owner still lives (or is buried, still undoable) is
+            // never unreachable; reconcileLedger heals it back into a
+            // capture at the next persist. (Capture-only reachability let
+            // the sweep kill two live agents through the first net,
+            // 2026-08-13.)
+            if let owner = ledgerEntry(of: stem)?.owner,
+               sessions[owner] != nil || graveyard[owner] != nil {
+                vlog("sweep: '\(stem)' unclaimed by captures but ledger owner '\(owner)' lives -> spared")
+                continue
+            }
             let path = stateDir.appendingPathComponent(entry).path
             if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
                let created = attrs[.modificationDate] as? Date,
@@ -4711,13 +4730,6 @@ class VigilSessionManager {
         let foreground: Bool?
         /// Monotonic pane-index counter; indices are never recycled.
         let paneSeq: Int?
-
-        func withTabs(_ tabs: [Tab]) -> PersistedSession {
-            PersistedSession(
-                name: name, label: label, emoji: emoji, cwd: cwd, tabs: tabs,
-                order: order, pinned: pinned, buriedUntil: buriedUntil,
-                foreground: foreground, paneSeq: paneSeq)
-        }
     }
 
     /// Frozen foreground truth for the shutdown persist: the flags must
@@ -4879,6 +4891,7 @@ class VigilSessionManager {
 
     private func persist() {
         refreshEmbeddedCaptures()
+        reconcileLedger()
         var entries = sessions.values.filter { $0.persistent }.map {
             PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq)
         }
@@ -4886,7 +4899,6 @@ class VigilSessionManager {
             PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq)
         }
         entries.sort { $0.name < $1.name }
-        restoreLostClaims(&entries)
         let data = try! JSONEncoder().encode(entries)
         try? FileManager.default.createDirectory(
             at: persistURL.deletingLastPathComponent(),
