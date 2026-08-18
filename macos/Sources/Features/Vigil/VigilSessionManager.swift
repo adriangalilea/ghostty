@@ -1201,7 +1201,7 @@ class VigilSessionManager {
         // must see these controllers as session-less.
         for controller in ms {
             memberships.removeObject(forKey: controller)
-            controller.surfaceTree = SplitTree()
+            killController(controller)
         }
         // The frozen visual survives relaunch too: asleep sessions keep their
         // face in the overview.
@@ -1947,7 +1947,7 @@ class VigilSessionManager {
                 dockMap.removeObject(forKey: member)
             }
             for member in ms { memberships.removeObject(forKey: member) }
-            for member in ms where member !== controller { member.surfaceTree = SplitTree() }
+            for member in ms where member !== controller { killController(member) }
             // BOTH classes stay DETACHED with trees ALIVE: coming back
             // re-embeds these exact surfaces (native tabs regroup from
             // live trees, no VT replay, titles intact). The old
@@ -2503,7 +2503,7 @@ class VigilSessionManager {
         if members(of: name).count > 1 {
             // A native tab window: it just closes.
             memberships.removeObject(forKey: controller)
-            controller.surfaceTree = SplitTree()
+            killController(controller)
         } else if let next = sessions[name]?.tabs.first(where: { !$0.panes.isEmpty }) {
             mountCapturedTab(next, name: name, in: controller)
         } else {
@@ -2551,7 +2551,6 @@ class VigilSessionManager {
         case .embedded, .floating:
             // The target already owns another live window. Its capture now
             // owns this pane, so releasing this duplicate viewport is safe.
-            controller.surfaceTree = SplitTree()
             killController(controller)
             open(name: target)
             vlog("move viewport: target '\(target)' already live -> closed source viewport")
@@ -3880,8 +3879,34 @@ class VigilSessionManager {
     /// Silent, total window kill: emptying the tree closes the window without
     /// ghostty's own close confirmation (same mechanism detach uses), and with
     /// no reference kept the surfaces free and the processes die.
+    /// THE programmatic window exit. Every path that makes a viewport
+    /// disappear without the user closing it (regroup siblings, detach,
+    /// vacate, kill) goes through here, because an emptied tree alone is
+    /// not a close: ghostty's `surfaceTreeDidChange` runs `window.close()`,
+    /// but a tab-window that was appended SILENTLY (vigilNewTab, never
+    /// shown) does not reliably reach `windowWillClose`, so the
+    /// contentView<->window cycle ghostty breaks there stays intact and
+    /// the whole NSWindow (titlebar accessories, tab bar, SwiftUI hosting
+    /// views, 40 CALayers) lives forever in NSApp.windows. 547 shapeshifts
+    /// left 1108 dead terminal windows resident, 1.9 GB and a quarter of a
+    /// core idle, WindowServer compositing corpses (2026-08-18). Undo is
+    /// disabled around the exit: this is structure moving, nothing a ⌘⇧T
+    /// should bring back (burials own their own undo).
     func killController(_ controller: TerminalController) {
-        controller.surfaceTree = SplitTree()
+        guard let window = controller.window else {
+            controller.surfaceTree = SplitTree()
+            return
+        }
+        let exit = {
+            controller.surfaceTree = SplitTree()
+            if window.isVisible || window.tabGroup != nil { window.close() }
+            window.contentView = nil
+        }
+        if let undoManager = controller.undoManager {
+            undoManager.disableUndoRegistration { exit() }
+        } else {
+            exit()
+        }
     }
 
     /// Every terminal window NOT registered to a session: should not exist
@@ -4493,6 +4518,18 @@ class VigilSessionManager {
                 vlog("!! IMPOSSIBLE [\(site)]: live pane '\(id)' owned by NOBODY (stranded by a move?)")
             }
         }
+        // Dead windows must actually die: a closed terminal window that
+        // stays resident keeps its titlebar accessories, tab bar and
+        // SwiftUI hosts alive and WindowServer compositing it. Undo-close
+        // legitimately retains a few (120s), so the tripwire is a RATIO:
+        // resident controllers vs windows a human can see.
+        let resident = TerminalController.all.count
+        let visible = TerminalController.all.filter {
+            $0.window.map { $0.isVisible || $0.isMiniaturized } ?? false
+        }.count
+        if resident > max(20, visible * 4) {
+            vlog("!! IMPOSSIBLE [\(site)]: \(resident) TerminalControllers resident for \(visible) visible windows (window leak)")
+        }
         // One daemon = ONE live pane: twin surfaces on one socket replay
         // interleaved frames into garbage (the duplicated-lazygit
         // corruption).
@@ -4844,11 +4881,45 @@ class VigilSessionManager {
             } else if !prevIds.isEmpty, prevIds.allSatisfy({ !live.contains($0) }) {
                 out.append(prev) // still cold, same position
             }
-            // else: panes partially live under another tab or gone; the
-            // live capture already represents them.
+            // else: partially live under another tab. The invariant pass
+            // below re-places whatever the live capture did NOT hold.
         }
         for index in liveTabs.indices where !used.contains(index) {
             out.append(liveTabs[index])
+        }
+
+        // A capture merge may NEVER lose a pane by inference. The old rule
+        // dropped a previous tab whose panes were "live under another
+        // tab" without checking that the output actually held them - a
+        // split tab whose partner rode a different live tree lost its
+        // shape and its pane, and only the ledger's heal brought the pane
+        // back, as a bare cold tab (2026-08-18: attention-kernel's split).
+        // Whatever the merge did not place is re-placed here, verbatim
+        // from the previous capture, and the log screams so the merge
+        // rule that dropped it can be found. Prefer the layout the user
+        // had over any inference about where its panes went.
+        let placed = Set(out.flatMap(tabPaneIds))
+        for prev in session.tabs {
+            let missing = tabPaneIds(prev).filter { !placed.contains($0) }
+            guard !missing.isEmpty else { continue }
+            let mine = out.contains { tab in
+                !Set(tabPaneIds(tab)).isDisjoint(with: Set(tabPaneIds(prev)))
+            }
+            vlog("!! mergeTabs: '\(name)' previous tab \(tabPaneIds(prev)) lost \(missing) in the merge (partner placed=\(mine)) -> re-placed from the previous capture")
+            let survivors = prev.panes.filter { pane in
+                paneId(of: pane).map { missing.contains($0) } ?? false
+            }
+            let dock = prev.dock.flatMap { d -> DockCapture? in
+                let keep = d.panes.filter { paneId(of: $0).map { missing.contains($0) } ?? false }
+                return keep.isEmpty ? nil : DockCapture(panes: keep, active: min(d.active, keep.count - 1), width: d.width, collapsed: d.collapsed)
+            }
+            if survivors.isEmpty, dock == nil { continue }
+            out.append(Tab(
+                panes: survivors,
+                layout: survivors.count == prev.panes.count ? prev.layout : nil,
+                dock: dock,
+                label: prev.label,
+                emoji: prev.emoji))
         }
         return out
     }
