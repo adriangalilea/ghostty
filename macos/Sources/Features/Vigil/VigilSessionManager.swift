@@ -2395,6 +2395,7 @@ class VigilSessionManager {
                     guard let vi = runtime.views.firstIndex(where: { $0 === view }) else { continue }
                     let proceed = { [weak self] in
                         guard let self else { return }
+                        self.expectDeath([paneId])
                         runtime.views.remove(at: vi)
                         runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
                         if runtime.views.isEmpty { self.detachedDocks[session]?[index] = nil }
@@ -2441,6 +2442,7 @@ class VigilSessionManager {
 
     private func removeColdPane(name: String, paneId: String) {
         guard var session = sessions[name] else { return }
+        expectDeath([paneId])
         for index in session.tabs.indices {
             if let paneIndex = session.tabs[index].panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
                 session.tabs[index].panes.remove(at: paneIndex)
@@ -3261,10 +3263,23 @@ class VigilSessionManager {
         sweepPaneDaemons()
     }
 
-    /// Kill pane daemons by id (resolved by the caller while its references
-    /// were still alive).
-    private func killDaemons(paneIds: Set<String>) {
+    /// Declare that these panes are about to die deliberately. MUST run
+    /// synchronously before any persist that drops their claims: the
+    /// ledger's heal reads this set, and a claim dropped without it looks
+    /// exactly like the bookkeeping bug the heal exists for (closing a
+    /// dock tenant persisted first and killed on the next tick, so every
+    /// close resurrected the tenant as a cold tab, 2026-08-18). The kill
+    /// itself may be deferred (the deferred-free UAF lesson); the intent
+    /// may not.
+    private func expectDeath(_ paneIds: Set<String>) {
         expectedUnclaims.formUnion(paneIds)
+    }
+
+    /// Kill pane daemons by id (resolved by the caller while its references
+    /// were still alive). Declares the intent too, for callers that kill
+    /// before they persist.
+    private func killDaemons(paneIds: Set<String>) {
+        expectDeath(paneIds)
         let vigildBin = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/bin/vigild").path
         for id in paneIds {
@@ -3493,6 +3508,7 @@ class VigilSessionManager {
               runtime.views.indices.contains(index) else { return }
         let view = runtime.views.remove(at: index)
         let paneId = view.vigilAttachId
+        if let paneId { expectDeath([paneId]) }
         view.removeFromSuperview()
         runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
         if runtime.views.isEmpty { dockMap.removeObject(forKey: controller) }
