@@ -1248,20 +1248,21 @@ extension Ghostty {
                     return
                 }
 
-                // Press-and-hold: with the setting on, a held letter's repeats
-                // belong to the accent-popup machinery (already fed through
-                // interpretKeyEvents above), not the pty - forwarding them
-                // types nnnn under the popup. Native text views swallow plain
-                // letter repeats entirely; match them. Modified repeats
-                // (ctrl+n held) and non-letters (space, digits, arrows) repeat
-                // as always.
+                // Press-and-hold: with the setting on, a held accent-capable
+                // key's repeats belong to the popup machinery (already fed
+                // through interpretKeyEvents above), not the pty - forwarding
+                // them types nnnn under the popup. Deliberately NARROWER than
+                // native text views (which swallow every letter): terminals
+                // need letter repeats (hjkl in editors), so only the Spanish
+                // accent set is surrendered to the popup. Everything else -
+                // letters, digits, arrows, delete - repeats at full speed, as
+                // do modified holds (ctrl+n).
                 if action == GHOSTTY_ACTION_REPEAT,
                    UserDefaults.ghostty.bool(forKey: "ApplePressAndHoldEnabled"),
                    translationEvent.modifierFlags.intersection([.control, .option, .command]).isEmpty,
                    let repeatChars = translationEvent.ghosttyCharacters,
-                   repeatChars.unicodeScalars.count == 1,
-                   let repeatScalar = repeatChars.unicodeScalars.first,
-                   CharacterSet.letters.contains(repeatScalar) {
+                   repeatChars.count == 1,
+                   "aeiounAEIOUN".contains(repeatChars) {
                     return
                 }
 
