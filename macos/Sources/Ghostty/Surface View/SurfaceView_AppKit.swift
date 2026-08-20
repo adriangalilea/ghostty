@@ -1248,6 +1248,23 @@ extension Ghostty {
                     return
                 }
 
+                // Press-and-hold: with the setting on, a held letter's repeats
+                // belong to the accent-popup machinery (already fed through
+                // interpretKeyEvents above), not the pty - forwarding them
+                // types nnnn under the popup. Native text views swallow plain
+                // letter repeats entirely; match them. Modified repeats
+                // (ctrl+n held) and non-letters (space, digits, arrows) repeat
+                // as always.
+                if action == GHOSTTY_ACTION_REPEAT,
+                   UserDefaults.ghostty.bool(forKey: "ApplePressAndHoldEnabled"),
+                   translationEvent.modifierFlags.intersection([.control, .option, .command]).isEmpty,
+                   let repeatChars = translationEvent.ghosttyCharacters,
+                   repeatChars.unicodeScalars.count == 1,
+                   let repeatScalar = repeatChars.unicodeScalars.first,
+                   CharacterSet.letters.contains(repeatScalar) {
+                    return
+                }
+
                 // We have no accumulated text so this is a normal key event.
                 _ = keyAction(
                     action,
@@ -2059,6 +2076,17 @@ extension Ghostty.SurfaceView: NSTextInputClient {
 
         // If insertText is called, our preedit must be over.
         unmarkText()
+
+        // Press-and-hold accent popup: the system asks us to REPLACE the
+        // character it already let through (the held key's first press) by
+        // passing a replacementRange. A pty cannot rewrite history, so the
+        // replacement becomes backspaces ahead of the new text (nñ → ñ).
+        // Only outside preedit: IME composition manages its own state via
+        // marked text, and the length cap keeps a confused input method from
+        // erasing the user's line.
+        if !hadMarkedText, replacementRange.length > 0, replacementRange.length <= 8 {
+            surfaceModel.sendText(String(repeating: "\u{7F}", count: replacementRange.length))
+        }
 
         // If we have an accumulator we're in another key event so we just
         // accumulate and return.

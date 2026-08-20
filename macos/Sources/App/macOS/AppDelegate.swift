@@ -208,8 +208,13 @@ class AppDelegate: NSObject,
     func applicationDidFinishLaunching(_ notification: Notification) {
         // System settings overrides
         UserDefaults.ghostty.register(defaults: [
-            // Disable this so that repeated key events make it through to our terminal views.
-            "ApplePressAndHoldEnabled": false,
+            // vigil (2026-08-20): TRUE, diverging from upstream's false. The
+            // accent popup (hold n → ñ) is wanted in the terminal; keyDown
+            // swallows plain letter repeats while this is on (native text-view
+            // behavior) and insertText translates the popup's replacementRange
+            // into backspaces. Registration is the LOWEST priority: a user
+            // write (per-app or -g) still turns it off and restores raw repeat.
+            "ApplePressAndHoldEnabled": true,
         ])
 
         // Store our start time
