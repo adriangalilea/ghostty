@@ -2395,7 +2395,7 @@ class VigilSessionManager {
                     guard let vi = runtime.views.firstIndex(where: { $0 === view }) else { continue }
                     let proceed = { [weak self] in
                         guard let self else { return }
-                        self.expectDeath([paneId])
+                        self.condemnDaemons(paneIds: [paneId])
                         runtime.views.remove(at: vi)
                         runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
                         if runtime.views.isEmpty { self.detachedDocks[session]?[index] = nil }
@@ -2442,7 +2442,7 @@ class VigilSessionManager {
 
     private func removeColdPane(name: String, paneId: String) {
         guard var session = sessions[name] else { return }
-        expectDeath([paneId])
+        condemnDaemons(paneIds: [paneId])
         for index in session.tabs.indices {
             if let paneIndex = session.tabs[index].panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
                 session.tabs[index].panes.remove(at: paneIndex)
@@ -3244,6 +3244,11 @@ class VigilSessionManager {
         // daemons: a daemon killed under a live surface posts child_exited
         // into the teardown (the socket EOF), racing the free.
         let paneIds = graveyard[name].map { ownedPaneIds($0) } ?? []
+        // The grace ran out: EVERY pane's death is declared now, durable,
+        // including the ones whose kill defers below - a deferral without
+        // the marker left the pane unclaimed-with-a-live-daemon, exactly
+        // the heal's resurrection signature (phantom tabs, 2026-08-20).
+        condemnDaemons(paneIds: Set(paneIds))
         graveyard[name] = nil
         graveyardDeadlines[name] = nil
         detachedDocks[name] = nil // tenant surfaces freed BEFORE their daemons die
@@ -3262,33 +3267,64 @@ class VigilSessionManager {
         sweepPaneDaemons()
     }
 
-    /// Declare that these panes are about to die deliberately. MUST run
-    /// synchronously before any persist that drops their claims: the
-    /// ledger's heal reads this set, and a claim dropped without it looks
-    /// exactly like the bookkeeping bug the heal exists for (closing a
-    /// dock tenant persisted first and killed on the next tick, so every
-    /// close resurrected the tenant as a cold tab, 2026-08-18). The kill
-    /// itself may be deferred (the deferred-free UAF lesson); the intent
-    /// may not.
-    private func expectDeath(_ paneIds: Set<String>) {
-        expectedUnclaims.formUnion(paneIds)
+    /// Deliberate death is a LEDGER fact: a `<pane>.condemned` marker in
+    /// the vigild state dir, written synchronously BEFORE any persist that
+    /// drops the pane's claim. A dropped claim with the marker is a close;
+    /// without it, it is the bookkeeping bug the heal exists for. Durable
+    /// on purpose - the in-memory intent set this replaces died with the
+    /// app, and two close paths (split close, the reap's corpse-held
+    /// deferral) never populated it at all, so the heal resurrected every
+    /// such close as a phantom cold tab and ⌘W paraded them through the
+    /// viewport (2026-08-20). Every ledger reader honors the marker: the
+    /// heal skips condemned panes, the sweep's owner-lives spare yields
+    /// (the pane dies by reachability, as closes always did), and `vigild
+    /// restore` completes a condemned death at boot instead of respawning
+    /// it. The kill itself may still defer (the deferred-free UAF lesson);
+    /// the intent may not.
+    func condemnDaemons(paneIds: Set<String>) {
+        let fm = FileManager.default
+        for id in paneIds {
+            let url = vigildStateDir.appendingPathComponent("\(id).condemned")
+            guard !fm.fileExists(atPath: url.path) else { continue }
+            fm.createFile(atPath: url.path, contents: nil,
+                          attributes: [.posixPermissions: 0o600])
+            vlog("condemn: '\(id)' deliberate death declared")
+        }
+    }
+
+    /// The panes under a closing split node, condemned at the close
+    /// gesture. (TerminalController routes ROOT closes into tab/window
+    /// semantics - burial, detach - so only destructive node closes call
+    /// this.)
+    func condemnPanes(in node: SplitTree<Ghostty.SurfaceView>.Node) {
+        condemnDaemons(paneIds: Set(node.compactMap(\.vigilAttachId)))
+    }
+
+    private func isCondemned(_ pane: String) -> Bool {
+        FileManager.default.fileExists(
+            atPath: vigildStateDir.appendingPathComponent("\(pane).condemned").path)
+    }
+
+    /// Undo brought a condemned pane back into a capture: the close was
+    /// taken back, full standing (heal, spare, reboot respawn) returns.
+    private func uncondemn(_ pane: String) {
+        let url = vigildStateDir.appendingPathComponent("\(pane).condemned")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try? FileManager.default.removeItem(at: url)
+        vlog("uncondemn: '\(pane)' claimed again (undo) - full standing restored")
     }
 
     /// Kill pane daemons by id (resolved by the caller while its references
-    /// were still alive). Declares the intent too, for callers that kill
-    /// before they persist.
+    /// were still alive). Condemns first so a persist landing between this
+    /// call and the fire-and-forget kill still reads the intent.
     private func killDaemons(paneIds: Set<String>) {
-        expectDeath(paneIds)
+        condemnDaemons(paneIds: paneIds)
         let vigildBin = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/bin/vigild").path
         for id in paneIds {
             runFireAndForget(vigildBin, ["kill", id])
         }
     }
-
-    /// Panes whose claims are ALLOWED to vanish (their daemons were
-    /// deliberately killed). Pruned once the kill's spec unlink lands.
-    private var expectedUnclaims = Set<String>()
 
     /// The pane's cwd + owning session, straight from the LEDGER: line 1
     /// and 2 of its daemon's spec (`~/.local/state/vigild/<pane>.spec`),
@@ -3330,7 +3366,10 @@ class VigilSessionManager {
         for file in (try? fm.contentsOfDirectory(atPath: stateDir.path)) ?? []
         where file.hasSuffix(".spec") && file.hasPrefix("vigil-") {
             let pane = String(file.dropLast(".spec".count))
-            guard claimed[pane] == nil, !expectedUnclaims.contains(pane) else { continue }
+            // A condemned pane's dropped claim is a CLOSE, not the bug the
+            // heal exists for: resurrecting it manufactured phantom tabs
+            // from every split close and reap deferral (2026-08-20).
+            guard claimed[pane] == nil, !isCondemned(pane) else { continue }
             guard fm.fileExists(atPath: stateDir.appendingPathComponent("\(pane).pid").path)
             else { continue }
             guard let entry = ledgerEntry(of: pane), sessions[entry.owner] != nil else { continue }
@@ -3342,12 +3381,9 @@ class VigilSessionManager {
         }
 
         for (pane, owner) in claimed {
+            uncondemn(pane) // a claimed pane is alive by definition; undo takes a close back
             guard let entry = ledgerEntry(of: pane), entry.owner != owner else { continue }
             runFireAndForget(vigildBin, ["chown", pane, owner])
-        }
-
-        expectedUnclaims = expectedUnclaims.filter {
-            fm.fileExists(atPath: stateDir.appendingPathComponent("\($0).spec").path)
         }
     }
 
@@ -3402,8 +3438,11 @@ class VigilSessionManager {
             // never unreachable; reconcileLedger heals it back into a
             // capture at the next persist. (Capture-only reachability let
             // the sweep kill two live agents through the first net,
-            // 2026-08-13.)
-            if let owner = ledgerEntry(of: stem)?.owner,
+            // 2026-08-13.) A CONDEMNED pane forfeits the spare: its death
+            // was declared, and this owner-lives rule was exactly what
+            // made deliberately closed panes immortal (2026-08-20).
+            if !isCondemned(stem),
+               let owner = ledgerEntry(of: stem)?.owner,
                sessions[owner] != nil || graveyard[owner] != nil {
                 vlog("sweep: '\(stem)' unclaimed by captures but ledger owner '\(owner)' lives -> spared")
                 continue
@@ -3425,6 +3464,20 @@ class VigilSessionManager {
             let pidfile = stateDir.appendingPathComponent("\(pane).pid")
             if !FileManager.default.fileExists(atPath: pidfile.path) {
                 try? FileManager.default.removeItem(at: agentStateDir.appendingPathComponent(entry))
+            }
+        }
+
+        // A condemned marker's referent is the SPEC (the right to survive):
+        // kill and daemon exit unlink both, but a close racing a natural
+        // exit can strand a marker alone. Prune only spec-less markers -
+        // a marker WITH a spec and no daemon is a machine-killed condemned
+        // pane whose cleanup belongs to `vigild restore` at boot, and
+        // pruning it first would let restore respawn the pane.
+        for entry in (try? FileManager.default.contentsOfDirectory(atPath: stateDir.path)) ?? []
+        where entry.hasSuffix(".condemned") {
+            let pane = String(entry.dropLast(".condemned".count))
+            if !FileManager.default.fileExists(atPath: stateDir.appendingPathComponent("\(pane).spec").path) {
+                try? FileManager.default.removeItem(at: stateDir.appendingPathComponent(entry))
             }
         }
 
@@ -3507,7 +3560,7 @@ class VigilSessionManager {
               runtime.views.indices.contains(index) else { return }
         let view = runtime.views.remove(at: index)
         let paneId = view.vigilAttachId
-        if let paneId { expectDeath([paneId]) }
+        if let paneId { condemnDaemons(paneIds: [paneId]) }
         view.removeFromSuperview()
         runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
         if runtime.views.isEmpty { dockMap.removeObject(forKey: controller) }

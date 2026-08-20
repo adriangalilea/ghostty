@@ -441,6 +441,9 @@ class BaseTerminalController: NSWindowController,
 
         // If the child process is not alive, then we exit immediately
         guard withConfirmation else {
+            // vigil: a destructive node close is a deliberate death; the
+            // marker must land before any persist sees the dropped claim.
+            VigilSessionManager.shared.condemnPanes(in: node)
             removeSurfaceNode(node)
             return
         }
@@ -455,6 +458,8 @@ class BaseTerminalController: NSWindowController,
             informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
         ) { [weak self] in
             if let self {
+                // vigil: same deliberate death as the unconfirmed branch.
+                VigilSessionManager.shared.condemnPanes(in: node)
                 self.removeSurfaceNode(node)
             }
         }
