@@ -1049,26 +1049,41 @@ class VigilSessionManager {
         persist()
     }
 
-    /// New Session = a new ephemeral, daemon-backed window. The shell/claude
-    /// lives in a vigild daemon, not the window's pty, so ⌘⇧P flips
-    /// `persistent` with zero restart: the process never moves.
-    func create(cwd: String) {
-        guard let ghostty = ghosttyApp else { return }
+    /// Session creation is a REGISTRY fact, never a window fact: mint the
+    /// identity plus one cold daemon-backed pane, asleep. The daemon spawns
+    /// and the shell/claude lives in it (not any window's pty) the moment a
+    /// viewport materializes the pane, so ⌘⇧P flips `persistent` with zero
+    /// restart: the process never moves.
+    private func mintSession(cwd: String) -> String {
         let name = newSessionId()
-        var config = Ghostty.SurfaceConfiguration()
-        config.workingDirectory = cwd
-        config.environmentVariables["VIGIL_SESSION"] = name
-        config.vigilAttach = "vigil-\(name)-0"
-        becomeRegular()
-        let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
-        var session = Session(name: name, label: name, cwd: cwd, state: .embedded)
+        var session = Session(name: name, label: name, cwd: cwd, state: .asleep)
         session.tabs = [Tab(panes: [Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0")], layout: nil)]
         session.paneSeq = 1 // index 0 consumed at birth
         sessions[name] = session // persistent defaults false → ephemeral
-        registerMember(controller, name: name)
-        vlog("born(create): '\(name)' cwd=\(cwd)")
-        persist()
-        NSApp.activate(ignoringOtherApps: true)
+        vlog("born(mint): '\(name)' cwd=\(cwd)")
+        return name
+    }
+
+    /// New Session (⌘N, menu-bar New Session, overview `n`): the fresh
+    /// session takes the CURRENT viewport (shapeshift; the occupant stays
+    /// alive, detached — the sidebar-click semantic). A window is created
+    /// only when no visible viewport exists: viewport necessity, never a
+    /// consequence of session creation.
+    func newSession(in controller: TerminalController? = nil, cwd explicitCwd: String? = nil) {
+        let viewport: TerminalController? = {
+            let c = controller ?? TerminalController.preferredParent
+            guard let c, c.window?.isVisible == true else { return nil }
+            return c
+        }()
+        let cwd = explicitCwd
+            ?? viewport?.focusedSurface?.pwd
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let name = mintSession(cwd: cwd)
+        if let viewport {
+            shapeshift(in: viewport, to: name)
+        } else {
+            open(name: name)
+        }
     }
 
     /// Pane commands with this prefix are daemon attach ids, not shell

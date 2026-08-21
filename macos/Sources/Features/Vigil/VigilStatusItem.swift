@@ -267,9 +267,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     }
 
     @objc private func newSession(_ sender: NSMenuItem) {
-        let cwd = TerminalController.preferredParent?.focusedSurface?.pwd
-            ?? FileManager.default.homeDirectoryForCurrentUser.path
-        VigilSessionManager.shared.create(cwd: cwd)
+        VigilSessionManager.shared.newSession()
     }
 
     @objc private func persistFrontWindow(_ sender: NSMenuItem) {

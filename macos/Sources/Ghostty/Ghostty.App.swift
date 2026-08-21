@@ -601,11 +601,7 @@ extension Ghostty {
                 MainActor.assumeIsolated { VigilSessionManager.shared.detachFrontWindow() }
 
             case GHOSTTY_ACTION_VIGIL_NEW_SESSION:
-                MainActor.assumeIsolated {
-                    VigilSessionManager.shared.create(
-                        cwd: TerminalController.preferredParent?.focusedSurface?.pwd
-                            ?? FileManager.default.homeDirectoryForCurrentUser.path)
-                }
+                MainActor.assumeIsolated { VigilSessionManager.shared.newSession() }
 
             case GHOSTTY_ACTION_VIGIL_OVERVIEW:
                 MainActor.assumeIsolated { VigilOverview.shared.toggle() }

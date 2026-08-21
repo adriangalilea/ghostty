@@ -6982,10 +6982,17 @@ pub const Keybinds = struct {
                 .{ .jump_to_prompt = 1 },
             );
 
-            // Mac windowing
+            // Mac windowing. vigil: session creation and window creation are
+            // decoupled gestures - cmd+N mints a session into the CURRENT
+            // viewport (shapeshift), cmd+shift+N opens a genuinely new window.
             try self.set.put(
                 alloc,
                 .{ .key = .{ .unicode = 'n' }, .mods = .{ .super = true } },
+                .{ .vigil_new_session = {} },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = 'n' }, .mods = .{ .super = true, .shift = true } },
                 .{ .new_window = {} },
             );
             try self.set.put(

@@ -353,7 +353,7 @@ class VigilOverview: NSObject {
     /// path).
     private func createSession() {
         hide()
-        VigilSessionManager.shared.create(
+        VigilSessionManager.shared.newSession(
             cwd: FileManager.default.homeDirectoryForCurrentUser.path)
     }
 
