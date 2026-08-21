@@ -423,48 +423,17 @@ class AppDelegate: NSObject,
             return .terminateCancel
         }
 
-        let windows = NSApplication.shared.windows
-        if windows.isEmpty { return .terminateNow }
-
-        // If we've already accepted to install an update, then we don't need to
-        // confirm quit. The user is already expecting the update to happen.
-        if updateController.isInstalling {
-            return .terminateNow
-        }
-
-        // This probably isn't fully safe. The isEmpty check above is aspirational, it doesn't
-        // quite work with SwiftUI because windows are retained on close. So instead we check
-        // if there are any that are visible. I'm guessing this breaks under certain scenarios.
-        //
-        // NOTE(mitchellh): I don't think we need this check at all anymore. I'm keeping it
-        // here because I don't want to remove it in a patch release cycle but we should
-        // target removing it soon.
-        if (windows.allSatisfy { !$0.isVisible }) {
-            return .terminateNow
-        }
-
-        // If the user is shutting down, restarting, or logging out, we don't confirm quit.
-        why: if let event = NSAppleEventManager.shared().currentAppleEvent {
-            // If all Ghostty windows are in the background (i.e. you Cmd-Q from the Cmd-Tab
-            // view), then this is null. I don't know why (pun intended) but we have to
-            // guard against it.
-            guard let keyword = AEKeyword("why?") else { break why }
-
-            if let why = event.attributeDescriptor(forKeyword: keyword) {
-                switch why.typeCodeValue {
-                case kAEShutDown, kAERestart, kAEReallyLogOut:
-                    return .terminateNow
-
-                default:
-                    break
-                }
-            }
-        }
-
-        // If our app says we don't need to confirm, we can exit now.
-        if !ghostty.needsConfirmQuit { return .terminateNow }
-
-        return terminate()
+        // vigil: interceptTermination returning false means vigil DECIDED this
+        // death (quitForReal, power-off, or nothing persistent survives) and
+        // already recorded/killed what that death requires. Upstream's
+        // interactive confirm that used to follow asks ghostty's truth -
+        // meaningless under a daemon (every surface reads as a running
+        // process) - and its sheet parks NSApp.terminate in a nested runloop
+        // that never returns once the sheet's window closes: a plain SIGTERM
+        // wedged the app inside its own quit for two hours (2026-08-21;
+        // vigil-dev's pkill -9 escalation had always masked it). A decided
+        // death terminates NOW, never waits on a human.
+        return .terminateNow
     }
 
     func applicationWillTerminate(_ notification: Notification) {

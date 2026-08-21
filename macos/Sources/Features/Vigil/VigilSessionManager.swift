@@ -492,9 +492,7 @@ class VigilSessionManager {
         sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         sigtermSource?.setEventHandler {
             MainActor.assumeIsolated {
-                let manager = VigilSessionManager.shared
-                manager.prepareForSystemShutdown()
-                manager.quitForReal()
+                VigilSessionManager.shared.quitForReal()
             }
         }
         sigtermSource?.resume()
@@ -4477,6 +4475,11 @@ class VigilSessionManager {
 
     func quitForReal() {
         reallyQuit = true
+        // DIE owns its ceremony: freeze foreground truth, kill ephemeral
+        // daemons, persist - for EVERY caller (SIGTERM, the eye menu's
+        // explicit Quit). The reallyQuit guard makes interceptTermination
+        // skip all bookkeeping, so it must happen here, before terminate.
+        prepareForSystemShutdown()
         NSApp.terminate(nil)
     }
 
