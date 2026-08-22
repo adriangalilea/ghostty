@@ -194,6 +194,20 @@ final class VigilSidebarModel: ObservableObject {
         refresh()
     }
 
+    /// Where you are: its own instant channel (see ActiveChain).
+    @Published private(set) var focus: VigilSessionManager.ActiveChain?
+
+    func refreshFocus() {
+        let fresh = VigilSessionManager.shared.activeChain()
+        if fresh != focus { focus = fresh }
+    }
+
+    func isFront(_ row: VigilSessionManager.SidebarSessionRow) -> Bool { focus?.session == row.id }
+    func isFront(_ tab: VigilSessionManager.SidebarTab) -> Bool { focus?.tab == tab.id }
+    func isFocused(_ pane: VigilSessionManager.SidebarPane) -> Bool {
+        pane.paneId != nil && focus?.pane == pane.paneId
+    }
+
     private var lastRefresh: Date = .distantPast
     private var refreshQueued = false
     private var stormWindowStart: Date = .distantPast
@@ -203,8 +217,11 @@ final class VigilSidebarModel: ObservableObject {
     /// notifications, bar syncs) collapse into at most ~4 snapshots/s.
     /// The snapshot reads per-pane files; an unthrottled storm once
     /// saturated the main thread and starved the runloop so hard that
-    /// launch restore never ran (2026-08-01).
-    func refresh() {
+    /// launch restore never ran (2026-08-01). `immediate` bypasses the
+    /// throttle for human-rate triggers (a key-window or focus change):
+    /// the tree must repaint with the click, never a tick later.
+    func refresh(immediate: Bool = false) {
+        refreshFocus()
         // Storm tripwire on RATE, not lifetime count: the cumulative
         // version screamed !! every ~17 min of NORMAL use, training the
         // marker to be ignored. The real storm was hundreds of calls/s.
@@ -217,7 +234,7 @@ final class VigilSidebarModel: ObservableObject {
         if stormCount == 200 {
             VigilSessionManager.shared.vlog("!! sidebar refresh storm: 200 calls in 10s")
         }
-        guard now.timeIntervalSince(lastRefresh) >= 0.25 else {
+        guard immediate || now.timeIntervalSince(lastRefresh) >= 0.25 else {
             if !refreshQueued {
                 refreshQueued = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -256,7 +273,7 @@ final class VigilSidebarModel: ObservableObject {
     /// so navigation always starts from the room you're standing in.
     func ensureSelection() {
         if selection == nil || !visibleItems.contains(where: { $0.id == selection }) {
-            selection = rows.first(where: \.isFront)?.id ?? visibleItems.first?.id
+            selection = focus?.session ?? visibleItems.first?.id
         }
     }
 
@@ -294,7 +311,7 @@ final class VigilSidebarModel: ObservableObject {
             let s = Self.hintLetter(i)
             labels[row.id] = s
             guard !collapsedSessions.contains(row.id) else { continue }
-            if row.tabs.count == 1, let tab = row.tabs.first {
+            if let tab = row.soleTab {
                 for (k, pane) in tab.panes.enumerated() {
                     labels["\(tab.id)#\(pane.id)"] = s + Self.hintLetter(k)
                 }
@@ -413,9 +430,7 @@ final class VigilSidebarModel: ObservableObject {
         case .session(let name):
             activate(.init(id: row.id, kind: .session(name)))
         case .tab(let session, let anchor):
-            let isFront = rows.first { $0.id == session }?
-                .tabs.first { $0.id == row.id }?.isFront ?? false
-            tabClicked(id: row.id, session: session, anchor: anchor, isFront: isFront)
+            tabClicked(id: row.id, session: session, anchor: anchor, isFront: focus?.tab == row.id)
         case .pane(let session, _, let paneId):
             activate(.init(id: row.id, kind: .pane(name: session, paneId: paneId)))
         }
@@ -597,7 +612,7 @@ final class VigilSidebarModel: ObservableObject {
         for row in rows {
             out.append(NavItem(id: row.id, kind: .session(row.id)))
             guard !collapsedSessions.contains(row.id) else { continue }
-            if row.tabs.count == 1, let tab = row.tabs.first {
+            if let tab = row.soleTab {
                 for pane in tab.panes {
                     out.append(NavItem(
                         id: "\(tab.id)#\(pane.id)",

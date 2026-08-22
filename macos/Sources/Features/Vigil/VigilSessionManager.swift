@@ -4006,9 +4006,6 @@ class VigilSessionManager {
         let state: AgentState?
         let isDock: Bool
         var emoji: String?        // the pane's custom face
-        /// DERIVED, never stored: this view is the key window's focused
-        /// surface right now. Keystrokes land here.
-        var focused: Bool = false
         /// Declared watch leases (notes) on this pane - the sentry's own
         /// words ("vigía de Carlos: awaiting his TG reply").
         var watchNotes: [String] = []
@@ -4027,11 +4024,11 @@ class VigilSessionManager {
         var anchor: String?
         /// Captured-but-unmounted (lazy shapeshift): daemons run, no views.
         var cold: Bool = false
-        /// DERIVED: this tab is mounted in the key window (the one the
-        /// eyes are on). At most one tab across the whole tree.
-        var isFront: Bool = false
         /// The tab's custom face.
         var emoji: String?
+        /// You gave this tab a name or a face: it carries information of
+        /// its own, so the tree never elides its row.
+        var named: Bool = false
     }
 
     struct SidebarSessionRow: Identifiable, Equatable {
@@ -4043,8 +4040,46 @@ class VigilSessionManager {
         /// Distinct descendant states, priority-ordered (blocked first),
         /// idle only when it is the only one: the collapsed row's cluster.
         let states: [AgentState]
-        let isFront: Bool
         let tabs: [SidebarTab]
+
+        /// The ONE tab whose row the tree elides: a lone tab that carries
+        /// no information of its own (no name, no face). A lone NAMED tab
+        /// earns its row like any tab among many.
+        var soleTab: SidebarTab? {
+            guard tabs.count == 1, let only = tabs.first, !only.named else { return nil }
+            return only
+        }
+    }
+
+    /// Where you ARE, derived from the key window: session, mounted tab
+    /// row, focused pane. Its own channel, read on every key-window and
+    /// focus change without the snapshot's throttle: the active chain must
+    /// repaint the instant a tab is clicked, never a tick later.
+    struct ActiveChain: Equatable {
+        let session: String
+        let tab: String?
+        let pane: String?
+    }
+
+    func activeChain() -> ActiveChain? {
+        guard let front = (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController as? TerminalController,
+              let name = sessionName(of: front), let session = sessions[name] else { return nil }
+        let ids = Set(front.surfaceTree.compactMap(\.vigilAttachId)
+            + (dockMap.object(forKey: front)?.views.compactMap(\.vigilAttachId) ?? []))
+        let tab = session.tabs.first { !Set(tabPaneIds($0)).isDisjoint(with: ids) }
+        let anchor = tab.flatMap { $0.panes.first?.id ?? $0.dock?.panes.first?.id }
+        return ActiveChain(
+            session: name,
+            tab: anchor.map { Self.tabRowId(name, anchor: $0) },
+            pane: front.focusedSurface?.vigilAttachId)
+    }
+
+    /// Row identity FOLLOWS THE TAB (its anchor pane), never its
+    /// position: index-based ids made selection, collapse and rename
+    /// UI stick to whatever tab happened to sit at that row after a
+    /// reorder (the renamed-tab-was-a-different-terminal bug).
+    static func tabRowId(_ session: String, anchor: String?, index: Int = 0) -> String {
+        anchor.map { "\(session)-tab-\($0)" } ?? "\(session)-t\(index)"
     }
 
     /// The cluster rule, shared by session and tab rollups: one dot PER
@@ -4065,13 +4100,6 @@ class VigilSessionManager {
     /// AgentState. A tab materializing its splits one tick apart renders
     /// every registered row from the first paint: nothing flashes.
     func sidebarSnapshot() -> [SidebarSessionRow] {
-        // The active chain is DERIVED here, never stored: whatever moved
-        // the viewport (a click, auto-follow, ⌘⇧J) is reflected by
-        // construction. mainWindow fallback keeps the chain lit while a
-        // panel (overview, alert) briefly holds key.
-        let front = (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController as? TerminalController
-        let frontName = front.flatMap { sessionName(of: $0) }
-        let focusedView = front?.focusedSurface
         let leases = watchLeases()
 
         func paneRow(_ pane: Pane, view: Ghostty.SurfaceView?, isDock: Bool) -> SidebarPane {
@@ -4092,21 +4120,13 @@ class VigilSessionManager {
                 state: paneDisplayState(pane.id),
                 isDock: isDock,
                 emoji: pane.emoji,
-                focused: view != nil && view === focusedView,
                 watchNotes: leases[pane.id]?.map(\.note) ?? [],
                 watchProcs: paneWatchers(pane.id))
         }
 
-        /// Row identity FOLLOWS THE TAB (its anchor pane), never its
-        /// position: index-based ids made selection, collapse and rename
-        /// UI stick to whatever tab happened to sit at that row after a
-        /// reorder (the renamed-tab-was-a-different-terminal bug).
-        func tabRowId(_ session: String, anchor: String?, index: Int) -> String {
-            anchor.map { "\(session)-tab-\($0)" } ?? "\(session)-t\(index)"
-        }
-
         /// A tab's skim label: WHERE it lives (cwd basename), never an echo
-        /// of its first pane's program (the pane rows already say that).
+        /// of its first pane's program or title (the pane rows already say
+        /// that; a terminal title is the full path).
         func tabTitle(cwd: String?, fallback: String) -> String {
             guard let cwd, !cwd.isEmpty else { return fallback }
             let base = URL(fileURLWithPath: cwd).lastPathComponent
@@ -4131,7 +4151,6 @@ class VigilSessionManager {
         let ordered = sessions.values.sorted { ($0.order, $0.label) < ($1.order, $1.label) }
         for session in ordered {
             let name = session.name
-            let ms = members(of: name)
             // Every live view of this session by pane id: member trees and
             // docks when embedded, held runtimes otherwise.
             var live: [String: Ghostty.SurfaceView] = [:]
@@ -4140,36 +4159,24 @@ class VigilSessionManager {
                     if let id = view.vigilAttachId { live[id] = view }
                 }
             }
-            func host(of ids: Set<String>) -> TerminalController? {
-                ms.first { member in
-                    member.surfaceTree.contains { $0.vigilAttachId.map(ids.contains) ?? false }
-                        || (dockMap.object(forKey: member)?.views.contains {
-                            $0.vigilAttachId.map(ids.contains) ?? false
-                        } ?? false)
-                }
-            }
             var tabs: [SidebarTab] = []
             for (index, tab) in session.tabs.enumerated() {
                 let ids = Set(tabPaneIds(tab))
                 guard !ids.isEmpty else { continue }
-                let member = host(of: ids)
                 var panes = tab.panes.map { paneRow($0, view: live[$0.id], isDock: false) }
                 panes += (tab.dock?.panes ?? []).map { paneRow($0, view: live[$0.id], isDock: true) }
                 let anchor = tab.panes.first?.id ?? tab.dock?.panes.first?.id
-                // A swap can leave the window title stale or on ghostty's
-                // literal 👻 default; the tab's own name is truer than either.
-                let title = anchor.flatMap { tabDisplayName(anchor: $0).label }
-                    ?? member.flatMap { liveTabTitle($0.window?.title) }
+                let title = tab.label.flatMap { $0.isEmpty ? nil : $0 }
                     ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)")
                 tabs.append(SidebarTab(
-                    id: tabRowId(name, anchor: anchor, index: index),
+                    id: Self.tabRowId(name, anchor: anchor, index: index),
                     title: title,
                     index: index,
                     panes: panes,
                     anchor: anchor,
                     cold: !ids.contains { live[$0] != nil },
-                    isFront: member != nil && member === front,
-                    emoji: tab.emoji))
+                    emoji: tab.emoji,
+                    named: tab.label?.isEmpty == false || tab.emoji?.isEmpty == false))
             }
             let tag: String
             switch session.state {
@@ -4185,7 +4192,6 @@ class VigilSessionManager {
                 stateTag: tag,
                 attention: session.attention,
                 states: Self.clusterStates(tabs.flatMap(\.panes).compactMap(\.state)),
-                isFront: name == frontName,
                 tabs: tabs))
         }
         return rows

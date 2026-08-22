@@ -93,9 +93,9 @@ struct VigilSidebarView: View {
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.stateDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.focusDidChange)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh() }
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true) }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh() }
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true) }
     }
 
     /// A row's report into the shared geometry map.
@@ -111,15 +111,15 @@ struct VigilSidebarView: View {
     /// or the deepest visible ancestor when collapse hides it. Drives the
     /// keep-visible scroll.
     private var activeLeafId: String? {
-        guard let row = model.rows.first(where: \.isFront) else { return nil }
+        guard let row = model.rows.first(where: { model.isFront($0) }) else { return nil }
         if model.collapsedSessions.contains(row.id) { return row.id }
-        if row.tabs.count == 1, let tab = row.tabs.first {
-            if let pane = tab.panes.first(where: \.focused) { return "\(tab.id)#\(pane.id)" }
+        if let tab = row.soleTab {
+            if let pane = tab.panes.first(where: { model.isFocused($0) }) { return "\(tab.id)#\(pane.id)" }
             return row.id
         }
-        guard let tab = row.tabs.first(where: \.isFront) else { return row.id }
+        guard let tab = row.tabs.first(where: { model.isFront($0) }) else { return row.id }
         if model.collapsedTabs.contains(tab.id) { return tab.id }
-        if let pane = tab.panes.first(where: \.focused) { return "\(tab.id)#\(pane.id)" }
+        if let pane = tab.panes.first(where: { model.isFocused($0) }) { return "\(tab.id)#\(pane.id)" }
         return tab.id
     }
 
@@ -135,7 +135,7 @@ struct VigilSidebarView: View {
               let row = model.rows.first(where: { $0.id == hint.name }) else { return nil }
         if model.collapsedSessions.contains(row.id) { return row.id }
         guard let pane = hint.pane else { return row.id }
-        if row.tabs.count == 1, let tab = row.tabs.first {
+        if let tab = row.soleTab {
             guard tab.panes.contains(where: { $0.paneId == pane }) else { return row.id }
             return "\(tab.id)#\(pane)"
         }
@@ -259,7 +259,7 @@ struct VigilSidebarView: View {
             sessionRow(row, collapsed: collapsed)
                 .id(row.id)
             if !collapsed {
-                if row.tabs.count == 1, let tab = row.tabs.first {
+                if let tab = row.soleTab {
                     ForEach(tab.panes) { pane in
                         paneRow(pane, session: row.id, tab: tab, level: 1)
                     }
@@ -281,12 +281,12 @@ struct VigilSidebarView: View {
             // the list (wash + border), cool accent against the warm
             // state tints, so "where am I" is answered by the tree shape,
             // not one row.
-            if row.isFront {
+            if model.isFront(row) {
                 RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.06))
             }
         })
         .overlay {
-            if row.isFront {
+            if model.isFront(row) {
                 RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1)
             }
@@ -355,7 +355,7 @@ struct VigilSidebarView: View {
         .background(rowBackground(
             id: id,
             hovered: hovered == id,
-            activity: row.isFront ? (collapsed ? .leaf : .chain) : .none,
+            activity: model.isFront(row) ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed ? row.states.first : nil))
         .background(reportHit(id: id, kind: .session(id)))
         .contentShape(Rectangle())
@@ -466,7 +466,7 @@ struct VigilSidebarView: View {
         .background(rowBackground(
             id: tab.id,
             hovered: hovered == tab.id,
-            activity: tab.isFront ? (collapsed ? .leaf : .chain) : .none,
+            activity: model.isFront(tab) ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed
                 ? VigilSessionManager.clusterStates(tab.panes.compactMap(\.state)).first
                 : nil))
@@ -559,7 +559,7 @@ struct VigilSidebarView: View {
         .background(rowBackground(
             id: id,
             hovered: hovered == id,
-            activity: pane.focused ? .leaf : .none,
+            activity: model.isFocused(pane) ? .leaf : .none,
             state: pane.state))
         .background(reportHit(
             id: id,
