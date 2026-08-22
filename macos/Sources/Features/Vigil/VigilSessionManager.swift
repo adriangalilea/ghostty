@@ -633,28 +633,16 @@ class VigilSessionManager {
         return true
     }
 
-    /// Close All Windows: every embedded session is killed (one confirm
-    /// naming everything that runs, the usual grace); strays close plain.
-    func killAllWindows() -> Bool {
+    /// Close All Windows: every embedded session detaches (everything
+    /// keeps running, nothing dies); strays close plain.
+    func detachAllWindows() -> Bool {
         let names = sessions.values.compactMap { session -> String? in
             if case .embedded = session.state { return session.name }
             return nil
         }
         guard !names.isEmpty else { return false }
-        let busy = names.flatMap { busyPrograms(of: $0) }
-        let proceed = { [weak self] in
-            guard let self else { return }
-            for name in names { self.kill(name: name, keepViewport: false) }
-            for stray in self.strayControllers() { stray.closeWindowImmediately() }
-        }
-        if busy.isEmpty {
-            proceed()
-        } else {
-            confirmKill(
-                label: "all windows",
-                info: "\(busy.joined(separator: ", ")) still running. Undo within \(Int(Self.killGrace))s.",
-                proceed)
-        }
+        for name in names { detach(name: name) }
+        for stray in strayControllers() { stray.closeWindowImmediately() }
         return true
     }
 
@@ -1934,11 +1922,11 @@ class VigilSessionManager {
 
     // MARK: Close (vigil owns every close; scope decides the meaning)
 
-    /// Closing a session's WINDOW (red button, ⌘⇧W) kills the session:
-    /// Kill/Cancel when something runs, then the 120s undo. Putting a
-    /// session away without killing is an explicit gesture (sidebar click,
-    /// ⌘⇧U, ⌘Q), never the window's close. Returns true when handled (the
-    /// close must be swallowed by the caller).
+    /// Closing a session's WINDOW (red button, ⌘⇧W) puts the session away:
+    /// it detaches, everything keeps running, no confirm, nothing dies
+    /// (Adrian 2026-08-22: the red button and ⌘Q never kill; only ⌘W
+    /// does). Returns true when handled (the close must be swallowed by
+    /// the caller).
     func handleWindowClose(controller: TerminalController) -> Bool {
         guard let name = sessionName(of: controller) else {
             vlog("handleWindowClose: controller has NO session -> not handled (window closes plain)")
@@ -1952,7 +1940,7 @@ class VigilSessionManager {
             persist()
             return false
         }
-        confirmKill(name: name) { self.kill(name: name, keepViewport: false) }
+        detach(name: name)
         return true
     }
 
@@ -3194,8 +3182,8 @@ class VigilSessionManager {
     /// here. `keepViewport`: the window the session showed in stays and
     /// the last active session takes it (the tab-close semantic: killing
     /// what you are looking at never closes the window while a session
-    /// remains); false = the window closes (the red button's literal
-    /// gesture). `viewport` names that window when the caller has it.
+    /// remains); false = the window closes. `viewport` names that window
+    /// when the caller has it.
     func kill(name: String, keepViewport: Bool = true, viewport: TerminalController? = nil) {
         guard let s = sessions[name] else { vlog("kill: '\(name)' NOT in sessions (noop)"); return }
         vlog("kill: '\(name)' state=\(stateTag(s.state)) -> graveyard")

@@ -974,8 +974,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     /// Close all windows, asking for confirmation if necessary.
     static func closeAllWindows() {
-        // vigil: every session window is killed through the graveyard.
-        if VigilSessionManager.shared.killAllWindows() { return }
+        // vigil: every session window detaches; nothing dies.
+        if VigilSessionManager.shared.detachAllWindows() { return }
         // The window we use for confirmations. Try to find the first window that
         // needs quit confirmation. This lets us attach the confirmation to something
         // that is running.
@@ -1432,8 +1432,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let group = (window.tabGroup?.windows ?? [window])
             .compactMap { $0.windowController as? TerminalController }
 
-        // vigil owns the close of a session window: the session is killed,
-        // confirmed by vigil's own process truth, with a 120s undo. Ghostty's
+        // vigil owns the close of a session window: the session detaches and
+        // keeps running (the red button never kills; ⌘W does). Ghostty's
         // generic "sessions will be terminated" confirm never runs here
         // (every surface is daemon-backed, it would fire on every close).
         // One session spans the whole tabGroup; handle each session ONCE and
