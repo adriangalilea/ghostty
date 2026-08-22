@@ -203,15 +203,21 @@ final class VigilBars {
     private let strayVisible = NSMapTable<TerminalController, NSNumber>(
         keyOptions: [.weakMemory, .objectPointerPersonality], valueOptions: .strongMemory)
 
-    /// The window's own visibility: the session's stored choice, else the
-    /// last toggle anywhere (the default a fresh window is born with).
+    /// The window's own visibility: the session's stored choice. A session
+    /// without one is STAMPED with the app-wide default the first time its
+    /// window syncs, so a later toggle elsewhere (which moves the default)
+    /// can never repaint it: only a toggle on this window changes it.
     func sidebarVisible(for controller: TerminalController) -> Bool {
         let manager = VigilSessionManager.shared
-        if let name = manager.sessionName(of: controller), let stored = manager.sessions[name]?.sidebar {
-            return stored
+        let fallback = UserDefaults.standard.bool(forKey: visibleKey)
+        if let name = manager.sessionName(of: controller), manager.sessions[name] != nil {
+            if let stored = manager.sessions[name]!.sidebar { return stored }
+            manager.stampSidebar(name: name, fallback)
+            return fallback
         }
         if let stray = strayVisible.object(forKey: controller) { return stray.boolValue }
-        return UserDefaults.standard.bool(forKey: visibleKey)
+        strayVisible.setObject(NSNumber(value: fallback), forKey: controller)
+        return fallback
     }
 
     func setSidebarVisible(_ visible: Bool, for controller: TerminalController) {

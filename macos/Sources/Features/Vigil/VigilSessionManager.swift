@@ -4226,6 +4226,13 @@ class VigilSessionManager {
         persist()
     }
 
+    /// First sync of a session window: freeze the default into the
+    /// session (no persist; the next persist carries it).
+    func stampSidebar(name: String, _ visible: Bool) {
+        guard sessions[name] != nil, sessions[name]!.sidebar == nil else { return }
+        sessions[name]!.sidebar = visible
+    }
+
     /// The window's sidebar visibility, stored on the session and synced
     /// to every member window of it.
     func setSidebar(name: String, _ visible: Bool) {
