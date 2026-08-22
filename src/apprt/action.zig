@@ -369,9 +369,6 @@ pub const Action = union(Key) {
     /// vigil: kill the session you are in (floating or normal window).
     vigil_kill,
 
-    /// vigil: toggle the front window persistent/ephemeral.
-    vigil_persist,
-
     /// vigil: toggle the front window floating on top.
     vigil_float,
 
@@ -450,7 +447,6 @@ pub const Action = union(Key) {
         vigil_cycle,
         vigil_next_floating,
         vigil_kill,
-        vigil_persist,
         vigil_float,
 
         test "ghostty.h Action.Key" {

@@ -2,11 +2,9 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The left bar's face. One visual BLOCK per session (the class is the
-/// block: persistent wears the faint teal wash + leading accent, the
-/// window border's language; ephemeral stays bare with the hourglass),
-/// and one rigid column grid so every glyph and dot lands on the same
-/// vertical line whatever the row type.
+/// The left bar's face. One visual BLOCK per session (the active one
+/// spotlit), and one rigid column grid so every glyph and dot lands on
+/// the same vertical line whatever the row type.
 struct VigilSidebarView: View {
     @ObservedObject var model: VigilSidebarModel
     /// The app-wide collapse truth: observing it here is what makes a
@@ -279,9 +277,6 @@ struct VigilSidebarView: View {
         }
         .padding(.vertical, 2)
         .background(ZStack {
-            if row.persistent {
-                RoundedRectangle(cornerRadius: 6).fill(Color.teal.opacity(0.035))
-            }
             // The spotlight: the ACTIVE session's whole block lifts off
             // the list (wash + border), cool accent against the warm
             // state tints, so "where am I" is answered by the tree shape,
@@ -294,14 +289,6 @@ struct VigilSidebarView: View {
             if row.isFront {
                 RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1)
-            }
-        }
-        .overlay(alignment: .leading) {
-            if row.persistent {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Color.teal.opacity(0.3))
-                    .frame(width: 2)
-                    .padding(.vertical, 4)
             }
         }
     }
@@ -347,14 +334,13 @@ struct VigilSidebarView: View {
             // construction (daemons carry it); the only honest distinction
             // is displayed-or-not, and the front tint + filled tab icons
             // already say that. Full state stays in the tooltip.
-            // Collapsed, a descendant's antenna outranks the survival
-            // glyph in the shared class slot (a hidden listener must stay
-            // visible; the hourglass returns on expand).
+            // Collapsed, a descendant's antenna rolls up into the class
+            // slot (a hidden listener must stay visible).
             Group {
                 if collapsed, row.tabs.flatMap(\.panes).contains(where: { watchActive($0) }) {
                     watchRollup(row.tabs.flatMap(\.panes))
                 } else {
-                    classGlyph(row.persistent)
+                    Color.clear.frame(width: Grid.classSlot)
                 }
             }
             // Expanded, the children speak for themselves; collapsed, the
@@ -378,11 +364,6 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: id as NSString)
         }
         .contextMenu {
-            Button(row.persistent
-                ? "Make Ephemeral (dies on explicit close)"
-                : "Make Persistent (survives quit and reboot)") {
-                VigilSessionManager.shared.setPersistent(name: id, !row.persistent)
-            }
             Button("Rename…") { VigilIdentity.editModal(name: id) }
             if model.rows.count > 1 {
                 Menu("Merge Into") {
@@ -398,7 +379,7 @@ struct VigilSidebarView: View {
                 VigilSessionManager.shared.killWithConfirm(name: id)
             }
         }
-        .help("\(row.label) (\(row.id)) · \(row.stateTag) · \(row.persistent ? "persistent" : "ephemeral")")
+        .help("\(row.label) (\(row.id)) · \(row.stateTag)")
         .opacity(hintFade(id) * dragSourceFade(.session(id)))
         .overlay {
             if model.dropTarget == id {
@@ -705,19 +686,6 @@ struct VigilSidebarView: View {
         return Group {
             if !watching.isEmpty {
                 antennaGlyph(watching.flatMap { $0.watchNotes + $0.watchProcs })
-            }
-        }
-        .frame(width: Grid.classSlot)
-    }
-
-    /// Fixed-width class column: hourglass marks ephemeral, persistence is
-    /// the group wash (no glyph needed).
-    private func classGlyph(_ persistent: Bool) -> some View {
-        Group {
-            if !persistent {
-                Image(systemName: "hourglass")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundColor(Color.secondary.opacity(0.7))
             }
         }
         .frame(width: Grid.classSlot)

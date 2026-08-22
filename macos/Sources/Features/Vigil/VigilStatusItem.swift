@@ -16,7 +16,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     let menuNextFloating = NSMenuItem(title: "Next Floating", action: #selector(nextFloating(_:)), keyEquivalent: "")
     let menuOverview = NSMenuItem(title: "Overview", action: #selector(overview(_:)), keyEquivalent: "")
     let menuNewSession = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
-    let menuPersist = NSMenuItem(title: "Persist Front Window", action: #selector(persistFrontWindow(_:)), keyEquivalent: "")
     let menuDetach = NSMenuItem(title: "Detach Front Window", action: #selector(detachFrontWindow(_:)), keyEquivalent: "")
 
     init(ghostty: Ghostty.App) {
@@ -69,7 +68,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         guard !mainMenu.items.contains(where: { $0.title == "Sessions" }) else { return }
 
         let menu = NSMenu(title: "Sessions")
-        for item in [menuNext, menuNextFloating, menuCycle, menuOverview, .separator(), menuNewSession, menuPersist, menuDetach] {
+        for item in [menuNext, menuNextFloating, menuCycle, menuOverview, .separator(), menuNewSession, menuDetach] {
             item.target = self
             item.menu?.removeItem(item)
             menu.addItem(item)
@@ -136,22 +135,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             submenu.addItem(sessionItem(verb, #selector(openSession(_:)), session.name, "macwindow"))
             if case .embedded = session.state {
                 submenu.addItem(sessionItem("Detach (keep running)", #selector(detachSession(_:)), session.name, "rectangle.portrait.and.arrow.right"))
-                if session.persistent {
-                    submenu.addItem(sessionItem("Make Ephemeral", #selector(makeEphemeral(_:)), session.name, "hourglass"))
-                } else {
-                    submenu.addItem(sessionItem("Persist (survive quit)", #selector(persistSession(_:)), session.name, "infinity"))
-                }
             }
             submenu.addItem(sessionItem("Rename…", #selector(renameSession(_:)), session.name, "pencil"))
             submenu.addItem(.separator())
-            let removal: String
-            let removalSymbol: String
-            switch session.state {
-            case .embedded: removal = "Forget (window stays)"; removalSymbol = "xmark.circle"
-            case .floating, .detached: removal = "Kill (processes die)"; removalSymbol = "trash"
-            case .asleep: removal = "Forget"; removalSymbol = "xmark.circle"
-            }
-            submenu.addItem(sessionItem(removal, #selector(forgetSession(_:)), session.name, removalSymbol))
+            submenu.addItem(sessionItem("Kill… (undo 120s)", #selector(killSession(_:)), session.name, "trash"))
             item.submenu = submenu
             menu.addItem(item)
         }
@@ -161,10 +148,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         create.target = self
         create.image = NSImage(systemSymbolName: "plus.rectangle", accessibilityDescription: nil)
         menu.addItem(create)
-        let persist = NSMenuItem(title: "Persist Front Window", action: #selector(persistFrontWindow(_:)), keyEquivalent: "")
-        persist.target = self
-        persist.image = NSImage(systemSymbolName: "infinity", accessibilityDescription: nil)
-        menu.addItem(persist)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Ghostty (kill all sessions)", action: #selector(quitForReal(_:)), keyEquivalent: "")
@@ -242,19 +225,9 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         VigilSessionManager.shared.detach(name: name)
     }
 
-    @objc private func persistSession(_ sender: NSMenuItem) {
+    @objc private func killSession(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        VigilSessionManager.shared.setPersistent(name: name, true)
-    }
-
-    @objc private func makeEphemeral(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
-        VigilSessionManager.shared.setPersistent(name: name, false)
-    }
-
-    @objc private func forgetSession(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
-        VigilSessionManager.shared.forget(name: name)
+        VigilSessionManager.shared.killWithConfirm(name: name)
     }
 
     @objc private func renameSession(_ sender: NSMenuItem) {
@@ -270,8 +243,4 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         VigilSessionManager.shared.newSession()
     }
 
-    @objc private func persistFrontWindow(_ sender: NSMenuItem) {
-        guard let controller = TerminalController.preferredParent else { return }
-        VigilSessionManager.shared.persistFully(controller: controller)
-    }
 }

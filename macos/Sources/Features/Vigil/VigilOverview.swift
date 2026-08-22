@@ -30,17 +30,15 @@ class VigilOverview: NSObject {
         if panel != nil { hide() } else { show() }
     }
 
-    /// All of ghostty, one grid: persistent sessions (any state) plus every
-    /// ephemeral window. Ephemeral vs persistent is a per-card toggle, not a
-    /// boundary of what the switcher can see.
+    /// All of ghostty, one grid: every session (any state) plus any stray
+    /// window that slipped past registration (safety net).
     private func buildEntries() -> [OverviewEntry] {
         let manager = VigilSessionManager.shared
         // Self-heal before showing anything: a dead-window session must never
         // become a card. Then scream if any impossible state slipped through.
         manager.reconcile()
         manager.assertInvariants("buildEntries")
-        manager.vlog("overview: " + manager.sessions.values
-            .map { "\($0.name)[\($0.persistent ? "P" : "e")]" }.sorted().joined(separator: " "))
+        manager.vlog("overview: " + manager.sessions.keys.sorted().joined(separator: " "))
         // Every rebuild refreshes live thumbnails: p/u/undo change what a
         // card IS mid-showing, and a freshly born session has no frozen
         // snapshot to fall back on.
@@ -56,27 +54,25 @@ class VigilOverview: NSObject {
                     state: session.state,
                     attention: session.attention,
                     thumbnail: session.thumbnail,
-                    persistent: session.persistent,
                     pinned: manager.sessionPinned(session.name),
                     controller: manager.anchorController(of: session.name),
                     running: manager.runningSummary(of: session.name),
                     died: manager.diedSummary(of: session.name))
             }
-        for controller in manager.ephemeralControllers() {
+        for controller in manager.strayControllers() {
             let surface = controller.focusedSurface ?? controller.surfaceTree.root?.leftmostLeaf()
             let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
             let cwd = surface?.pwd ?? "~"
-            let label = manager.ephemeralLabel(controller)
+            let label = manager.strayLabel(controller)
                 ?? (title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title)
             entries.append(OverviewEntry(
                 kind: .window,
-                name: "ephemeral-\(UInt(bitPattern: ObjectIdentifier(controller).hashValue))",
+                name: "stray-\(UInt(bitPattern: ObjectIdentifier(controller).hashValue))",
                 label: label,
                 emoji: nil,
                 state: .embedded,
                 attention: .none,
                 thumbnail: VigilSessionManager.windowSnapshot(controller),
-                persistent: false,
                 pinned: manager.isPinned(controller),
                 controller: controller,
                 running: [],
@@ -91,7 +87,6 @@ class VigilOverview: NSObject {
             state: .asleep,
             attention: .none,
             thumbnail: nil,
-            persistent: false,
             pinned: false,
             controller: nil,
             running: [],
@@ -148,10 +143,6 @@ class VigilOverview: NSObject {
             onKill: { [weak self] entry in
                 self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
                 self?.removeSelected()
-            },
-            onPersist: { [weak self] entry in
-                self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
-                self?.togglePersistSelected()
             },
             onPin: { [weak self] entry in
                 self?.model.selection = self?.model.entries.firstIndex { $0.id == entry.id } ?? 0
@@ -271,7 +262,6 @@ class VigilOverview: NSObject {
                 case 126: self.model.move(-self.model.columns); return nil // up
                 case 125: self.model.move(self.model.columns); return nil // down
                 case 45: self.createSession(); return nil // n
-                case 35: self.togglePersistSelected(); return nil // p: persistent
                 case 3: self.togglePinSelected(); return nil // f: floating (on top)
                 case 15: self.renameSelected(); return nil // r: rename session
                 case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
@@ -317,11 +307,11 @@ class VigilOverview: NSObject {
     }
 
     /// Drag & drop wrote a new entries order; mirror it into the sessions'
-    /// order fields so it survives restarts. Ephemeral windows keep their
+    /// order fields so it survives restarts. Stray windows keep their
     /// relative place only for this showing.
     private func persistOrder() {
         let manager = VigilSessionManager.shared
-        for (index, entry) in model.entries.enumerated() where entry.persistent {
+        for (index, entry) in model.entries.enumerated() where manager.sessions[entry.name] != nil {
             manager.setOrder(name: entry.name, order: index)
         }
     }
@@ -387,7 +377,7 @@ class VigilOverview: NSObject {
                 label: label.isEmpty ? entry.label : label,
                 emoji: draft.emoji.isEmpty ? nil : draft.emoji)
         } else if let controller = entry.controller, !label.isEmpty {
-            manager.renameEphemeral(controller, label)
+            manager.renameStray(controller, label)
         }
         panel?.makeKeyAndOrderFront(nil)
         let keep = model.selection
@@ -402,13 +392,12 @@ class VigilOverview: NSObject {
         panel?.makeKeyAndOrderFront(nil)
     }
 
-    /// Pin/unpin the selected window on top. A persistent session stores
-    /// the intent (works detached/asleep too); an ephemeral window is pure
-    /// window level.
+    /// Pin/unpin the selected window on top. A session stores the intent
+    /// (works detached/asleep too); a stray window is pure window level.
     private func togglePinSelected() {
         guard let entry = model.selected, entry.isWindow else { return }
         let manager = VigilSessionManager.shared
-        if entry.persistent {
+        if manager.sessions[entry.name] != nil {
             manager.togglePinSession(entry.name)
         } else if let controller = entry.controller {
             manager.togglePin(controller)
@@ -442,35 +431,6 @@ class VigilOverview: NSObject {
         refit()
     }
 
-    /// p on a live window flips ephemeral <-> persistent in place, and
-    /// persistent MEANS survives everything: the panes move into daemons
-    /// on the spot. Detached and asleep are persistent by definition
-    /// (there is no window to hand back); removing them is backspace's job.
-    private func togglePersistSelected() {
-        guard let entry = model.selected, entry.isWindow else { return }
-        guard case .embedded = entry.state, let controller = entry.controller else { return }
-        let manager = VigilSessionManager.shared
-        if entry.persistent {
-            manager.forget(name: entry.name)
-        } else {
-            manager.persistFully(controller: controller)
-            // The fresh daemon panes are still booting; snapshot again once
-            // they have replayed their content.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                MainActor.assumeIsolated {
-                    guard self.panel != nil, !self.modalActive else { return }
-                    let selection = self.model.selection
-                    self.model.entries = self.buildEntries()
-                    self.model.selection = min(selection, max(self.model.entries.count - 1, 0))
-                }
-            }
-        }
-        let keep = model.selection
-        model.entries = buildEntries()
-        model.selection = min(keep, model.entries.count - 1)
-        refit()
-    }
-
     /// Backspace kills for real, whatever the card is: window + processes for
     /// live ones, tree release for detached, registry drop for asleep. The
     /// confirmation shows the thumbnail and the exact consequence, so you
@@ -492,7 +452,7 @@ class VigilOverview: NSObject {
         case .detached: info = "Detached but alive; this is the kill. \(dying)"
         case .asleep: info = "Only the registry entry and its frozen state are dropped."
         }
-        if entry.persistent, let session = manager.sessions[entry.name] {
+        if let session = manager.sessions[entry.name] {
             info = "cwd: \(session.cwd)\ntabs: \(max(session.tabs.count, 1)) panes: \(max(session.paneCount, 1))\n" + info
         }
         alert.informativeText = info
@@ -507,13 +467,12 @@ class VigilOverview: NSObject {
         panel?.makeKeyAndOrderFront(nil)
         guard confirmed else { return }
 
-        // Any registered session (persistent OR ephemeral, any state) buries
-        // via kill(); killEphemeral is only for an unregistered window
-        // (safety net).
+        // Any registered session (any state) buries via kill(); killStray
+        // is only for an unregistered window (safety net).
         if manager.sessions[entry.name] != nil {
             manager.kill(name: entry.name)
         } else if let controller = entry.controller {
-            manager.killEphemeral(controller)
+            manager.killStray(controller)
         }
         model.entries = buildEntries()
         guard !model.entries.isEmpty else { hide(); return }
@@ -570,9 +529,6 @@ struct OverviewEntry: Identifiable {
     let state: VigilSessionManager.State
     let attention: VigilSessionManager.Attention
     let thumbnail: NSImage?
-    /// Persistent = vigil session (survives detach/quit/reboot). Ephemeral =
-    /// a plain window, dies on close. A toggle, not a boundary.
-    let persistent: Bool
     /// Pinned on top (Antinote-style); only meaningful for live windows.
     let pinned: Bool
 
@@ -618,14 +574,9 @@ struct OverviewEntry: Identifiable {
         }
     }
 
-    /// State-honest verb for the kill confirmation.
-    var removeVerb: String {
-        switch state {
-        case .embedded: return persistent ? "kill" : "close"
-        case .floating, .detached: return "kill"
-        case .asleep: return "forget"
-        }
-    }
+    /// State-honest verb for the kill confirmation: every state kills
+    /// (daemons die at reap; an asleep session has only sleeping ones).
+    var removeVerb: String { "kill" }
 
 }
 
@@ -694,7 +645,6 @@ struct OverviewView: View {
     let onClose: () -> Void
     let onActivate: (OverviewEntry) -> Void
     let onKill: (OverviewEntry) -> Void
-    let onPersist: (OverviewEntry) -> Void
     let onPin: (OverviewEntry) -> Void
     let onRename: (OverviewEntry) -> Void
     let onCommitRename: () -> Void
@@ -833,7 +783,6 @@ struct OverviewView: View {
                 Text(entry.title)
                     .font(.system(size: 18, weight: .bold))
                     .lineLimit(1)
-                survivalChip(entry)
             }
         }
     }
@@ -860,9 +809,6 @@ struct OverviewView: View {
         // corner controls vanish for its duration (they collide otherwise,
         // and none of them belongs in the middle of a rename).
         let editingThis = focused && model.editing
-        let (persistTint, persistIcon): (Color, String) = entry.persistent
-            ? (.teal, "infinity")
-            : (.secondary, "hourglass")
         VStack(spacing: 6) {
             // The lane ABOVE the thumbnail holds ONLY the name (+ rename).
             if entry.isWindow {
@@ -887,16 +833,7 @@ struct OverviewView: View {
                         .stroke(
                             focused ? Color.accentColor : Color.white.opacity(0.15),
                             lineWidth: focused ? 3 : 1))
-                // Persist top-LEFT; floating + kill top-RIGHT, on the picture.
-                .overlay(alignment: .topLeading) {
-                    if entry.isWindow && !editingThis {
-                        cornerButton("p", persistIcon, tint: persistTint, focused: focused,
-                                     help: entry.persistent
-                                        ? "Persistent: survives quit. Click to make ephemeral."
-                                        : "Ephemeral: dies on close. Click to make persistent.") { onPersist(entry) }
-                            .padding(8)
-                    }
-                }
+                // Floating + kill top-RIGHT, on the picture.
                 .overlay(alignment: .topTrailing) {
                     if entry.isWindow && !editingThis {
                         HStack(spacing: 6) {
@@ -1073,17 +1010,6 @@ struct OverviewView: View {
                     }
                 }
             }
-        }
-    }
-
-    /// The survival readout, one chip: teal = survives quit, neutral =
-    /// ephemeral (the class that just dies).
-    @ViewBuilder
-    private func survivalChip(_ entry: OverviewEntry) -> some View {
-        if entry.persistent {
-            chip("survives quit", .teal, icon: "infinity")
-        } else {
-            chip("ephemeral", .secondary, icon: "hourglass")
         }
     }
 

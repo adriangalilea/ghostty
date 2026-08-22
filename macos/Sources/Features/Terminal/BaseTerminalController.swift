@@ -241,9 +241,9 @@ class BaseTerminalController: NSWindowController,
         // We can only create new splits for surfaces in our tree.
         guard surfaceTree.root?.node(view: oldView) != nil else { return nil }
 
-        // Create a new surface view. Splits inside a persistent vigil
-        // session are daemon-backed like every other pane of it: the whole
-        // workspace survives, not just the first pane.
+        // Create a new surface view. Splits inside a vigil session are
+        // daemon-backed like every other pane of it: the whole workspace
+        // survives, not just the first pane.
         guard let ghostty_app = ghostty.app else { return nil }
         let config = VigilSessionManager.shared.configForNewSplit(
             in: self,
@@ -441,9 +441,6 @@ class BaseTerminalController: NSWindowController,
 
         // If the child process is not alive, then we exit immediately
         guard withConfirmation else {
-            // vigil: a destructive node close is a deliberate death; the
-            // marker must land before any persist sees the dropped claim.
-            VigilSessionManager.shared.condemnPanes(in: node)
             removeSurfaceNode(node)
             return
         }
@@ -458,8 +455,6 @@ class BaseTerminalController: NSWindowController,
             informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
         ) { [weak self] in
             if let self {
-                // vigil: same deliberate death as the unconfirmed branch.
-                VigilSessionManager.shared.condemnPanes(in: node)
                 self.removeSurfaceNode(node)
             }
         }

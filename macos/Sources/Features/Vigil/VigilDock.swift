@@ -156,12 +156,17 @@ final class VigilDockHost: NSView {
     }
 
     /// Collapse/teardown: unmount the visible tenant (it lives on in the
-    /// runtime) so a hidden dock holds no view in the window's hierarchy.
+    /// runtime) so a hidden dock holds no view in the window's hierarchy,
+    /// and the strip forgets its tenants: its rootView held the last
+    /// presented runtime's SurfaceViews strongly, which kept closed
+    /// tenants alive (and their sockets open) for as long as the window
+    /// never presented another dock.
     func unmountActive() {
         mountedHost?.removeFromSuperview()
         mountedHost = nil
         mounted?.removeFromSuperview()
         mounted = nil
+        strip?.rootView = VigilDockStrip(tenants: [], active: 0, onSelect: { _ in }, onAdd: {}, onClose: { _ in })
     }
 }
 

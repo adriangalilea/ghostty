@@ -171,6 +171,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     override func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
         super.surfaceTreeDidChange(from: from, to: to)
 
+        // vigil: THE chokepoint for structure changes in a session window
+        // (a split born or closed, an undo, a surface dragged in): the
+        // session registry edits itself here, synchronously.
+        VigilSessionManager.shared.treeDidChange(self, from: from, to: to)
+
         // Whenever our surface tree changes in any way (new split, close split, etc.)
         // we want to invalidate our state.
         invalidateRestorableState()
@@ -194,7 +199,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) {
         // We have a special case if our tree is empty to close our tab immediately.
         // This makes it so that undo is handled properly.
+        // vigil: a session window emptied (its only pane dragged out or
+        // exited) closes through the registry, without the recreate undo.
         if newTree.isEmpty {
+            if VigilSessionManager.shared.handleEmptiedTree(self) { return }
             closeTabImmediately()
             return
         }
@@ -251,13 +259,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
         withParent explicitParent: NSWindow? = nil
     ) -> TerminalController {
-        // vigil: every window is daemon-backed from birth (ephemeral until the
-        // eye persists it), so persisting never restarts the session. Skips
+        // vigil: every window is a session, daemon-backed from birth. Skips
         // configs that already carry an attach id (create/resurrection/tab).
         let vigil = VigilSessionManager.shared.newWindowConfig(base: baseConfig)
         let c = TerminalController.init(ghostty, withBaseConfig: vigil?.config ?? baseConfig)
         if let vigil {
-            VigilSessionManager.shared.registerEphemeralSession(
+            VigilSessionManager.shared.registerSession(
                 controller: c, name: vigil.name, cwd: vigil.cwd)
         }
 
@@ -447,7 +454,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             ghostty, withBaseConfig: vigilTab?.config ?? baseConfig)
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
         if let vigilTab {
-            VigilSessionManager.shared.registerMember(controller, name: vigilTab.name)
+            VigilSessionManager.shared.registerMember(controller, name: vigilTab.name, after: parentController)
         }
         guard let window = controller.window else { return controller }
 
@@ -682,11 +689,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         withConfirmation: Bool = true
     ) {
         // If this isn't the root then we're dealing with a split closure.
-        // The pane ITSELF is lost (daemon-backed or not: its daemon dies
-        // once unreachable), so the normal running-process confirm applies.
-        // Only closes that PRESERVE the work (window close = detach/undo)
-        // skip it.
+        // vigil: the pane leaves for the graveyard (the tree-change
+        // chokepoint buries it); the confirm names what actually runs
+        // there (vigil's process truth, never ghostty's always-running
+        // daemon child).
         if surfaceTree.root != node {
+            if VigilSessionManager.shared.closePane(node, in: self, withConfirmation: withConfirmation) { return }
             super.closeSurface(node, withConfirmation: withConfirmation)
             return
         }
@@ -966,6 +974,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     /// Close all windows, asking for confirmation if necessary.
     static func closeAllWindows() {
+        // vigil: every session window is killed through the graveyard.
+        if VigilSessionManager.shared.killAllWindows() { return }
         // The window we use for confirmations. Try to find the first window that
         // needs quit confirmation. This lets us attach the confirmation to something
         // that is running.
@@ -1316,17 +1326,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // vigil session tab: closing ONE tab of a multi-tab session is a
         // structural edit, not the session's lifecycle: the tab leaves the
         // session, buried with the undo grace, then its processes DIE. The
-        // tab itself is lost, so a running process gets the normal confirm.
-        // (The LAST tab falls through to closeWindow above: the session is
-        // preserved there, so that path never confirms.)
+        // confirm asks vigil's process truth (what holds the tty), never
+        // ghostty's always-running daemon child.
         if VigilSessionManager.shared.sessionName(of: self) != nil {
-            guard surfaceTree.contains(where: { $0.needsConfirmQuit }) else {
+            let busy = VigilSessionManager.shared.busyPrograms(
+                panes: surfaceTree.compactMap(\.vigilAttachId))
+            guard !busy.isEmpty else {
                 VigilSessionManager.shared.closeTabStructurally(self)
                 return
             }
             confirmClose(
                 messageText: "Close Tab?",
-                informativeText: "The terminal still has a running process. Closing the tab will kill it (undo keeps it for \(Int(VigilSessionManager.killGrace))s)."
+                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tab kills it (undo keeps it for \(Int(VigilSessionManager.killGrace))s)."
             ) {
                 VigilSessionManager.shared.closeTabStructurally(self)
             }
@@ -1349,6 +1360,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @IBAction func closeOtherTabs(_ sender: Any?) {
         guard let window = window else { return }
         guard let tabGroup = window.tabGroup else { return }
+        // vigil: session tabs leave through the graveyard.
+        if VigilSessionManager.shared.closeSiblingTabs(of: self, onlyRight: false) { return }
 
         // If we only have one window then we have no other tabs to close
         guard tabGroup.windows.count > 1 else { return }
@@ -1381,6 +1394,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @IBAction func closeTabsOnTheRight(_ sender: Any?) {
         guard let window = window else { return }
         guard let tabGroup = window.tabGroup else { return }
+        // vigil: session tabs leave through the graveyard.
+        if VigilSessionManager.shared.closeSiblingTabs(of: self, onlyRight: true) { return }
         guard let currentIndex = tabGroup.windows.firstIndex(of: window) else { return }
 
         let tabsToClose = tabGroup.windows.enumerated().filter { $0.offset > currentIndex }
@@ -1417,16 +1432,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let group = (window.tabGroup?.windows ?? [window])
             .compactMap { $0.windowController as? TerminalController }
 
-        // vigil owns the close of a session window: ephemeral kills with a
-        // 120s undo, persistent detaches and keeps running. Nothing is lost, so
-        // there is NO generic "sessions will be terminated" confirm (every
-        // surface is daemon-backed now, which would trigger it on every close).
+        // vigil owns the close of a session window: the session is killed,
+        // confirmed by vigil's own process truth, with a 120s undo. Ghostty's
+        // generic "sessions will be terminated" confirm never runs here
+        // (every surface is daemon-backed, it would fire on every close).
         // One session spans the whole tabGroup; handle each session ONCE and
         // let stray session-less tabs close plain.
         let sessionNames = group.compactMap { VigilSessionManager.shared.sessionName(of: $0) }
         if !sessionNames.isEmpty {
             var handled = Set<String>()
-            for c in group {
+            for c in group where !c.surfaceTree.isEmpty {
                 if let name = VigilSessionManager.shared.sessionName(of: c) {
                     guard handled.insert(name).inserted else { continue }
                     _ = VigilSessionManager.shared.handleWindowClose(controller: c)

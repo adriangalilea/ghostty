@@ -751,12 +751,6 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Kill the session you are in (floating or normal window).",
         }},
 
-        .vigil_persist => comptime &.{.{
-            .action = .vigil_persist,
-            .title = "Toggle Persistent",
-            .description = "Toggle the front window between persistent and ephemeral.",
-        }},
-
         .vigil_float => comptime &.{.{
             .action = .vigil_float,
             .title = "Toggle Floating",

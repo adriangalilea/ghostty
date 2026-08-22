@@ -881,10 +881,6 @@ pub const Action = union(enum) {
     /// overview; dies with the usual undo grace.
     vigil_kill,
 
-    /// vigil: toggle the front window between persistent and ephemeral
-    /// (whole tabGroup), from inside the focused session.
-    vigil_persist,
-
     /// vigil: toggle the front window floating on top, from inside.
     vigil_float,
 
@@ -1387,7 +1383,6 @@ pub const Action = union(enum) {
             .vigil_cycle,
             .vigil_next_floating,
             .vigil_kill,
-            .vigil_persist,
             .vigil_float,
             .toggle_visibility,
             .check_for_updates,

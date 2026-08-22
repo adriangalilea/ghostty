@@ -22,24 +22,45 @@ import GhosttyKit
 /// adjective-noun; feeds VIGIL_SESSION and the wake registry), `label` is the
 /// human alias. Tabs and splits are structure INSIDE the session, never
 /// identities: a new tab joins its window's session, a dragged-out tab mints
-/// a new session (reconcileTabs), and daemons are owned by reachability, not
-/// by parsing their id.
+/// a new session (reconcileTabs).
+///
+/// OWNERSHIP IS THE REGISTRY. `Session.tabs` lists every pane a session
+/// owns, live or cold, in tab order, and it is always current: every
+/// structural event (a split born or closed, a tab joining or leaving, a
+/// move, a close) edits it synchronously at the moment it happens. Live
+/// trees are projections of it, never a source; vigil.json is its mirror.
+/// A pane is in exactly one place: a session, a burial, or dead. Nothing
+/// is inferred at persist time and nothing heals, because there is no
+/// second store to disagree with.
+///
+/// Every session survives: window close, ⌘Q and reboot keep its daemons
+/// running. The only death is an explicit kill, always through the
+/// graveyard (120s undo), and a reap kills daemons deterministically and
+/// verifies they died. Daemon lifetime never depends on ARC.
 ///
 /// Durable state lives in the wake registry (~/.local/state/wake), maintained
-/// event-driven by agent adapters. This manager persists name + label +
-/// cwd + captured tabs so asleep sessions are listable and resurrectable.
+/// event-driven by agent adapters.
 @MainActor
 class VigilSessionManager {
     static let shared = VigilSessionManager()
 
+    /// One tab's live runtime while it has no window: its split tree (views
+    /// alive, daemons attached) and its dock, if any. Held by the session's
+    /// state, released as one value.
+    struct TabRuntime {
+        var tree: SplitTree<Ghostty.SurfaceView>
+        var dock: VigilDockRuntime?
+    }
+
     enum State {
         case embedded
         /// One tab floats in the quick terminal; `rest` are the session's
-        /// other tab trees, waiting detached. `floatedIndex` is where the
-        /// floating tree reinserts on reclaim.
-        case floating(rest: [SplitTree<Ghostty.SurfaceView>], floatedIndex: Int)
-        /// One tree per tab, in tab order.
-        case detached([SplitTree<Ghostty.SurfaceView>])
+        /// other tabs, waiting detached; `floatedDock` is the floated
+        /// tab's dock (alive, unshown while floating); `floatedIndex` is
+        /// where the floating tab reinserts on reclaim.
+        case floating(rest: [TabRuntime], floatedDock: VigilDockRuntime?, floatedIndex: Int)
+        /// One runtime per live tab, in tab order.
+        case detached([TabRuntime])
         case asleep
     }
 
@@ -112,27 +133,16 @@ class VigilSessionManager {
 
     /// Custom identities for PANES and TABS (label + emoji, display-only
     /// aliases, the id≠label rule one level down). Keyed by pane daemon id
-    /// (tabs by "tab:" + their anchor pane id): durable, so a renamed
-    /// claude keeps its name across moves, detach and reboot. Persisted
-    /// beside vigil.json; pruned by the reachability sweep with the
-    /// daemon.
+    /// (tabs by "tab:" + their anchor pane id). A name lives ON THE THING
+    /// IT NAMES, in the registry, and nowhere else: it is written, moved,
+    /// buried and dropped by exactly the code that owns the pane, so it can
+    /// never be collected out from under a live one and a drag carries it
+    /// for free.
     struct CustomIdentity: Codable, Equatable {
         var label: String?
         var emoji: String?
     }
 
-    /// A name lives ON THE THING IT NAMES, in the one state file, and
-    /// nowhere else. It used to live in a side map keyed by pane id in its
-    /// own `identities.json`: a second store with its own lifecycle, its
-    /// own garbage collector (which deleted every hand-typed name whose
-    /// daemon lacked a pidfile) and no redundancy of any kind. Folding it
-    /// into the capture kills that entire class by construction: an
-    /// identity is now written, moved, buried and dropped by exactly the
-    /// same code that owns the pane, so it can never be collected while
-    /// the pane lives, and a drag carries the name with the pane for free.
-    ///
-    /// Key shape is unchanged so every call site reads the same: a pane id,
-    /// or `tab:<anchor pane id>` for its tab.
     func customIdentity(_ key: String) -> CustomIdentity? {
         let wantsTab = key.hasPrefix("tab:")
         let target = wantsTab ? String(key.dropFirst(4)) : key
@@ -143,8 +153,7 @@ class VigilSessionManager {
                     guard tab.label != nil || tab.emoji != nil else { return nil }
                     return CustomIdentity(label: tab.label, emoji: tab.emoji)
                 }
-                for pane in tab.panes + (tab.dock?.panes ?? [])
-                where paneId(of: pane) == target {
+                for pane in tab.panes + (tab.dock?.panes ?? []) where pane.id == target {
                     guard pane.label != nil || pane.emoji != nil else { return nil }
                     return CustomIdentity(label: pane.label, emoji: pane.emoji)
                 }
@@ -156,19 +165,13 @@ class VigilSessionManager {
     func setCustomIdentity(key: String, label: String?, emoji: String?) {
         let wantsTab = key.hasPrefix("tab:")
         let target = wantsTab ? String(key.dropFirst(4)) : key
-        // The capture must be CURRENT before we write into it: a tab that
-        // is live but not yet captured (a fresh split, a ⌘T between
-        // persists) exists only on screen, and a name written into a stale
-        // capture lands nowhere.
-        refreshEmbeddedCaptures()
         var landed = false
         for (name, session) in sessions {
             var tabs = session.tabs
             var hit = false
             for index in tabs.indices {
                 // CONTAINS, not "is first": the anchor is the tab's stable
-                // handle, but live tree order and capture order can differ
-                // for a beat, and requiring first position made a rename
+                // handle, but requiring first position made a rename
                 // silently do nothing (Adrian, naming a tab '*-utils').
                 if wantsTab, tabPaneIds(tabs[index]).contains(target) {
                     tabs[index].label = label
@@ -176,14 +179,13 @@ class VigilSessionManager {
                     hit = true
                 } else if !wantsTab {
                     for pindex in tabs[index].panes.indices
-                    where paneId(of: tabs[index].panes[pindex]) == target {
+                    where tabs[index].panes[pindex].id == target {
                         tabs[index].panes[pindex].label = label
                         tabs[index].panes[pindex].emoji = emoji
                         hit = true
                     }
                     if var dock = tabs[index].dock {
-                        for dindex in dock.panes.indices
-                        where paneId(of: dock.panes[dindex]) == target {
+                        for dindex in dock.panes.indices where dock.panes[dindex].id == target {
                             dock.panes[dindex].label = label
                             dock.panes[dindex].emoji = emoji
                             hit = true
@@ -212,29 +214,27 @@ class VigilSessionManager {
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
 
-    /// One leaf of the workspace. Every pane lives in a vigild daemon, so
-    /// `command` is its attach sentinel and resurrection is native reattach;
-    /// a pane that somehow lost its daemon resurrects as a bare shell in its
-    /// cwd (the honest fallback, nothing recreated, nothing replayed).
+    /// One leaf of the workspace. `id` is its vigild daemon id, THE identity
+    /// (`vigil-<birth session>-<index>`, minted monotonic, never recycled);
+    /// resurrection is a native reattach to that daemon, and a daemon that
+    /// died comes back as a fresh shell in `cwd` (honest, nothing replayed).
     struct Pane: Codable {
-        let cwd: String
-        let command: String?
-        /// The pane's last known terminal title, RECORDED at capture time.
-        /// A name that lives only in a live terminal is not state: it is a
-        /// side effect, and it vanishes the moment the pane goes cold or
-        /// the app restarts, leaving a workspace of "~" rows that cannot be
-        /// told apart (2026-08-08). Stored here, a name survives detach,
-        /// quit, reboot and resurrection, exactly like the identity does.
+        let id: String
+        var cwd: String
+        /// The pane's last known terminal title, refreshed while it is
+        /// live. A name that lives only in a live terminal is a side
+        /// effect that vanishes when the pane goes cold; stored here it
+        /// survives detach, quit, reboot and resurrection.
         var title: String?
-        /// The name and face YOU gave this pane. Stored here, with the pane,
-        /// so it is owned by one writer and moves with the pane on a drag.
+        /// The name and face YOU gave this pane: owned by one writer, moves
+        /// with the pane on a drag.
         var label: String?
         var emoji: String?
 
-        init(cwd: String, command: String?, title: String? = nil,
+        init(id: String, cwd: String, title: String? = nil,
              label: String? = nil, emoji: String? = nil) {
+            self.id = id
             self.cwd = cwd
-            self.command = command
             self.title = title
             self.label = label
             self.emoji = emoji
@@ -299,8 +299,10 @@ class VigilSessionManager {
         var state: State
         var attention: Attention = .none
         var attentionSince: Date?
-        /// Captured at detach, one entry per tab in tab order; what
-        /// resurrection rebuilds (as tabs of ONE window).
+        /// THE REGISTRY: every pane this session owns, live or cold, one
+        /// entry per tab in tab order, always current (edited at every
+        /// structural event, never inferred). Resurrection rebuilds it as
+        /// tabs of ONE window.
         var tabs: [Tab] = []
         /// Manual overview ordering (drag & drop); lower first.
         var order: Int = 0
@@ -309,15 +311,6 @@ class VigilSessionManager {
         /// survives detach, quit and reboot, and a detached/asleep session
         /// can be pinned before it even has a window.
         var pinned: Bool = false
-        /// Survival policy. Ephemeral (false): the daemons are killed on
-        /// window close and on quit, and the session is never written to
-        /// vigil.json. Persistent (true): survives close/quit/reboot and
-        /// wears the class border. ⌘⇧P flips this in place; the daemons keep
-        /// running either way, so there is never a restart.
-        var persistent: Bool = false
-        /// A buried ephemeral session: exhumes intact but is never written
-        /// to vigil.json. Runtime-only.
-        var ephemeral: Bool = false
         /// Loaded intent: this session had a WINDOW when the app last
         /// recorded it (crash or shutdown), so launch restores it as one.
         /// Detached-in-background sessions load with this false and stay
@@ -348,39 +341,11 @@ class VigilSessionManager {
 
     /// Live docks, keyed by tab controller (the dock is per TAB: its
     /// tenants are context-bound, lazygit of THIS tab's repo). Weak keys;
-    /// the runtime strongly owns the tenant SurfaceViews.
+    /// the runtime strongly owns the tenant SurfaceViews. A windowless
+    /// tab's dock rides its `TabRuntime`.
     private let dockMap = NSMapTable<TerminalController, VigilDockRuntime>(
         keyOptions: [.weakMemory, .objectPointerPersonality],
         valueOptions: .strongMemory)
-
-    /// Docks of detached/floating sessions: session name → tab index →
-    /// runtime, index-aligned with the detached trees array (the same
-    /// capture order). Re-embed zips them back onto controllers.
-    private var detachedDocks: [String: [Int: VigilDockRuntime]] = [:]
-
-    /// Tabs mid-materialization (first pane mounted, splits landing a
-    /// tick later): the sidebar renders the CAPTURE's shape for these so
-    /// a 2-split tab never flashes as 1 row. Time-capped self-clearing.
-    private let materializing = NSMapTable<TerminalController, NSDate>(
-        keyOptions: [.weakMemory, .objectPointerPersonality],
-        valueOptions: .strongMemory)
-
-    private func markMaterializing(_ controller: TerminalController) {
-        materializing.setObject(NSDate(), forKey: controller)
-    }
-
-    func isMaterializing(_ controller: TerminalController) -> Bool {
-        guard let date = materializing.object(forKey: controller) else { return false }
-        if Date().timeIntervalSince(date as Date) > 3 {
-            materializing.removeObject(forKey: controller)
-            return false
-        }
-        return true
-    }
-
-    private func clearMaterializing(_ controller: TerminalController) {
-        materializing.removeObject(forKey: controller)
-    }
 
     /// Killed sessions rest here for a grace period before their daemons
     /// actually die. Undo (ghostty's native `undo` action; bind cmd+shift+T
@@ -388,9 +353,40 @@ class VigilSessionManager {
     /// nothing had died yet. Ghostty's own ExpiringUndoManager drives the
     /// expiry. 120s: long enough for regret, short enough that hidden
     /// daemons never linger (config key candidate if it feels wrong).
+    /// EVERY close rests here - a session, a tab, a split pane, a dock
+    /// tenant - one death path, one undo.
     private var graveyard: [String: Session] = [:]
     private var graveyardDeadlines: [String: Date] = [:]
     static let killGrace: TimeInterval = 120
+
+    /// Most recently active sessions, newest first: the successor order
+    /// when the session you are in dies (the tab-close semantic: the
+    /// viewport goes to the last one you were in, never closes while any
+    /// session remains). Runtime-only; manual order is the fallback.
+    private var recent: [String] = []
+
+    /// Nesting depth of vigil's OWN tree swaps (mount, release, kill,
+    /// move). `treeDidChange` is the chokepoint for ghostty-driven
+    /// structure changes (splits born and closed, undo, process exits)
+    /// and must not read a wholesale swap as a mass close.
+    private var treeSwaps = 0
+
+    func withTreeSwap(_ body: () -> Void) {
+        treeSwaps += 1
+        defer { treeSwaps -= 1 }
+        body()
+    }
+
+    /// Vigil's own wholesale tree swap: under the swap flag AND with the
+    /// controller's ghostty undo stack dropped. The undo manager is
+    /// app-wide and a controller's "New Split"/"Close Terminal"/"Move
+    /// Split" undos outlive any swap: ⌘Z after a shapeshift would assign
+    /// the OLD occupant's tree to the window outside any swap, reading as
+    /// a mass close of the new occupant plus a theft of the old one.
+    private func swapTree(_ controller: TerminalController, _ tree: SplitTree<Ghostty.SurfaceView>) {
+        controller.undoManager?.removeAllActions(withTarget: controller)
+        withTreeSwap { controller.surfaceTree = tree }
+    }
 
     /// Set once at app launch by VigilStatusItem; needed to spawn windows.
     weak var ghosttyApp: Ghostty.App?
@@ -461,7 +457,7 @@ class VigilSessionManager {
         acquireInstanceLock()
         load()
         loadAcks()
-        sweepPaneDaemons()
+        collectOrphans()
         // A logout/restart/shutdown is starting. THE signal, and the only
         // reliable one: the AppleEvent probe in applicationShouldTerminate
         // (kAEShutDown/kAERestart) does not arrive on macOS 26, so every
@@ -484,10 +480,9 @@ class VigilSessionManager {
         startStateDirWatcher()
         // SIGTERM means DIE (vigil-dev restarts, system tooling). Without
         // this, AppKit routed it into the ⌘Q intercept, which CANCELS
-        // termination into menu-bar service mode when persistent sessions
-        // exist: three invisible survivors once stacked up behind
-        // pkill + open -n (2026-08-01). Freeze foreground truth, kill
-        // ephemeral daemons, then really terminate.
+        // termination into menu-bar service mode while sessions exist:
+        // three invisible survivors once stacked up behind pkill + open -n
+        // (2026-08-01). Freeze foreground truth, persist, really terminate.
         signal(SIGTERM, SIG_IGN)
         sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         sigtermSource?.setEventHandler {
@@ -496,20 +491,9 @@ class VigilSessionManager {
             }
         }
         sigtermSource?.resume()
-        // The sweep is a garbage collector: collection points are events
-        // (burial reaps) plus this slow safety tick for anything that dies
-        // outside vigil's sight (undo expiry, crashes).
-        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    VigilSessionManager.shared.sweepPaneDaemons()
-                }
-            }
-        }
-        // Fresh ephemeral windows must wear their ring without waiting for
-        // a session state change; and a completed tab drag (out or in) has
-        // no dedicated AppKit event, but the moved window becomes key, so
-        // membership reconciliation rides the same notification.
+        // A completed tab drag (out or in) has no dedicated AppKit event,
+        // but the moved window becomes key, so membership reconciliation
+        // rides the key-window notification.
         NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
@@ -559,9 +543,119 @@ class VigilSessionManager {
     }
 
     /// Assign a live controller to a session. All grouping/order comes from
-    /// the controller's window and tabGroup; this only records ownership.
-    func registerMember(_ controller: TerminalController, name: String) {
+    /// the controller's window and tabGroup. The controller's tree joins
+    /// the REGISTRY here when the registry does not know it yet: a fresh
+    /// ⌘T or window, or a tab that arrived from another session (drag-in,
+    /// a move's settle) - its panes are claimed from wherever they lived,
+    /// as one new tab. A tree the registry already lists (a mount, a
+    /// regroup) changes nothing. Membership follows the tree, so callers
+    /// assign the tree FIRST.
+    func registerMember(_ controller: TerminalController, name: String, after parent: TerminalController? = nil) {
         memberships.setObject(name as NSString, forKey: controller)
+        guard sessions[name] != nil else { return }
+        let dock = dockMap.object(forKey: controller)
+        let ids = controller.surfaceTree.compactMap(\.vigilAttachId)
+            + (dock?.views.compactMap(\.vigilAttachId) ?? [])
+        guard let first = ids.first, !ownedPaneIds(sessions[name]!).contains(first) else { return }
+        var carried: [Pane] = []
+        var label: String?
+        var emoji: String?
+        for id in ids {
+            guard let taken = takePane(id) else { continue }
+            carried.append(taken.pane)
+            label = label ?? taken.tabLabel
+            emoji = emoji ?? taken.tabEmoji
+            chown(id, to: name)
+        }
+        let (panes, layout) = capture(controller.surfaceTree, carrying: carried)
+        let tab = Tab(
+            panes: panes, layout: layout,
+            dock: dock.flatMap { captureDock($0, carrying: carried) },
+            label: label, emoji: emoji)
+        // A ⌘T lands right after its parent tab (where AppKit places the
+        // native tab), never at the end: registry order IS the tab order.
+        let parentIds = Set(parent?.surfaceTree.compactMap(\.vigilAttachId) ?? [])
+        if !parentIds.isEmpty,
+           let index = sessions[name]!.tabs.firstIndex(where: { !Set(tabPaneIds($0)).isDisjoint(with: parentIds) }) {
+            sessions[name]!.tabs.insert(tab, at: index + 1)
+        } else {
+            sessions[name]!.tabs.append(tab)
+        }
+        vlog("register: '\(name)' += tab \(ids) (\(carried.count) claimed)")
+    }
+
+    /// A session window's tree EMPTIED by ghostty (its only pane dragged
+    /// into another window, or exited): the window closes without
+    /// ghostty's recreate-the-window undo (that undo would resurrect an
+    /// unregistered window holding a view whose pane lives elsewhere).
+    /// A pane still listed here was closed, not moved, and is buried; the
+    /// session sleeps when no member remains, clears when nothing is left.
+    func handleEmptiedTree(_ controller: TerminalController) -> Bool {
+        guard let name = sessionName(of: controller) else { return false }
+        for id in controller.surfaceTree.compactMap(\.vigilAttachId) where locate(id)?.owner == name {
+            if let taken = takePane(id) { buryPane(taken.pane, from: name) }
+        }
+        memberships.removeObject(forKey: controller)
+        dockMap.object(forKey: controller)?.unmount()
+        dockMap.removeObject(forKey: controller)
+        killController(controller)
+        if sessions[name] != nil, members(of: name).isEmpty { sessions[name]!.state = .asleep }
+        clearIfEmpty(name)
+        persist()
+        return true
+    }
+
+    /// Close Other Tabs / Close Tabs to the Right in a session window:
+    /// each tab leaves through the graveyard, one confirm naming what runs.
+    func closeSiblingTabs(of controller: TerminalController, onlyRight: Bool) -> Bool {
+        guard let name = sessionName(of: controller), let window = controller.window,
+              let group = window.tabGroup?.windows else { return false }
+        let current = group.firstIndex(of: window) ?? 0
+        let targets = group.enumerated().compactMap { offset, candidate -> TerminalController? in
+            guard candidate !== window, !onlyRight || offset > current,
+                  let c = candidate.windowController as? TerminalController,
+                  sessionName(of: c) == name else { return nil }
+            return c
+        }
+        guard !targets.isEmpty else { return true }
+        let busy = busyPrograms(panes: targets.flatMap { $0.surfaceTree.compactMap(\.vigilAttachId) })
+        let proceed = { [weak self] in
+            for target in targets { self?.closeTabStructurally(target) }
+        }
+        if busy.isEmpty {
+            proceed()
+        } else {
+            controller.confirmClose(
+                messageText: onlyRight ? "Close Tabs on the Right?" : "Close Other Tabs?",
+                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tabs kills it (undo keeps them for \(Int(Self.killGrace))s)."
+            ) { proceed() }
+        }
+        return true
+    }
+
+    /// Close All Windows: every embedded session is killed (one confirm
+    /// naming everything that runs, the usual grace); strays close plain.
+    func killAllWindows() -> Bool {
+        let names = sessions.values.compactMap { session -> String? in
+            if case .embedded = session.state { return session.name }
+            return nil
+        }
+        guard !names.isEmpty else { return false }
+        let busy = names.flatMap { busyPrograms(of: $0) }
+        let proceed = { [weak self] in
+            guard let self else { return }
+            for name in names { self.kill(name: name, keepViewport: false) }
+            for stray in self.strayControllers() { stray.closeWindowImmediately() }
+        }
+        if busy.isEmpty {
+            proceed()
+        } else {
+            confirmKill(
+                label: "all windows",
+                info: "\(busy.joined(separator: ", ")) still running. Undo within \(Int(Self.killGrace))s.",
+                proceed)
+        }
+        return true
     }
 
     /// The session's live tab-controllers in tab order. Controllers whose
@@ -599,26 +693,301 @@ class VigilSessionManager {
         return window.windowController as? TerminalController
     }
 
-    /// The session's live tab trees in tab order (embedded: member trees;
+    /// The session's live tab runtimes (embedded: member trees + docks;
     /// floating: the waiting rest + the quick terminal's tree; detached:
-    /// the owned trees).
-    private func liveTrees(_ session: Session) -> [SplitTree<Ghostty.SurfaceView>] {
+    /// the held runtimes). Display and occlusion read this; ownership
+    /// never does.
+    private func runtimes(_ session: Session) -> [TabRuntime] {
         switch session.state {
         case .embedded:
-            return members(of: session.name).map(\.surfaceTree).filter { !$0.isEmpty }
-        case .floating(let rest, _):
-            var trees = rest
+            return members(of: session.name)
+                .filter { !$0.surfaceTree.isEmpty }
+                .map { TabRuntime(tree: $0.surfaceTree, dock: dockMap.object(forKey: $0)) }
+        case .floating(let rest, let floatedDock, _):
+            var out = rest
             if floatingName == session.name,
                let quick = quickController(create: false),
                !quick.surfaceTree.isEmpty {
-                trees.append(quick.surfaceTree)
+                out.append(TabRuntime(tree: quick.surfaceTree, dock: floatedDock))
             }
-            return trees
-        case .detached(let trees):
-            return trees
+            return out
+        case .detached(let held):
+            return held
         case .asleep:
             return []
         }
+    }
+
+    // MARK: Registry (ownership IS the registry; every structural event edits it here)
+
+    /// Every pane id a session owns: its registry, nothing else.
+    func ownedPaneIds(_ session: Session) -> Set<String> {
+        Set(session.tabs.flatMap(tabPaneIds))
+    }
+
+    /// Every daemon id a tab lists (panes + dock).
+    func tabPaneIds(_ tab: Tab) -> [String] {
+        (tab.panes + (tab.dock?.panes ?? [])).map(\.id)
+    }
+
+    /// Where a pane lives right now: a session or a burial, and its tab.
+    private func locate(_ id: String) -> (owner: String, buried: Bool, tab: Int)? {
+        for (name, session) in sessions {
+            if let tab = session.tabs.firstIndex(where: { tabPaneIds($0).contains(id) }) {
+                return (name, false, tab)
+            }
+        }
+        for (name, session) in graveyard {
+            if let tab = session.tabs.firstIndex(where: { tabPaneIds($0).contains(id) }) {
+                return (name, true, tab)
+            }
+        }
+        return nil
+    }
+
+    /// The pane's registry entry, wherever it lives.
+    private func registered(_ id: String) -> Pane? {
+        guard let at = locate(id) else { return nil }
+        let tab = (at.buried ? graveyard[at.owner] : sessions[at.owner])!.tabs[at.tab]
+        return (tab.panes + (tab.dock?.panes ?? [])).first { $0.id == id }
+    }
+
+    /// Take a pane OUT of wherever it lives (a session's tab, a dock, a
+    /// burial). An emptied tab is dropped and hands its own name and face
+    /// to the taker (the identity travels with the only pane instead of
+    /// dying with the husk); an emptied burial is dropped; a held runtime
+    /// releases the pane's view so no two trees ever hold one daemon. The
+    /// one primitive under every move and every re-claim.
+    private func takePane(_ id: String) -> (pane: Pane, tabLabel: String?, tabEmoji: String?)? {
+        guard let at = locate(id) else { return nil }
+        var session = (at.buried ? graveyard[at.owner] : sessions[at.owner])!
+        var tab = session.tabs[at.tab]
+        var pane: Pane?
+        if let index = tab.panes.firstIndex(where: { $0.id == id }) {
+            pane = tab.panes.remove(at: index)
+            tab.layout = nil
+        } else if var dock = tab.dock, let index = dock.panes.firstIndex(where: { $0.id == id }) {
+            pane = dock.panes.remove(at: index)
+            dock.active = min(dock.active, max(dock.panes.count - 1, 0))
+            tab.dock = dock.panes.isEmpty ? nil : dock
+        }
+        guard let pane else { return nil }
+        let emptied = tab.panes.isEmpty && (tab.dock?.panes.isEmpty ?? true)
+        if emptied { session.tabs.remove(at: at.tab) } else { session.tabs[at.tab] = tab }
+        func scrub(_ runtimes: inout [TabRuntime]) {
+            for index in runtimes.indices {
+                if let view = runtimes[index].tree.first(where: { $0.vigilAttachId == id }),
+                   let node = runtimes[index].tree.root?.node(view: view) {
+                    runtimes[index].tree = runtimes[index].tree.removing(node)
+                }
+                if let dock = runtimes[index].dock, let vi = dock.views.firstIndex(where: { $0.vigilAttachId == id }) {
+                    dock.views.remove(at: vi)
+                    dock.active = min(dock.active, max(dock.views.count - 1, 0))
+                }
+            }
+            runtimes.removeAll { $0.tree.isEmpty && ($0.dock?.views.isEmpty ?? true) }
+        }
+        switch session.state {
+        case .detached(var held):
+            scrub(&held)
+            session.state = held.isEmpty ? .asleep : .detached(held)
+        case .floating(var rest, let floatedDock, let floatedIndex):
+            scrub(&rest)
+            if let dock = floatedDock, let vi = dock.views.firstIndex(where: { $0.vigilAttachId == id }) {
+                dock.views.remove(at: vi)
+                dock.active = min(dock.active, max(dock.views.count - 1, 0))
+            }
+            if floatingName == at.owner, let quick = quickController(create: false),
+               let view = quick.surfaceTree.first(where: { $0.vigilAttachId == id }),
+               let node = quick.surfaceTree.root?.node(view: view) {
+                quickTreeSwap = true
+                quick.surfaceTree = quick.surfaceTree.removing(node)
+                quickTreeSwap = false
+            }
+            session.state = .floating(rest: rest, floatedDock: floatedDock, floatedIndex: floatedIndex)
+        case .embedded, .asleep:
+            break
+        }
+        if at.buried {
+            if session.tabs.isEmpty { dropBurial(at.owner) } else { graveyard[at.owner] = session }
+        } else {
+            sessions[at.owner] = session
+        }
+        return (pane, emptied ? tab.label : nil, emptied ? tab.emoji : nil)
+    }
+
+    /// One live view as a registry pane, carrying the remembered facts of
+    /// its current entry (title, and the name and face YOU gave it): a
+    /// capture is a rewrite and would otherwise erase what the view does
+    /// not know about.
+    private func capturedPane(_ view: Ghostty.SurfaceView, id: String, previous: Pane?) -> Pane {
+        Pane(
+            id: id,
+            cwd: view.pwd ?? previous?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
+            title: capturedTitle(of: view) ?? previous?.title,
+            label: previous?.label,
+            emoji: previous?.emoji)
+    }
+
+    /// A live tree as registry panes (DFS leaf order) + split shape.
+    private func capture(
+        _ tree: SplitTree<Ghostty.SurfaceView>, carrying previous: [Pane]
+    ) -> (panes: [Pane], layout: Layout?) {
+        let panes = tree.compactMap { view -> Pane? in
+            guard let id = view.vigilAttachId else {
+                vlog("!! capture: a surface with NO daemon id in a session tree - skipped")
+                return nil
+            }
+            return capturedPane(view, id: id, previous: previous.first { $0.id == id } ?? registered(id))
+        }
+        return (panes, Self.captureLayout(tree))
+    }
+
+    private func captureDock(_ runtime: VigilDockRuntime, carrying previous: [Pane]) -> DockCapture? {
+        let panes = runtime.views.compactMap { view -> Pane? in
+            guard let id = view.vigilAttachId else { return nil }
+            return capturedPane(view, id: id, previous: previous.first { $0.id == id } ?? registered(id))
+        }
+        guard !panes.isEmpty else { return nil }
+        return DockCapture(
+            panes: panes,
+            active: min(max(runtime.active, 0), panes.count - 1),
+            width: Double(runtime.width),
+            collapsed: runtime.collapsed)
+    }
+
+    /// THE chokepoint for ghostty-driven structure changes in a session
+    /// window: a split born (⌘D), a split closed (⌘W, a process exit, an
+    /// undo), a surface dragged between windows. Vigil's own swaps never
+    /// arrive here (`withTreeSwap`).
+    func treeDidChange(
+        _ controller: TerminalController,
+        from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>
+    ) {
+        guard treeSwaps == 0, let name = sessionName(of: controller), sessions[name] != nil else { return }
+        applyTreeDiff(session: name, from: from, to: to)
+    }
+
+    /// The quick terminal's tree changed while a session floats in it:
+    /// same chokepoint, the floated tab.
+    func quickTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
+        guard !quickTreeSwap, let name = floatingName, sessions[name] != nil else { return }
+        applyTreeDiff(session: name, from: from, to: to)
+    }
+
+    /// Diff the pane ids of one tab's tree before and after, and edit the
+    /// registry NOW: joined panes are claimed (taken from wherever they
+    /// lived: a burial means an undo, another session means a drag, a
+    /// pane already listed cold here means it just materialized), the
+    /// tab's shape is recaptured, and closed panes are buried. Nothing
+    /// is inferred later, so a close and a move can never be confused.
+    private func applyTreeDiff(
+        session name: String,
+        from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>
+    ) {
+        let before = Set(from.compactMap(\.vigilAttachId))
+        let after = Set(to.compactMap(\.vigilAttachId))
+        let touched = before.union(after)
+        guard !touched.isEmpty else { return }
+
+        func tabIndex() -> Int? {
+            sessions[name]!.tabs.firstIndex { !Set(tabPaneIds($0)).isDisjoint(with: touched) }
+        }
+        let listedHere = tabIndex().map { Set(tabPaneIds(sessions[name]!.tabs[$0])) } ?? []
+        var carried: [Pane] = []
+        var inheritedLabel: String?
+        var inheritedEmoji: String?
+        for id in after.subtracting(before) where !listedHere.contains(id) {
+            guard let taken = takePane(id) else {
+                vlog("tree: fresh pane '\(id)' joins '\(name)'")
+                continue
+            }
+            carried.append(taken.pane)
+            inheritedLabel = inheritedLabel ?? taken.tabLabel
+            inheritedEmoji = inheritedEmoji ?? taken.tabEmoji
+            chown(id, to: name)
+            vlog("tree: pane '\(id)' claimed by '\(name)'")
+        }
+
+        var session = sessions[name]!
+        let index = tabIndex()
+        let previous = index.map { session.tabs[$0].panes } ?? []
+        let closed = previous.filter { before.contains($0.id) && !after.contains($0.id) }
+        let (panes, layout) = capture(to, carrying: previous + carried)
+        if let index {
+            // Panes listed but in neither tree are still cold (a tab
+            // materializing its splits one tick apart): they stay listed,
+            // and the shape is the one being built toward, not the
+            // half-built one.
+            let cold = session.tabs[index].panes.filter { !touched.contains($0.id) }
+            session.tabs[index].panes = panes + cold
+            if cold.isEmpty { session.tabs[index].layout = layout }
+            if session.tabs[index].label == nil { session.tabs[index].label = inheritedLabel }
+            if session.tabs[index].emoji == nil { session.tabs[index].emoji = inheritedEmoji }
+            if session.tabs[index].panes.isEmpty, session.tabs[index].dock?.panes.isEmpty ?? true {
+                session.tabs.remove(at: index)
+            }
+        } else if !panes.isEmpty {
+            vlog("!! tree: '\(name)' has a live tree with no registry tab -> appended")
+            session.tabs.append(Tab(panes: panes, layout: layout, label: inheritedLabel, emoji: inheritedEmoji))
+        }
+        sessions[name] = session
+        for pane in closed { buryPane(pane, from: name) }
+        persist()
+    }
+
+    /// A closed pane (split ⌘W, process exit, dock tenant close, cold
+    /// close) rests in the graveyard as its own one-pane session: same
+    /// 120s grace, same undo, same reap as every other death.
+    private func buryPane(_ pane: Pane, from owner: String) {
+        var buried = Session(
+            name: newSessionId(),
+            label: pane.label ?? pane.title ?? paneProgram(pane.id)
+                ?? URL(fileURLWithPath: pane.cwd).lastPathComponent,
+            emoji: pane.emoji,
+            cwd: pane.cwd,
+            state: .asleep)
+        buried.tabs = [Tab(panes: [pane], layout: nil)]
+        vlog("close: pane '\(pane.id)' leaves '\(owner)' -> buried as '\(buried.name)'")
+        bury(buried)
+    }
+
+    /// The reboot mirror of ownership: the daemon's spec carries its
+    /// owner (VIGIL_SESSION for `vigild restore`), rewritten at every
+    /// claim. Write-only from here; never read back to second-guess the
+    /// registry.
+    private func chown(_ id: String, to owner: String) {
+        runFireAndForget(vigildBin, ["chown", id, owner])
+    }
+
+    private var vigildBin: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/vigild").path
+    }
+
+    // MARK: Recency (the successor order when the session you are in dies)
+
+    private func touchRecent(_ name: String) {
+        guard recent.first != name else { return }
+        recent.removeAll { $0 == name }
+        recent.insert(name, at: 0)
+    }
+
+    /// The session that takes a viewport when its occupant dies: the most
+    /// recently active one that can be MOUNTED (detached or asleep;
+    /// embedded and floating already live elsewhere), else manual order.
+    private func successor(excluding dying: String) -> String? {
+        func mountable(_ session: Session) -> Bool {
+            guard session.name != dying else { return false }
+            switch session.state {
+            case .detached, .asleep: return true
+            case .embedded, .floating: return false
+            }
+        }
+        if let hit = recent.compactMap({ sessions[$0] }).first(where: mountable) { return hit.name }
+        return sessions.values.filter(mountable)
+            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
+            .first?.name
     }
 
     // MARK: Attention (fed by agent adapters through the wake events log)
@@ -793,6 +1162,7 @@ class VigilSessionManager {
         } else {
             return
         }
+        if let name { touchRecent(name) }
         let now = Date()
         var changed = false
         for view in views {
@@ -913,30 +1283,30 @@ class VigilSessionManager {
         guard let session = sessions[name] else { return }
         guard let quick = quickController(create: true) else { return }
 
-        let tree: SplitTree<Ghostty.SurfaceView>
-        var rest: [SplitTree<Ghostty.SurfaceView>] = []
+        let floated: TabRuntime
+        var rest: [TabRuntime] = []
         var floatedIndex = 0
         switch session.state {
         case .embedded:
             // Which tab floats: the one you were looking at. Identified by
-            // its leaf view, not an index: detach stashes trees in CAPTURE
-            // order, which need not match the native member order.
+            // its leaf view, not an index: detach stashes runtimes in
+            // REGISTRY order, which need not match the native member order.
             let selectedLeaf = (focusWindow(of: name)?.windowController as? TerminalController)?
                 .surfaceTree.root?.leftmostLeaf()
             detach(name: name)
-            guard case .detached(let trees) = sessions[name]!.state, !trees.isEmpty else { return }
-            floatedIndex = trees.firstIndex { $0.root?.leftmostLeaf() === selectedLeaf } ?? 0
-            tree = trees[floatedIndex]
-            rest = trees
+            guard case .detached(let held) = sessions[name]!.state, !held.isEmpty else { return }
+            floatedIndex = held.firstIndex { $0.tree.root?.leftmostLeaf() === selectedLeaf } ?? 0
+            floated = held[floatedIndex]
+            rest = held
             rest.remove(at: floatedIndex)
         case .floating:
             // Presence acks once the quick terminal is key (chokepoint).
             quick.animateIn()
             return
-        case .detached(let trees):
-            guard !trees.isEmpty else { return }
-            tree = trees[0]
-            rest = Array(trees.dropFirst())
+        case .detached(let held):
+            guard let first = held.first else { return }
+            floated = first
+            rest = Array(held.dropFirst())
         case .asleep:
             open(name: name)
             return
@@ -950,51 +1320,40 @@ class VigilSessionManager {
             stashedQuickTree = quick.surfaceTree
         }
 
-        sessions[name]!.state = .floating(rest: rest, floatedIndex: floatedIndex)
+        sessions[name]!.state = .floating(rest: rest, floatedDock: floated.dock, floatedIndex: floatedIndex)
         floatingName = name
         quickTreeSwap = true
-        quick.surfaceTree = tree
+        quick.surfaceTree = floated.tree
         quickTreeSwap = false
         quick.animateIn()
-        if let view = tree.root?.leftmostLeaf() {
+        if let view = floated.tree.root?.leftmostLeaf() {
             DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
         }
         persist()
     }
 
     /// The floating session leaves the quick terminal: back to detached
-    /// with whatever its tree is NOW (splits made while floating survive),
-    /// reinserted among its waiting tabs, and the quick terminal gets its
-    /// own stashed workspace back.
+    /// with whatever its tree is NOW (splits made while floating already
+    /// edited the registry through the chokepoint), reinserted among its
+    /// waiting tabs, and the quick terminal gets its own stashed workspace
+    /// back.
     func reclaim(_ name: String, from quick: QuickTerminalController) {
         guard floatingName == name else { return }
         floatingName = nil
         let tree = quick.surfaceTree
         if let session = sessions[name] {
-            var trees: [SplitTree<Ghostty.SurfaceView>] = []
+            var held: [TabRuntime] = []
             var index = 0
-            if case .floating(let rest, let floatedIndex) = session.state {
-                trees = rest
+            var dock: VigilDockRuntime?
+            if case .floating(let rest, let floatedDock, let floatedIndex) = session.state {
+                held = rest
                 index = floatedIndex
+                dock = floatedDock
             }
             if !tree.isEmpty {
-                trees.insert(tree, at: min(index, trees.count))
+                held.insert(TabRuntime(tree: tree, dock: dock), at: min(index, held.count))
             }
-            if trees.isEmpty {
-                sessions[name]!.state = .asleep
-            } else {
-                // mergeTabs, not captureTabs alone: a cold tab dropped from
-                // the capture is a daemon stranded for the sweep.
-                // Evaluate BEFORE assigning: the RHS reads `sessions`, and
-                // evaluating it inside the subscript's exclusive modify
-                // access is a Swift exclusivity trap (the drag-move crash,
-                // 2026-08-04: `sessions[name]?.tabs = mergedCapture(...)`
-                // died in captureTabs' sessions read). Same rule at every
-                // capture-assignment site.
-                let freshTabs = mergeTabs(name: name, liveTabs: captureTabs(name: name, trees))
-                sessions[name]!.tabs = freshTabs
-                sessions[name]!.state = .detached(trees)
-            }
+            sessions[name]!.state = held.isEmpty ? .asleep : .detached(held)
         }
         quickTreeSwap = true
         quick.surfaceTree = stashedQuickTree ?? SplitTree()
@@ -1005,21 +1364,12 @@ class VigilSessionManager {
 
     // MARK: Lifecycle
 
-    /// Set a session's survival policy directly. Flag flip, no restart; the
-    /// scope is the session, which IS the whole window.
-    func setPersistent(name: String, _ value: Bool) {
-        guard sessions[name] != nil else { return }
-        sessions[name]!.persistent = value
-        if value { refineIdentity(name: name) }
-        persist()
-    }
-
     /// Stamp a fresh window's config so it is daemon-backed from birth (a
     /// vigild attach id + VIGIL_SESSION). Returns nil when the config already
     /// carries vigil identity (attach id or VIGIL_SESSION: create,
     /// resurrection and tab paths handled it), so this only augments plain
     /// windows (⌘N, the startup window, dock reopen). Pair with
-    /// registerEphemeralSession once the controller exists.
+    /// registerSession once the controller exists.
     func newWindowConfig(
         base: Ghostty.SurfaceConfiguration?
     ) -> (config: Ghostty.SurfaceConfiguration, name: String, cwd: String)? {
@@ -1036,10 +1386,10 @@ class VigilSessionManager {
         return (config, name, cwd)
     }
 
-    /// Register a freshly-created plain window as an ephemeral session.
-    func registerEphemeralSession(controller: TerminalController, name: String, cwd: String) {
+    /// Register a freshly-created plain window (⌘⇧N, the startup window,
+    /// dock reopen) as a session: the window's tree is its first tab.
+    func registerSession(controller: TerminalController, name: String, cwd: String) {
         var session = Session(name: name, label: name, cwd: cwd, state: .embedded)
-        session.tabs = [Tab(panes: [Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0")], layout: nil)]
         session.paneSeq = 1 // index 0 consumed at birth
         sessions[name] = session
         registerMember(controller, name: name)
@@ -1050,14 +1400,13 @@ class VigilSessionManager {
     /// Session creation is a REGISTRY fact, never a window fact: mint the
     /// identity plus one cold daemon-backed pane, asleep. The daemon spawns
     /// and the shell/claude lives in it (not any window's pty) the moment a
-    /// viewport materializes the pane, so ⌘⇧P flips `persistent` with zero
-    /// restart: the process never moves.
+    /// viewport materializes the pane.
     private func mintSession(cwd: String) -> String {
         let name = newSessionId()
         var session = Session(name: name, label: name, cwd: cwd, state: .asleep)
-        session.tabs = [Tab(panes: [Pane(cwd: cwd, command: "\(Self.attachSentinel)vigil-\(name)-0")], layout: nil)]
+        session.tabs = [Tab(panes: [Pane(id: "vigil-\(name)-0", cwd: cwd)], layout: nil)]
         session.paneSeq = 1 // index 0 consumed at birth
-        sessions[name] = session // persistent defaults false → ephemeral
+        sessions[name] = session
         vlog("born(mint): '\(name)' cwd=\(cwd)")
         return name
     }
@@ -1083,10 +1432,6 @@ class VigilSessionManager {
             open(name: name)
         }
     }
-
-    /// Pane commands with this prefix are daemon attach ids, not shell
-    /// commands; resurrection sets the surface's native attach config.
-    static let attachSentinel = "vigil-attach:"
 
     /// A new tab JOINS its window's session (session scope = the window):
     /// this stamps the config with the parent session's identity and the
@@ -1131,47 +1476,12 @@ class VigilSessionManager {
         return config
     }
 
-    /// Every pane daemon id a session owns: live attach surfaces across all
-    /// its tab trees plus captured attach sentinels. Ownership is derived
-    /// from reachability, NEVER parsed out of the daemon id (the id embeds
-    /// the BIRTH session as a label; drag-out moves ownership without
-    /// renaming daemons).
-    func ownedPaneIds(_ session: Session) -> Set<String> {
-        var ids = Set<String>()
-        for tree in liveTrees(session) {
-            for view in tree {
-                if let id = view.vigilAttachId { ids.insert(id) }
-            }
-        }
-        // Dock tenants are panes too: live runtimes (embedded tabs and
-        // detached/floating stashes) and captured sentinels all claim their
-        // daemons, or the reachability sweep would murder a collapsed dock.
-        for controller in members(of: session.name) {
-            for view in dockMap.object(forKey: controller)?.views ?? [] {
-                if let id = view.vigilAttachId { ids.insert(id) }
-            }
-        }
-        for runtime in (detachedDocks[session.name] ?? [:]).values {
-            for view in runtime.views {
-                if let id = view.vigilAttachId { ids.insert(id) }
-            }
-        }
-        for tab in session.tabs {
-            for pane in tab.panes + (tab.dock?.panes ?? []) {
-                if let cmd = pane.command, cmd.hasPrefix(Self.attachSentinel) {
-                    ids.insert(String(cmd.dropFirst(Self.attachSentinel.count)))
-                }
-            }
-        }
-        return ids
-    }
-
     /// Mint the next daemon pane index for a session: the persisted
-    /// monotonic counter, floored by the owned-id max (heals data recorded
-    /// before the counter existed). NEVER derived from owned ids alone: an
-    /// id whose tab left the session (bury, drag-out) is still a live
-    /// daemon elsewhere, and re-minting it attaches the new surface to
-    /// that daemon's socket - the departed tab replays into the new pane.
+    /// monotonic counter, floored by the owned-id max. NEVER derived from
+    /// owned ids alone: an id whose tab left the session (bury, drag-out)
+    /// is still a live daemon elsewhere, and re-minting it attaches the
+    /// new surface to that daemon's socket - the departed tab replays into
+    /// the new pane.
     private func nextPaneIndex(name: String) -> Int {
         guard let session = sessions[name] else { return 0 }
         var maxIndex = 0
@@ -1185,43 +1495,76 @@ class VigilSessionManager {
         return minted
     }
 
-    /// Detach: every tab tree (ptys running) moves from the window to this
-    /// manager. Emptying each member's tree closes its window; our strong
-    /// reference keeps every surface alive.
+    /// Detach: every live tab (ptys running) moves from its window to this
+    /// manager as a held runtime; the windows close. Our strong reference
+    /// keeps every surface alive.
     func detach(name: String) {
         guard let session = sessions[name], case .embedded = session.state else { return }
-        let ms = members(of: name)
-        guard !ms.isEmpty else { return }
-        let focus = focusWindow(of: name)
-        let focusController = (focus?.windowController as? TerminalController) ?? ms[0]
-        if let pwd = focusController.focusedSurface?.pwd { sessions[name]!.cwd = pwd }
-        // Freeze the visual: the overview shows what the workspace looked
-        // like at the moment it was released. The selected tab's WHOLE
-        // window content: a workspace is its splits, one pane is a lie.
-        sessions[name]!.thumbnail = Self.windowSnapshot(focusController)
-            ?? (focusController.focusedSurface ?? focusController.surfaceTree.root?.leftmostLeaf())?.asImage
-        // Trees and docks stashed in CAPTURE order (mergedCapture inside
-        // carries cold tabs too: captureTabs alone silently dropped them
-        // here, stranding their daemons for the sweep).
-        let (trees, docks) = stashOrdered(name: name)
-        for runtime in docks.values { runtime.unmount() }
-        for controller in ms { dockMap.removeObject(forKey: controller) }
-        detachedDocks[name] = docks.isEmpty ? nil : docks
-        sessions[name]!.state = .detached(trees)
-        setOcclusion(false, trees)
-        for runtime in docks.values { setOcclusion(false, views: runtime.views) }
-        // Membership ends BEFORE the trees empty: the window-close cascade
-        // must see these controllers as session-less.
-        for controller in ms {
-            memberships.removeObject(forKey: controller)
-            killController(controller)
-        }
-        // The frozen visual survives relaunch too: asleep sessions keep their
-        // face in the overview.
-        if let thumb = sessions[name]!.thumbnail {
-            persistThumb(name: name, image: thumb)
-        }
+        guard !members(of: name).isEmpty else { return }
+        let held = vacate(name, keeping: nil)
+        sessions[name]!.state = held.isEmpty ? .asleep : .detached(held)
         persist()
+    }
+
+    /// Pull every live tab of an embedded session out of its windows, in
+    /// REGISTRY order (the native group rotates the anchored tab first;
+    /// tab order must never follow it). Sibling windows close; `keeping`'s
+    /// tree is left in place for the caller to REPLACE (an emptied tree
+    /// closes the window, a replaced one never does). Membership ends
+    /// before any tree empties, so the close cascade sees session-less
+    /// controllers. Freezes the session's thumbnail and cwd on the way.
+    private func vacate(_ name: String, keeping viewport: TerminalController?) -> [TabRuntime] {
+        let ms = members(of: name)
+        let focusController = viewport
+            ?? (focusWindow(of: name)?.windowController as? TerminalController)
+            ?? ms.first
+        if let focusController {
+            if let pwd = focusController.focusedSurface?.pwd { sessions[name]!.cwd = pwd }
+            // Freeze the visual: the overview shows what the workspace
+            // looked like at the moment it was released. The selected tab's
+            // WHOLE window content: a workspace is its splits.
+            let thumb = Self.windowSnapshot(focusController)
+                ?? (focusController.focusedSurface ?? focusController.surfaceTree.root?.leftmostLeaf())?.asImage
+            if let thumb {
+                sessions[name]!.thumbnail = thumb
+                persistThumb(name: name, image: thumb)
+            }
+        }
+        var pool = ms.filter { !$0.surfaceTree.isEmpty }
+        var held: [TabRuntime] = []
+        for tab in sessions[name]!.tabs {
+            let ids = Set(tabPaneIds(tab))
+            guard let index = pool.firstIndex(where: { member in
+                member.surfaceTree.contains { $0.vigilAttachId.map(ids.contains) ?? false }
+            }) else { continue } // a cold tab lives in the registry alone
+            let member = pool.remove(at: index)
+            let liveIds = Set(member.surfaceTree.compactMap(\.vigilAttachId))
+            let registered = Set(tab.panes.map(\.id))
+            guard registered.isSubset(of: liveIds) else {
+                // Half-materialized (vacated between the mount and its
+                // split tick): held, this runtime would mount verbatim
+                // forever with its cold siblings unreachable. Released
+                // instead: the tab goes cold and rebuilds whole.
+                vlog("vacate: '\(name)' tab \(registered.sorted()) half-live \(liveIds.sorted()) -> released cold")
+                dockMap.object(forKey: member)?.unmount()
+                continue
+            }
+            held.append(TabRuntime(tree: member.surfaceTree, dock: dockMap.object(forKey: member)))
+        }
+        for stray in pool {
+            vlog("!! vacate: '\(name)' member tree \(stray.surfaceTree.compactMap(\.vigilAttachId)) missing from its registry (appended)")
+            held.append(TabRuntime(tree: stray.surfaceTree, dock: dockMap.object(forKey: stray)))
+        }
+        for runtime in held {
+            runtime.dock?.unmount()
+            setOcclusion(false, [runtime])
+        }
+        for member in ms {
+            dockMap.removeObject(forKey: member)
+            memberships.removeObject(forKey: member)
+        }
+        for member in ms where member !== viewport { killController(member) }
+        return held
     }
 
     /// Captured ratios onto a freshly materialized tree. Structural walk:
@@ -1281,43 +1624,6 @@ class VigilSessionManager {
             .appendingPathComponent(".local/state/wake/dumps/\(name)")
     }
 
-    /// One live view as a captured pane. THE single place a Pane is built
-    /// from a surface, because a capture is a rewrite: anything the pane
-    /// carries that the view does not know about - the name and face YOU
-    /// gave it - must be carried across or every persist would silently
-    /// erase it.
-    private func capturedPane(_ view: Ghostty.SurfaceView) -> Pane {
-        let id = view.vigilAttachId
-        let existing = id.flatMap { customIdentity($0) }
-        return Pane(
-            cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
-            command: id.map { "\(Self.attachSentinel)\($0)" },
-            title: capturedTitle(of: view),
-            label: existing?.label,
-            emoji: existing?.emoji)
-    }
-
-    /// Capture every tab of the workspace: panes + split shape per tree.
-    /// Daemon panes need only their attach sentinel (the daemon IS the
-    /// state); a daemon-less pane records its cwd and comes back as a bare
-    /// shell.
-    private func captureDock(_ runtime: VigilDockRuntime) -> DockCapture? {
-        guard !runtime.views.isEmpty else { return nil }
-        let panes = runtime.views.map { view -> Pane in
-            capturedPane(view)
-        }
-        return DockCapture(
-            panes: panes,
-            active: min(max(runtime.active, 0), panes.count - 1),
-            width: Double(runtime.width),
-            collapsed: runtime.collapsed)
-    }
-
-    /// docks: live runtimes by tab index (detach passes them). nil = carry
-    /// forward whatever the session already holds for that index (a stashed
-    /// runtime, else the previous capture), so paths that never see docks
-    /// (reclaim from the quick terminal) cannot silently drop them: a
-    /// dropped capture is an unreachable daemon, and the sweep kills those.
     /// The name to REMEMBER for a live pane: its terminal title, which is
     /// what the program calls itself ("Buscar versión en castellano", not
     /// "adrian"). Ghostty's own default (a bare "👻") and an empty title
@@ -1338,41 +1644,9 @@ class VigilSessionManager {
         return title
     }
 
-    /// A pane's remembered name, from whichever capture currently holds it.
+    /// A pane's remembered name, from its registry entry.
     func capturedTitle(ofPane paneId: String) -> String? {
-        for session in sessions.values {
-            for tab in session.tabs {
-                for pane in tab.panes + (tab.dock?.panes ?? [])
-                where self.paneId(of: pane) == paneId {
-                    return pane.title
-                }
-            }
-        }
-        return nil
-    }
-
-    private func captureTabs(
-        name: String, _ trees: [SplitTree<Ghostty.SurfaceView>],
-        docks: [Int: VigilDockRuntime]? = nil
-    ) -> [Tab] {
-        let previous = sessions[name]?.tabs ?? []
-        return trees.enumerated().map { (index, tree) in
-            let panes = tree.map { view -> Pane in capturedPane(view) }
-            let dock: DockCapture?
-            if let docks {
-                dock = docks[index].flatMap { captureDock($0) }
-            } else if let runtime = detachedDocks[name]?[index] {
-                dock = captureDock(runtime)
-            } else {
-                dock = index < previous.count ? previous[index].dock : nil
-            }
-            // The tab's own name follows its ANCHOR pane, not its position:
-            // a recapture, a reorder or a swap must never rename a tab.
-            let anchorId = panes.compactMap { paneId(of: $0) }.first
-            let identity = anchorId.flatMap { customIdentity("tab:\($0)") }
-            return Tab(panes: panes, layout: Self.captureLayout(tree), dock: dock,
-                       label: identity?.label, emoji: identity?.emoji)
-        }
+        registered(paneId)?.title
     }
 
     private func runFireAndForget(_ bin: String, _ args: [String]) {
@@ -1451,28 +1725,23 @@ class VigilSessionManager {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
 
-        case .detached(let trees):
-            // ONE window, first live tree mounted, the rest released to
-            // COLD (captures + daemons; the sidebar mounts them on click).
+        case .detached(let held):
+            // ONE window, first live tab mounted, the rest released to
+            // COLD (registry + daemons; the sidebar mounts them on click).
             // The lazy rule is universal: launch, overview and shapeshift
             // all materialize the same way, so tabs never "disappear"
             // between the first open and the first swap.
-            vlog("open: '\(name)' detached tabs=\(trees.count) -> mount first, \(trees.count - 1) cold")
-            guard let first = trees.first else {
+            vlog("open: '\(name)' detached tabs=\(held.count) -> mount first, \(held.count - 1) cold")
+            guard let first = held.first else {
                 sessions[name]!.state = .asleep
                 open(name: name)
                 return
             }
-            let controller = TerminalController.newWindow(ghostty, tree: first, confirmUndo: false)
+            let controller = TerminalController.newWindow(ghostty, tree: first.tree, confirmUndo: false)
             registerMember(controller, name: name)
-            if let dock = detachedDocks[name]?[0] {
-                dockMap.setObject(dock, forKey: controller)
-            }
-            for runtime in (detachedDocks[name] ?? [:]).values
-            where runtime !== dockMap.object(forKey: controller) {
-                runtime.unmount()
-            }
-            detachedDocks[name] = nil
+            if let dock = first.dock { dockMap.setObject(dock, forKey: controller) }
+            for runtime in held.dropFirst() { runtime.dock?.unmount() }
+            setOcclusion(true, [first])
             sessions[name]!.state = .embedded
             controller.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -1480,19 +1749,33 @@ class VigilSessionManager {
         case .asleep:
             resurrect(name: name, ghostty: ghostty)
         }
+        touchRecent(name)
         persist()
     }
 
-    /// Rebuild the whole workspace from its captured tabs: one window, every
-    /// tab regrouped, every pane back in its cwd. Daemon panes reattach
-    /// natively (living daemon = living processes, per-pane resume rides
-    /// VIGILD_RESUME); a daemon-less pane comes back as a bare shell.
-    private func resurrect(name: String, ghostty: Ghostty.App) {
-        let session = sessions[name]!
-        var tabs = session.tabs
-        if tabs.isEmpty || tabs.allSatisfy({ $0.panes.isEmpty }) {
-            tabs = [Tab(panes: [Pane(cwd: session.cwd, command: nil)], layout: nil)]
+    /// Every tab needs a host pane to materialize: a session with nothing
+    /// registered (every tab emptied by moves and closes) gets one fresh
+    /// pane in its cwd, and a dock-only tab (its split panes moved away,
+    /// its tenants staying) gets a fresh host pane in front of its dock,
+    /// the moment it is shown.
+    private func ensureHostPanes(_ name: String) {
+        var tabs = sessions[name]!.tabs
+        if tabs.isEmpty { tabs = [Tab(panes: [], layout: nil)] }
+        for index in tabs.indices where tabs[index].panes.isEmpty {
+            tabs[index].panes = [Pane(id: "vigil-\(name)-\(nextPaneIndex(name: name))", cwd: sessions[name]!.cwd)]
+            tabs[index].layout = nil
         }
+        sessions[name]!.tabs = tabs
+    }
+
+    /// Rebuild the whole workspace from its registry: one window, every
+    /// tab regrouped, every pane back in its cwd. Panes reattach natively
+    /// (living daemon = living processes, per-pane resume rides the
+    /// daemon's own resume pointer); a dead daemon comes back as a fresh
+    /// shell.
+    private func resurrect(name: String, ghostty: Ghostty.App) {
+        ensureHostPanes(name)
+        let tabs = sessions[name]!.tabs
 
         func configFor(_ pane: Pane) -> Ghostty.SurfaceConfiguration {
             resurrectConfig(name: name, pane: pane)
@@ -1540,15 +1823,14 @@ class VigilSessionManager {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// A pane's resurrection config: cwd + session identity + the native
-    /// attach id when its daemon lives (then the surface is a reattach).
+    /// A pane's resurrection config: cwd + session identity + its native
+    /// attach id (a live daemon makes the surface a reattach; a dead one
+    /// is spawned fresh on first contact).
     private func resurrectConfig(name: String, pane: Pane) -> Ghostty.SurfaceConfiguration {
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = pane.cwd
         config.environmentVariables["VIGIL_SESSION"] = name
-        if let command = pane.command, command.hasPrefix(Self.attachSentinel) {
-            config.vigilAttach = String(command.dropFirst(Self.attachSentinel.count))
-        }
+        config.vigilAttach = pane.id
         return config
     }
 
@@ -1585,7 +1867,6 @@ class VigilSessionManager {
     ) {
         let panes = tab.panes
         guard panes.count > 1 else { return }
-        markMaterializing(controller)
         let layout = tab.layout
         // The closure is BOUND to the tree it was scheduled for: a swap
         // between schedule and fire (a rival mount racing this one) would
@@ -1598,7 +1879,6 @@ class VigilSessionManager {
         // (splits against an unhosted surface drop); mounting into a live
         // window passes 0 and splits land on the next runloop tick.
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            defer { self?.clearMaterializing(controller) }
             guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else {
                 self?.vlog("resurrect: splits DROPPED (no anchor surface)")
                 return
@@ -1634,7 +1914,8 @@ class VigilSessionManager {
                 }
                 materialize(layout, anchor: anchor)
                 // Splits are born 0.5; re-shape to the captured ratios
-                // wherever the realized tree matches the layout.
+                // wherever the realized tree matches the layout. Same
+                // panes, so the chokepoint only recaptures the shape.
                 if let root = controller.surfaceTree.root {
                     controller.surfaceTree = SplitTree(
                         root: Self.applyRatios(root, layout),
@@ -1653,38 +1934,56 @@ class VigilSessionManager {
 
     // MARK: Close (vigil owns every close; scope decides the meaning)
 
-    /// Closing a session's WINDOW is its lifecycle event: persistent
-    /// detaches (everything keeps running), ephemeral is killed with the
-    /// undo grace. Returns true when handled (the close must be swallowed
-    /// by the caller).
+    /// Closing a session's WINDOW (red button, ⌘⇧W) kills the session:
+    /// Kill/Cancel when something runs, then the 120s undo. Putting a
+    /// session away without killing is an explicit gesture (sidebar click,
+    /// ⌘⇧U, ⌘Q), never the window's close. Returns true when handled (the
+    /// close must be swallowed by the caller).
     func handleWindowClose(controller: TerminalController) -> Bool {
         guard let name = sessionName(of: controller) else {
             vlog("handleWindowClose: controller has NO session -> not handled (window closes plain)")
             return false
         }
-        let persistent = sessions[name]!.persistent
         let empty = members(of: name).allSatisfy { $0.surfaceTree.isEmpty }
-        vlog("handleWindowClose: '\(name)' persistent=\(persistent) emptyTrees=\(empty)")
+        vlog("handleWindowClose: '\(name)' emptyTrees=\(empty)")
         if empty {
             for member in members(of: name) { memberships.removeObject(forKey: member) }
-            if persistent { sessions[name]!.state = .asleep }
-            else { killDaemons(of: sessions[name]!); sessions[name] = nil }
+            sessions[name]!.state = .asleep
             persist()
             return false
         }
-        if persistent {
-            detach(name: name)
-        } else {
-            // Explicit ⌘W on an ephemeral session: the one gesture that
-            // kills it, confirmed like ⌘⇧⌫ (Adrian 2026-08-01), then the
-            // usual 120s undo grace.
-            confirmKill(name: name) { self.kill(name: name) }
+        confirmKill(name: name) { self.kill(name: name, keepViewport: false) }
+        return true
+    }
+
+    /// ⌘W on a SPLIT pane of a session window: confirm with vigil's
+    /// process truth (the program holding the tty, never ghostty's
+    /// always-running daemon child), then let ghostty remove the node; the
+    /// tree-change chokepoint buries the pane. Returns false when the
+    /// close needs no confirm (the caller's plain removal proceeds).
+    func closePane(
+        _ node: SplitTree<Ghostty.SurfaceView>.Node,
+        in controller: TerminalController,
+        withConfirmation: Bool
+    ) -> Bool {
+        guard withConfirmation, sessionName(of: controller) != nil else { return false }
+        let busy = busyPrograms(panes: node.compactMap(\.vigilAttachId))
+        guard !busy.isEmpty else {
+            controller.closeSurface(node, withConfirmation: false)
+            return true
+        }
+        controller.confirmClose(
+            messageText: "Close Pane?",
+            informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it (undo keeps it for \(Int(Self.killGrace))s)."
+        ) { [weak controller] in
+            controller?.closeSurface(node, withConfirmation: false)
         }
         return true
     }
 
     /// Confirm-then-kill for surfaces outside the keybind path (sidebar
-    /// context menu): same alert, same grace.
+    /// context menu, overview): same alert, same grace; the viewport the
+    /// session showed in moves on to the last active session.
     func killWithConfirm(name: String) {
         guard sessions[name] != nil else { return }
         confirmKill(name: name) { self.kill(name: name) }
@@ -1692,91 +1991,61 @@ class VigilSessionManager {
 
     /// Closing one TAB of a multi-tab session is a structural edit, not a
     /// lifecycle event: the tab leaves the session and becomes its own
-    /// buried ephemeral session (120s grace, ⌘⇧T exhumes it into its own
-    /// window; expiry kills its pane daemons). Symmetric with drag-out,
-    /// which also makes a tab its own session, just an alive one.
+    /// buried session (120s grace, ⌘⇧T exhumes it into its own window;
+    /// expiry kills its pane daemons). Symmetric with drag-out, which also
+    /// makes a tab its own session, just an alive one.
     func closeTabStructurally(_ controller: TerminalController) {
         guard let name = sessionName(of: controller) else { return }
         let tree = controller.surfaceTree
         let dock = dockMap.object(forKey: controller)
         memberships.removeObject(forKey: controller)
         dockMap.removeObject(forKey: controller)
-        controller.surfaceTree = SplitTree()
+        swapTree(controller, SplitTree())
         vlog("closeTab: one tab leaves '\(name)'")
-        // The tab leaves the SOURCE capture too. Without this, the next
-        // mergedCapture saw its panes as not-live and carried the tab as
-        // "still cold": a closed tab haunted the sidebar as a phantom
-        // cold row forever (buryMountedTab already strips; this path
-        // forgot).
-        var movedIds = Set<String>()
-        for view in tree { if let id = view.vigilAttachId { movedIds.insert(id) } }
-        for view in dock?.views ?? [] { if let id = view.vigilAttachId { movedIds.insert(id) } }
-        sessions[name]?.tabs.removeAll { !Set(tabPaneIds($0)).isDisjoint(with: movedIds) }
         guard !tree.isEmpty else { persist(); return }
-
-        let surface = tree.root?.leftmostLeaf()
-        let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
-        let cwd = surface?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-        let tabName = newSessionId()
-        var session = Session(
-            name: tabName,
-            label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
-            cwd: cwd,
-            state: .detached([tree]))
-        session.ephemeral = true
-        session.thumbnail = surface?.asImage
-        // The tab's dock leaves WITH its tab (the dock is the tab's).
-        if let dock {
-            dock.unmount()
-            detachedDocks[tabName] = [0: dock]
-            session.tabs = captureTabs(name: tabName, [tree], docks: [0: dock])
-        }
-        bury(session)
+        buryTab(tree: tree, dock: dock, from: name)
         persist()
     }
 
-    /// The eye on/off toggle: flip the front window's session between
-    /// persistent (survives quit) and ephemeral (dies on close), in place.
-    func toggleFrontPersist() {
-        guard let controller = TerminalController.preferredParent else { return }
-        toggleWindowPersist(controller)
+    /// A live tab leaves its session for the graveyard: its registry entry
+    /// moves into a one-tab burial that HOLDS the runtime (views alive, so
+    /// an exhume re-embeds without a VT replay). The tab's dock leaves
+    /// with it (the dock is the tab's).
+    private func buryTab(tree: SplitTree<Ghostty.SurfaceView>, dock: VigilDockRuntime?, from name: String) {
+        let ids = Set(tree.compactMap(\.vigilAttachId) + (dock?.views.compactMap(\.vigilAttachId) ?? []))
+        var session = sessions[name]!
+        let tab: Tab
+        if let index = session.tabs.firstIndex(where: { !Set(tabPaneIds($0)).isDisjoint(with: ids) }) {
+            tab = session.tabs.remove(at: index)
+        } else {
+            vlog("!! buryTab: '\(name)' tab \(ids) was not in its registry")
+            let (panes, layout) = capture(tree, carrying: [])
+            tab = Tab(panes: panes, layout: layout, dock: dock.flatMap { captureDock($0, carrying: []) })
+        }
+        sessions[name] = session
+        let surface = tree.root?.leftmostLeaf()
+        let cwd = surface?.pwd ?? tab.panes.first?.cwd
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        var buried = Session(
+            name: newSessionId(),
+            label: tab.label ?? surface.flatMap { capturedTitle(of: $0) }
+                ?? URL(fileURLWithPath: cwd).lastPathComponent,
+            emoji: tab.emoji,
+            cwd: cwd,
+            state: .detached([TabRuntime(tree: tree, dock: dock)]))
+        buried.tabs = [tab]
+        buried.thumbnail = surface?.asImage
+        dock?.unmount()
+        vlog("close: tab \(ids.sorted()) leaves '\(name)' -> buried as '\(buried.name)'")
+        bury(buried)
     }
 
-    /// The titlebar eye at window scope: the controller's session IS the
-    /// window, one flag flip covers every tab.
-    func toggleWindowPersist(_ controller: TerminalController) {
-        guard let name = sessionName(of: controller) else { return }
-        setPersistent(name: name, !(sessions[name]?.persistent ?? false))
-    }
-
-    /// True when the front window belongs to a persistent session.
-    var frontWindowPersistent: Bool {
-        guard let controller = TerminalController.preferredParent,
-              let name = sessionName(of: controller) else { return false }
-        return sessions[name]?.persistent == true
-    }
-
-    /// True when this window belongs to a persistent session.
-    func windowPersistent(_ controller: TerminalController) -> Bool {
-        guard let name = sessionName(of: controller) else { return false }
-        return sessions[name]?.persistent == true
-    }
-
-    /// One-gesture detach for the front window: detaching means
-    /// keep-running-in-the-background, which is what persistent is.
+    /// One-gesture detach for the front window (⌘⇧U): keep running in the
+    /// background, window closes.
     func detachFrontWindow() {
         guard let controller = TerminalController.preferredParent,
               let name = sessionName(of: controller) else { return }
-        sessions[name]?.persistent = true
         detach(name: name)
-        persist()
-    }
-
-    /// Mark the window's session persistent (survives close/quit/reboot). The
-    /// window is already daemon-backed, so this only flips the flag.
-    func persistFully(controller: TerminalController) {
-        guard let name = sessionName(of: controller) else { return }
-        setPersistent(name: name, true)
     }
 
     // MARK: Drag-out / drag-in (membership follows AppKit's tabGroups)
@@ -1840,11 +2109,10 @@ class VigilSessionManager {
     }
 
     /// Drag-out: these tabs left their session's window; they become their
-    /// own session, inheriting the survival class (dragging a tab out of a
-    /// surviving window must not silently make it mortal). The ID stays a
-    /// fresh random handle (identity is NEVER derived — the adrian-N
-    /// lesson); lineage lives in the LABEL: "<parent label> 2", "… 3",
-    /// renameable and refined async when persistent.
+    /// own session (registerMember claims their registry entries from the
+    /// old one). The ID stays a fresh random handle (identity is NEVER
+    /// derived — the adrian-N lesson); lineage lives in the LABEL:
+    /// "<parent label> 2", "… 3", renameable.
     private func mintSession(from controllers: [TerminalController], inheriting old: Session) {
         let name = newSessionId()
         let cwd = controllers.first?.focusedSurface?.pwd ?? old.cwd
@@ -1852,11 +2120,10 @@ class VigilSessionManager {
         let taken = Set(sessions.values.map(\.label))
         while taken.contains("\(old.label) \(ordinal)") { ordinal += 1 }
         var session = Session(name: name, label: "\(old.label) \(ordinal)", cwd: cwd, state: .embedded)
-        session.persistent = old.persistent
         session.emoji = old.emoji // visual lineage, renameable like the label
         sessions[name] = session
         for controller in controllers { registerMember(controller, name: name) }
-        vlog("mint(drag-out): '\(name)' ('\(session.label)') from '\(old.name)' tabs=\(controllers.count) persistent=\(old.persistent)")
+        vlog("mint(drag-out): '\(name)' ('\(session.label)') from '\(old.name)' tabs=\(controllers.count)")
         // No async label refinement here: the lineage label is already
         // meaningful (unlike an id seed), and silently replacing it would
         // erase exactly the breadcrumb the mint just created. Rename wins.
@@ -1864,20 +2131,23 @@ class VigilSessionManager {
     }
 
     /// Drag-in: a session's tabs joined another session's window; the window
-    /// absorbs them. Attention escalates; nothing dies (the daemons'
-    /// ownership moved with their surfaces).
+    /// absorbs them, cold tabs included. Attention escalates; nothing dies.
     private func absorb(_ other: String, into absorberName: String) {
-        guard let absorbed = sessions[other], sessions[absorberName] != nil else { return }
+        guard sessions[other] != nil, sessions[absorberName] != nil else { return }
         for controller in members(of: other) {
             registerMember(controller, name: absorberName)
         }
+        let absorbed = sessions[other]!
+        for tab in absorbed.tabs {
+            for id in tabPaneIds(tab) { chown(id, to: absorberName) }
+        }
+        sessions[absorberName]!.tabs += absorbed.tabs
         if absorbed.attention.rawValue > sessions[absorberName]!.attention.rawValue {
             sessions[absorberName]!.attention = absorbed.attention
             sessions[absorberName]!.attentionSince = absorbed.attentionSince
         }
-        sessions[absorberName]!.persistent =
-            sessions[absorberName]!.persistent || absorbed.persistent
         sessions[other] = nil
+        recent.removeAll { $0 == other }
         try? FileManager.default.removeItem(at: dumpsDir(other))
         vlog("absorb(drag-in): '\(other)' -> '\(absorberName)'")
         persist()
@@ -1889,9 +2159,8 @@ class VigilSessionManager {
     /// The window is a VIEWPORT: clicking a session in the bar swaps what
     /// this window displays, it never spawns a window. Live targets keep
     /// their home (focus it); detached/asleep targets mount INTO this
-    /// window. The current occupant leaves honestly: persistent detaches
-    /// (running, invisible), ephemeral buries (120s undo), a session-less
-    /// stray's tree buries too.
+    /// window. The current occupant leaves honestly: detached, running,
+    /// invisible (a session-less stray is minted a real session first).
     func shapeshift(in controller: TerminalController, to targetName: String, anchor: String? = nil) {
         guard let target = sessions[targetName], let ghostty = ghosttyApp else { return }
         switch target.state {
@@ -1931,13 +2200,9 @@ class VigilSessionManager {
     /// stutter vanilla doesn't have, sampled 2026-08-06). Detach/bury
     /// occlude; mount un-occludes (the window's own notifications take
     /// over from there).
-    private func setOcclusion(_ visible: Bool, _ trees: [SplitTree<Ghostty.SurfaceView>]) {
-        for tree in trees {
-            for view in tree {
-                guard let surface = view.surface, view.isWindowVisible != visible else { continue }
-                ghostty_surface_set_occlusion(surface, visible)
-                view.isWindowVisible = visible
-            }
+    private func setOcclusion(_ visible: Bool, _ runtimes: [TabRuntime]) {
+        for runtime in runtimes {
+            setOcclusion(visible, views: Array(runtime.tree) + (runtime.dock?.views ?? []))
         }
     }
 
@@ -1949,54 +2214,44 @@ class VigilSessionManager {
         }
     }
 
+    /// The occupant of a viewport leaves it ALIVE: the session goes
+    /// detached with its runtimes held (coming back re-embeds these exact
+    /// surfaces: native tabs regroup from live trees, no VT replay, titles
+    /// intact); this controller's tree is left for mount to REPLACE.
     private func releaseOccupant(of controller: TerminalController) {
         if let current = sessionName(of: controller) {
-            let ms = members(of: current)
-            let (trees, docks) = stashOrdered(name: current)
-            if let pwd = controller.focusedSurface?.pwd { sessions[current]!.cwd = pwd }
-            sessions[current]!.thumbnail = Self.windowSnapshot(controller)
-            for member in ms {
-                dockMap.object(forKey: member)?.unmount()
-                dockMap.removeObject(forKey: member)
-            }
-            for member in ms { memberships.removeObject(forKey: member) }
-            for member in ms where member !== controller { killController(member) }
-            // BOTH classes stay DETACHED with trees ALIVE: coming back
-            // re-embeds these exact surfaces (native tabs regroup from
-            // live trees, no VT replay, titles intact). The old
-            // straight-to-asleep shortcut made every return a full
-            // rebuild - the reported delay and the ghost-titled tabs.
-            sessions[current]!.state = .detached(trees)
-            detachedDocks[current] = docks.isEmpty ? nil : docks
-            setOcclusion(false, trees)
-            for dock in docks.values { setOcclusion(false, views: dock.views) }
-            if sessions[current]!.persistent, let thumb = sessions[current]!.thumbnail {
-                persistThumb(name: current, image: thumb)
-            }
+            let held = vacate(current, keeping: controller)
+            sessions[current]!.state = held.isEmpty ? .asleep : .detached(held)
         } else if !controller.surfaceTree.isEmpty {
-            // Safety-net stray: mint it a REAL ephemeral session (alive,
-            // listed, killable) instead of silently burying its tree.
+            // Safety-net stray: mint it a REAL session (alive, listed,
+            // killable) instead of silently burying its tree.
             let tree = controller.surfaceTree
             let surface = controller.focusedSurface ?? tree.root?.leftmostLeaf()
             let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
             let cwd = surface?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+            let runtime = TabRuntime(tree: tree, dock: nil)
             var stray = Session(
                 name: newSessionId(),
                 label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
                 cwd: cwd,
-                state: .detached([tree]))
+                state: .detached([runtime]))
             stray.thumbnail = surface?.asImage
+            let (panes, layout) = capture(tree, carrying: [])
+            stray.tabs = [Tab(panes: panes, layout: layout)]
             sessions[stray.name] = stray
-            setOcclusion(false, [tree])
+            vlog("!! release: session-less window minted as stray '\(stray.name)'")
+            setOcclusion(false, [runtime])
         }
     }
 
     /// Mount a detached/asleep session INTO an existing window as ONE
     /// synchronous tree swap: its first tab REPLACES the window's tree and
-    /// every other tab stays COLD (capture + running daemons; the sidebar
+    /// every other tab stays COLD (registry + running daemons; the sidebar
     /// lists them and a click mounts them the same way). No window is ever
     /// created or closed here: a shapeshift must be instant, not a
-    /// shuffle (Adrian 2026-08-01).
+    /// shuffle (Adrian 2026-08-01). The tree lands BEFORE membership:
+    /// registerMember reads the controller's tree, and the old occupant's
+    /// tree must never be claimed for the newcomer.
     private func mount(
         _ name: String,
         into controller: TerminalController,
@@ -2005,38 +2260,36 @@ class VigilSessionManager {
     ) {
         guard let session = sessions[name] else { return }
         switch session.state {
-        case .detached(let trees):
-            // The ANCHORED tree (else the first) mounts into THIS window
+        case .detached(let held):
+            // The ANCHORED tab (else the first) mounts into THIS window
             // instantly; remaining tabs regroup as NATIVE tab-windows
             // behind it (ghostty's regular tab UX, exactly - Adrian
             // 2026-08-03: session tabs ARE native tabs, period).
             let chosenIndex = anchor.flatMap { a in
-                trees.firstIndex { tree in tree.contains { $0.vigilAttachId == a } }
+                held.firstIndex { runtime in runtime.tree.contains { $0.vigilAttachId == a } }
             } ?? 0
-            guard trees.indices.contains(chosenIndex) else {
+            guard held.indices.contains(chosenIndex) else {
                 sessions[name]!.state = .asleep
                 mount(name, into: controller, ghostty: ghostty, anchor: anchor)
                 return
             }
+            let chosen = held[chosenIndex]
+            swapTree(controller, chosen.tree)
+            if let dock = chosen.dock { dockMap.setObject(dock, forKey: controller) }
             registerMember(controller, name: name)
-            controller.surfaceTree = trees[chosenIndex]
-            // Wake the MOUNTED tree's renderers (the window's occlusion
+            // Wake the MOUNTED tab's renderers (the window's occlusion
             // notifications take over from the next change); the rest
             // regroup as unselected tab windows and stay occluded until
             // AppKit reports them visible.
-            setOcclusion(true, [trees[chosenIndex]])
+            setOcclusion(true, [chosen])
             focusLeftmost(controller)
-            if let dock = detachedDocks[name]?[chosenIndex] {
-                dockMap.setObject(dock, forKey: controller)
-                setOcclusion(true, views: dock.views)
-            }
-            let rest = trees.enumerated().filter { $0.offset != chosenIndex }
+            let rest = held.enumerated().filter { $0.offset != chosenIndex }
             if !rest.isEmpty {
                 // This window is PRESENTED (it is the live viewport), so
                 // the rest attach in ONE next tick - no stagger, no
                 // trickle. The 0.3s beat exists only for freshly created
                 // windows (launch resurrect). Each tab lands at its
-                // CAPTURE position relative to the anchored viewport
+                // REGISTRY position relative to the anchored viewport
                 // (before-anchor insert .below it, after-anchor chain
                 // .above), so the native bar never rotates anchored-first.
                 regroupsInFlight += 1
@@ -2044,50 +2297,42 @@ class VigilSessionManager {
                     guard let self else { return }
                     defer { self.regroupsInFlight -= 1; self.syncWindowMarks() }
                     var lastAfter = controller.window
-                    for (index, tree) in rest {
+                    for (index, runtime) in rest {
                         let before = index < chosenIndex
                         let tab = TerminalController.vigilNewTab(
-                            ghostty, parent: controller, tree: tree,
+                            ghostty, parent: controller, tree: runtime.tree,
                             relativeTo: before ? controller.window : lastAfter,
                             ordered: before ? .below : .above)
                         if !before { lastAfter = tab.window ?? lastAfter }
+                        if let dock = runtime.dock { self.dockMap.setObject(dock, forKey: tab) }
                         self.registerMember(tab, name: name)
                         self.focusLeftmost(tab)
-                        if let dock = self.detachedDocks[name]?[index] {
-                            self.dockMap.setObject(dock, forKey: tab)
-                        }
                     }
-                    self.detachedDocks[name] = nil
                     controller.window?.makeKeyAndOrderFront(nil)
                     self.focusLeftmost(controller)
                     VigilBars.shared.syncAll()
                 }
-            } else {
-                detachedDocks[name] = nil
             }
             sessions[name]!.state = .embedded
 
         case .asleep:
-            var tabs = session.tabs
-            if tabs.isEmpty || tabs.allSatisfy({ $0.panes.isEmpty }) {
-                tabs = [Tab(panes: [Pane(cwd: session.cwd, command: nil)], layout: nil)]
-                sessions[name]!.tabs = tabs
-            }
-            guard ghostty.app != nil else { return }
+            ensureHostPanes(name)
+            let tabs = sessions[name]!.tabs
+            guard let app = ghostty.app else { return }
             let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [unowned self] in
                 self.resurrectConfig(name: name, pane: $0)
             }
-            registerMember(controller, name: name)
             let usable = tabs.enumerated().filter { !$0.element.panes.isEmpty }
             let chosen = anchor.flatMap { a in
                 usable.first { tabPaneIds($0.element).contains(a) }
             } ?? usable.first
-            guard let chosen, let app = ghostty.app else { return }
+            guard let chosen else { return }
             let first = chosen.element
             let panes = first.panes
             let firstIndex = min(first.layout?.firstLeaf ?? 0, panes.count - 1)
             let view = Ghostty.SurfaceView(app, baseConfig: configFor(panes[firstIndex]))
-            controller.surfaceTree = SplitTree(view: view)
+            swapTree(controller, SplitTree(view: view))
+            registerMember(controller, name: name)
             materializeSplits(controller, tab: first, configFor: configFor, delay: 0)
             materializeDockCapture(controller, first.dock, configFor: configFor)
             focusLeftmost(controller)
@@ -2140,35 +2385,22 @@ class VigilSessionManager {
     }
 
 
-    /// Swap WHICH tab of the CURRENT session this window displays: capture
-    /// the mounted tab back (its daemons keep its exact state), release
-    /// it, materialize the cold tab in place. The viewport rule, one
-    /// level down. `anchor` is any pane id of the cold tab (indices shift
-    /// as tabs go live/cold; pane ids never lie).
+    /// Swap WHICH tab of the CURRENT session this window displays: the
+    /// mounted tab releases (its daemons keep its exact state), the cold
+    /// tab materializes in place. The viewport rule, one level down.
+    /// `anchor` is any pane id of the cold tab (indices shift as tabs go
+    /// live/cold; pane ids never lie). A tab with ANY pane live in this
+    /// session's windows is already showing (its siblings may still be
+    /// materializing a tick behind).
     func shapeshiftTab(name: String, anchor: String, in controller: TerminalController) {
-        guard sessionName(of: controller) == name, sessions[name] != nil else { return }
-        let tabs = mergedCapture(name: name)
-        sessions[name]!.tabs = tabs
-        var live = liveAttachIds(of: name)
-        // A MATERIALIZING member claims its whole captured tab: half its
-        // panes are still landing async, and judging "already showing" by
-        // realized views alone let a second mount race the first - the
-        // twin-pane manufacturer.
-        for member in members(of: name) where isMaterializing(member) {
-            let seed = Set(member.surfaceTree.compactMap(\.vigilAttachId))
-            for tab in tabs where !Set(tabPaneIds(tab)).isDisjoint(with: seed) {
-                live.formUnion(tabPaneIds(tab))
-            }
-        }
-        guard !live.contains(anchor) else { return } // already showing: no-op is honest
-        guard let target = tabs.first(where: { tab in
-                  (tab.panes + (tab.dock?.panes ?? [])).contains { paneId(of: $0) == anchor }
-              }),
-              !target.panes.isEmpty,
-              let app = ghosttyApp?.app else {
-            vlog("shapeshiftTab: '\(name)' anchor \(anchor) matches NO captured tab - refused loud")
+        guard sessionName(of: controller) == name, let session = sessions[name] else { return }
+        let live = liveAttachIds(of: name)
+        guard let target = session.tabs.first(where: { tabPaneIds($0).contains(anchor) }),
+              !target.panes.isEmpty else {
+            vlog("shapeshiftTab: '\(name)' anchor \(anchor) matches NO registered tab - refused loud")
             return
         }
+        guard Set(tabPaneIds(target)).isDisjoint(with: live) else { return } // already showing
         vlog("shapeshiftTab: '\(name)' -> tab anchored at \(anchor)")
 
         dockMap.object(forKey: controller)?.unmount()
@@ -2186,8 +2418,9 @@ class VigilSessionManager {
         DispatchQueue.main.async { Ghostty.moveFocus(to: leaf) }
     }
 
-    /// Replace the window's tree with a captured tab, in place. The old
-    /// tree's views release (whoever captured them keeps their daemons).
+    /// Replace the window's tree with a registered tab, in place. The old
+    /// tree's views release (whoever holds their registry entries keeps
+    /// their daemons).
     private func mountCapturedTab(_ target: Tab, name: String, in controller: TerminalController) {
         guard !target.panes.isEmpty, let app = ghosttyApp?.app else { return }
         let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [unowned self] in
@@ -2196,19 +2429,19 @@ class VigilSessionManager {
         let panes = target.panes
         let firstIndex = min(target.layout?.firstLeaf ?? 0, panes.count - 1)
         let view = Ghostty.SurfaceView(app, baseConfig: configFor(panes[firstIndex]))
-        controller.surfaceTree = SplitTree(view: view)
+        swapTree(controller, SplitTree(view: view))
         materializeSplits(controller, tab: target, configFor: configFor, delay: 0)
         materializeDockCapture(controller, target.dock, configFor: configFor)
         focusLeftmost(controller)
     }
 
-    // MARK: Viewport ⌘W (the tab closes; the window NEVER does)
+    // MARK: Viewport ⌘W (the tab closes; the window NEVER does while a session remains)
 
     /// Adrian 2026-08-03: "cmd+w always closes the TAB, never the window."
     /// The mounted tab buries (structural edit, undo grace, confirm when a
     /// process runs) and the session's next tab takes the viewport; the
-    /// LAST tab is the session's lifecycle (persistent sleeps, ephemeral
-    /// kills with the ⌘⇧⌫ confirm) and the next session takes the
+    /// LAST tab is the session's death (Kill/Cancel when something runs,
+    /// then the undo grace) and the last active session takes the
     /// viewport. Only with nothing left anywhere does the window truly
     /// close. Window close stays reachable: red button / ⌘⇧W / ⌘M.
     /// Returns false when this controller is not a lone viewport (native
@@ -2216,12 +2449,9 @@ class VigilSessionManager {
     func closeViewportTab(_ controller: TerminalController) -> Bool {
         guard let name = sessionName(of: controller),
               members(of: name).count <= 1 else { return false }
-        let freshTabs = mergedCapture(name: name) // before the write access (exclusivity)
-        sessions[name]!.tabs = freshTabs
         let live = liveAttachIds(of: name)
         let cold = sessions[name]!.tabs.filter { tab in
-            let ids = tabPaneIds(tab)
-            return !ids.isEmpty && Set(ids).isDisjoint(with: live) && !tab.panes.isEmpty
+            !tab.panes.isEmpty && Set(tabPaneIds(tab)).isDisjoint(with: live)
         }
 
         if let next = cold.first {
@@ -2241,15 +2471,11 @@ class VigilSessionManager {
             return true
         }
 
-        // The LAST tab: session lifecycle; the viewport moves on.
-        let proceed = { [weak self, weak controller] in
+        // The LAST tab: the session dies; the viewport moves on.
+        vlog("closeViewportTab: last tab of '\(name)' -> kill, viewport moves on")
+        confirmKill(name: name) { [weak self, weak controller] in
             guard let self, let controller else { return }
-            self.closeLastTab(controller, name: name)
-        }
-        if sessions[name]!.persistent {
-            proceed()
-        } else {
-            confirmKill(name: name) { proceed() }
+            self.kill(name: name, viewport: controller)
         }
         return true
     }
@@ -2258,63 +2484,8 @@ class VigilSessionManager {
         let tree = controller.surfaceTree
         let dock = dockMap.object(forKey: controller)
         dockMap.removeObject(forKey: controller)
-        var mountedIds = Set<String>()
-        for view in tree { if let id = view.vigilAttachId { mountedIds.insert(id) } }
-        for view in dock?.views ?? [] { if let id = view.vigilAttachId { mountedIds.insert(id) } }
-        sessions[name]!.tabs.removeAll { !Set(tabPaneIds($0)).isDisjoint(with: mountedIds) }
-
-        if !tree.isEmpty {
-            let surface = controller.focusedSurface ?? tree.root?.leftmostLeaf()
-            let title = surface?.title.trimmingCharacters(in: .whitespaces) ?? ""
-            let cwd = surface?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-            var buried = Session(
-                name: newSessionId(),
-                label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
-                cwd: cwd,
-                state: .detached([tree]))
-            buried.ephemeral = true
-            buried.thumbnail = surface?.asImage
-            if let dock {
-                dock.unmount()
-                detachedDocks[buried.name] = [0: dock]
-                buried.tabs = captureTabs(name: buried.name, [tree], docks: [0: dock])
-            }
-            bury(buried)
-            vlog("closeViewportTab: mounted tab of '\(name)' buried as '\(buried.name)'")
-        }
+        if !tree.isEmpty { buryTab(tree: tree, dock: dock, from: name) }
         mountCapturedTab(next, name: name, in: controller)
-        persist()
-    }
-
-    private func closeLastTab(_ controller: TerminalController, name: String) {
-        vlog("closeViewportTab: last tab of '\(name)' -> lifecycle, viewport moves on")
-        let persistent = sessions[name]!.persistent
-        releaseOccupant(of: controller)
-        // The LIFECYCLE, for real: persistent sleeps detached (the release
-        // above IS the detach); ephemeral dies (bury + undo grace). The
-        // confirm the caller showed promised a kill - honoring it here is
-        // what makes ⌘W actually close the session instead of leaving a
-        // detached ghost that auto-follow drags right back.
-        if !persistent { kill(name: name) }
-        // Only a session that can TAKE this viewport (mount refuses
-        // embedded/floating: they already live elsewhere). If everything
-        // else is on screen already, the window closes plain.
-        let next = sessions.values
-            .filter { session in
-                guard session.name != name else { return false }
-                switch session.state {
-                case .detached, .asleep: return true
-                case .embedded, .floating: return false
-                }
-            }
-            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .first
-        guard let next, let ghostty = ghosttyApp else {
-            killController(controller) // nothing left to view: the window closes plain
-            persist()
-            return
-        }
-        mount(next.name, into: controller, ghostty: ghostty)
         persist()
     }
 
@@ -2344,8 +2515,8 @@ class VigilSessionManager {
     /// Right-click Close Tab from the sidebar: the native flow for
     /// whatever form the tab is in. Live → its window's close-tab (which
     /// carries the viewport semantics and confirms); COLD → buried from
-    /// capture (daemons alive, exhumable), confirming when the tree files
-    /// say something runs.
+    /// the registry (daemons alive, exhumable), confirming when the tree
+    /// files say something runs.
     func closeTabFromSidebar(name: String, anchor: String?, in host: TerminalController?) {
         guard sessions[name] != nil, let anchor else { return }
         if let view = liveView(attachId: anchor),
@@ -2353,8 +2524,6 @@ class VigilSessionManager {
             controller.closeTab(nil)
             return
         }
-        let freshTabs = mergedCapture(name: name) // before the write access (exclusivity)
-        sessions[name]!.tabs = freshTabs
         guard let tab = sessions[name]!.tabs.first(where: { tabPaneIds($0).contains(anchor) }) else { return }
         let busy = busyPrograms(panes: tabPaneIds(tab))
         let proceed = { [weak self] in
@@ -2377,64 +2546,50 @@ class VigilSessionManager {
         let cwd = tab.panes.first?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
         var buried = Session(
             name: newSessionId(),
-            label: URL(fileURLWithPath: cwd).lastPathComponent,
+            label: tab.label ?? tab.panes.first?.title ?? URL(fileURLWithPath: cwd).lastPathComponent,
+            emoji: tab.emoji,
             cwd: cwd,
             state: .asleep)
         buried.tabs = [tab]
-        buried.ephemeral = true
         bury(buried)
-        vlog("closeTab(sidebar): cold tab of '\(name)' buried")
+        vlog("close: cold tab \(ids) leaves '\(name)' -> buried as '\(buried.name)'")
         persist()
     }
 
     /// Right-click Close Pane: live panes ride the native close flow
-    /// (dock tenants included); cold panes leave the capture, then their
-    /// daemon dies. Confirms exactly when something runs. A LIVE view's
-    /// owner is resolved by RUNTIME, never by window: a collapsed dock's
-    /// tenant has a live view and NO window, and the old window-gated
-    /// dispatch fell through to the capture edit - killing the daemon
-    /// under the live view while mergedCapture resurrected the row from
-    /// the runtime ("Close Pane does nothing", 2026-08-07).
+    /// (dock tenants included: a collapsed dock's tenant has a live view
+    /// and NO window, so the owner is resolved by RUNTIME, never by
+    /// window); cold panes leave the registry for the graveyard. Confirms
+    /// exactly when something runs.
     func closePaneFromSidebar(name: String, paneId: String?, in host: TerminalController?) {
         guard let paneId else { return }
         if let view = liveView(attachId: paneId) {
             for case let controller as TerminalController in dockMap.keyEnumerator() {
                 if closeDockTenantIfHosted(view, in: controller, withConfirmation: true) { return }
             }
-            // The dock of a detached/floating session rides detachedDocks
-            // until re-embed; its tenants close there.
-            for (session, docks) in detachedDocks {
-                for (index, runtime) in docks {
-                    guard let vi = runtime.views.firstIndex(where: { $0 === view }) else { continue }
-                    let proceed = { [weak self] in
-                        guard let self else { return }
-                        self.condemnDaemons(paneIds: [paneId])
-                        runtime.views.remove(at: vi)
-                        runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
-                        if runtime.views.isEmpty { self.detachedDocks[session]?[index] = nil }
-                        self.persist()
-                        DispatchQueue.main.async { [weak self] in
-                            self?.killDaemons(paneIds: [paneId])
-                        }
-                        self.vlog("closePane(sidebar): detached dock tenant '\(paneId)' closed")
-                    }
-                    let busy = busyPrograms(panes: [paneId])
-                    if !busy.isEmpty, let host {
-                        host.confirmClose(
-                            messageText: "Close Dock Pane?",
-                            informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it.")
-                        { proceed() }
-                    } else {
-                        proceed()
-                    }
-                    return
-                }
-            }
             if let controller = view.window?.windowController as? TerminalController {
                 controller.closeSurface(view, withConfirmation: true)
                 return
             }
-            vlog("!! closePane(sidebar): live view '\(paneId)' held by no dock and no window - refused loud")
+            // A held runtime's tenant (detached/floating session): the
+            // registry edit is the close, the runtime releases the view.
+            if locate(paneId) != nil {
+                let busy = busyPrograms(panes: [paneId])
+                let proceed = { [weak self] in
+                    guard let self else { return }
+                    self.removeColdPane(name: name, paneId: paneId)
+                }
+                if !busy.isEmpty, let host {
+                    host.confirmClose(
+                        messageText: "Close Dock Pane?",
+                        informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it (undo keeps it for \(Int(Self.killGrace))s).")
+                    { proceed() }
+                } else {
+                    proceed()
+                }
+                return
+            }
+            vlog("!! closePane(sidebar): live view '\(paneId)' held by no dock, no window, no registry - refused loud")
             return
         }
         guard sessions[name] != nil else { return }
@@ -2446,62 +2601,38 @@ class VigilSessionManager {
         if !busy.isEmpty, let host {
             host.confirmClose(
                 messageText: "Close Pane?",
-                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it.")
+                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it (undo keeps it for \(Int(Self.killGrace))s).")
             { proceed() }
         } else {
             proceed()
         }
     }
 
+    /// A pane that has no window leaves its registry for the graveyard
+    /// (takePane releases any held view; the daemon runs until reap).
     private func removeColdPane(name: String, paneId: String) {
-        guard var session = sessions[name] else { return }
-        condemnDaemons(paneIds: [paneId])
-        for index in session.tabs.indices {
-            if let paneIndex = session.tabs[index].panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
-                session.tabs[index].panes.remove(at: paneIndex)
-                session.tabs[index].layout = nil // shape no longer matches
-            }
-            if var dock = session.tabs[index].dock,
-               let dockIndex = dock.panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
-                dock.panes.remove(at: dockIndex)
-                dock.active = min(dock.active, max(dock.panes.count - 1, 0))
-                session.tabs[index].dock = dock.panes.isEmpty ? nil : dock
-            }
-        }
-        session.tabs.removeAll { $0.panes.isEmpty && ($0.dock?.panes.isEmpty ?? true) }
-        sessions[name] = session
+        guard let taken = takePane(paneId) else { return }
+        buryPane(taken.pane, from: name)
         persist()
-        killDaemons(paneIds: [paneId])
-        vlog("closePane(sidebar): '\(paneId)' removed from '\(name)'")
     }
 
-    // MARK: Move (drag: capture-space re-parenting between sessions)
+    // MARK: Move (drag: registry re-parenting between sessions)
     //
-    // Moving panes/tabs/sessions is a CAPTURE operation: ownership is
-    // reachability (never parsed from a daemon id, the drag-out
-    // invariant), so re-parenting means moving pane ids between captures.
-    // Daemons never notice; live views release first (the daemon holds
-    // their exact state) and the target mounts them lazily on click.
+    // Moving panes/tabs/sessions is a REGISTRY operation: a pane's entry
+    // leaves one session's tabs and lands in another's. Daemons never
+    // notice (the owner mirror is rewritten by chown); live views release
+    // first (the daemon holds their exact state) and the target mounts
+    // them lazily on click, or splits live when it is on screen.
 
-    private func sentinelCommand(_ paneId: String) -> String {
-        "\(Self.attachSentinel)\(paneId)"
-    }
-
-    /// Capture the mounted tab OUT of its window for a move. If the source
+    /// Take the mounted tab OUT of its window for a move. If the source
     /// still has a tab, the viewport mounts it. If the source is empty, the
     /// controller deliberately stays unclaimed with its moved tree intact;
     /// `settleVacatedController` atomically hands that viewport to the move
-    /// target after the target capture owns the pane. Choosing an arbitrary
+    /// target after the target owns the pane. Choosing an arbitrary
     /// session here used to leave a live tree sessionless when that session
     /// was already embedded and `mount` refused (2026-08-12).
-    /// Returns the captured tab (dock included).
+    /// Returns the tab's registry entry (dock included).
     private func vacateMountedTab(_ controller: TerminalController, name: String) -> Tab? {
-        // THE 2026-08-04 drag-move crash: `?.` chain assignment evaluates
-        // the RHS INSIDE the exclusive modify access on `sessions`, and
-        // mergedCapture reads `sessions` -> exclusivity trap, guaranteed
-        // in -Onone. Evaluate first, then assign.
-        let freshTabs = mergedCapture(name: name)
-        sessions[name]?.tabs = freshTabs
         let tree = controller.surfaceTree
         guard !tree.isEmpty else { return nil }
         let dock = dockMap.object(forKey: controller)
@@ -2509,8 +2640,8 @@ class VigilSessionManager {
         var mountedIds = Set<String>()
         for view in tree { if let id = view.vigilAttachId { mountedIds.insert(id) } }
         for view in dock?.views ?? [] { if let id = view.vigilAttachId { mountedIds.insert(id) } }
-        let captured = sessions[name]?.tabs.first { !Set(tabPaneIds($0)).isDisjoint(with: mountedIds) }
-        sessions[name]?.tabs.removeAll { !Set(tabPaneIds($0)).isDisjoint(with: mountedIds) }
+        let index = sessions[name]?.tabs.firstIndex { !Set(tabPaneIds($0)).isDisjoint(with: mountedIds) }
+        let captured = index.map { sessions[name]!.tabs.remove(at: $0) }
         dock?.unmount()
 
         if members(of: name).count > 1 {
@@ -2539,25 +2670,22 @@ class VigilSessionManager {
               let targetSession = sessions[target] else { return }
 
         switch targetSession.state {
-        case .detached(let trees):
-            // The capture is the durable representation of these cold tabs.
-            // Release the old detached views before promoting the moved live
-            // tree, otherwise the target would have two runtime owners.
-            if let docks = detachedDocks[target] {
-                for dock in docks.values { dock.unmount() }
-            }
-            detachedDocks[target] = nil
-            setOcclusion(false, trees)
+        case .detached(let held):
+            // The registry is the durable representation of these cold
+            // tabs. Release the held runtimes before promoting the moved
+            // live tree, otherwise the target would have two runtime owners.
+            for runtime in held { runtime.dock?.unmount() }
+            setOcclusion(false, held)
             registerMember(controller, name: target)
             sessions[target]!.state = .embedded
-            setOcclusion(true, [controller.surfaceTree])
+            setOcclusion(true, views: Array(controller.surfaceTree))
             focusLeftmost(controller)
             vlog("move viewport: unclaimed controller -> detached target '\(target)'")
 
         case .asleep:
             registerMember(controller, name: target)
             sessions[target]!.state = .embedded
-            setOcclusion(true, [controller.surfaceTree])
+            setOcclusion(true, views: Array(controller.surfaceTree))
             focusLeftmost(controller)
             vlog("move viewport: unclaimed controller -> asleep target '\(target)'")
 
@@ -2583,11 +2711,10 @@ class VigilSessionManager {
             memberships.removeObject(forKey: member)
             killController(member)
         }
-        detachedDocks[name] = nil
         var buried = sessions[name]!
         buried.state = .asleep
-        buried.ephemeral = !buried.persistent ? true : buried.ephemeral
         sessions[name] = nil
+        recent.removeAll { $0 == name }
         bury(buried)
         onAttentionChange?()
     }
@@ -2596,8 +2723,6 @@ class VigilSessionManager {
     /// session, where it lands as a cold tab.
     func moveTab(anchor: String, from source: String, to target: String) {
         guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
-        let freshSourceTabs = mergedCapture(name: source) // before the write access (exclusivity)
-        sessions[source]!.tabs = freshSourceTabs
         var moved: Tab?
         if let view = liveView(attachId: anchor),
            let controller = view.window?.windowController as? TerminalController,
@@ -2608,6 +2733,7 @@ class VigilSessionManager {
         }
         guard let moved else { return }
         sessions[target]!.tabs.append(moved)
+        for id in tabPaneIds(moved) { chown(id, to: target) }
         if let view = liveView(attachId: anchor),
            let controller = view.window?.windowController as? TerminalController {
             settleVacatedController(controller, movedTo: target)
@@ -2623,66 +2749,63 @@ class VigilSessionManager {
     /// first tab, live-appended when the target is mounted).
     func movePane(paneId: String, from source: String, to target: String, isDock: Bool) {
         guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
-        let freshSourceTabs = mergedCapture(name: source) // before the write access (exclusivity)
-        sessions[source]!.tabs = freshSourceTabs
-        var pane: Pane?
-        var inheritedLabel: String?
-        var inheritedEmoji: String?
         var vacatedController: TerminalController?
+        var vacated: Tab?
 
+        // A live view leaves its window first (its registry entry follows
+        // below, through the one take primitive). Vigil's own tree edit
+        // is a swap, never a close.
         if let view = liveView(attachId: paneId),
            let controller = view.window?.windowController as? TerminalController {
             if let runtime = dockMap.object(forKey: controller),
                let index = runtime.views.firstIndex(where: { $0 === view }) {
-                pane = Pane(cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
-                            command: sentinelCommand(paneId),
-                            title: capturedTitle(of: view))
                 let released = runtime.views.remove(at: index)
                 released.removeFromSuperview()
                 runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
                 if runtime.views.isEmpty { dockMap.removeObject(forKey: controller) }
                 VigilBars.shared.sync(controller)
             } else if let node = controller.surfaceTree.root?.node(view: view) {
-                pane = Pane(cwd: view.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
-                            command: sentinelCommand(paneId),
-                            title: capturedTitle(of: view))
                 if controller.surfaceTree.root == node {
-                    // Last pane of the mounted tab: this IS a tab move, and
-                    // the tab's NAME AND FACE move with it (a ♠️ typed onto
-                    // a tab evaporated here, 2026-08-10).
-                    let vacated = vacateMountedTab(controller, name: source)
-                    inheritedLabel = vacated?.label
-                    inheritedEmoji = vacated?.emoji
+                    // Last pane of the mounted tab: this IS a tab move.
+                    vacated = vacateMountedTab(controller, name: source)
                     vacatedController = controller
                 } else {
-                    controller.surfaceTree = controller.surfaceTree.removing(node)
+                    swapTree(controller, controller.surfaceTree.removing(node))
                 }
             }
         }
-        if pane == nil {
-            // Cold: lift it out of the captures.
-            outer: for index in sessions[source]!.tabs.indices {
-                if let paneIndex = sessions[source]!.tabs[index].panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
-                    pane = sessions[source]!.tabs[index].panes.remove(at: paneIndex)
-                    sessions[source]!.tabs[index].layout = nil
-                    if sessions[source]!.tabs[index].panes.isEmpty {
-                        // The lift emptied the tab: its identity travels
-                        // with its only pane instead of dying with the husk.
-                        inheritedLabel = sessions[source]!.tabs[index].label
-                        inheritedEmoji = sessions[source]!.tabs[index].emoji
-                    }
-                    break outer
-                }
-                if var dock = sessions[source]!.tabs[index].dock,
-                   let dockIndex = dock.panes.firstIndex(where: { self.paneId(of: $0) == paneId }) {
-                    pane = dock.panes.remove(at: dockIndex)
-                    dock.active = min(dock.active, max(dock.panes.count - 1, 0))
-                    sessions[source]!.tabs[index].dock = dock.panes.isEmpty ? nil : dock
-                    break outer
-                }
+        // The registry entry: from the vacated tab (already lifted out of
+        // the source), else taken from wherever it lives. An emptied tab's
+        // NAME AND FACE travel with its only pane instead of dying with the
+        // husk (a ♠️ typed onto a tab evaporated here, 2026-08-10).
+        var pane: Pane?
+        var inheritedLabel: String?
+        var inheritedEmoji: String?
+        if let vacated {
+            pane = (vacated.panes + (vacated.dock?.panes ?? [])).first { $0.id == paneId }
+            // The tab's cold siblings and its dock tenants stay registered
+            // in the source, as a cold tab that keeps the tab's identity;
+            // only a tab emptied by this move hands its name to the pane.
+            let rest = vacated.panes.filter { $0.id != paneId }
+            let restDock = vacated.dock.flatMap { d -> DockCapture? in
+                let keep = d.panes.filter { $0.id != paneId }
+                return keep.isEmpty ? nil
+                    : DockCapture(panes: keep, active: min(d.active, keep.count - 1), width: d.width, collapsed: d.collapsed)
             }
+            if rest.isEmpty, restDock == nil {
+                inheritedLabel = vacated.label
+                inheritedEmoji = vacated.emoji
+            } else {
+                sessions[source]!.tabs.append(Tab(
+                    panes: rest, layout: nil, dock: restDock, label: vacated.label, emoji: vacated.emoji))
+            }
+        } else if let taken = takePane(paneId) {
+            pane = taken.pane
+            inheritedLabel = taken.tabLabel
+            inheritedEmoji = taken.tabEmoji
         }
         guard let pane else { return }
+        chown(paneId, to: target)
 
         if isDock {
             // Stays a dock tenant. Mounted target: live append (native
@@ -2698,6 +2821,19 @@ class VigilSessionManager {
                 runtime.views.append(view)
                 runtime.active = runtime.views.count - 1
                 VigilBars.shared.sync(host)
+                // The registry entry lands in the HOST tab's dock.
+                let hostIds = Set(host.surfaceTree.compactMap(\.vigilAttachId))
+                let index = sessions[target]!.tabs.firstIndex { !Set(tabPaneIds($0)).isDisjoint(with: hostIds) }
+                    ?? {
+                        vlog("!! movePane: host tab \(hostIds.sorted()) of '\(target)' not in its registry - tenant appended as a new tab")
+                        sessions[target]!.tabs.append(Tab(panes: [], layout: nil))
+                        return sessions[target]!.tabs.count - 1
+                    }()
+                var dock = sessions[target]!.tabs[index].dock
+                    ?? DockCapture(panes: [], active: 0, width: Double(runtime.width), collapsed: false)
+                dock.panes.append(pane)
+                dock.active = dock.panes.count - 1
+                sessions[target]!.tabs[index].dock = dock
             } else {
                 if sessions[target]!.tabs.isEmpty {
                     sessions[target]!.tabs = [Tab(panes: [], layout: nil)]
@@ -2731,14 +2867,27 @@ class VigilSessionManager {
         // ...then fold the fresh single-pane tab into the anchored tab.
         guard var session = sessions[target] else { return }
         guard let freshIndex = session.tabs.lastIndex(where: {
-            $0.panes.count == 1 && self.paneId(of: $0.panes[0]) == paneId
+            $0.panes.count == 1 && $0.panes[0].id == paneId
         }) else { return }
         let fresh = session.tabs.remove(at: freshIndex)
+        if liveView(attachId: paneId)?.window != nil {
+            // The moved pane became the target's live viewport (its source
+            // window was handed over): folding a live pane into a cold tab
+            // would list it where it cannot materialize. It stays a tab.
+            session.tabs.append(fresh)
+            sessions[target] = session
+            persist()
+            return
+        }
         if let view = liveView(attachId: anchor), view.window != nil,
            let controller = view.window?.windowController as? TerminalController,
            controller.surfaceTree.contains(view),
-           let app = ghosttyApp?.app {
-            // Live split, right of the anchor.
+           let app = ghosttyApp?.app,
+           let tabIndex = session.tabs.firstIndex(where: { tabPaneIds($0).contains(anchor) }) {
+            // Live split, right of the anchor. The registry lists the
+            // pane in the anchored tab FIRST, so the chokepoint sees a
+            // listed pane materialize, never a foreign one to claim.
+            session.tabs[tabIndex].panes.append(contentsOf: fresh.panes)
             sessions[target] = session
             let newView = Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: target, pane: fresh.panes[0]))
             if let tree = try? controller.surfaceTree.inserting(view: newView, at: view, direction: .right) {
@@ -2760,25 +2909,29 @@ class VigilSessionManager {
     /// clears through the tray.
     func mergeSession(_ source: String, into target: String) {
         guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
-        let freshSourceTabs = mergedCapture(name: source) // before the write access (exclusivity)
-        sessions[source]!.tabs = freshSourceTabs
         let ms = members(of: source)
-        sessions[target]!.tabs.append(contentsOf: sessions[source]!.tabs)
+        let moving = sessions[source]!.tabs
+        sessions[target]!.tabs.append(contentsOf: moving)
         sessions[source]!.tabs = []
+        for tab in moving {
+            for id in tabPaneIds(tab) { chown(id, to: target) }
+        }
         for member in ms {
             dockMap.object(forKey: member)?.unmount()
             dockMap.removeObject(forKey: member)
             memberships.removeObject(forKey: member)
         }
-        detachedDocks[source] = nil
+        if case .detached(let held) = sessions[source]!.state {
+            for runtime in held { runtime.dock?.unmount() }
+        }
         if sessions[target]!.attention.rawValue < sessions[source]!.attention.rawValue {
             sessions[target]!.attention = sessions[source]!.attention
             sessions[target]!.attentionSince = sessions[source]!.attentionSince
         }
         var buried = sessions[source]!
         buried.state = .asleep
-        buried.ephemeral = !buried.persistent
         sessions[source] = nil
+        recent.removeAll { $0 == source }
         bury(buried)
         vlog("merge: '\(source)' -> '\(target)' (\(sessions[target]!.tabs.count) tabs)")
         // The source's windows shapeshift to the merged target (first one)
@@ -2991,7 +3144,7 @@ class VigilSessionManager {
                 guard case .embedded = session.state else { return nil }
                 return focusWindow(of: session.name)
             }
-        let strays = ephemeralControllers().compactMap(\.window)
+        let strays = strayControllers().compactMap(\.window)
         let ring = sessionWindows + strays
         guard !ring.isEmpty else { return }
 
@@ -3022,68 +3175,70 @@ class VigilSessionManager {
 
     /// Windows that slipped past registration (should not exist; safety
     /// net) keep a runtime label keyed by the controller.
-    private var ephemeralLabels: [ObjectIdentifier: String] = [:]
+    private var strayLabels: [ObjectIdentifier: String] = [:]
 
-    func ephemeralLabel(_ controller: TerminalController) -> String? {
-        ephemeralLabels[ObjectIdentifier(controller)]
+    func strayLabel(_ controller: TerminalController) -> String? {
+        strayLabels[ObjectIdentifier(controller)]
     }
 
-    func renameEphemeral(_ controller: TerminalController, _ label: String) {
-        ephemeralLabels[ObjectIdentifier(controller)] = label
+    func renameStray(_ controller: TerminalController, _ label: String) {
+        strayLabels[ObjectIdentifier(controller)] = label
     }
 
-    /// State-honest removal: drop the session entity. embedded: unregister,
-    /// the window returns to being a plain window (nothing dies; closing it
-    /// later kills normally). detached: dropping the only reference releases
-    /// the surfaces. asleep: forget the registry entry. wake's own registry
-    /// is never touched.
-    func forget(name: String) {
-        for controller in members(of: name) {
-            memberships.removeObject(forKey: controller)
-            dockMap.removeObject(forKey: controller)
-        }
-        detachedDocks[name] = nil
-        sessions[name] = nil
-        try? FileManager.default.removeItem(at: dumpsDir(name))
-        persist()
-        onAttentionChange?()
-    }
+    // MARK: Kill + graveyard (the ONE death path: bury, then reap)
 
-    // MARK: Kill + graveyard
-
-    /// Kill with a grace period: detach silently (window closes, every
-    /// process keeps running), bury the session, and only when the grace
-    /// expires do the daemons actually die. Undo within the grace exhumes
-    /// everything intact. The caller already confirmed; no prompts here.
-    func kill(name: String) {
+    /// Kill with a grace period: the session leaves its windows (every
+    /// process keeps running), rests in the graveyard, and only when the
+    /// grace expires do its daemons actually die. Undo within the grace
+    /// exhumes everything intact. The caller already confirmed; no prompts
+    /// here. `keepViewport`: the window the session showed in stays and
+    /// the last active session takes it (the tab-close semantic: killing
+    /// what you are looking at never closes the window while a session
+    /// remains); false = the window closes (the red button's literal
+    /// gesture). `viewport` names that window when the caller has it.
+    func kill(name: String, keepViewport: Bool = true, viewport: TerminalController? = nil) {
         guard let s = sessions[name] else { vlog("kill: '\(name)' NOT in sessions (noop)"); return }
-        vlog("kill: '\(name)' state=\(stateTag(s.state)) persistent=\(s.persistent) -> graveyard")
+        vlog("kill: '\(name)' state=\(stateTag(s.state)) -> graveyard")
         if case .floating = sessions[name]!.state, let quick = quickController(create: false) {
             quick.animateOut()
             reclaim(name, from: quick)
         }
+        var kept: TerminalController?
         if case .embedded = sessions[name]!.state {
-            detach(name: name)
+            kept = keepViewport
+                ? (viewport ?? (focusWindow(of: name)?.windowController as? TerminalController))
+                : nil
+            let held = vacate(name, keeping: kept)
+            sessions[name]!.state = held.isEmpty ? .asleep : .detached(held)
         }
         var session = sessions[name]!
-        // The buried trees keep their daemons alive until expiry or exhume.
-        // An ephemeral session's burial is not written to vigil.json.
-        session.ephemeral = !session.persistent
         sessions[name] = nil
+        recent.removeAll { $0 == name }
         session.attention = .none
         bury(session)
+        if let kept {
+            if let next = successor(excluding: name), let ghostty = ghosttyApp {
+                vlog("kill: viewport of '\(name)' -> '\(next)'")
+                mount(next, into: kept, ghostty: ghostty)
+                touchRecent(next)
+            } else {
+                killController(kept) // nothing left to view: the window closes
+            }
+        }
         persist()
         onAttentionChange?()
     }
 
     /// Rest a session in the graveyard: 120s grace, undoable, reaped on
-    /// expiry. One burial mechanism for every kind of kill (window kill,
-    /// structural tab close).
+    /// expiry. One burial mechanism for every kind of death (session kill,
+    /// tab close, split close, dock tenant close, a source emptied by
+    /// moves). Burials are written to vigil.json with their deadline, so
+    /// a relaunch honors the remaining grace.
     private func bury(_ session: Session) {
         let name = session.name
         // A corpse never renders: its daemons stay alive for the grace,
         // its renderers must not.
-        if case .detached(let trees) = session.state { setOcclusion(false, trees) }
+        if case .detached(let held) = session.state { setOcclusion(false, held) }
         graveyard[name] = session
         graveyardDeadlines[name] = Date().addingTimeInterval(Self.killGrace)
 
@@ -3102,6 +3257,14 @@ class VigilSessionManager {
         }
     }
 
+    /// A burial drops without dying (its last pane was re-claimed by an
+    /// undo or a move).
+    private func dropBurial(_ name: String) {
+        graveyard[name] = nil
+        graveyardDeadlines[name] = nil
+        try? FileManager.default.removeItem(at: dumpsDir(name))
+    }
+
     /// A killed session resting in its grace period, for the overview:
     /// lingers dimmed with a countdown and a recover act.
     struct Burial {
@@ -3110,7 +3273,6 @@ class VigilSessionManager {
         let emoji: String?
         let deadline: Date
         let thumbnail: NSImage?
-        let ephemeral: Bool
     }
 
     /// The sidebar's burial tray rows: lightweight, equatable, countdown
@@ -3140,8 +3302,7 @@ class VigilSessionManager {
                 label: session.label,
                 emoji: session.emoji,
                 deadline: deadline,
-                thumbnail: session.thumbnail,
-                ephemeral: session.ephemeral)
+                thumbnail: session.thumbnail)
         }
         .sorted { $0.deadline < $1.deadline }
     }
@@ -3149,8 +3310,9 @@ class VigilSessionManager {
     /// Kill the session you are IN right now, floating or in a normal
     /// window, with no trip to the overview. The floating quick terminal
     /// takes priority when it is the key window (that is what you are
-    /// looking at); otherwise the front terminal's session. Always
-    /// confirmed first (a keystroke that kills processes must ask), then
+    /// looking at); otherwise the front terminal's session, whose window
+    /// stays as the viewport of the last active session. Confirmed when
+    /// something runs (a keystroke that kills processes must ask), then
     /// undo grace.
     func killCurrent() {
         if let name = floatingName,
@@ -3164,15 +3326,15 @@ class VigilSessionManager {
             return
         }
         if let name = sessionName(of: controller) {
-            confirmKill(name: name) { self.kill(name: name) }
+            confirmKill(name: name) { self.kill(name: name, viewport: controller) }
         } else {
             let busy = busyPrograms(in: controller)
-            guard !busy.isEmpty else { killEphemeral(controller); return }
+            guard !busy.isEmpty else { killStray(controller); return }
             let title = controller.focusedSurface?.title.trimmingCharacters(in: .whitespaces)
             confirmKill(
                 label: (title?.isEmpty == false ? title! : "this window"),
                 info: "\(busy.joined(separator: ", ")) still running. The window closes and it dies."
-            ) { self.killEphemeral(controller) }
+            ) { self.killStray(controller) }
         }
     }
 
@@ -3208,7 +3370,7 @@ class VigilSessionManager {
     }
 
     /// Undo of a kill: back from the graveyard as a full session (identity
-    /// included, ephemeral or not), everything still running.
+    /// included), everything still running.
     func exhume(_ name: String) {
         guard let session = graveyard.removeValue(forKey: name) else { return }
         graveyardDeadlines[name] = nil
@@ -3219,7 +3381,7 @@ class VigilSessionManager {
 
     /// A window that slipped past registration (safety net) gets the same
     /// courtesy as a session on kill: buried with the grace, exhumable.
-    func killEphemeral(_ controller: TerminalController) {
+    func killStray(_ controller: TerminalController) {
         let tree = controller.surfaceTree
         guard !tree.isEmpty else {
             killController(controller)
@@ -3234,289 +3396,131 @@ class VigilSessionManager {
             name: newSessionId(),
             label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
             cwd: cwd,
-            state: .detached([tree]))
-        session.ephemeral = true
+            state: .detached([TabRuntime(tree: tree, dock: nil)]))
+        let (panes, layout) = capture(tree, carrying: [])
+        session.tabs = [Tab(panes: panes, layout: layout)]
         bury(session)
     }
 
     /// Reap NOW, before the grace expires: the daemons die immediately and
-    /// the burial is dropped. For "get this out of my face" from the
-    /// overview instead of waiting out the 120s.
+    /// the burial is dropped. For "get this out of my face" from the tray
+    /// instead of waiting out the 120s.
     func reapNow(_ name: String) {
         graveyardDeadlines[name] = Date.distantPast
         reapIfExpired(name)
     }
 
-    /// The grace ran out: now the kill actually happens. Dropping the
-    /// buried trees releases surfaces (recreation processes die) and every
-    /// owned pane daemon is killed.
+    /// The grace ran out: now the death actually happens. The burial's
+    /// registry names every daemon; its held runtimes release (views free
+    /// synchronously, a leaked view elsewhere changes nothing); then the
+    /// daemons are killed AND VERIFIED dead. No deferral, no sweep, no
+    /// dependence on what ARC happens to hold.
     private func reapIfExpired(_ name: String) {
-        guard let deadline = graveyardDeadlines[name], Date() >= deadline else { return }
-        // Resolve the daemon list BEFORE releasing anything, then drop every
-        // reference so the surfaces fully free, and only THEN kill the
-        // daemons: a daemon killed under a live surface posts child_exited
-        // into the teardown (the socket EOF), racing the free.
-        let paneIds = graveyard[name].map { ownedPaneIds($0) } ?? []
-        // The grace ran out: EVERY pane's death is declared now, durable,
-        // including the ones whose kill defers below - a deferral without
-        // the marker left the pane unclaimed-with-a-live-daemon, exactly
-        // the heal's resurrection signature (phantom tabs, 2026-08-20).
-        condemnDaemons(paneIds: Set(paneIds))
-        graveyard[name] = nil
-        graveyardDeadlines[name] = nil
-        detachedDocks[name] = nil // tenant surfaces freed BEFORE their daemons die
-        try? FileManager.default.removeItem(at: dumpsDir(name))
-        // A pane whose SurfaceView is STILL HELD elsewhere (ghostty's
-        // undo-close corpses outlive our burial) is not killed now: a
-        // daemon dying under a live surface is the zombie-pane bug. The
-        // reachability sweep collects it once the surface actually frees.
-        let held = Set(Ghostty.SurfaceView.vigilAttachSurfaces.allObjects.compactMap(\.vigilAttachId))
-        let free = paneIds.filter { !held.contains($0) }
-        for id in paneIds.subtracting(free) {
-            vlog("reap: '\(id)' still held by a live surface -> left for the sweep")
+        guard let deadline = graveyardDeadlines[name], Date() >= deadline,
+              let session = graveyard[name] else { return }
+        let ids = ownedPaneIds(session)
+        if case .detached(let held) = session.state {
+            for runtime in held { runtime.dock?.unmount() }
         }
-        killDaemons(paneIds: Set(free))
+        dropBurial(name)
+        vlog("reap: '\(name)' -> kill \(ids.sorted())")
+        killDaemons(ids)
         persist()
-        sweepPaneDaemons()
     }
 
-    /// Deliberate death is a LEDGER fact: a `<pane>.condemned` marker in
-    /// the vigild state dir, written synchronously BEFORE any persist that
-    /// drops the pane's claim. A dropped claim with the marker is a close;
-    /// without it, it is the bookkeeping bug the heal exists for. Durable
-    /// on purpose - the in-memory intent set this replaces died with the
-    /// app, and two close paths (split close, the reap's corpse-held
-    /// deferral) never populated it at all, so the heal resurrected every
-    /// such close as a phantom cold tab and ⌘W paraded them through the
-    /// viewport (2026-08-20). Every ledger reader honors the marker: the
-    /// heal skips condemned panes, the sweep's owner-lives spare yields
-    /// (the pane dies by reachability, as closes always did), and `vigild
-    /// restore` completes a condemned death at boot instead of respawning
-    /// it. The kill itself may still defer (the deferred-free UAF lesson);
-    /// the intent may not.
-    func condemnDaemons(paneIds: Set<String>) {
-        let fm = FileManager.default
-        for id in paneIds {
-            let url = vigildStateDir.appendingPathComponent("\(id).condemned")
-            guard !fm.fileExists(atPath: url.path) else { continue }
-            fm.createFile(atPath: url.path, contents: nil,
-                          attributes: [.posixPermissions: 0o600])
-            vlog("condemn: '\(id)' deliberate death declared")
+    /// Kill pane daemons, deterministically: one `vigild kill` with every
+    /// id, which unlinks their survival state, signals, and WAITS until
+    /// each is gone (escalating to SIGKILL). Off the main thread (a stuck
+    /// daemon must not freeze the app); the verification screams into the
+    /// log and the state files of the dead are pruned when it returns.
+    private func killDaemons(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        let bin = vigildBin
+        let sorted = ids.sorted()
+        let stateDir = vigildStateDir
+        let agentDir = agentStateDir
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: bin)
+            p.arguments = ["kill"] + sorted
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+            let survivors = sorted.filter {
+                FileManager.default.fileExists(atPath: stateDir.appendingPathComponent("\($0).pid").path)
+            }
+            for id in sorted where !survivors.contains(id) {
+                try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).state"))
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let manager = VigilSessionManager.shared
+                    if survivors.isEmpty {
+                        manager.vlog("kill: \(sorted) dead (verified)")
+                    } else {
+                        manager.vlog("!! kill: \(survivors) STILL ALIVE after vigild kill (status \(p.terminationStatus))")
+                    }
+                    for id in sorted { manager.lastAck[id] = nil }
+                }
+            }
         }
     }
 
-    /// The panes under a closing split node, condemned at the close
-    /// gesture. (TerminalController routes ROOT closes into tab/window
-    /// semantics - burial, detach - so only destructive node closes call
-    /// this.)
-    func condemnPanes(in node: SplitTree<Ghostty.SurfaceView>.Node) {
-        condemnDaemons(paneIds: Set(node.compactMap(\.vigilAttachId)))
-    }
-
-    private func isCondemned(_ pane: String) -> Bool {
-        FileManager.default.fileExists(
-            atPath: vigildStateDir.appendingPathComponent("\(pane).condemned").path)
-    }
-
-    /// Undo brought a condemned pane back into a capture: the close was
-    /// taken back, full standing (heal, spare, reboot respawn) returns.
-    private func uncondemn(_ pane: String) {
-        let url = vigildStateDir.appendingPathComponent("\(pane).condemned")
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        try? FileManager.default.removeItem(at: url)
-        vlog("uncondemn: '\(pane)' claimed again (undo) - full standing restored")
-    }
-
-    /// Kill pane daemons by id (resolved by the caller while its references
-    /// were still alive). Condemns first so a persist landing between this
-    /// call and the fire-and-forget kill still reads the intent.
-    private func killDaemons(paneIds: Set<String>) {
-        condemnDaemons(paneIds: paneIds)
-        let vigildBin = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin/vigild").path
-        for id in paneIds {
-            runFireAndForget(vigildBin, ["kill", id])
-        }
-    }
-
-    /// The pane's cwd + owning session, straight from the LEDGER: line 1
-    /// and 2 of its daemon's spec (`~/.local/state/vigild/<pane>.spec`),
-    /// rewritten atomically by `vigild chown`, removed only by a
-    /// deliberate kill.
-    private func ledgerEntry(of pane: String) -> (cwd: String, owner: String)? {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/vigild/\(pane).spec")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        let lines = text.components(separatedBy: "\n")
-        guard lines.count >= 2, !lines[1].isEmpty else { return nil }
-        return (lines[0], lines[1])
-    }
-
-    /// Ownership is a fact ON the pane (the ledger), and captures are a
-    /// LAYOUT CACHE that reconciles into it here, at the persist
-    /// chokepoint. Two passes:
-    ///  - heal: a live daemon whose ledger owner is a live session but
-    ///    that NO capture claims was dropped by bookkeeping. Restore it as
-    ///    a cold tab in its owner, IN MEMORY, and scream. (The first net
-    ///    restored into the serialized copy only: memory disagreed, every
-    ///    persist re-screamed, and the sweep - which reads memory - killed
-    ///    two daemons straight through the net, 2026-08-13.)
-    ///  - stamp: every capture claim whose ledger disagrees is chowned, so
-    ///    a legitimate move is one field rewrite and pre-ledger daemons
-    ///    migrate on the first persist after launch.
-    /// A capture error now costs a reshuffle, never a conversation.
-    private func reconcileLedger() {
-        let fm = FileManager.default
-        let stateDir = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/vigild")
-        let vigildBin = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin/vigild").path
-
-        var claimed: [String: String] = [:]
-        for (name, session) in sessions { for id in ownedPaneIds(session) { claimed[id] = name } }
-        for (name, session) in graveyard { for id in ownedPaneIds(session) { claimed[id] = name } }
-
-        for file in (try? fm.contentsOfDirectory(atPath: stateDir.path)) ?? []
-        where file.hasSuffix(".spec") && file.hasPrefix("vigil-") {
-            let pane = String(file.dropLast(".spec".count))
-            // A condemned pane's dropped claim is a CLOSE, not the bug the
-            // heal exists for: resurrecting it manufactured phantom tabs
-            // from every split close and reap deferral (2026-08-20).
-            guard claimed[pane] == nil, !isCondemned(pane) else { continue }
-            guard fm.fileExists(atPath: stateDir.appendingPathComponent("\(pane).pid").path)
-            else { continue }
-            guard let entry = ledgerEntry(of: pane), sessions[entry.owner] != nil else { continue }
-            sessions[entry.owner]!.tabs.append(Tab(
-                panes: [Pane(cwd: entry.cwd, command: "\(Self.attachSentinel)\(pane)")],
-                layout: nil))
-            claimed[pane] = entry.owner
-            vlog("!! ledger: '\(pane)' lost every capture claim with a LIVE daemon -> restored as a cold tab in '\(entry.owner)'")
-        }
-
-        for (pane, owner) in claimed {
-            uncondemn(pane) // a claimed pane is alive by definition; undo takes a close back
-            guard let entry = ledgerEntry(of: pane), entry.owner != owner else { continue }
-            runFireAndForget(vigildBin, ["chown", pane, owner])
-        }
-    }
-
-    /// Kill every pane daemon a session owns. Ownership is the session's
-    /// derived pane-id list, never a name-prefix match (a dragged-in tab's
-    /// daemon carries its BIRTH session in its id, not its owner).
-    private func killDaemons(of session: Session) {
-        killDaemons(paneIds: ownedPaneIds(session))
-    }
-
-    /// Garbage-collect pane daemons by reachability: a daemon lives while a
-    /// live attach surface holds it (any tree anywhere, undo corpses
-    /// included: the surface IS the socket) or a captured sentinel claims it
-    /// (sessions, burials). Everything else is unreachable and dies. Young
-    /// pidfiles are spared: a daemon mid-birth has no surface yet.
-    private func sweepPaneDaemons() {
+    /// Orphan collection, at launch: a daemon no session and no burial
+    /// lists is owned by nobody and dies. Never mid-life: a pane between
+    /// its birth and its registration must not meet a collector. The
+    /// registry is the ONLY input - never a live view (ARC liveness is not
+    /// ownership), never a spec's owner line (a mirror is not a source).
+    /// State files and resume pointers of panes with no daemon and no
+    /// owner are pruned with it (a stale resume pointer is typed into
+    /// whoever inherits the index; 44 were lying in wait once).
+    private func collectOrphans() {
         // Two-instance safety: another instance of THIS bundle shares the
-        // vigild state dir, and its ephemeral daemons are invisible to this
-        // one (not in vigil.json), so sweeping while it runs would murder
-        // its live sessions. Vanilla upstream ghostty never touches vigild
-        // and does not block the GC. Caveat until the fork owns its bundle
-        // id everywhere: a fork installed under a DIFFERENT id is invisible
-        // to this guard.
+        // vigild state dir and its registry; killing under it would race
+        // its own bookkeeping. Caveat until the fork owns its bundle id
+        // everywhere: a fork installed under a DIFFERENT id is invisible.
         let me = ProcessInfo.processInfo.processIdentifier
         let rivals = NSWorkspace.shared.runningApplications.filter {
             $0.bundleIdentifier == Bundle.main.bundleIdentifier
                 && $0.processIdentifier != me
         }
         guard rivals.isEmpty else {
-            vlog("sweep: skipped, another instance of this bundle is running")
+            vlog("collect: skipped, another instance of this bundle is running")
             return
         }
 
         var owned = Set<String>()
-        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
-            if let id = view.vigilAttachId { owned.insert(id) }
-        }
         for session in sessions.values { owned.formUnion(ownedPaneIds(session)) }
         for session in graveyard.values { owned.formUnion(ownedPaneIds(session)) }
 
-        let stateDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/vigild")
-        let vigildBin = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin/vigild").path
-        for entry in (try? FileManager.default.contentsOfDirectory(atPath: stateDir.path)) ?? []
-        where entry.hasSuffix(".pid") && entry.hasPrefix("vigil-") {
-            let stem = String(entry.dropLast(4))
-            guard !owned.contains(stem) else { continue }
-            // The LEDGER outranks capture bookkeeping: captures are a
-            // cache and may be wrong, the spec's owner is not. A daemon
-            // whose owner still lives (or is buried, still undoable) is
-            // never unreachable; reconcileLedger heals it back into a
-            // capture at the next persist. (Capture-only reachability let
-            // the sweep kill two live agents through the first net,
-            // 2026-08-13.) A CONDEMNED pane forfeits the spare: its death
-            // was declared, and this owner-lives rule was exactly what
-            // made deliberately closed panes immortal (2026-08-20).
-            if !isCondemned(stem),
-               let owner = ledgerEntry(of: stem)?.owner,
-               sessions[owner] != nil || graveyard[owner] != nil {
-                vlog("sweep: '\(stem)' unclaimed by captures but ledger owner '\(owner)' lives -> spared")
-                continue
-            }
-            let path = stateDir.appendingPathComponent(entry).path
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-               let created = attrs[.modificationDate] as? Date,
-               Date().timeIntervalSince(created) < 300 { continue }
-            vlog("sweep: unreachable daemon '\(stem)' -> kill")
-            runFireAndForget(vigildBin, ["kill", stem])
+        let fm = FileManager.default
+        let entries = (try? fm.contentsOfDirectory(atPath: vigildStateDir.path)) ?? []
+        var orphans = Set<String>()
+        for entry in entries where entry.hasSuffix(".pid") && entry.hasPrefix("vigil-") {
+            let id = String(entry.dropLast(".pid".count))
+            if !owned.contains(id) { orphans.insert(id) }
         }
-
-        // AgentState files are per-pane facts; a pane whose daemon is GONE
-        // (no pidfile) would keep its last word forever otherwise. The
-        // same reachability sweep that owns daemon lifecycle prunes them.
-        for entry in (try? FileManager.default.contentsOfDirectory(atPath: agentStateDir.path)) ?? []
-        where entry.hasSuffix(".state") {
-            let pane = String(entry.dropLast(".state".count))
-            let pidfile = stateDir.appendingPathComponent("\(pane).pid")
-            if !FileManager.default.fileExists(atPath: pidfile.path) {
-                try? FileManager.default.removeItem(at: agentStateDir.appendingPathComponent(entry))
-            }
+        if !orphans.isEmpty {
+            vlog("collect: orphan daemons \(orphans.sorted()) -> kill")
+            killDaemons(orphans)
         }
-
-        // A condemned marker's referent is the SPEC (the right to survive):
-        // kill and daemon exit unlink both, but a close racing a natural
-        // exit can strand a marker alone. Prune only spec-less markers -
-        // a marker WITH a spec and no daemon is a machine-killed condemned
-        // pane whose cleanup belongs to `vigild restore` at boot, and
-        // pruning it first would let restore respawn the pane.
-        for entry in (try? FileManager.default.contentsOfDirectory(atPath: stateDir.path)) ?? []
-        where entry.hasSuffix(".condemned") {
-            let pane = String(entry.dropLast(".condemned".count))
-            if !FileManager.default.fileExists(atPath: stateDir.appendingPathComponent("\(pane).spec").path) {
-                try? FileManager.default.removeItem(at: stateDir.appendingPathComponent(entry))
-            }
-        }
-
-        // Resume pointers are per-pane facts too, and a stale one is WORSE
-        // than a stale state file: the daemon TYPES it into a fresh shell.
-        // An owned pane keeps its pointer through any daemon death (that is
-        // how an asleep session resumes its claude); an UNREACHABLE pane's
-        // pointer is a dead conversation waiting to be typed into whoever
-        // inherits the index, so it dies with the pane. 44 of these were
-        // lying in wait when rapid-lynx-4 got re-minted (2026-08-09).
-        for entry in (try? FileManager.default.contentsOfDirectory(atPath: stateDir.path)) ?? []
-        where entry.hasSuffix(".resume") && entry.hasPrefix("vigil-") {
-            let pane = String(entry.dropLast(".resume".count))
-            guard !owned.contains(pane),
-                  !FileManager.default.fileExists(
-                      atPath: stateDir.appendingPathComponent("\(pane).pid").path)
+        for entry in entries where entry.hasSuffix(".resume") && entry.hasPrefix("vigil-") {
+            let id = String(entry.dropLast(".resume".count))
+            guard !owned.contains(id),
+                  !fm.fileExists(atPath: vigildStateDir.appendingPathComponent("\(id).pid").path)
             else { continue }
-            try? FileManager.default.removeItem(at: stateDir.appendingPathComponent(entry))
-            vlog("sweep: unreachable pane '\(pane)' -> resume pointer removed")
+            try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry))
+            vlog("collect: stale resume pointer '\(id)' removed")
         }
-
-        // Names need no sweep at all: an identity lives ON its pane in the
-        // capture, so it is dropped by whatever drops the pane and can
-        // never be collected out from under a live one. (This is where a
-        // pidfile-keyed collector used to delete every hand-typed name the
-        // moment its daemon was absent - a reboot, a respawn, any repair.)
+        for entry in (try? fm.contentsOfDirectory(atPath: agentStateDir.path)) ?? []
+        where entry.hasSuffix(".state") {
+            let id = String(entry.dropLast(".state".count))
+            guard !owned.contains(id),
+                  !fm.fileExists(atPath: vigildStateDir.appendingPathComponent("\(id).pid").path)
+            else { continue }
+            try? fm.removeItem(at: agentStateDir.appendingPathComponent(entry))
+        }
     }
 
     // MARK: Dock (the right bar: per-TAB stack of daemon-backed tool panes)
@@ -3540,17 +3544,20 @@ class VigilSessionManager {
     }
 
     /// Spawn a new dock tenant: an ordinary daemon-backed pane (own vigild
-    /// daemon, VIGIL_SESSION stamped) rooted in the tab's cwd.
+    /// daemon, VIGIL_SESSION stamped) rooted in the tab's cwd, registered
+    /// in the tab's dock the moment it is born.
     @discardableResult
     func addDockTenant(_ controller: TerminalController) -> Ghostty.SurfaceView? {
         guard let name = sessionName(of: controller),
               let app = controller.ghostty.app else { return nil }
-        var config = Ghostty.SurfaceConfiguration()
-        config.workingDirectory = controller.focusedSurface?.pwd
+        let cwd = controller.focusedSurface?.pwd
             ?? sessions[name]?.cwd
             ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let id = "vigil-\(name)-\(nextPaneIndex(name: name))"
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = cwd
         config.environmentVariables["VIGIL_SESSION"] = name
-        config.vigilAttach = "vigil-\(name)-\(nextPaneIndex(name: name))"
+        config.vigilAttach = id
         let view = Ghostty.SurfaceView(app, baseConfig: config)
         let runtime = dockMap.object(forKey: controller) ?? {
             let r = VigilDockRuntime(views: [], active: 0, width: 340, collapsed: false)
@@ -3560,30 +3567,37 @@ class VigilSessionManager {
         runtime.views.append(view)
         runtime.active = runtime.views.count - 1
         runtime.collapsed = false
+        let tabIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
+        if let index = sessions[name]!.tabs.firstIndex(where: { !Set(tabPaneIds($0)).isDisjoint(with: tabIds) }) {
+            var dock = sessions[name]!.tabs[index].dock
+                ?? DockCapture(panes: [], active: 0, width: Double(runtime.width), collapsed: false)
+            dock.panes.append(Pane(id: id, cwd: cwd))
+            dock.active = dock.panes.count - 1
+            dock.collapsed = false
+            sessions[name]!.tabs[index].dock = dock
+        } else {
+            vlog("!! dock: '\(name)' tab \(tabIds) not in its registry; tenant '\(id)' unregistered")
+        }
         VigilBars.shared.sync(controller)
         persist()
         return view
     }
 
-    /// Close one tenant: release the surface, then kill its daemon (in
-    /// that order, the deferred-free UAF lesson). An explicit small close
-    /// on an explicit small pane: no confirm, no grace.
+    /// Close one tenant: the view leaves the dock, the pane leaves the
+    /// registry for the graveyard (undo keeps it 120s, reap kills it).
     func closeDockTenant(_ controller: TerminalController, index: Int) {
         guard let runtime = dockMap.object(forKey: controller),
-              runtime.views.indices.contains(index) else { return }
+              runtime.views.indices.contains(index),
+              let name = sessionName(of: controller) else { return }
         let view = runtime.views.remove(at: index)
-        let paneId = view.vigilAttachId
-        if let paneId { condemnDaemons(paneIds: [paneId]) }
         view.removeFromSuperview()
         runtime.active = min(runtime.active, max(runtime.views.count - 1, 0))
         if runtime.views.isEmpty { dockMap.removeObject(forKey: controller) }
         VigilBars.shared.sync(controller)
-        persist()
-        if let paneId {
-            DispatchQueue.main.async { [weak self] in
-                self?.killDaemons(paneIds: [paneId])
-            }
+        if let id = view.vigilAttachId, let taken = takePane(id) {
+            buryPane(taken.pane, from: name)
         }
+        persist()
     }
 
     func setDockActive(_ controller: TerminalController, index: Int) {
@@ -3960,11 +3974,11 @@ class VigilSessionManager {
     /// should bring back (burials own their own undo).
     func killController(_ controller: TerminalController) {
         guard let window = controller.window else {
-            controller.surfaceTree = SplitTree()
+            swapTree(controller, SplitTree())
             return
         }
         let exit = {
-            controller.surfaceTree = SplitTree()
+            self.swapTree(controller, SplitTree())
             if window.isVisible || window.tabGroup != nil { window.close() }
             window.contentView = nil
         }
@@ -3980,7 +3994,7 @@ class VigilSessionManager {
     /// the overview shows all of ghostty regardless. On-screen windows only:
     /// ghostty retains closed windows for undo-close, and those corpses must
     /// not haunt the overview.
-    func ephemeralControllers() -> [TerminalController] {
+    func strayControllers() -> [TerminalController] {
         TerminalController.all.filter { controller in
             guard let window = controller.window else { return false }
             guard window.isVisible || window.isMiniaturized else { return false }
@@ -4036,7 +4050,6 @@ class VigilSessionManager {
         /// Distinct descendant states, priority-ordered (blocked first),
         /// idle only when it is the only one: the collapsed row's cluster.
         let states: [AgentState]
-        let persistent: Bool
         let isFront: Bool
         let tabs: [SidebarTab]
     }
@@ -4051,10 +4064,13 @@ class VigilSessionManager {
         return states.isEmpty ? [] : [.idle]
     }
 
-    /// One immutable projection of everything the left bar shows: every
-    /// session (live, detached, asleep) → its tabs → their panes (splits
-    /// AND dock tenants), each pane with its program (argv truth from the
-    /// daemon's tree file) and its continuous AgentState.
+    /// One immutable projection of everything the left bar shows, READ
+    /// FROM THE REGISTRY: every session (live, detached, asleep) → its
+    /// tabs → their panes (splits AND dock tenants), each pane decorated
+    /// with its live view when one exists (title, focus) and with its
+    /// program (argv truth from the daemon's tree file) and continuous
+    /// AgentState. A tab materializing its splits one tick apart renders
+    /// every registered row from the first paint: nothing flashes.
     func sidebarSnapshot() -> [SidebarSessionRow] {
         // The active chain is DERIVED here, never stored: whatever moved
         // the viewport (a click, auto-follow, ⌘⇧J) is reflected by
@@ -4065,52 +4081,27 @@ class VigilSessionManager {
         let focusedView = front?.focusedSurface
         let leases = watchLeases()
 
-        func paneRow(view: Ghostty.SurfaceView, session: String, isDock: Bool) -> SidebarPane {
-            let paneId = view.vigilAttachId
-            let program = paneId.flatMap { paneProgram($0) }
-            let custom = paneId.flatMap { customIdentity($0) }
-            let title = custom?.label
+        func paneRow(_ pane: Pane, view: Ghostty.SurfaceView?, isDock: Bool) -> SidebarPane {
+            let program = paneProgram(pane.id)
+            let liveTitle = view.flatMap { liveTabTitle($0.title) }
+            // The name YOU gave it, else what runs there, else what the
+            // program calls itself, else where it lives.
+            let title = pane.label
                 ?? program
-                ?? (view.title.isEmpty ? "shell" : view.title)
-            return SidebarPane(
-                id: paneId ?? "view-\(ObjectIdentifier(view).hashValue)",
-                paneId: paneId,
-                title: title,
-                program: program,
-                state: paneId.flatMap { paneDisplayState($0) },
-                isDock: isDock,
-                emoji: custom?.emoji,
-                focused: view === focusedView,
-                watchNotes: paneId.flatMap { leases[$0]?.map(\.note) } ?? [],
-                watchProcs: paneId.map { paneWatchers($0) } ?? [])
-        }
-
-        func capturedPaneRow(_ pane: Pane, session: String, index: Int, tab: Int, isDock: Bool) -> SidebarPane {
-            let paneId = self.paneId(of: pane)
-            let program = paneId.flatMap { paneProgram($0) }
-            let custom = paneId.flatMap { customIdentity($0) }
-            // The REMEMBERED name outranks the cwd basename: a cold pane
-            // still knows what it was ("Buscar versión en castellano"),
-            // where the cwd only ever said "adrian".
-            let title = custom?.label
+                ?? liveTitle
                 ?? pane.title
-                ?? program
                 ?? URL(fileURLWithPath: pane.cwd).lastPathComponent
             return SidebarPane(
-                id: paneId ?? "captured-\(session)-\(tab)-\(index)\(isDock ? "-d" : "")",
-                paneId: paneId,
+                id: pane.id,
+                paneId: pane.id,
                 title: title,
                 program: program,
-                state: paneId.flatMap { paneDisplayState($0) },
+                state: paneDisplayState(pane.id),
                 isDock: isDock,
-                emoji: custom?.emoji,
-                watchNotes: paneId.flatMap { leases[$0]?.map(\.note) } ?? [],
-                watchProcs: paneId.map { paneWatchers($0) } ?? [])
-        }
-
-        /// The tab's face + label override, anchored by pane id.
-        func tabCustom(_ anchor: String?) -> CustomIdentity? {
-            anchor.flatMap { customIdentity("tab:\($0)") }
+                emoji: pane.emoji,
+                focused: view != nil && view === focusedView,
+                watchNotes: leases[pane.id]?.map(\.note) ?? [],
+                watchProcs: paneWatchers(pane.id))
         }
 
         /// Row identity FOLLOWS THE TAB (its anchor pane), never its
@@ -4129,13 +4120,9 @@ class VigilSessionManager {
             return base.isEmpty ? fallback : base
         }
 
-        /// A LIVE tab wears the native tab bar's name (same tab, same
-        /// name - the cwd alias made the two bars disagree about one
-        /// tab), cleaned: claude's braille-spinner / idle-marker prefix
-        /// strips (it ticks several times a second and would flicker the
-        /// row), ghost/empty titles yield nil (cwd fallback). Row
-        /// identity is the anchor pane id, so a title change re-renders
-        /// text, never the subtree.
+        /// A LIVE title, cleaned: claude's braille-spinner / idle-marker
+        /// prefix strips (it ticks several times a second and would
+        /// flicker the row), ghost/empty titles yield nil.
         func liveTabTitle(_ raw: String?) -> String? {
             guard var t = raw?.trimmingCharacters(in: .whitespaces),
                   !t.isEmpty, t != "👻" else { return nil }
@@ -4151,182 +4138,45 @@ class VigilSessionManager {
         let ordered = sessions.values.sorted { ($0.order, $0.label) < ($1.order, $1.label) }
         for session in ordered {
             let name = session.name
+            let ms = members(of: name)
+            // Every live view of this session by pane id: member trees and
+            // docks when embedded, held runtimes otherwise.
+            var live: [String: Ghostty.SurfaceView] = [:]
+            for runtime in runtimes(session) {
+                for view in Array(runtime.tree) + (runtime.dock?.views ?? []) {
+                    if let id = view.vigilAttachId { live[id] = view }
+                }
+            }
+            func host(of ids: Set<String>) -> TerminalController? {
+                ms.first { member in
+                    member.surfaceTree.contains { $0.vigilAttachId.map(ids.contains) ?? false }
+                        || (dockMap.object(forKey: member)?.views.contains {
+                            $0.vigilAttachId.map(ids.contains) ?? false
+                        } ?? false)
+                }
+            }
             var tabs: [SidebarTab] = []
-            switch session.state {
-            case .embedded:
-                // Capture order is THE order: a tab keeps its row (and its
-                // row id, so selection/collapse survive) whether it is
-                // mounted or cold; a swap never reshuffles the tree.
-                let ms = members(of: name)
-                let live = liveAttachIds(of: name)
-                var usedMembers = Set<ObjectIdentifier>()
-
-                func liveTabRow(_ controller: TerminalController, index: Int) -> SidebarTab {
-                    var panes = controller.surfaceTree.map {
-                        paneRow(view: $0, session: name, isDock: false)
-                    }
-                    if let dock = dockMap.object(forKey: controller) {
-                        panes += dock.views.map { paneRow(view: $0, session: name, isDock: true) }
-                    }
-                    let cwd = controller.surfaceTree.root?.leftmostLeaf().pwd
-                    let anchor = panes.first(where: { $0.paneId != nil })?.paneId
-                    let custom = tabCustom(anchor)
-                    return SidebarTab(
-                        id: tabRowId(name, anchor: anchor, index: index),
-                        // A swap can leave the window title stale or on
-                        // ghostty's literal 👻 default; the anchor's
-                        // remembered name is truer than either.
-                        title: anchor.flatMap { tabDisplayName(anchor: $0).label }
-                            ?? liveTabTitle(controller.window?.title)
-                            ?? tabTitle(cwd: cwd, fallback: "tab \(index + 1)"),
-                        index: index, panes: panes,
-                        anchor: anchor,
-                        isFront: controller === front,
-                        emoji: custom?.emoji)
-                }
-
-                func memberHosting(_ ids: Set<String>) -> TerminalController? {
-                    guard !ids.isEmpty else { return nil }
-                    for member in ms where !usedMembers.contains(ObjectIdentifier(member)) {
-                        for view in member.surfaceTree {
-                            if let vid = view.vigilAttachId, ids.contains(vid) { return member }
-                        }
-                    }
-                    return nil
-                }
-
-                for (index, tab) in session.tabs.enumerated() {
-                    let idList = tabPaneIds(tab)
-                    let ids = Set(idList)
-                    if let member = memberHosting(ids) {
-                        usedMembers.insert(ObjectIdentifier(member))
-                        if isMaterializing(member) {
-                            // Mid-materialization the capture IS the shape:
-                            // the half-built tree would flash 1 pane, then N.
-                            // Same row ids (attach ids), so nothing jumps.
-                            var panes = tab.panes.enumerated().map {
-                                capturedPaneRow($1, session: name, index: $0, tab: index, isDock: false)
-                            }
-                            panes += (tab.dock?.panes ?? []).enumerated().map {
-                                capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
-                            }
-                            let custom = tabCustom(idList.first)
-                            tabs.append(SidebarTab(
-                                id: tabRowId(name, anchor: idList.first, index: index),
-                                title: idList.first.flatMap { tabDisplayName(anchor: $0).label }
-                                ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
-                                index: index,
-                                panes: panes,
-                                anchor: idList.first,
-                                emoji: custom?.emoji))
-                        } else {
-                            tabs.append(liveTabRow(member, index: index))
-                        }
-                    } else if !ids.isEmpty, ids.allSatisfy({ !live.contains($0) }) {
-                        var panes = tab.panes.enumerated().map {
-                            capturedPaneRow($1, session: name, index: $0, tab: index, isDock: false)
-                        }
-                        panes += (tab.dock?.panes ?? []).enumerated().map {
-                            capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
-                        }
-                        let custom = tabCustom(idList.first)
-                        tabs.append(SidebarTab(
-                            id: tabRowId(name, anchor: idList.first, index: index),
-                            title: idList.first.flatMap { tabDisplayName(anchor: $0).label }
-                                ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
-                            index: index,
-                            panes: panes,
-                            anchor: idList.first,
-                            cold: true,
-                            emoji: custom?.emoji))
-                    }
-                }
-                // Members not represented in the captures yet (a fresh ⌘T
-                // between persists): appended, never lost.
-                for (offset, member) in ms.enumerated()
-                where !usedMembers.contains(ObjectIdentifier(member)) && !member.surfaceTree.isEmpty {
-                    tabs.append(liveTabRow(member, index: session.tabs.count + offset))
-                }
-            case .floating, .detached:
-                // SAME order and SAME rows as embedded: capture order is
-                // the spine, live stashed trees fill their tabs, cold tabs
-                // stay listed. (Raw tree order shuffled rows on every
-                // look-away, and cold tabs vanished entirely.)
-                let trees = liveTrees(session)
-                let stashedLive = Set(trees.flatMap { tree in tree.compactMap(\.vigilAttachId) })
-                var usedTrees = Set<Int>()
-
-                func stashedTabRow(_ treeIndex: Int, index: Int) -> SidebarTab {
-                    let tree = trees[treeIndex]
-                    var panes = tree.map { paneRow(view: $0, session: name, isDock: false) }
-                    if let dock = detachedDocks[name]?[treeIndex] {
-                        panes += dock.views.map { paneRow(view: $0, session: name, isDock: true) }
-                    }
-                    let anchor = panes.first(where: { $0.paneId != nil })?.paneId
-                    let custom = tabCustom(anchor)
-                    return SidebarTab(
-                        id: tabRowId(name, anchor: anchor, index: index),
-                        title: custom?.label
-                            ?? liveTabTitle(tree.root?.leftmostLeaf().title)
-                            ?? tabTitle(cwd: tree.root?.leftmostLeaf().pwd, fallback: "tab \(index + 1)"),
-                        index: index,
-                        panes: panes,
-                        anchor: anchor,
-                        emoji: custom?.emoji)
-                }
-
-                for (index, tab) in session.tabs.enumerated() {
-                    let idList = tabPaneIds(tab)
-                    let ids = Set(idList)
-                    if let treeIndex = trees.indices.first(where: { candidate in
-                        !usedTrees.contains(candidate) && trees[candidate].contains { view in
-                            view.vigilAttachId.map { ids.contains($0) } ?? false
-                        }
-                    }) {
-                        usedTrees.insert(treeIndex)
-                        tabs.append(stashedTabRow(treeIndex, index: index))
-                    } else if !ids.isEmpty, ids.allSatisfy({ !stashedLive.contains($0) }) {
-                        var panes = tab.panes.enumerated().map {
-                            capturedPaneRow($1, session: name, index: $0, tab: index, isDock: false)
-                        }
-                        panes += (tab.dock?.panes ?? []).enumerated().map {
-                            capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
-                        }
-                        let custom = tabCustom(idList.first)
-                        tabs.append(SidebarTab(
-                            id: tabRowId(name, anchor: idList.first, index: index),
-                            title: idList.first.flatMap { tabDisplayName(anchor: $0).label }
-                                ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
-                            index: index,
-                            panes: panes,
-                            anchor: idList.first,
-                            cold: true,
-                            emoji: custom?.emoji))
-                    }
-                }
-                for treeIndex in trees.indices where !usedTrees.contains(treeIndex) {
-                    tabs.append(stashedTabRow(treeIndex, index: session.tabs.count + treeIndex))
-                }
-            case .asleep:
-                for (index, tab) in session.tabs.enumerated() {
-                    var panes = tab.panes.enumerated().map {
-                        capturedPaneRow($1, session: name, index: $0, tab: index, isDock: false)
-                    }
-                    panes += (tab.dock?.panes ?? []).enumerated().map {
-                        capturedPaneRow($1, session: name, index: $0, tab: index, isDock: true)
-                    }
-                    let anchor = panes.first(where: { $0.paneId != nil })?.paneId
-                    let custom = tabCustom(anchor)
-                    tabs.append(SidebarTab(
-                        id: tabRowId(name, anchor: anchor, index: index),
-                        title: anchor.flatMap { tabDisplayName(anchor: $0).label }
-                            ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)"),
-                        index: index,
-                        panes: panes,
-                        anchor: anchor,
-                        cold: true,
-                        emoji: custom?.emoji))
-                }
+            for (index, tab) in session.tabs.enumerated() {
+                let ids = Set(tabPaneIds(tab))
+                guard !ids.isEmpty else { continue }
+                let member = host(of: ids)
+                var panes = tab.panes.map { paneRow($0, view: live[$0.id], isDock: false) }
+                panes += (tab.dock?.panes ?? []).map { paneRow($0, view: live[$0.id], isDock: true) }
+                let anchor = tab.panes.first?.id ?? tab.dock?.panes.first?.id
+                // A swap can leave the window title stale or on ghostty's
+                // literal 👻 default; the tab's own name is truer than either.
+                let title = anchor.flatMap { tabDisplayName(anchor: $0).label }
+                    ?? member.flatMap { liveTabTitle($0.window?.title) }
+                    ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)")
+                tabs.append(SidebarTab(
+                    id: tabRowId(name, anchor: anchor, index: index),
+                    title: title,
+                    index: index,
+                    panes: panes,
+                    anchor: anchor,
+                    cold: !ids.contains { live[$0] != nil },
+                    isFront: member != nil && member === front,
+                    emoji: tab.emoji))
             }
             let tag: String
             switch session.state {
@@ -4342,7 +4192,6 @@ class VigilSessionManager {
                 stateTag: tag,
                 attention: session.attention,
                 states: Self.clusterStates(tabs.flatMap(\.panes).compactMap(\.state)),
-                persistent: session.persistent,
                 isFront: name == frontName,
                 tabs: tabs))
         }
@@ -4412,10 +4261,9 @@ class VigilSessionManager {
     /// shutdown itself, so service mode is off the table from here on.
     fileprivate(set) var systemPoweringOff = false
 
-    /// Cmd+Q with sessions alive: detach every persistent session, kill the
-    /// ephemeral ones (their daemons die exactly as a normal quit would have
-    /// killed their processes), vanish from the dock. Returns true when the
-    /// termination must be cancelled.
+    /// Cmd+Q with sessions alive: detach every session (everything keeps
+    /// running), vanish from the dock. Returns true when the termination
+    /// must be cancelled.
     func interceptTermination() -> Bool {
         guard !reallyQuit else { return false }
         // The machine is going down: DIE. prepareForSystemShutdown already
@@ -4441,23 +4289,14 @@ class VigilSessionManager {
         if let name = floatingName, let quick = quickController(create: false) {
             reclaim(name, from: quick)
         }
-        // Persistent sessions detach and keep running (service mode);
-        // ephemeral ones die with the app. Snapshot names first:
-        // detach/remove mutate sessions, which must not happen while
-        // iterating it.
-        let persistentNames = Array(sessions.filter { $0.value.persistent }.keys)
-        let ephemeralNames = Array(sessions.filter { !$0.value.persistent }.keys)
-        for name in persistentNames {
+        // Every session detaches and keeps running (service mode).
+        // Snapshot names first: detach mutates sessions, which must not
+        // happen while iterating it.
+        for name in Array(sessions.keys) {
             if case .embedded = sessions[name]?.state { detach(name: name) }
         }
-        for name in ephemeralNames {
-            // Daemons resolved while the trees are still alive.
-            if let session = sessions[name] { killDaemons(of: session) }
-            for controller in members(of: name) { memberships.removeObject(forKey: controller) }
-            sessions[name] = nil
-        }
         // Nothing to survive: let the app quit for real.
-        guard sessions.values.contains(where: { $0.persistent }) else {
+        guard !sessions.isEmpty else {
             persist()
             return false
         }
@@ -4475,10 +4314,10 @@ class VigilSessionManager {
 
     func quitForReal() {
         reallyQuit = true
-        // DIE owns its ceremony: freeze foreground truth, kill ephemeral
-        // daemons, persist - for EVERY caller (SIGTERM, the eye menu's
-        // explicit Quit). The reallyQuit guard makes interceptTermination
-        // skip all bookkeeping, so it must happen here, before terminate.
+        // DIE owns its ceremony: freeze foreground truth, persist - for
+        // EVERY caller (SIGTERM, the eye menu's explicit Quit). The
+        // reallyQuit guard makes interceptTermination skip all
+        // bookkeeping, so it must happen here, before terminate.
         prepareForSystemShutdown()
         NSApp.terminate(nil)
     }
@@ -4486,10 +4325,8 @@ class VigilSessionManager {
     /// System shutdown/restart/logout: the app must DIE (cancelling
     /// termination blocks the shutdown), recording the workspace exactly as
     /// it stands so login rebuilds it: foreground flags frozen while the
-    /// windows are still open, ephemeral daemons killed (their specs die
-    /// with them, so `vigild restore` does not respawn cruft), persistent
-    /// daemons left for the OS to kill (their specs survive; restore
-    /// respawns them at login).
+    /// windows are still open. Daemons are left for the OS to kill (their
+    /// specs survive; `vigild restore` respawns them at login).
     func prepareForSystemShutdown() {
         // Both signals may land (willPowerOff, then the terminate): the
         // first one owns the truth, while the windows still show.
@@ -4498,11 +4335,6 @@ class VigilSessionManager {
         for (name, session) in sessions { frozen[name] = isForeground(session) }
         shutdownForeground = frozen
         vlog("shutdown(system): froze \(frozen.filter(\.value).count)/\(frozen.count) foreground -> \(frozen.filter(\.value).keys.sorted().joined(separator: ","))")
-        for (name, session) in sessions where !session.persistent {
-            killDaemons(of: session)
-            for controller in members(of: name) { memberships.removeObject(forKey: controller) }
-            sessions[name] = nil
-        }
         persist()
     }
 
@@ -4572,22 +4404,21 @@ class VigilSessionManager {
         #if DEBUG
         for (name, s) in sessions {
             if case .embedded = s.state, members(of: name).isEmpty {
-                vlog("!! IMPOSSIBLE [\(site)]: '\(name)' embedded with no members, persistent=\(s.persistent)")
-            }
-            if !s.persistent, case .asleep = s.state {
-                vlog("!! IMPOSSIBLE [\(site)]: ephemeral '\(name)' is asleep")
+                vlog("!! IMPOSSIBLE [\(site)]: '\(name)' embedded with no members")
             }
         }
-        // The move machinery's tripwire: every live attach surface must be
-        // OWNED (a session or a burial claims its daemon), or a move
-        // stranded it and the sweep will murder a pane someone can see.
+        // Every attach surface alive in the process must be REGISTERED (a
+        // session or a burial lists its pane). A windowed one that is not
+        // was stranded by a move; a WINDOWLESS one is a leak: some UI
+        // object retains a view whose pane already died (the dock strip,
+        // a stale focusedSurface, a titlebar closure once kept daemons
+        // immortal this way when liveness was ownership, 2026-08-22).
         var owned = Set<String>()
         for session in sessions.values { owned.formUnion(ownedPaneIds(session)) }
         for session in graveyard.values { owned.formUnion(ownedPaneIds(session)) }
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
-            if let id = view.vigilAttachId, view.window != nil, !owned.contains(id) {
-                vlog("!! IMPOSSIBLE [\(site)]: live pane '\(id)' owned by NOBODY (stranded by a move?)")
-            }
+            guard let id = view.vigilAttachId, !owned.contains(id) else { continue }
+            vlog("!! IMPOSSIBLE [\(site)]: surface for '\(id)' is \(view.window == nil ? "windowless (LEAKED)" : "live") but registered NOWHERE")
         }
         // Dead windows must actually die: a closed terminal window that
         // stays resident keeps its titlebar accessories, tab bar and
@@ -4614,23 +4445,18 @@ class VigilSessionManager {
         #endif
     }
 
-    /// Self-heal: sessions whose member windows silently died (persistent
-    /// sleeps on its last capture, ephemeral dies: its window IS its life),
-    /// membership vs tabGroup divergence, empty-tree corpse windows.
+    /// Self-heal: sessions whose member windows silently died sleep on
+    /// their registry; membership vs tabGroup divergence; empty-tree
+    /// corpse windows.
     func reconcile() {
         reconcileTabs()
         let orphaned = sessions.filter { _, session in
             if case .embedded = session.state { return members(of: session.name).isEmpty }
             return false
         }
-        for (name, session) in orphaned {
-            vlog("reconcile: '\(name)' embedded with no members, persistent=\(session.persistent) -> \(session.persistent ? "asleep" : "killed")")
-            if session.persistent {
-                sessions[name]!.state = .asleep
-            } else {
-                killDaemons(of: session)
-                sessions[name] = nil
-            }
+        for (name, _) in orphaned {
+            vlog("reconcile: '\(name)' embedded with no members -> asleep")
+            sessions[name]!.state = .asleep
         }
         for controller in TerminalController.all
         where controller.surfaceTree.isEmpty && controller.window?.isVisible == true {
@@ -4869,12 +4695,6 @@ class VigilSessionManager {
         }
     }
 
-    /// The daemon id a captured pane attaches to, if any.
-    func paneId(of pane: Pane) -> String? {
-        guard let cmd = pane.command, cmd.hasPrefix(Self.attachSentinel) else { return nil }
-        return String(cmd.dropFirst(Self.attachSentinel.count))
-    }
-
     /// Every attach id LIVE in a session's member windows (trees + docks).
     private func liveAttachIds(of name: String) -> Set<String> {
         var ids = Set<String>()
@@ -4889,171 +4709,57 @@ class VigilSessionManager {
         return ids
     }
 
-    /// Every daemon id a captured tab references (panes + dock).
-    func tabPaneIds(_ tab: Tab) -> [String] {
-        (tab.panes + (tab.dock?.panes ?? [])).compactMap { paneId(of: $0) }
-    }
-
-    /// Capture an embedded session WITHOUT losing its COLD tabs and
-    /// WITHOUT reordering: each previous tab keeps its position (captured
-    /// fresh if its panes are live, carried cold otherwise; a mount swap
-    /// must never make rows jump), new live tabs append. Dropping a cold
-    /// tab from the capture would strand its daemons for the sweep.
-    private func mergedCapture(name: String) -> [Tab] {
-        var trees: [SplitTree<Ghostty.SurfaceView>] = []
-        var docks: [Int: VigilDockRuntime] = [:]
-        var settling = Set<String>()
-        for member in members(of: name) where !member.surfaceTree.isEmpty {
-            // A tree mid-materialization is NOT truth: its splits are
-            // still landing async. Capturing it wrote a THINNER tab than
-            // the capture it was born from - the sidebar's materializing
-            // guard then rendered that lie (a pane row vanished for a
-            // beat on first mount) and the still-cold panes' daemons were
-            // briefly disowned. The previous capture holds until settled.
-            if isMaterializing(member) {
-                for view in member.surfaceTree {
-                    if let id = view.vigilAttachId { settling.insert(id) }
-                }
-                continue
-            }
-            if let runtime = dockMap.object(forKey: member) {
-                docks[trees.count] = runtime
-            }
-            trees.append(member.surfaceTree)
-        }
-        return mergeTabs(
-            name: name,
-            liveTabs: captureTabs(name: name, trees, docks: docks),
-            settling: settling)
-    }
-
-    /// The merge half of mergedCapture, reusable by any path that already
-    /// holds the live trees (reclaim): previous positions kept, cold tabs
-    /// carried, new live tabs appended; tabs overlapping a SETTLING tree
-    /// (mid-materialization) keep their previous capture untouched.
-    private func mergeTabs(name: String, liveTabs: [Tab], settling: Set<String> = []) -> [Tab] {
-        guard let session = sessions[name] else { return liveTabs }
-        let live = liveAttachIds(of: name)
-
-        var out: [Tab] = []
-        var used = Set<Int>()
-        for prev in session.tabs {
-            let prevIds = Set(tabPaneIds(prev))
-            if !prevIds.isDisjoint(with: settling) {
-                out.append(prev) // mid-materialization: previous capture holds
-                continue
-            }
-            if let index = liveTabs.indices.first(where: { candidate in
-                !used.contains(candidate)
-                    && !prevIds.isDisjoint(with: Set(tabPaneIds(liveTabs[candidate])))
-            }) {
-                out.append(liveTabs[index])
-                used.insert(index)
-            } else if !prevIds.isEmpty, prevIds.allSatisfy({ !live.contains($0) }) {
-                out.append(prev) // still cold, same position
-            }
-            // else: partially live under another tab. The invariant pass
-            // below re-places whatever the live capture did NOT hold.
-        }
-        for index in liveTabs.indices where !used.contains(index) {
-            out.append(liveTabs[index])
-        }
-
-        // A capture merge may NEVER lose a pane by inference. The old rule
-        // dropped a previous tab whose panes were "live under another
-        // tab" without checking that the output actually held them - a
-        // split tab whose partner rode a different live tree lost its
-        // shape and its pane, and only the ledger's heal brought the pane
-        // back, as a bare cold tab (2026-08-18: attention-kernel's split).
-        // Whatever the merge did not place is re-placed here, verbatim
-        // from the previous capture, and the log screams so the merge
-        // rule that dropped it can be found. Prefer the layout the user
-        // had over any inference about where its panes went.
-        let placed = Set(out.flatMap(tabPaneIds))
-        for prev in session.tabs {
-            let missing = tabPaneIds(prev).filter { !placed.contains($0) }
-            guard !missing.isEmpty else { continue }
-            let mine = out.contains { tab in
-                !Set(tabPaneIds(tab)).isDisjoint(with: Set(tabPaneIds(prev)))
-            }
-            vlog("!! mergeTabs: '\(name)' previous tab \(tabPaneIds(prev)) lost \(missing) in the merge (partner placed=\(mine)) -> re-placed from the previous capture")
-            let survivors = prev.panes.filter { pane in
-                paneId(of: pane).map { missing.contains($0) } ?? false
-            }
-            let dock = prev.dock.flatMap { d -> DockCapture? in
-                let keep = d.panes.filter { paneId(of: $0).map { missing.contains($0) } ?? false }
-                return keep.isEmpty ? nil : DockCapture(panes: keep, active: min(d.active, keep.count - 1), width: d.width, collapsed: d.collapsed)
-            }
-            if survivors.isEmpty, dock == nil { continue }
-            out.append(Tab(
-                panes: survivors,
-                layout: survivors.count == prev.panes.count ? prev.layout : nil,
-                dock: dock,
-                label: prev.label,
-                emoji: prev.emoji))
-        }
-        return out
-    }
-
-    /// Stash an embedded session's live trees + dock runtimes in CAPTURE
-    /// ORDER, refreshing the capture first. Capture order is THE order:
-    /// the native tab bar, the sidebar, the stash and vigil.json must all
-    /// agree, or a session shuffles its rows every time it is looked away
-    /// from (mount puts the anchored tab first in the native group, so
-    /// member order rotates; it must never leak into identity).
-    private func stashOrdered(name: String)
-        -> (trees: [SplitTree<Ghostty.SurfaceView>], docks: [Int: VigilDockRuntime]) {
-        let merged = mergedCapture(name: name)
-        sessions[name]!.tabs = merged
-        var pool: [(tree: SplitTree<Ghostty.SurfaceView>, dock: VigilDockRuntime?)] = []
-        for member in members(of: name) where !member.surfaceTree.isEmpty {
-            pool.append((member.surfaceTree, dockMap.object(forKey: member)))
-        }
-        var trees: [SplitTree<Ghostty.SurfaceView>] = []
-        var docks: [Int: VigilDockRuntime] = [:]
-        var used = Set<Int>()
-        for tab in merged {
-            let ids = Set(tabPaneIds(tab))
-            guard let match = pool.indices.first(where: { candidate in
-                !used.contains(candidate) && pool[candidate].tree.contains { view in
-                    view.vigilAttachId.map { ids.contains($0) } ?? false
-                }
-            }) else { continue } // a cold tab lives in the capture alone
-            used.insert(match)
-            if let dock = pool[match].dock { docks[trees.count] = dock }
-            trees.append(pool[match].tree)
-        }
-        for index in pool.indices where !used.contains(index) {
-            vlog("stashOrdered: '\(name)' live tree missing from its own capture (appended)")
-            if let dock = pool[index].dock { docks[trees.count] = dock }
-            trees.append(pool[index].tree)
-        }
-        return (trees, docks)
-    }
-
-    /// Captures of EMBEDDED sessions go stale between detaches, and a hard
-    /// app kill (crash, vigil-dev restart) then resurrects the LAST
-    /// DETACH's shape while the launch sweep murders every daemon the
-    /// stale capture never claimed (cost real panes 2026-08-01:
-    /// sleek-onyx-1/2/3, bold-willow-7). Refresh at the persist
-    /// chokepoint: every state change re-captures the live shape, so
-    /// vigil.json always resurrects what is actually on screen.
-    private func refreshEmbeddedCaptures() {
+    /// Display facts of LIVE panes (cwd, title, dock width/active/collapse)
+    /// refresh at persist: they are not ownership, only what the registry
+    /// remembers about a pane once it goes cold. No entry is ever added or
+    /// dropped here.
+    private func refreshLiveFacts() {
         for (name, session) in sessions {
-            guard case .embedded = session.state else { continue }
-            guard !members(of: name).isEmpty else { continue }
-            let tabs = mergedCapture(name: name)
-            if !tabs.isEmpty { sessions[name]!.tabs = tabs }
+            var views: [String: Ghostty.SurfaceView] = [:]
+            var docks: [String: VigilDockRuntime] = [:] // keyed by any tenant id
+            for runtime in runtimes(session) {
+                for view in runtime.tree {
+                    if let id = view.vigilAttachId { views[id] = view }
+                }
+                for view in runtime.dock?.views ?? [] {
+                    if let id = view.vigilAttachId {
+                        views[id] = view
+                        docks[id] = runtime.dock
+                    }
+                }
+            }
+            guard !views.isEmpty else { continue }
+            var tabs = session.tabs
+            for t in tabs.indices {
+                for p in tabs[t].panes.indices {
+                    if let view = views[tabs[t].panes[p].id] { refreshFacts(&tabs[t].panes[p], from: view) }
+                }
+                guard var dock = tabs[t].dock else { continue }
+                for p in dock.panes.indices {
+                    if let view = views[dock.panes[p].id] { refreshFacts(&dock.panes[p], from: view) }
+                }
+                if let runtime = dock.panes.first.flatMap({ docks[$0.id] }) {
+                    dock.width = Double(runtime.width)
+                    dock.collapsed = runtime.collapsed
+                    dock.active = min(max(runtime.active, 0), dock.panes.count - 1)
+                }
+                tabs[t].dock = dock
+            }
+            sessions[name]!.tabs = tabs
         }
+    }
+
+    private func refreshFacts(_ pane: inout Pane, from view: Ghostty.SurfaceView) {
+        if let pwd = view.pwd { pane.cwd = pwd }
+        if let title = capturedTitle(of: view) { pane.title = title }
     }
 
     private func persist() {
-        refreshEmbeddedCaptures()
-        reconcileLedger()
-        var entries = sessions.values.filter { $0.persistent }.map {
+        refreshLiveFacts()
+        var entries = sessions.values.map {
             PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq)
         }
-        entries += graveyard.values.filter { !$0.ephemeral }.map {
+        entries += graveyard.values.map {
             PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq)
         }
         entries.sort { $0.name < $1.name }
@@ -5061,7 +4767,7 @@ class VigilSessionManager {
         try? FileManager.default.createDirectory(
             at: persistURL.deletingLastPathComponent(),
             withIntermediateDirectories: true)
-        // This file is now the ONLY copy of everything you named. It is
+        // This file is the ONLY copy of everything you named. It is
         // rewritten wholesale many times a minute, so it gets the two
         // cheap guarantees that failure mode deserves: the previous good
         // version is kept beside it, and the new one lands ATOMICALLY (a
@@ -5169,12 +4875,10 @@ class VigilSessionManager {
         }
     }
 
-    /// Idempotent: every window of a persistent session carries the
-    /// vigilance mark (eye + label titlebar pill, colored by survival class)
-    /// and a matching content border; every other window carries none. One
-    /// sync walks all windows; called from persist(), the chokepoint every
-    /// state change already flows through (plus any window becoming key,
-    /// for fresh windows).
+    /// Idempotent: every session window carries the titlebar mark (face
+    /// chip, pin, dock toggle) and its tab bar. One sync walks all windows;
+    /// called from persist(), the chokepoint every state change already
+    /// flows through (plus any window becoming key, for fresh windows).
     private func syncWindowMarks() {
         for controller in TerminalController.all {
             guard let window = controller.window else { continue }
@@ -5192,7 +4896,6 @@ class VigilSessionManager {
             enforceTabBar(window)
 
             let name = sessionName(of: controller)
-            let persistent = name.map { sessions[$0]?.persistent == true } ?? false
 
             // Enforce a session's stored pin intent on its live window
             // (covers resurrection/re-embed for free); session-less windows
@@ -5206,22 +4909,22 @@ class VigilSessionManager {
             syncTabTitle(controller)
             let pinned = name.map { sessionPinned($0) } ?? isPinned(controller)
 
+            // Closures capture the controller WEAKLY: the accessory lives
+            // on the window, so a strong capture is a window→accessory→
+            // controller→window cycle that keeps closed windows resident.
             let mark = VigilWindowMark(
                 label: name.flatMap { sessions[$0]?.label },
                 emoji: name.flatMap { sessions[$0]?.emoji },
-                persistent: persistent,
                 pinned: pinned,
                 dockOpen: dockMap.object(forKey: controller).map { !$0.collapsed } ?? false,
                 onEditIdentity: name.map { n in { VigilIdentity.editModal(name: n) } },
-                onTogglePersist: { [weak self] in
-                    // Session scope IS the window: one flip covers every tab.
-                    self?.toggleWindowPersist(controller)
-                },
-                onTogglePin: { [weak self] in
+                onTogglePin: { [weak self, weak controller] in
+                    guard let controller else { return }
                     if let name { self?.togglePinSession(name) }
                     else { self?.togglePin(controller); self?.persist() }
                 },
-                onToggleDock: name == nil ? nil : { [weak self] in
+                onToggleDock: name == nil ? nil : { [weak self, weak controller] in
+                    guard let controller else { return }
                     self?.toggleDock(controller)
                 })
 
@@ -5240,76 +4943,10 @@ class VigilSessionManager {
                 window.addTitlebarAccessoryViewController(accessory)
             }
 
-            // Persistent windows wear the thin teal border; ephemeral
-            // windows get NONE (the default, undramatic state). Persistent
-            // is the one that stands out.
-            syncBorder(window, color: persistent ? .systemTeal : nil)
-
             // The side bars ride the same chokepoint: every window that
             // gets its mark gets its bars (idempotent install + state sync).
             VigilBars.shared.sync(controller)
         }
-    }
-
-    /// A thin class-colour border around the window, drawn as a click-through
-    /// overlay INSIDE the contentView (safe surface, like the glass effect)
-    /// with the window's real corner radius so it hugs the rounded shape.
-    /// Never touches the private frame view (that broke teardown). A nil
-    /// colour removes it (ephemeral windows carry no border).
-    private func syncBorder(_ window: NSWindow, color: NSColor?) {
-        guard let content = window.contentView else { return }
-        let existing = content.subviews.compactMap({ $0 as? VigilBorderOverlay }).first
-        guard let color else {
-            existing?.removeFromSuperview()
-            return
-        }
-        let overlay = existing ?? {
-            let o = VigilBorderOverlay(frame: content.bounds)
-            o.autoresizingMask = [.width, .height]
-            o.wantsLayer = true
-            content.addSubview(o) // topmost; interior transparent, edges only
-            return o
-        }()
-        overlay.frame = content.bounds
-        let radius: CGFloat = (window.responds(to: Selector(("_cornerRadius")))
-            ? window.value(forKey: "_cornerRadius") as? CGFloat : nil) ?? 10
-        overlay.layer?.cornerRadius = radius
-        overlay.layer?.cornerCurve = .continuous
-        overlay.layer?.borderWidth = 2
-        overlay.layer?.borderColor = color.withAlphaComponent(0.6).cgColor
-        overlay.layer?.masksToBounds = false
-    }
-
-    /// A capture claiming the same daemon TWICE would resurrect two
-    /// surfaces on one socket: twin panes both replaying the daemon's VT,
-    /// frames interleaving into garbage (the duplicated-lazygit corruption,
-    /// minted by pre-paneSeq index recycling). One daemon = one pane: the
-    /// first claim wins, later claims drop and their tab loses its layout
-    /// (a healed shape beats a corrupt one), screamed in the log.
-    private func dedupedTabs(_ tabs: [Tab], name: String) -> [Tab] {
-        var seen = Set<String>()
-        var healed: [Tab] = []
-        for var tab in tabs {
-            let before = tab.panes.count + (tab.dock?.panes.count ?? 0)
-            tab.panes = tab.panes.filter { pane in
-                guard let id = paneId(of: pane) else { return true }
-                return seen.insert(id).inserted
-            }
-            if var dock = tab.dock {
-                dock.panes = dock.panes.filter { pane in
-                    guard let id = paneId(of: pane) else { return true }
-                    return seen.insert(id).inserted
-                }
-                tab.dock = dock
-            }
-            let after = tab.panes.count + (tab.dock?.panes.count ?? 0)
-            if after != before {
-                vlog("!! heal[load]: '\(name)' capture claimed a daemon twice - \(before - after) duplicate pane(s) dropped, layout reset")
-                tab.layout = nil
-            }
-            if !tab.panes.isEmpty { healed.append(tab) }
-        }
-        return healed
     }
 
     /// The highest pane index any state file on disk records for a session:
@@ -5344,6 +4981,7 @@ class VigilSessionManager {
             }
         }
         guard let entries = decoded else { return }
+        var seen = Set<String>()
         for entry in entries {
             var session = Session(
                 name: entry.name,
@@ -5351,27 +4989,26 @@ class VigilSessionManager {
                 emoji: entry.emoji,
                 cwd: entry.cwd,
                 state: .asleep,
-                tabs: dedupedTabs(entry.tabs ?? [], name: entry.name),
+                tabs: entry.tabs ?? [],
                 order: entry.order ?? 0)
-            // vigil.json only ever holds persistent sessions (persist filters).
-            session.persistent = true
-            // Heal data recorded before the counter existed: the counter
-            // must clear every captured index, or a bury after this load
-            // frees the top index for re-minting while its daemon lives.
-            var maxIndex = -1
+            // One daemon = ONE pane: a registry claiming an id twice would
+            // attach two surfaces to one socket (frames interleave into
+            // garbage). The writer cannot produce this; a file that has it
+            // screams.
+            for id in session.tabs.flatMap(tabPaneIds) where !seen.insert(id).inserted {
+                vlog("!! load: '\(entry.name)' lists '\(id)' which another entry already lists")
+            }
+            // The counter must clear every index this session has ever
+            // used: a mint that reuses an index inherits a dead pane's
+            // resume pointer (rapid-lynx-4 typed `claude --resume` of a
+            // long-dead conversation into itself, 2026-08-09). The floor
+            // covers every index the STATE DIR has ever seen.
+            var maxIndex = Self.maxPaneIndexOnDisk(session: entry.name)
             for id in ownedPaneIds(session) {
                 if let n = id.split(separator: "-").last.flatMap({ Int($0) }) {
                     maxIndex = max(maxIndex, n)
                 }
             }
-            // The capture is NOT the whole story: panes from before the
-            // counter existed died leaving no capture but leaving state
-            // files (.resume above all), and a mint that reuses such an
-            // index inherits a dead pane's pointer - a fresh tab typed
-            // `claude --resume <uuid-of-a-long-dead-conversation>` into
-            // itself (rapid-lynx-4, 2026-08-09). The floor covers every
-            // index the STATE DIR has ever seen for this session.
-            maxIndex = max(maxIndex, Self.maxPaneIndexOnDisk(session: entry.name))
             session.paneSeq = max(entry.paneSeq ?? 0, maxIndex + 1)
             session.pinned = entry.pinned ?? false
             session.foreground = entry.foreground ?? false

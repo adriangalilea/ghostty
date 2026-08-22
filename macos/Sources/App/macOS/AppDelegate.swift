@@ -424,7 +424,7 @@ class AppDelegate: NSObject,
         }
 
         // vigil: interceptTermination returning false means vigil DECIDED this
-        // death (quitForReal, power-off, or nothing persistent survives) and
+        // death (quitForReal, power-off, or no session survives) and
         // already recorded/killed what that death requires. Upstream's
         // interactive confirm that used to follow asks ghostty's truth -
         // meaningless under a daemon (every surface reads as a running

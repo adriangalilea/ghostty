@@ -1,41 +1,23 @@
 import AppKit
 import SwiftUI
 
-/// Per-window controls in the titlebar: the survival eye ON/OFF (click to
-/// flip ephemeral <-> persistent) and the pin-on-top, on EVERY window.
-/// Persistent wears teal, cold on purpose (persisted = preserved);
-/// ephemeral is neutral. Native titlebar accessory, composes with tabs and
-/// titlebar theming.
+/// Per-window controls in the titlebar: the session's face chip (the door
+/// to the identity editor), the pin-on-top, and the tab's dock toggle.
+/// Native titlebar accessory, composes with tabs and titlebar theming.
 final class VigilTitlebarAccessory: NSTitlebarAccessoryViewController {}
 
-/// The survival-class border: a click-through overlay INSIDE the window's
-/// contentView (the same safe surface the glass effect uses), tracing the
-/// window's real rounded corners via `_cornerRadius`. NOT a subview of the
-/// private frame view (NSThemeFrame) — that destabilized window teardown
-/// and left zombie windows (2026-07-18). ARC-owned by contentView, so it
-/// tears down with the window and never touches close.
-final class VigilBorderOverlay: NSView {
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override var mouseDownCanMoveWindow: Bool { true }
-}
-
-
 struct VigilWindowMark: View {
-    /// The session label; shown only on hover (help), never inline. The
-    /// titlebar shows two things: the session's emoji face (its chip is the
-    /// door to the identity editor) and whether the window is persistent.
+    /// The session label; shown only on hover (help), never inline.
     let label: String?
     /// The session's emoji face, shown inline (colour carries itself; no
     /// class semantics). nil session emoji shows a faint placeholder.
     let emoji: String?
-    let persistent: Bool
     let pinned: Bool
     /// Whether this tab's dock (the right bar) is open.
     let dockOpen: Bool
     /// Opens the identity editor; nil for session-less windows (safety-net
     /// strays have no identity to edit) which then show no chip at all.
     var onEditIdentity: (() -> Void)?
-    var onTogglePersist: () -> Void
     var onTogglePin: () -> Void
     /// Toggles the tab's dock; nil for session-less windows.
     var onToggleDock: (() -> Void)?
@@ -78,16 +60,6 @@ struct VigilWindowMark: View {
                 help: pinned ? "Floating above other windows. Click to drop it back."
                              : "Float this window above the others.")
 
-            roundButton(
-                // Persistent = infinity (endures, keeps running in the
-                // background); ephemeral = hourglass (time-limited, dies on
-                // close). Persistent in the cold class colour, ephemeral neutral.
-                icon: persistent ? "infinity" : "hourglass",
-                on: persistent,
-                color: persistent ? .teal : .secondary,
-                action: onTogglePersist,
-                help: persistHelp)
-
             if let onToggleDock {
                 roundButton(
                     // The tab's dock: a collapsible stack of tool panes
@@ -110,17 +82,9 @@ struct VigilWindowMark: View {
         return "\(name)Edit this session's emoji and name."
     }
 
-    private var persistHelp: String {
-        let name = label.map { "“\($0)” " } ?? ""
-        return persistent
-            ? "\(name)persistent: survives closing the window and quitting the app. Click to make ephemeral."
-            : "Ephemeral: dies when the window closes. Click to make it survive quit."
-    }
-
-    /// A subtle round button, glyph always in its class colour (so the
-    /// class reads at a glance) on a faint disc: a touch stronger when ON,
-    /// fainter when OFF. No harsh fills or borders; sized like the native
-    /// traffic lights next to it.
+    /// A subtle round button, glyph always in its colour on a faint disc:
+    /// a touch stronger when ON, fainter when OFF. No harsh fills or
+    /// borders; sized like the native traffic lights next to it.
     private func roundButton(
         icon: String, on: Bool, color: Color, action: @escaping () -> Void, help: String
     ) -> some View {
