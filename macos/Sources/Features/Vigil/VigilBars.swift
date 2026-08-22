@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 
 /// The two custom side bars of every terminal window (NEVER native
-/// NSSplitViewController sidebars): LEFT the session tree, one global
-/// visibility + width shared by every window; RIGHT the per-tab dock.
+/// NSSplitViewController sidebars): LEFT the session tree, visibility
+/// PER WINDOW (the session's, persisted; the last toggle is the default
+/// for new windows) with one global width; RIGHT the per-tab dock.
 /// Both are push splits INSIDE TerminalViewContainer: the bar views are
 /// siblings of the terminal hosting view and the terminal is inset to make
 /// room, so the titlebar toggle buttons never move when a bar toggles.
@@ -159,7 +160,7 @@ final class VigilBars {
         guard let window = NSApp.keyWindow,
               let controller = window.windowController as? TerminalController,
               let container = controller.terminalViewContainer else { return }
-        if !sidebarVisible { sidebarVisible = true }
+        if !sidebarVisible(for: controller) { setSidebarVisible(true, for: controller) }
         guard let host = container.subviews.compactMap({ $0 as? VigilSidebarHost }).first else { return }
         controlHost = host
         controlMode = true
@@ -185,7 +186,7 @@ final class VigilBars {
         guard let window = NSApp.keyWindow,
               let controller = window.windowController as? TerminalController,
               let container = controller.terminalViewContainer else { return }
-        if !sidebarVisible { sidebarVisible = true }
+        if !sidebarVisible(for: controller) { setSidebarVisible(true, for: controller) }
         guard let host = container.subviews.compactMap({ $0 as? VigilSidebarHost }).first else { return }
         if window.firstResponder === host {
             host.model.returnFocus?()
@@ -198,11 +199,29 @@ final class VigilBars {
     private let visibleKey = "vigil.sidebar.visible"
     private let widthKey = "vigil.sidebar.width"
 
-    var sidebarVisible: Bool {
-        get { UserDefaults.standard.bool(forKey: visibleKey) }
-        set {
-            UserDefaults.standard.set(newValue, forKey: visibleKey)
-            syncAll()
+    /// Session-less strays keep their own flag, keyed by controller.
+    private let strayVisible = NSMapTable<TerminalController, NSNumber>(
+        keyOptions: [.weakMemory, .objectPointerPersonality], valueOptions: .strongMemory)
+
+    /// The window's own visibility: the session's stored choice, else the
+    /// last toggle anywhere (the default a fresh window is born with).
+    func sidebarVisible(for controller: TerminalController) -> Bool {
+        let manager = VigilSessionManager.shared
+        if let name = manager.sessionName(of: controller), let stored = manager.sessions[name]?.sidebar {
+            return stored
+        }
+        if let stray = strayVisible.object(forKey: controller) { return stray.boolValue }
+        return UserDefaults.standard.bool(forKey: visibleKey)
+    }
+
+    func setSidebarVisible(_ visible: Bool, for controller: TerminalController) {
+        let manager = VigilSessionManager.shared
+        UserDefaults.standard.set(visible, forKey: visibleKey)
+        if let name = manager.sessionName(of: controller) {
+            manager.setSidebar(name: name, visible) // persists + syncs every member
+        } else {
+            strayVisible.setObject(NSNumber(value: visible), forKey: controller)
+            sync(controller)
         }
     }
 
@@ -217,8 +236,8 @@ final class VigilBars {
         }
     }
 
-    func toggleSidebar() {
-        sidebarVisible.toggle()
+    func toggleSidebar(in controller: TerminalController) {
+        setSidebarVisible(!sidebarVisible(for: controller), for: controller)
     }
 
     func syncAll() {
@@ -237,7 +256,7 @@ final class VigilBars {
 
         // Left: the session tree.
         let sidebar = ensureSidebar(container, controller: controller)
-        let showSidebar = sidebarVisible
+        let showSidebar = sidebarVisible(for: controller)
         sidebar.isHidden = !showSidebar
         sidebar.widthConstraint.constant = sidebarWidth
         if showSidebar { sidebar.model.refresh() }
@@ -267,7 +286,7 @@ final class VigilBars {
             trailing: dockWidth,
             top: 0)
 
-        ensureToggleAccessory(window)
+        ensureToggleAccessory(window, controller: controller)
     }
 
     // MARK: Install
@@ -312,12 +331,13 @@ final class VigilBars {
 
     /// The LEFT titlebar toggle: fixed at the far left, rides the titlebar,
     /// never moves when the bar toggles (the whole point).
-    private func ensureToggleAccessory(_ window: NSWindow) {
+    private func ensureToggleAccessory(_ window: NSWindow, controller: TerminalController) {
         let existing = window.titlebarAccessoryViewControllers
             .compactMap { $0 as? VigilSidebarToggleAccessory }
             .first
-        let toggle = VigilSidebarToggle(on: sidebarVisible) { [weak self] in
-            self?.toggleSidebar()
+        let toggle = VigilSidebarToggle(on: sidebarVisible(for: controller)) { [weak self, weak controller] in
+            guard let controller else { return }
+            self?.toggleSidebar(in: controller)
         }
         if let hosting = existing?.view as? NSHostingView<VigilSidebarToggle> {
             hosting.rootView = toggle

@@ -311,6 +311,11 @@ class VigilSessionManager {
         /// survives detach, quit and reboot, and a detached/asleep session
         /// can be pinned before it even has a window.
         var pinned: Bool = false
+        /// The session tree sidebar of this session's window: shown or
+        /// hidden, persisted; nil = the app-wide default (the last toggle
+        /// anywhere). Per window, never global: toggling one window must
+        /// not repaint another.
+        var sidebar: Bool? = nil
         /// Loaded intent: this session had a WINDOW when the app last
         /// recorded it (crash or shutdown), so launch restores it as one.
         /// Detached-in-background sessions load with this false and stay
@@ -4221,6 +4226,14 @@ class VigilSessionManager {
         persist()
     }
 
+    /// The window's sidebar visibility, stored on the session and synced
+    /// to every member window of it.
+    func setSidebar(name: String, _ visible: Bool) {
+        guard sessions[name] != nil else { return }
+        sessions[name]!.sidebar = visible
+        persist()
+    }
+
     /// The pin state of a session (its stored intent).
     func sessionPinned(_ name: String) -> Bool {
         sessions[name]?.pinned ?? false
@@ -4663,6 +4676,7 @@ class VigilSessionManager {
         let tabs: [Tab]?
         let order: Int?
         let pinned: Bool?
+        let sidebar: Bool?
         let buriedUntil: Date?
         /// Had a window at record time; launch restores it as one.
         let foreground: Bool?
@@ -4745,10 +4759,10 @@ class VigilSessionManager {
     private func persist() {
         refreshLiveFacts()
         var entries = sessions.values.map {
-            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq)
+            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq)
         }
         entries += graveyard.values.map {
-            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq)
+            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq)
         }
         entries.sort { $0.name < $1.name }
         let data = try! JSONEncoder().encode(entries)
@@ -4999,6 +5013,7 @@ class VigilSessionManager {
             }
             session.paneSeq = max(entry.paneSeq ?? 0, maxIndex + 1)
             session.pinned = entry.pinned ?? false
+            session.sidebar = entry.sidebar
             session.foreground = entry.foreground ?? false
             session.thumbnail = NSImage(
                 contentsOfFile: dumpsDir(entry.name).appendingPathComponent("thumb.png").path)
