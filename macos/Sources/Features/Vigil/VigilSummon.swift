@@ -17,14 +17,6 @@ enum VigilFollowMode: String {
     static var current: VigilFollowMode {
         UserDefaults.standard.string(forKey: key).flatMap(VigilFollowMode.init) ?? .summon
     }
-
-    /// One-time migration from the retired `vigil.autofollow` bool: true
-    /// was the window behavior; false/absent falls to the default above.
-    static func migrate() {
-        guard UserDefaults.standard.string(forKey: key) == nil,
-              UserDefaults.standard.bool(forKey: "vigil.autofollow") else { return }
-        UserDefaults.standard.set(VigilFollowMode.window.rawValue, forKey: key)
-    }
 }
 
 /// The summon engine: an agent stalls mid-turn somewhere in the unseen
@@ -55,7 +47,6 @@ final class VigilSummon {
     private var engineDismiss = false
 
     private init() {
-        VigilFollowMode.migrate()
         NotificationCenter.default.addObserver(
             forName: VigilSessionManager.stateDidChange, object: nil, queue: .main
         ) { _ in
@@ -107,10 +98,23 @@ final class VigilSummon {
 
     private func announce() {
         let manager = VigilSessionManager.shared
-        for ask in manager.midTurnAsks() where (chimed[ask.pane] ?? .distantPast) < ask.since {
+        let asks = manager.midTurnAsks()
+        // The ledgers live exactly as long as their blocks: entries for
+        // panes no longer mid-turn-blocked drop here, so the maps are
+        // bounded by the open-ask count forever. Lost on app restart by
+        // design — a still-open ask re-chimes once, the unseen-relight
+        // doctrine in audio.
+        let open = Set(asks.map(\.pane))
+        chimed = chimed.filter { open.contains($0.key) }
+        announced = announced.filter { open.contains($0.key) }
+        // ONE chime per tick however many asks landed together — three
+        // overlapping dings are noise about noise.
+        var fresh = false
+        for ask in asks where (chimed[ask.pane] ?? .distantPast) < ask.since {
             chimed[ask.pane] = ask.since
-            Self.chime()
+            fresh = true
         }
+        if fresh { Self.chime() }
         // Embedded asks never summon; surface them where Adrian IS: a
         // pill on the key window naming the asker (⌘⇧J lands on it).
         for ask in manager.embeddedAsks() where (announced[ask.pane] ?? .distantPast) < ask.since {

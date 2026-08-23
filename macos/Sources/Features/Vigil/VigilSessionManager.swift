@@ -71,11 +71,11 @@ class VigilSessionManager {
         case none = 0
         case done = 1
         case input = 2
-        /// A permission prompt: the agent is stalled MID-TURN until Adrian
-        /// approves. Outranks a turn-end question (the documented
-        /// permission > review ordering, now real): ⌘⇧J and the summon
-        /// serve approvals first.
-        case approval = 3
+        /// A MID-TURN blocker: a permission prompt or an AskUserQuestion —
+        /// the agent is stalled mid-work until Adrian answers. Outranks a
+        /// turn-end question (the documented permission > review ordering,
+        /// now real): ⌘⇧J and the summon serve these first.
+        case midTurn = 3
     }
 
     /// The second token of a blocked pane's state file: WHY it is blocked.
@@ -1118,12 +1118,12 @@ class VigilSessionManager {
                 changed = true
                 continue
             }
-            // Notification = permission prompt (mid-turn, the agent is
-            // stalled); Ask = the adapter classifier found a question at
-            // turn end. Distinct ranks: the summon and ⌘⇧J serve
-            // approvals first.
+            // Notification = permission prompt, Question = AskUserQuestion
+            // (both mid-turn, the agent is stalled); Ask = the adapter
+            // classifier found a question at turn end. Distinct ranks:
+            // the summon and ⌘⇧J serve mid-turn blockers first.
             let attention: Attention = switch event.event {
-            case "Notification": .approval
+            case "Notification", "Question": .midTurn
             case "Ask": .input
             default: .done
             }
@@ -1347,7 +1347,12 @@ class VigilSessionManager {
             return
         }
         if let session = mostUrgent {
-            float(name: session.name)
+            // Pane-precise like every attention landing (follow()'s rule),
+            // which also means an ASLEEP asker resurrects into the panel
+            // exactly as the auto-summon would — one behavior, two
+            // triggers. A done-head has no asking pane; session-level
+            // float (asleep -> real window, the peek-vs-rebuild doctrine).
+            float(name: session.name, landOn: askingPane(session.name))
             return
         }
         guard let controller = TerminalController.preferredParent,
@@ -1520,8 +1525,22 @@ class VigilSessionManager {
         }
 
         vlog("float: resurrect tab \(tabIndex) of '\(name)' into the quick terminal")
+        // The tab's dock resurrects ALIVE-unshown, exactly like a live
+        // float's (the quick terminal shows no docks anywhere): reclaim
+        // then hands the runtime on, so a later mount shows the tenants
+        // without waiting for a full resurrect.
+        var floatedDock: VigilDockRuntime?
+        if let capture = tab.dock, !capture.panes.isEmpty {
+            floatedDock = VigilDockRuntime(
+                views: capture.panes.map {
+                    Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: name, pane: $0))
+                },
+                active: min(capture.active, capture.panes.count - 1),
+                width: CGFloat(capture.width),
+                collapsed: capture.collapsed)
+        }
         sessions[name]!.state = .floating(
-            rest: rest, floatedDock: nil, floatedIndex: min(tabIndex, rest.count))
+            rest: rest, floatedDock: floatedDock, floatedIndex: min(tabIndex, rest.count))
         floatingName = name
         quickTreeSwap = true
         quick.surfaceTree = SplitTree(view: anchor)
