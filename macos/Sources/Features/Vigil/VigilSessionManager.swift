@@ -1277,24 +1277,22 @@ class VigilSessionManager {
     /// pill through embeddedAsks() instead.
     func summonQueue() -> [SummonCandidate] {
         midTurnAsks { session in
-            if case .embedded = session.state { return false }
             if case .floating = session.state, session.name != floatingName { return false }
             return true
         }
-        .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since }
+        .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since && !paneOnScreen($0.pane) }
     }
 
-    /// Mid-turn blockers inside EMBEDDED sessions, unseen: the summon
-    /// never moves them, but they must still make NOISE — a chime plus a
-    /// pill on the key window (the ⌘⇧J affordance surfaced at the moment
-    /// of the ask); an ask from a hidden tab of the very window Adrian
-    /// works in used to pass in silence (2026-08-23).
-    func embeddedAsks() -> [SummonCandidate] {
-        midTurnAsks { session in
-            if case .embedded = session.state { return true }
-            return false
-        }
-        .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since }
+    /// A pane Adrian can actually SEE right now — never summon material:
+    /// the summon exists for asks no glass shows. occlusionState, not
+    /// isVisible: a window buried behind another app reads isVisible
+    /// forever, and suppressing summons for buried prompts was exactly
+    /// the silence being fixed (2026-08-23).
+    func paneOnScreen(_ pane: String) -> Bool {
+        guard let view = liveView(attachId: pane), let window = view.window else { return false }
+        return window.isVisible
+            && window.occlusionState.contains(.visible)
+            && !view.isHiddenOrHasHiddenAncestor
     }
 
     /// EVERY mid-turn blocker, seen or not, any session state: the chime
@@ -1376,6 +1374,34 @@ class VigilSessionManager {
         var floatedIndex = 0
         switch session.state {
         case .embedded:
+            // The LOAN (2026-08-23): a pane-precise float of an embedded
+            // session whose asking tab no glass shows takes THAT TAB into
+            // the panel and returns it home on release — a placement is
+            // never destroyed, and a placement never mutes an ask. A live
+            // hidden native tab is borrowed whole; a cold tab resurrects.
+            if let pane, !paneOnScreen(pane) {
+                if let member = members(of: name).first(where: { m in
+                    // Loanable = no glass currently shows it (occlusion
+                    // truth, same rule as paneOnScreen).
+                    !(m.window.map { $0.isVisible && $0.occlusionState.contains(.visible) } ?? false)
+                        && m.surfaceTree.contains { $0.vigilAttachId == pane }
+                }) {
+                    loanMember(member, of: name, landOn: pane, quick: quick)
+                    return
+                }
+                if liveView(attachId: pane) == nil,
+                   let tabIndex = sessions[name]!.tabs.firstIndex(where: { $0.panes.contains { $0.id == pane } }) {
+                    floatCapturedTab(name: name, tabIndex: tabIndex, rest: [], landOn: pane, quick: quick)
+                    return
+                }
+                // A pane-precise float of an embedded session is a LOAN or
+                // nothing: falling through to the whole-session detach
+                // would rip Adrian's window over an occlusion race between
+                // queue derivation and this call. Refuse loudly; the
+                // engine retries next tick.
+                vlog("float: pane \(pane) of embedded '\(name)' neither loanable nor cold - refused")
+                return
+            }
             // Which tab floats: the one you were looking at. Identified by
             // its leaf view, not an index: detach stashes runtimes in
             // REGISTRY order, which need not match the native member order.
@@ -1476,7 +1502,32 @@ class VigilSessionManager {
         guard floatingName == name else { return }
         floatingName = nil
         let tree = quick.surfaceTree
-        if let session = sessions[name] {
+        if let session = sessions[name], case .embedded = session.state {
+            // The LOAN returns home: a silent, unselected native tab of
+            // the session's window (appended; capture order is untouched,
+            // a later detach/resurrect restores strip order). If every
+            // window died while the tab was away, the session is no
+            // longer embedded-with-glass: it takes the detached shape
+            // with this one live tab.
+            let dock = loanedDock
+            loanedDock = nil
+            if !tree.isEmpty {
+                if let ghostty = ghosttyApp,
+                   let host = (focusWindow(of: name)?.windowController as? TerminalController)
+                       ?? members(of: name).first {
+                    let controller = TerminalController.vigilNewTab(ghostty, parent: host, tree: tree)
+                    registerMember(controller, name: name)
+                    if let dock {
+                        dockMap.setObject(dock, forKey: controller)
+                        VigilBars.shared.sync(controller)
+                    }
+                    vlog("reclaim: loaned tab of '\(name)' returned as native tab")
+                } else {
+                    sessions[name]!.state = .detached([TabRuntime(tree: tree, dock: dock)])
+                    vlog("reclaim: loaned tab of '\(name)' -> detached (windows died while away)")
+                }
+            }
+        } else if let session = sessions[name] {
             var held: [TabRuntime] = []
             var index = 0
             var dock: VigilDockRuntime?
@@ -1496,6 +1547,48 @@ class VigilSessionManager {
             quickTreeSwap = false
             stashedQuickTree = nil
         }
+        persist()
+    }
+
+    /// The loaned tab's dock while an EMBEDDED session's tab rides the
+    /// panel (the .floating state slot exists only for non-embedded
+    /// floats); part of the panel-occupancy trio with floatingName and
+    /// stashedQuickTree.
+    private var loanedDock: VigilDockRuntime?
+
+    /// Take ONE live hidden native tab of an embedded session into the
+    /// quick terminal. Membership ends before the member window closes
+    /// (the close cascade must see a session-less controller, the vacate
+    /// rule); the tree survives by reference and reclaim returns it home
+    /// as a silent native tab.
+    private func loanMember(
+        _ member: TerminalController, of name: String,
+        landOn pane: String, quick: QuickTerminalController
+    ) {
+        let tree = member.surfaceTree
+        guard !tree.isEmpty else { return }
+        vlog("float: loan tab \(tree.compactMap(\.vigilAttachId)) of '\(name)' -> quick terminal")
+        let dock = dockMap.object(forKey: member)
+        dock?.unmount()
+        dockMap.removeObject(forKey: member)
+        memberships.removeObject(forKey: member)
+        killController(member)
+
+        if let current = floatingName {
+            reclaim(current, from: quick, restoreStash: false)
+        } else if !quick.surfaceTree.isEmpty {
+            stashedQuickTree = quick.surfaceTree
+        }
+        loanedDock = dock
+        floatingName = name
+        quickTreeSwap = true
+        quick.surfaceTree = tree
+        quickTreeSwap = false
+        quick.animateIn()
+        if let view = tree.first(where: { $0.vigilAttachId == pane }) ?? tree.root?.leftmostLeaf() {
+            DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
+        }
+        touchRecent(name)
         persist()
     }
 
@@ -1539,8 +1632,15 @@ class VigilSessionManager {
                 width: CGFloat(capture.width),
                 collapsed: capture.collapsed)
         }
-        sessions[name]!.state = .floating(
-            rest: rest, floatedDock: floatedDock, floatedIndex: min(tabIndex, rest.count))
+        if case .embedded = sessions[name]!.state {
+            // A LOAN: the session keeps its windows and stays embedded;
+            // reclaim returns the tab as a native tab (or hands it to
+            // detached if the windows died while it was away).
+            loanedDock = floatedDock
+        } else {
+            sessions[name]!.state = .floating(
+                rest: rest, floatedDock: floatedDock, floatedIndex: min(tabIndex, rest.count))
+        }
         floatingName = name
         quickTreeSwap = true
         quick.surfaceTree = SplitTree(view: anchor)

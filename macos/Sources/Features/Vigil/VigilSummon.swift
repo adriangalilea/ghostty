@@ -89,8 +89,6 @@ final class VigilSummon {
     /// decides whether anything moves (Adrian 2026-08-23: prompts passing
     /// in silence, "it did not even make a noise").
     private var chimed: [String: Date] = [:]
-    /// One pill per (pane, block) for embedded hidden-tab asks.
-    private var announced: [String: Date] = [:]
 
     static func chime() {
         NSSound(named: NSSound.Name("Glass"))?.play()
@@ -99,32 +97,25 @@ final class VigilSummon {
     private func announce() {
         let manager = VigilSessionManager.shared
         let asks = manager.midTurnAsks()
-        // The ledgers live exactly as long as their blocks: entries for
-        // panes no longer mid-turn-blocked drop here, so the maps are
+        // The ledger lives exactly as long as its blocks: entries for
+        // panes no longer mid-turn-blocked drop here, so the map is
         // bounded by the open-ask count forever. Lost on app restart by
         // design — a still-open ask re-chimes once, the unseen-relight
         // doctrine in audio.
         let open = Set(asks.map(\.pane))
         chimed = chimed.filter { open.contains($0.key) }
-        announced = announced.filter { open.contains($0.key) }
         // ONE chime per tick however many asks landed together — three
-        // overlapping dings are noise about noise.
+        // overlapping dings are noise about noise. The vlog makes every
+        // chime auditable: "I heard nothing" vs "nothing fired" must be
+        // distinguishable from the log alone.
         var fresh = false
         for ask in asks where (chimed[ask.pane] ?? .distantPast) < ask.since {
             chimed[ask.pane] = ask.since
             fresh = true
         }
-        if fresh { Self.chime() }
-        // Embedded asks never summon; surface them where Adrian IS: a
-        // pill on the key window naming the asker (⌘⇧J lands on it).
-        for ask in manager.embeddedAsks() where (announced[ask.pane] ?? .distantPast) < ask.since {
-            announced[ask.pane] = ask.since
-            manager.vlog("summon: embedded ask announced '\(ask.name)' pane \(ask.pane)")
-            guard let key = NSApp.keyWindow,
-                  key.windowController is TerminalController,
-                  let session = manager.sessions[ask.name] else { continue }
-            let emoji = session.emoji.map { "\($0) " } ?? ""
-            VigilFollowSplash.show(in: key, text: "\(emoji)\(session.label) asks  ·  ⌘⇧J")
+        if fresh {
+            manager.vlog("summon: chime")
+            Self.chime()
         }
     }
 
@@ -164,9 +155,16 @@ final class VigilSummon {
         // (the fleet asks while Adrian reads elsewhere).
         guard !VigilBars.shared.controlMode else { return }
         if NSApp.isActive, let key = NSApp.keyWindow {
+            // Veto only an answer IN PROGRESS: the FOCUSED pane is
+            // blocked — typing there IS answering. Anything wider mutes
+            // the summon: session-level (any raw block) muted hidden-tab
+            // asks, visible-level (any on-screen block) let one lingering
+            // unanswered prompt mute the whole fleet (both 2026-08-23).
+            // Queue discipline falls out: answer the prompt under your
+            // fingers, THEN the next one summons.
             if let controller = key.windowController as? TerminalController,
-               let name = VigilSessionManager.shared.sessionName(of: controller),
-               manager.asking(name) { return }
+               let pane = controller.focusedSurface?.vigilAttachId,
+               manager.paneAgentState(pane)?.state == .blocked { return }
             if key is NSPanel, !(key.windowController is QuickTerminalController) { return }
         }
         guard let head = queue().first else { return }
