@@ -71,6 +71,23 @@ class VigilSessionManager {
         case none = 0
         case done = 1
         case input = 2
+        /// A permission prompt: the agent is stalled MID-TURN until Adrian
+        /// approves. Outranks a turn-end question (the documented
+        /// permission > review ordering, now real): ⌘⇧J and the summon
+        /// serve approvals first.
+        case approval = 3
+    }
+
+    /// The second token of a blocked pane's state file: WHY it is blocked.
+    /// permission (a tool waits for approval) and question (AskUserQuestion
+    /// fired and waits) are MID-TURN blockers - the agent is frozen
+    /// mid-work; ask is a turn-end question, conversational, it can wait.
+    /// The summon follows mid-turn blockers only. A flavorless blocked
+    /// (pre-flavor state file) is treated as ask: never summoned,
+    /// self-corrects on the pane's next event.
+    enum BlockFlavor: String {
+        case permission, question, ask
+        var midTurn: Bool { self != .ask }
     }
 
     /// Continuous program state of a pane, distinct from Attention: the
@@ -483,6 +500,9 @@ class VigilSessionManager {
         }
         startEventWatcher()
         startStateDirWatcher()
+        // The summon engine subscribes to the same chokepoints; next tick,
+        // never re-entrant with this init.
+        DispatchQueue.main.async { _ = VigilSummon.shared }
         // SIGTERM means DIE (vigil-dev restarts, system tooling). Without
         // this, AppKit routed it into the ⌘Q intercept, which CANCELS
         // termination into menu-bar service mode while sessions exist:
@@ -1098,9 +1118,15 @@ class VigilSessionManager {
                 changed = true
                 continue
             }
-            // Notification = permission prompt; Ask = the adapter classifier
-            // found a question at turn end (both need input NOW).
-            let attention: Attention = ["Notification", "Ask"].contains(event.event) ? .input : .done
+            // Notification = permission prompt (mid-turn, the agent is
+            // stalled); Ask = the adapter classifier found a question at
+            // turn end. Distinct ranks: the summon and ⌘⇧J serve
+            // approvals first.
+            let attention: Attention = switch event.event {
+            case "Notification": .approval
+            case "Ask": .input
+            default: .done
+            }
             // Escalate only: an input request is not downgraded by a later Stop.
             if attention.rawValue > sessions[name]!.attention.rawValue {
                 sessions[name]!.attention = attention
@@ -1232,6 +1258,55 @@ class VigilSessionManager {
     /// key shapeshifts to it).
     var mostUrgentName: String? { mostUrgent?.name }
 
+    // MARK: Summon (mid-turn blockers pull the quick terminal in)
+
+    struct SummonCandidate: Equatable {
+        let name: String
+        let pane: String
+        let since: Date
+    }
+
+    /// The summon's queue, DERIVED on every read (state files + ownership,
+    /// no second store to go stale): panes stalled MID-TURN (permission or
+    /// question flavor), unseen, living in a LIVE runtime tree of an
+    /// unseen-fleet session. Oldest first. Excluded by law: embedded
+    /// sessions (a placement Adrian chose is never auto-ripped from its
+    /// window - those asks keep keycap/badge/⌘⇧J), asleep sessions and
+    /// cold panes (no live tree to mount; they resurrect through the
+    /// existing affordances), and anything already seen.
+    func summonQueue() -> [SummonCandidate] {
+        var out: [SummonCandidate] = []
+        for session in sessions.values {
+            let trees: [SplitTree<Ghostty.SurfaceView>]
+            switch session.state {
+            case .detached(let held):
+                trees = held.map(\.tree)
+            case .floating(let rest, _, _) where session.name == floatingName:
+                var all = rest.map(\.tree)
+                if let quick = quickController(create: false) { all.append(quick.surfaceTree) }
+                trees = all
+            default:
+                continue
+            }
+            for tree in trees {
+                for view in tree {
+                    guard let pane = view.vigilAttachId,
+                          let s = paneAgentState(pane), s.state == .blocked,
+                          s.flavor?.midTurn == true,
+                          (lastAck[pane] ?? .distantPast) < s.since else { continue }
+                    out.append(SummonCandidate(name: session.name, pane: pane, since: s.since))
+                }
+            }
+        }
+        return out.sorted { $0.since < $1.since }
+    }
+
+    /// Quick-terminal facts the summon engine drives its flow by; the
+    /// mechanics stay in here, the policy lives in VigilSummon.
+    var quickTerminalVisible: Bool { quickController(create: false)?.visible ?? false }
+    var quickTerminalWindow: NSWindow? { quickController(create: false)?.window }
+    func dismissQuickTerminal() { quickController(create: false)?.animateOut() }
+
     // MARK: Floating (the quick terminal hosts one tab of a session)
 
     /// Name of the session currently hosted by the quick terminal.
@@ -1272,7 +1347,10 @@ class VigilSessionManager {
     /// its window first (a detach, capture included) and floats its SELECTED
     /// tab; the other tabs wait detached. Asleep ones resurrect into a real
     /// window instead (a rebuild belongs in a workspace, not a peek).
-    func float(name: String) {
+    /// `landOn` makes the landing pane-precise (the summon's contract, the
+    /// same rule as follow()): the tab CONTAINING that pane floats and the
+    /// pane takes focus, never merely the first tab.
+    func float(name: String, landOn pane: String? = nil) {
         guard let session = sessions[name] else { return }
         guard let quick = quickController(create: true) else { return }
 
@@ -1288,27 +1366,50 @@ class VigilSessionManager {
                 .surfaceTree.root?.leftmostLeaf()
             detach(name: name)
             guard case .detached(let held) = sessions[name]!.state, !held.isEmpty else { return }
-            floatedIndex = held.firstIndex { $0.tree.root?.leftmostLeaf() === selectedLeaf } ?? 0
+            floatedIndex = held.firstIndex { tab in
+                if let pane { return tab.tree.contains { $0.vigilAttachId == pane } }
+                return tab.tree.root?.leftmostLeaf() === selectedLeaf
+            } ?? 0
             floated = held[floatedIndex]
             rest = held
             rest.remove(at: floatedIndex)
         case .floating:
+            // Already hosted here. A pane in the floated tab just takes
+            // focus; a pane waiting in a REST tab re-floats on its own tab
+            // (reclaim to detached, keep the quick workspace stashed for
+            // the flow's eventual dismissal, float again pane-precise).
+            if let pane, !quick.surfaceTree.contains(where: { $0.vigilAttachId == pane }) {
+                reclaim(name, from: quick, restoreStash: false)
+                float(name: name, landOn: pane)
+                return
+            }
             // Presence acks once the quick terminal is key (chokepoint).
             quick.animateIn()
+            if let pane, let view = quick.surfaceTree.first(where: { $0.vigilAttachId == pane }) {
+                DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
+            }
             return
         case .detached(let held):
-            guard let first = held.first else { return }
-            floated = first
-            rest = Array(held.dropFirst())
+            guard !held.isEmpty else { return }
+            floatedIndex = held.firstIndex { tab in
+                guard let pane else { return false }
+                return tab.tree.contains { $0.vigilAttachId == pane }
+            } ?? 0
+            floated = held[floatedIndex]
+            rest = held
+            rest.remove(at: floatedIndex)
         case .asleep:
             open(name: name)
             return
         }
 
         // Whoever floats now leaves first; a native quick terminal
-        // workspace is stashed, not destroyed.
+        // workspace is stashed, not destroyed. A float replacing a float
+        // keeps the stash INTACT (restoreStash: false): restoring it here
+        // only to overwrite it a line later dropped the native workspace
+        // silently.
         if let current = floatingName {
-            reclaim(current, from: quick)
+            reclaim(current, from: quick, restoreStash: false)
         } else if !quick.surfaceTree.isEmpty {
             stashedQuickTree = quick.surfaceTree
         }
@@ -1319,7 +1420,9 @@ class VigilSessionManager {
         quick.surfaceTree = floated.tree
         quickTreeSwap = false
         quick.animateIn()
-        if let view = floated.tree.root?.leftmostLeaf() {
+        let landing = pane.flatMap { p in floated.tree.first { $0.vigilAttachId == p } }
+            ?? floated.tree.root?.leftmostLeaf()
+        if let view = landing {
             DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
         }
         persist()
@@ -1330,7 +1433,10 @@ class VigilSessionManager {
     /// edited the registry through the chokepoint), reinserted among its
     /// waiting tabs, and the quick terminal gets its own stashed workspace
     /// back.
-    func reclaim(_ name: String, from quick: QuickTerminalController) {
+    /// `restoreStash: false` is the float-replaces-float path: the next
+    /// tree overwrites the quick terminal immediately, so the stashed
+    /// native workspace must survive for the flow's FINAL dismissal.
+    func reclaim(_ name: String, from quick: QuickTerminalController, restoreStash: Bool = true) {
         guard floatingName == name else { return }
         floatingName = nil
         let tree = quick.surfaceTree
@@ -1348,10 +1454,12 @@ class VigilSessionManager {
             }
             sessions[name]!.state = held.isEmpty ? .asleep : .detached(held)
         }
-        quickTreeSwap = true
-        quick.surfaceTree = stashedQuickTree ?? SplitTree()
-        quickTreeSwap = false
-        stashedQuickTree = nil
+        if restoreStash {
+            quickTreeSwap = true
+            quick.surfaceTree = stashedQuickTree ?? SplitTree()
+            quickTreeSwap = false
+            stashedQuickTree = nil
+        }
         persist()
     }
 
@@ -3064,8 +3172,13 @@ class VigilSessionManager {
     /// to"); they stay reachable through ⌘⇧J.
     var followTarget: String? {
         if let name = sessions.values
-            .filter({ $0.attention == .input })
-            .sorted(by: { ($0.attentionSince ?? .distantPast) < ($1.attentionSince ?? .distantPast) })
+            .filter({ $0.attention.rawValue >= Attention.input.rawValue })
+            .sorted(by: {
+                if $0.attention.rawValue != $1.attention.rawValue {
+                    return $0.attention.rawValue > $1.attention.rawValue
+                }
+                return ($0.attentionSince ?? .distantPast) < ($1.attentionSince ?? .distantPast)
+            })
             .first?.name {
             return name
         }
@@ -3801,7 +3914,7 @@ class VigilSessionManager {
     /// The pane's continuous program state as its adapter last wrote it.
     /// First token only; trailing tokens tolerated (older files carried
     /// a "blocked input" flavor).
-    func paneAgentState(_ pane: String) -> (state: AgentState, since: Date)? {
+    func paneAgentState(_ pane: String) -> (state: AgentState, flavor: BlockFlavor?, since: Date)? {
         let url = agentStateDir.appendingPathComponent("\(pane).state")
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
@@ -3813,8 +3926,9 @@ class VigilSessionManager {
         case "idle": state = .idle
         default: return nil
         }
+        let flavor = parts.count > 1 ? BlockFlavor(rawValue: String(parts[1])) : nil
         let since = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
-        return (state, since ?? .distantPast)
+        return (state, flavor, since ?? .distantPast)
     }
 
     /// Display state, ONE rule: `done` and `blocked` decay to idle once

@@ -12,7 +12,9 @@ struct VigilSidebarView: View {
     /// only proxies its values).
     @ObservedObject private var collapse = VigilSidebarCollapse.shared
     @State private var hovered: String?
-    @AppStorage("vigil.autofollow") private var autoFollow = false
+    @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
+    @AppStorage(VigilHush.key) private var hushMedia = false
+    private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
     private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
@@ -131,7 +133,7 @@ struct VigilSidebarView: View {
     /// = where ⌘⇧J goes next. Visiting it re-derives the hint to the
     /// queue's next head; clicking the row is the same jump.
     private var hintRowId: String? {
-        guard !autoFollow, let hint = model.followHint,
+        guard followMode != .window, let hint = model.followHint,
               let row = model.rows.first(where: { $0.id == hint.name }) else { return nil }
         if model.collapsedSessions.contains(row.id) { return row.id }
         guard let pane = hint.pane else { return row.id }
@@ -161,23 +163,50 @@ struct VigilSidebarView: View {
         }
     }
 
-    // MARK: Footer (auto-follow)
+    // MARK: Footer (follow mode)
 
-    /// The viewport chases the attention queue: a session asks for input,
-    /// this window follows; answering advances to the next in line.
+    /// ONE control, three mutually-exclusive modes (two toggles that both
+    /// move focus would fight): off / summon (mid-turn blockers pull the
+    /// quick terminal in) / window (the key window shapeshifts to any
+    /// unseen ask). Summon carries its hush sub-toggle.
     private var footer: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "arrow.right.circle")
-                .font(.system(size: 9))
-                .foregroundColor(autoFollow ? .orange : .secondary)
-            Text("auto-follow")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(autoFollow ? .primary : .secondary)
-            Spacer()
-            Toggle("", isOn: $autoFollow)
-                .toggleStyle(.switch)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: followMode == .summon
+                      ? "bolt.horizontal.circle" : "arrow.right.circle")
+                    .font(.system(size: 9))
+                    .foregroundColor(followMode == .off ? .secondary : .orange)
+                Text("follow")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(followMode == .off ? .secondary : .primary)
+                Spacer()
+                Picker("", selection: $followModeRaw) {
+                    Text("off").tag(VigilFollowMode.off.rawValue)
+                    Text("summon").tag(VigilFollowMode.summon.rawValue)
+                    Text("window").tag(VigilFollowMode.window.rawValue)
+                }
+                .pickerStyle(.segmented)
                 .controlSize(.mini)
                 .labelsHidden()
+                .fixedSize()
+            }
+            .help("off: asks stay in the queue (keycap, badge, ⌘⇧J). summon: a permission prompt or question mid-turn pulls the quick terminal in on the asking pane; answering advances in place. window: this window shapeshifts to any unseen ask.")
+            if followMode == .summon {
+                HStack(spacing: 5) {
+                    Image(systemName: "speaker.slash.circle")
+                        .font(.system(size: 9))
+                        .foregroundColor(hushMedia ? .orange : .secondary)
+                    Text("hush media")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(hushMedia ? .primary : .secondary)
+                    Spacer()
+                    Toggle("", isOn: $hushMedia)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                }
+                .help("A summon pauses playing media; the queue draining resumes it (only if hush paused it, and never against a manual pause/resume).")
+            }
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 6)
@@ -185,7 +214,6 @@ struct VigilSidebarView: View {
         .overlay(alignment: .top) {
             Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1)
         }
-        .help("When a session asks for input, this window follows it; answering advances to the next in the queue.")
     }
 
     // MARK: Burial tray (sticky bottom: killed, still undoable)

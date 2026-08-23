@@ -187,7 +187,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
         let colour: NSColor?
         switch attention {
-        case .input: colour = .systemRed
+        case .approval, .input: colour = .systemRed
         case .done: colour = .systemGreen
         case .none: colour = nil
         }

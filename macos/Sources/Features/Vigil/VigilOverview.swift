@@ -1002,8 +1002,8 @@ struct OverviewView: View {
                     VStack {
                         Spacer()
                         HStack {
-                            chip(entry.attention == .input ? "needs you" : "done",
-                                 entry.attention == .input ? .red : .green, filled: true)
+                            chip(entry.attention.rawValue >= VigilSessionManager.Attention.input.rawValue ? "needs you" : "done",
+                                 entry.attention.rawValue >= VigilSessionManager.Attention.input.rawValue ? .red : .green, filled: true)
                                 .padding(6)
                             Spacer()
                         }

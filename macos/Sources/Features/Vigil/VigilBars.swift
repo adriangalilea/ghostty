@@ -49,7 +49,7 @@ final class VigilBars {
     private var followWork: DispatchWorkItem?
 
     func scheduleAutoFollow() {
-        guard UserDefaults.standard.bool(forKey: "vigil.autofollow") else { return }
+        guard VigilFollowMode.current == .window else { return }
         followWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.autoFollowNow() }
         followWork = work
@@ -57,7 +57,7 @@ final class VigilBars {
     }
 
     private func autoFollowNow() {
-        guard UserDefaults.standard.bool(forKey: "vigil.autofollow"), !controlMode else { return }
+        guard VigilFollowMode.current == .window, !controlMode else { return }
         let manager = VigilSessionManager.shared
         guard let target = manager.followTarget else { return }
         guard NSApp.isActive,
@@ -78,8 +78,7 @@ final class VigilBars {
         // not land in the new terminal. Shield the swapped window's
         // terminal briefly; the splash names the arrival and IS the
         // cooldown indicator (a swallowed event re-flashes it).
-        followShieldUntil = Date().addingTimeInterval(0.4)
-        followShieldWindow = controller.window
+        shield(window: controller.window)
         let face: String = {
             guard let session = manager.sessions[target] else { return target }
             let emoji = session.emoji.map { "\($0) " } ?? ""
@@ -92,6 +91,15 @@ final class VigilBars {
 
     private var followShieldUntil: Date = .distantPast
     private weak var followShieldWindow: NSWindow?
+
+    /// The summon shields the quick terminal the same way auto-follow
+    /// shields a swapped viewport: content just changed (or appeared)
+    /// under keystrokes possibly in flight, and a stray Enter must never
+    /// answer a prompt sight-unseen.
+    func shield(window: NSWindow?) {
+        followShieldUntil = Date().addingTimeInterval(0.4)
+        followShieldWindow = window
+    }
 
     /// True while the event races a just-fired auto-follow swap AND is
     /// headed into the swapped window's TERMINAL content (sidebar rows,
