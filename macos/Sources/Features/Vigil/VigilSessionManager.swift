@@ -1275,24 +1275,18 @@ class VigilSessionManager {
     /// Oldest first. Embedded sessions never summon (a placement Adrian
     /// chose is never auto-ripped from its window) — their asks chime and
     /// pill through embeddedAsks() instead.
+    /// Eligibility is ATTENDED-truth alone: unseen per the ack ledger
+    /// (key-window visibility, the one presence chokepoint). "Some pixels
+    /// of the prompt exist on some monitor" is not attention — an
+    /// occlusion-based on-screen suppressor ate a real ask while Adrian
+    /// watched a video with the vigil window standing beside Safari
+    /// (2026-08-23, "just heard the bell, had to go to the terminal").
     func summonQueue() -> [SummonCandidate] {
         midTurnAsks { session in
             if case .floating = session.state, session.name != floatingName { return false }
             return true
         }
-        .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since && !paneOnScreen($0.pane) }
-    }
-
-    /// A pane Adrian can actually SEE right now — never summon material:
-    /// the summon exists for asks no glass shows. occlusionState, not
-    /// isVisible: a window buried behind another app reads isVisible
-    /// forever, and suppressing summons for buried prompts was exactly
-    /// the silence being fixed (2026-08-23).
-    func paneOnScreen(_ pane: String) -> Bool {
-        guard let view = liveView(attachId: pane), let window = view.window else { return false }
-        return window.isVisible
-            && window.occlusionState.contains(.visible)
-            && !view.isHiddenOrHasHiddenAncestor
+        .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since }
     }
 
     /// EVERY mid-turn blocker, seen or not, any session state: the chime
@@ -1379,11 +1373,20 @@ class VigilSessionManager {
             // the panel and returns it home on release — a placement is
             // never destroyed, and a placement never mutes an ask. A live
             // hidden native tab is borrowed whole; a cold tab resurrects.
-            if let pane, !paneOnScreen(pane) {
+            if let pane {
+                // Already riding the panel as a loan: focus, nothing moves.
+                if floatingName == name, quick.surfaceTree.contains(where: { $0.vigilAttachId == pane }) {
+                    quick.animateIn()
+                    if let view = quick.surfaceTree.first(where: { $0.vigilAttachId == pane }) {
+                        DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
+                    }
+                    return
+                }
                 if let member = members(of: name).first(where: { m in
-                    // Loanable = no glass currently shows it (occlusion
-                    // truth, same rule as paneOnScreen).
-                    !(m.window.map { $0.isVisible && $0.occlusionState.contains(.visible) } ?? false)
+                    // Loanable = anything but the KEY window (the one
+                    // surface Adrian is actively USING; a window merely
+                    // visible somewhere is not attention).
+                    m.window !== NSApp.keyWindow
                         && m.surfaceTree.contains { $0.vigilAttachId == pane }
                 }) {
                     loanMember(member, of: name, landOn: pane, quick: quick)

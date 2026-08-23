@@ -65,12 +65,20 @@ enum VigilHush {
     }()
 
     static func pause() {
-        guard enabled, let remote else { return }
+        // Every decision is auditable: "hush did nothing" must name WHY
+        // from the log alone (disabled / nothing playing / pause failed).
+        guard enabled else { VigilSessionManager.shared.vlog("hush: disabled - skip"); return }
+        guard let remote else { return }
         remote.isPlaying(DispatchQueue.main) { playing in
             MainActor.assumeIsolated {
-                guard playing else { return }
+                guard playing else {
+                    VigilSessionManager.shared.vlog("hush: nothing playing - skip")
+                    return
+                }
                 wePaused = remote.send(1, nil) // kMRPause
-                if wePaused { VigilSessionManager.shared.vlog("hush: paused playback") }
+                VigilSessionManager.shared.vlog(wePaused
+                    ? "hush: paused playback"
+                    : "hush: pause command REFUSED")
             }
         }
     }
@@ -80,7 +88,10 @@ enum VigilHush {
         wePaused = false
         remote.isPlaying(DispatchQueue.main) { playing in
             MainActor.assumeIsolated {
-                guard !playing else { return }
+                guard !playing else {
+                    VigilSessionManager.shared.vlog("hush: already playing - claim moot")
+                    return
+                }
                 _ = remote.send(0, nil) // kMRPlay
                 VigilSessionManager.shared.vlog("hush: resumed playback")
             }
