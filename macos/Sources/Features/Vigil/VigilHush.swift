@@ -2,97 +2,108 @@ import AppKit
 
 /// The summon's media courtesy (sub-toggle of summon mode): the panel
 /// auto-appearing pauses whatever the system is playing; the flow ending
-/// resumes it — only if hush paused it AND Adrian has not touched
-/// playback since. The contract is enforced by OBSERVATION, not just an
-/// end-check: MediaRemote's isPlaying-did-change notification fires on
-/// every transition, and a flip to PLAYING while hush holds the pause
-/// means Adrian resumed himself — the claim clears, and his later pause
-/// is his to keep (resume() additionally re-checks state as a belt).
-/// MediaRemote over dlopen: private, but it answers unentitled on this
-/// machine (probed 2026-08-23) and the stack already lives on private
-/// seams (ReminderKit precedent). The one forbidden fallback is a blind
-/// HID play/pause keypress: without a state query it can START playback,
-/// worse than doing nothing — if MediaRemote ever stops answering, hush
-/// goes inert with one vlog scream.
+/// resumes it — only if hush paused it AND playback was untouched since
+/// (resume re-checks state, so a manual resume makes ours a no-op).
+///
+/// Mechanism: the `media-control` CLI (brew, github.com/ungive/media-control),
+/// which rides the Apple-signed-host adapter technique. Direct MediaRemote
+/// over dlopen was built first and is DELETED, not kept as fallback: on
+/// this macOS the gate answers unentitled queries with "nothing playing"
+/// even mid-video (proven 2026-08-23 — the probe with silence was falsely
+/// reassuring; only a probe WITH media playing tells the truth). The one
+/// forbidden fallback remains a blind HID play/pause keypress: without a
+/// state query it can START playback, worse than doing nothing. Missing
+/// binary → hush inert with one vlog scream.
+///
+/// Known corner accepted with the CLI (snapshot, not a stream): a manual
+/// resume-then-pause DURING one flow reads as "not playing" at drain and
+/// gets resumed against intent; the old streaming observation died with
+/// the direct framework path. Revisit with `media-control stream` if it
+/// ever bites in practice.
+///
+/// FIXME(official-api): the CLI is a MEANTIME dependency, not the end
+/// state. Apple shipped a new `NowPlaying.framework` (Beta this SDK
+/// cycle — /documentation/nowplaying: MediaSession, MediaPlaybackSnapshot,
+/// RemoteMediaSession; checked 2026-08-23, not yet in the installed SDK).
+/// When the SDK lands, evaluate whether it grants third parties
+/// SYSTEM-WIDE observe + pause/play (vs the MPNowPlayingInfoCenter
+/// own-app-publishing limitation). If it does: delete this file's CLI
+/// plumbing, adopt the framework (a real stream also restores the
+/// resume-then-pause contract), and drop media-control from the Brewfile.
 @MainActor
 enum VigilHush {
     static let key = "vigil.summon.hush"
     static var enabled: Bool { UserDefaults.standard.bool(forKey: key) }
 
     private static var wePaused = false
+    private static var screamed = false
 
-    // MRMediaRemoteGetNowPlayingApplicationIsPlaying(queue, block) +
-    // MRMediaRemoteSendCommand(command, userInfo); kMRPlay = 0, kMRPause = 1.
-    // MRMediaRemoteRegisterForNowPlayingNotifications(queue) arms the
-    // kMRMediaRemote… NSNotifications.
-    private typealias IsPlayingFn = @convention(c) (DispatchQueue, @escaping (Bool) -> Void) -> Void
-    private typealias SendCommandFn = @convention(c) (Int32, AnyObject?) -> Bool
-    private typealias RegisterFn = @convention(c) (DispatchQueue) -> Void
+    /// The app launches env-scrubbed (vigil-dev's `env -i`), so PATH never
+    /// finds brew; the binary is addressed absolutely.
+    private static let cli: String? = [
+        "/opt/homebrew/bin/media-control",
+        "/usr/local/bin/media-control",
+    ].first { FileManager.default.fileExists(atPath: $0) }
 
-    private static let remote: (isPlaying: IsPlayingFn, send: SendCommandFn)? = {
-        guard let handle = dlopen(
-            "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW),
-            let playing = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying"),
-            let send = dlsym(handle, "MRMediaRemoteSendCommand") else {
-            VigilSessionManager.shared.vlog("hush: MediaRemote unavailable - hush inert")
-            return nil
+    private static func run(_ args: [String], done: ((String) -> Void)? = nil) {
+        guard let cli else { return }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: cli)
+        proc.arguments = args
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        proc.terminationHandler = { _ in
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            guard let done else { return }
+            DispatchQueue.main.async { done(String(decoding: data, as: UTF8.self)) }
         }
-        // Playback-state observation: registration + the notification are
-        // best-effort (the query/command pair above is the load-bearing
-        // half); a macOS that stops delivering them degrades hush to the
-        // end-check alone, never to silence or a blind toggle.
-        if let register = dlsym(handle, "MRMediaRemoteRegisterForNowPlayingNotifications") {
-            unsafeBitCast(register, to: RegisterFn.self)(DispatchQueue.main)
-            NotificationCenter.default.addObserver(
-                forName: NSNotification.Name(
-                    "kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification"),
-                object: nil, queue: .main
-            ) { notification in
-                let playing = notification.userInfo?[
-                    "kMRMediaRemoteNowPlayingApplicationIsPlayingUserInfoKey"] as? Bool
-                MainActor.assumeIsolated {
-                    guard wePaused, playing == true else { return }
-                    // Adrian resumed while hush held the pause: the claim
-                    // is his now, hush never touches playback again this
-                    // flow (his subsequent pause included).
-                    wePaused = false
-                    VigilSessionManager.shared.vlog("hush: playback resumed externally - claim released")
-                }
-            }
+        do { try proc.run() } catch {
+            VigilSessionManager.shared.vlog("hush: media-control failed to run - \(error)")
         }
-        return (unsafeBitCast(playing, to: IsPlayingFn.self),
-                unsafeBitCast(send, to: SendCommandFn.self))
-    }()
+    }
+
+    private static func isPlaying(_ json: String) -> Bool {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return obj["playing"] as? Bool ?? false
+    }
 
     static func pause() {
         // Every decision is auditable: "hush did nothing" must name WHY
-        // from the log alone (disabled / nothing playing / pause failed).
+        // from the log alone (disabled / no binary / nothing playing).
         guard enabled else { VigilSessionManager.shared.vlog("hush: disabled - skip"); return }
-        guard let remote else { return }
-        remote.isPlaying(DispatchQueue.main) { playing in
+        guard cli != nil else {
+            if !screamed {
+                screamed = true
+                VigilSessionManager.shared.vlog("hush: media-control not installed (brew install media-control) - hush inert")
+            }
+            return
+        }
+        run(["get"]) { json in
             MainActor.assumeIsolated {
-                guard playing else {
+                guard isPlaying(json) else {
                     VigilSessionManager.shared.vlog("hush: nothing playing - skip")
                     return
                 }
-                wePaused = remote.send(1, nil) // kMRPause
-                VigilSessionManager.shared.vlog(wePaused
-                    ? "hush: paused playback"
-                    : "hush: pause command REFUSED")
+                wePaused = true
+                run(["pause"])
+                VigilSessionManager.shared.vlog("hush: paused playback")
             }
         }
     }
 
     static func resume() {
-        guard wePaused, let remote else { return }
+        guard wePaused, cli != nil else { return }
         wePaused = false
-        remote.isPlaying(DispatchQueue.main) { playing in
+        run(["get"]) { json in
             MainActor.assumeIsolated {
-                guard !playing else {
+                guard !isPlaying(json) else {
                     VigilSessionManager.shared.vlog("hush: already playing - claim moot")
                     return
                 }
-                _ = remote.send(0, nil) // kMRPlay
+                run(["play"])
                 VigilSessionManager.shared.vlog("hush: resumed playback")
             }
         }

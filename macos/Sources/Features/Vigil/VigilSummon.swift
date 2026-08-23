@@ -89,9 +89,17 @@ final class VigilSummon {
     /// decides whether anything moves (Adrian 2026-08-23: prompts passing
     /// in silence, "it did not even make a noise").
     private var chimed: [String: Date] = [:]
+    /// One soft ding per (pane, done-turn): a finished turn is NEWS, not
+    /// an interruption — different sound, no glass moves (the eye and
+    /// ⌘⇧H already carry it).
+    private var chimedDone: [String: Date] = [:]
 
     static func chime() {
         NSSound(named: NSSound.Name("Glass"))?.play()
+    }
+
+    static func doneChime() {
+        NSSound(named: NSSound.Name("Pop"))?.play()
     }
 
     private func announce() {
@@ -116,6 +124,19 @@ final class VigilSummon {
         if fresh {
             manager.vlog("summon: chime")
             Self.chime()
+        }
+        // Finished turns ding softer — news, not interruption.
+        let done = manager.doneTurns()
+        let openDone = Set(done.map(\.pane))
+        chimedDone = chimedDone.filter { openDone.contains($0.key) }
+        var freshDone = false
+        for d in done where (chimedDone[d.pane] ?? .distantPast) < d.since {
+            chimedDone[d.pane] = d.since
+            freshDone = true
+        }
+        if freshDone {
+            manager.vlog("summon: done chime")
+            Self.doneChime()
         }
     }
 

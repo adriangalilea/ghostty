@@ -1289,6 +1289,21 @@ class VigilSessionManager {
         .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since }
     }
 
+    /// Panes whose turn just FINISHED (state done), any session: the
+    /// done-chime feed. A finished turn dings SOFTER, lights the eye and
+    /// stays summonable (⌘⇧H) — but never moves glass; only blockers
+    /// float (Adrian 2026-08-23).
+    func doneTurns() -> [SummonCandidate] {
+        var out: [SummonCandidate] = []
+        for session in sessions.values {
+            for pane in ownedPaneIds(session) {
+                guard let s = paneAgentState(pane), s.state == .done else { continue }
+                out.append(SummonCandidate(name: session.name, pane: pane, since: s.since))
+            }
+        }
+        return out.sorted { $0.since < $1.since }
+    }
+
     /// EVERY mid-turn blocker, seen or not, any session state: the chime
     /// feed. A prompt landing under Adrian's eyes still dings once —
     /// noise is the contract; presence only decides whether anything
