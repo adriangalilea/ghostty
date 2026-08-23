@@ -93,9 +93,41 @@ final class VigilSummon {
             .filter { $0.since > snoozeDate && $0.pane != current?.pane }
     }
 
+    /// One chime per (pane, block): every mid-turn blocker DINGS, visible
+    /// or hidden, embedded or not — noise is the contract; presence only
+    /// decides whether anything moves (Adrian 2026-08-23: prompts passing
+    /// in silence, "it did not even make a noise").
+    private var chimed: [String: Date] = [:]
+    /// One pill per (pane, block) for embedded hidden-tab asks.
+    private var announced: [String: Date] = [:]
+
+    static func chime() {
+        NSSound(named: NSSound.Name("Glass"))?.play()
+    }
+
+    private func announce() {
+        let manager = VigilSessionManager.shared
+        for ask in manager.midTurnAsks() where (chimed[ask.pane] ?? .distantPast) < ask.since {
+            chimed[ask.pane] = ask.since
+            Self.chime()
+        }
+        // Embedded asks never summon; surface them where Adrian IS: a
+        // pill on the key window naming the asker (⌘⇧J lands on it).
+        for ask in manager.embeddedAsks() where (announced[ask.pane] ?? .distantPast) < ask.since {
+            announced[ask.pane] = ask.since
+            manager.vlog("summon: embedded ask announced '\(ask.name)' pane \(ask.pane)")
+            guard let key = NSApp.keyWindow,
+                  key.windowController is TerminalController,
+                  let session = manager.sessions[ask.name] else { continue }
+            let emoji = session.emoji.map { "\($0) " } ?? ""
+            VigilFollowSplash.show(in: key, text: "\(emoji)\(session.label) asks  ·  ⌘⇧J")
+        }
+    }
+
     private func evaluate() {
         guard VigilFollowMode.current == .summon else { return }
         let manager = VigilSessionManager.shared
+        announce()
 
         if let cur = current {
             // Adrian moved the flow himself (manual float of another

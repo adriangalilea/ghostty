@@ -1268,34 +1268,46 @@ class VigilSessionManager {
 
     /// The summon's queue, DERIVED on every read (state files + ownership,
     /// no second store to go stale): panes stalled MID-TURN (permission or
-    /// question flavor), unseen, living in a LIVE runtime tree of an
-    /// unseen-fleet session. Oldest first. Excluded by law: embedded
-    /// sessions (a placement Adrian chose is never auto-ripped from its
-    /// window - those asks keep keycap/badge/⌘⇧J), asleep sessions and
-    /// cold panes (no live tree to mount; they resurrect through the
-    /// existing affordances), and anything already seen.
+    /// question flavor), unseen, in any session that is NOT embedded —
+    /// detached, asleep and cold panes all summon (asleep/cold resurrect
+    /// their tab straight into the panel; "asleep never summons" meant the
+    /// whole fleet was MUTE after every app restart, Adrian 2026-08-23).
+    /// Oldest first. Embedded sessions never summon (a placement Adrian
+    /// chose is never auto-ripped from its window) — their asks chime and
+    /// pill through embeddedAsks() instead.
     func summonQueue() -> [SummonCandidate] {
+        midTurnAsks { session in
+            if case .embedded = session.state { return false }
+            if case .floating = session.state, session.name != floatingName { return false }
+            return true
+        }
+        .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since }
+    }
+
+    /// Mid-turn blockers inside EMBEDDED sessions, unseen: the summon
+    /// never moves them, but they must still make NOISE — a chime plus a
+    /// pill on the key window (the ⌘⇧J affordance surfaced at the moment
+    /// of the ask); an ask from a hidden tab of the very window Adrian
+    /// works in used to pass in silence (2026-08-23).
+    func embeddedAsks() -> [SummonCandidate] {
+        midTurnAsks { session in
+            if case .embedded = session.state { return true }
+            return false
+        }
+        .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since }
+    }
+
+    /// EVERY mid-turn blocker, seen or not, any session state: the chime
+    /// feed. A prompt landing under Adrian's eyes still dings once —
+    /// noise is the contract; presence only decides whether anything
+    /// MOVES.
+    func midTurnAsks(_ include: (Session) -> Bool = { _ in true }) -> [SummonCandidate] {
         var out: [SummonCandidate] = []
-        for session in sessions.values {
-            let trees: [SplitTree<Ghostty.SurfaceView>]
-            switch session.state {
-            case .detached(let held):
-                trees = held.map(\.tree)
-            case .floating(let rest, _, _) where session.name == floatingName:
-                var all = rest.map(\.tree)
-                if let quick = quickController(create: false) { all.append(quick.surfaceTree) }
-                trees = all
-            default:
-                continue
-            }
-            for tree in trees {
-                for view in tree {
-                    guard let pane = view.vigilAttachId,
-                          let s = paneAgentState(pane), s.state == .blocked,
-                          s.flavor?.midTurn == true,
-                          (lastAck[pane] ?? .distantPast) < s.since else { continue }
-                    out.append(SummonCandidate(name: session.name, pane: pane, since: s.since))
-                }
+        for session in sessions.values where include(session) {
+            for pane in ownedPaneIds(session) {
+                guard let s = paneAgentState(pane), s.state == .blocked,
+                      s.flavor?.midTurn == true else { continue }
+                out.append(SummonCandidate(name: session.name, pane: pane, since: s.since))
             }
         }
         return out.sorted { $0.since < $1.since }
@@ -1391,6 +1403,14 @@ class VigilSessionManager {
             return
         case .detached(let held):
             guard !held.isEmpty else { return }
+            if let pane, !held.contains(where: { $0.tree.contains { $0.vigilAttachId == pane } }) {
+                // The ask lives in a COLD tab (no runtime): resurrect just
+                // that tab into the panel; the live runtimes wait as rest.
+                if let tabIndex = sessions[name]!.tabs.firstIndex(where: { $0.panes.contains { $0.id == pane } }) {
+                    floatCapturedTab(name: name, tabIndex: tabIndex, rest: held, landOn: pane, quick: quick)
+                    return
+                }
+            }
             floatedIndex = held.firstIndex { tab in
                 guard let pane else { return false }
                 return tab.tree.contains { $0.vigilAttachId == pane }
@@ -1399,6 +1419,17 @@ class VigilSessionManager {
             rest = held
             rest.remove(at: floatedIndex)
         case .asleep:
+            // Pane-precise float of an asleep session = the summon's
+            // resurrect-into-the-panel (the post-relaunch fleet must
+            // summon); a plain manual float keeps the peek-vs-rebuild
+            // doctrine and opens a real window.
+            if let pane {
+                ensureHostPanes(name)
+                if let tabIndex = sessions[name]!.tabs.firstIndex(where: { $0.panes.contains { $0.id == pane } }) {
+                    floatCapturedTab(name: name, tabIndex: tabIndex, rest: [], landOn: pane, quick: quick)
+                    return
+                }
+            }
             open(name: name)
             return
         }
@@ -1460,6 +1491,57 @@ class VigilSessionManager {
             quickTreeSwap = false
             stashedQuickTree = nil
         }
+        persist()
+    }
+
+    /// Resurrect ONE captured tab straight into the quick terminal: an
+    /// asleep session's tab, or a detached session's cold tab. Views are
+    /// native reattaches (living daemons, VT replay); the rest of the
+    /// workspace stays cold in the capture and mounts later as usual. On
+    /// reclaim the tab joins the session's held runtimes — the session
+    /// wakes to detached with one live tab, exactly the shape a look-away
+    /// leaves. The known scope cut: the tab's dock stays cold while
+    /// floating (the quick terminal shows no docks anywhere).
+    private func floatCapturedTab(
+        name: String, tabIndex: Int, rest: [TabRuntime],
+        landOn pane: String?, quick: QuickTerminalController
+    ) {
+        guard let app = ghosttyApp?.app else { return }
+        let tab = sessions[name]!.tabs[tabIndex]
+        guard !tab.panes.isEmpty else { return }
+        let firstIndex = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
+        let anchor = Ghostty.SurfaceView(
+            app, baseConfig: resurrectConfig(name: name, pane: tab.panes[firstIndex]))
+
+        if let current = floatingName {
+            reclaim(current, from: quick, restoreStash: false)
+        } else if !quick.surfaceTree.isEmpty {
+            stashedQuickTree = quick.surfaceTree
+        }
+
+        vlog("float: resurrect tab \(tabIndex) of '\(name)' into the quick terminal")
+        sessions[name]!.state = .floating(
+            rest: rest, floatedDock: nil, floatedIndex: min(tabIndex, rest.count))
+        floatingName = name
+        quickTreeSwap = true
+        quick.surfaceTree = SplitTree(view: anchor)
+        quickTreeSwap = false
+        quick.animateIn()
+        materializeSplits(quick, tab: tab, configFor: {
+            self.resurrectConfig(name: name, pane: $0)
+        }, delay: 0.35)
+        if let pane, pane != tab.panes[firstIndex].id, tab.panes.count > 1 {
+            // Focus lands once the splits settle.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self, self.floatingName == name,
+                      let target = self.quickController(create: false)?
+                          .surfaceTree.first(where: { $0.vigilAttachId == pane }) else { return }
+                Ghostty.moveFocus(to: target)
+            }
+        } else {
+            DispatchQueue.main.async { Ghostty.moveFocus(to: anchor) }
+        }
+        touchRecent(name)
         persist()
     }
 
@@ -1961,7 +2043,7 @@ class VigilSessionManager {
     /// against an unhosted surface is dropped), then re-shape to the
     /// captured ratios.
     private func materializeSplits(
-        _ controller: TerminalController,
+        _ controller: BaseTerminalController,
         tab: Tab,
         configFor: @escaping (Pane) -> Ghostty.SurfaceConfiguration,
         delay: TimeInterval = 0.7
