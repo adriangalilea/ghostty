@@ -30,17 +30,25 @@ enum VigilNod {
     private nonisolated(unsafe) static var engine: SignalEngine?
     private nonisolated(unsafe) static var listening = false
 
+    /// Queued asks. One gesture at a time (two recognizers racing over one
+    /// head is nonsense), but a prompt that arrives mid-question WAITS instead
+    /// of being silently dropped: the drop is exactly how a real prompt went
+    /// unheard while a ghost was being answered (seen live, 2026-08-24).
+    private nonisolated(unsafe) static var queue: [(String, TimeInterval, (HeadGesture?) -> Void)] = []
+
     /// Ask, then hand the verdict back. `nil` means no answer: a timeout NEVER
     /// approves, and the prompt is left exactly as it was.
-    ///
-    /// One gesture at a time: a second prompt arriving mid-question would race
-    /// two recognizers over one head.
     static func ask(
         _ spoken: String,
         timeout: TimeInterval = 20,
         completion: @escaping (HeadGesture?) -> Void
     ) {
-        guard enabled, available, !listening else { return completion(nil) }
+        guard enabled, available else { return completion(nil) }
+        if listening {
+            queue.append((spoken, timeout, completion))
+            log.info("nod gate: queued behind the active ask (\(queue.count) waiting)")
+            return
+        }
         listening = true
 
         let e = SignalEngine(tap: tap)
@@ -66,7 +74,10 @@ enum VigilNod {
             e.stop()
             engine = nil
             listening = false
-            await MainActor.run { completion(answer) }
+            await MainActor.run {
+                completion(answer)
+                drain()
+            }
         }
 
         // A gesture that never comes must not hold the gate forever.
@@ -76,7 +87,14 @@ enum VigilNod {
             engine = nil
             listening = false
             completion(nil)
+            drain()
         }
+    }
+
+    private static func drain() {
+        guard !queue.isEmpty else { return }
+        let (spoken, timeout, completion) = queue.removeFirst()
+        ask(spoken, timeout: timeout, completion: completion)
     }
 }
 #endif
