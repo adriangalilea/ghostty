@@ -1034,6 +1034,9 @@ class VigilSessionManager {
     private struct WakeEvent: Decodable {
         let container: String
         let event: String
+        /// The permission notification's text, forwarded by the claude hook so
+        /// the nod gate can SPEAK the request instead of a generic bell.
+        let msg: String?
         /// The vigild pane daemon the agent lives in. Ground truth for
         /// ownership: VIGIL_SESSION in the process env is stamped at birth
         /// and goes stale when a tab is dragged into another session.
@@ -1111,6 +1114,23 @@ class VigilSessionManager {
                 name = event.container
             } else {
                 continue
+            }
+            // Nod gate: a permission prompt is answerable by head (AirPods
+            // in, nod allows once, shake denies). Fires whether or not the
+            // pane is on screen: presence governs ATTENTION, not the gate;
+            // headphones in your ears mean your hands are elsewhere either
+            // way. A timeout answers NOTHING and the prompt stays untouched.
+            if event.event == "Notification", VigilNod.enabled,
+               let gatePane = event.pane, !gatePane.isEmpty {
+                let spoken = (event.msg?.isEmpty == false) ? event.msg! : "a permission request in \(name)"
+                let bin = vigildBin
+                VigilNod.ask(spoken) { [weak self] gesture in
+                    guard let self, let gesture else { return }
+                    // "1" approves ONCE; escape backs out. Never the standing
+                    // grant: that is a seated decision, not a head movement.
+                    let keys = gesture == .nod ? "1" : "\u{1b}"
+                    self.runFireAndForget(bin, ["send", gatePane, keys])
+                }
             }
             // Presence beats attention, PANE-granular: only an event whose
             // console is actually on screen is already answered. A watched

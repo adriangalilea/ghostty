@@ -14,6 +14,7 @@ struct VigilSidebarView: View {
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
     @AppStorage(VigilHush.key) private var hushMedia = false
+    @AppStorage(VigilNod.key) private var nodGate = false
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
     private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
@@ -206,6 +207,24 @@ struct VigilSidebarView: View {
                         .labelsHidden()
                 }
                 .help("A summon pauses playing media; the queue draining resumes it (only if hush paused it, and never against a manual pause/resume).")
+            }
+            // Only offered when motion-capable AirPods are actually connected:
+            // a toggle for a feature that cannot work is worse than no toggle.
+            if VigilNod.available {
+                HStack(spacing: 5) {
+                    Image(systemName: "airpods.pro")
+                        .font(.system(size: 9))
+                        .foregroundColor(nodGate ? .orange : .secondary)
+                    Text("nod to allow")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(nodGate ? .primary : .secondary)
+                    Spacer()
+                    Toggle("", isOn: $nodGate)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                }
+                .help("A permission prompt is read out on your AirPods; nod to allow it once, shake to deny. No gesture answers nothing and leaves the prompt untouched.")
             }
         }
         .padding(.horizontal, 11)
