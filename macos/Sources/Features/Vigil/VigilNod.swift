@@ -75,17 +75,22 @@ enum VigilNod {
         }
     }
 
+    /// completion carries the gesture AND the ledger verdict, because the
+    /// caller's episode bookkeeping keys off HOW the ask ended: an answered
+    /// prompt (allow/deny/superseded) closes its episode by EVENT, never by
+    /// the pump happening to sample the unblocked gap between two chained
+    /// prompts — sampling missed that gap on every chained run all night.
     static func ask(
         _ spoken: String,
         pane: String? = nil,
         timeout: TimeInterval = 20,
-        completion: @escaping (HeadGesture?) -> Void
+        completion: @escaping (HeadGesture?, String) -> Void
     ) {
-        guard enabled, available else { return completion(nil) }
+        guard enabled, available else { return completion(nil, "unavailable") }
         // One ask at a time; ORDERING lives in the session manager's pump,
         // which derives who is next from state files. A queue here would be
         // a second brain disagreeing with it.
-        guard !listening else { return completion(nil) }
+        guard !listening else { return completion(nil, "busy") }
         listening = true
         activePane = pane
         wasCancelled = false
@@ -128,7 +133,7 @@ enum VigilNod {
                 : answer == .shake ? "deny"
                 : wasCancelled ? cancelReason : "timeout"
             ledger(verdict, pane: pane, spoken: spoken)
-            await MainActor.run { completion(answer) }
+            await MainActor.run { completion(answer, verdict) }
         }
 
         // A gesture that never comes must not hold the gate forever.
@@ -138,8 +143,9 @@ enum VigilNod {
             engine = nil
             listening = false
             lastAskEnded = Date()
-            ledger(wasCancelled ? cancelReason : "timeout", pane: pane, spoken: spoken)
-            completion(nil)
+            let verdict = wasCancelled ? cancelReason : "timeout"
+            ledger(verdict, pane: pane, spoken: spoken)
+            completion(nil, verdict)
         }
     }
 }

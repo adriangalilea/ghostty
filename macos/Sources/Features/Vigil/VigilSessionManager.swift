@@ -4302,7 +4302,7 @@ class VigilSessionManager {
         vlog("nod gate: asking pane \(next.pane)")
         let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
         let bin = vigildBin
-        VigilNod.ask(spoken, pane: next.pane) { [weak self] gesture in
+        VigilNod.ask(spoken, pane: next.pane) { [weak self] gesture, verdict in
             self?.nodAskingPane = nil
             if let gesture {
                 // "1" approves ONCE; escape backs out. Never the standing
@@ -4310,8 +4310,14 @@ class VigilSessionManager {
                 let keys = gesture == .nod ? "1" : "\u{1b}"
                 self?.runFireAndForget(bin, ["send", next.pane, keys])
             }
-            // Answered, denied or timed out: the state file is the truth,
-            // pump again and the next still-blocked pane gets its ask.
+            // An ANSWERED ask closes its episode by event: allow, deny and
+            // superseded all mean THIS prompt is resolved, so the pane's next
+            // block is a new question no matter how invisible the gap was.
+            // timeout keeps the 22s guard (the same unanswered prompt must
+            // not re-ask in a loop); preempted was already cleared.
+            if verdict == "allow" || verdict == "deny" || verdict == "superseded" {
+                self?.nodAsked[next.pane] = nil
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self?.pumpNodGate() }
         }
     }
