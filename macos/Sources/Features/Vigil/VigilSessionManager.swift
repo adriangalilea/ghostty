@@ -713,9 +713,18 @@ class VigilSessionManager {
     private func runtimes(_ session: Session) -> [TabRuntime] {
         switch session.state {
         case .embedded:
-            return members(of: session.name)
+            var out = members(of: session.name)
                 .filter { !$0.surfaceTree.isEmpty }
                 .map { TabRuntime(tree: $0.surfaceTree, dock: dockMap.object(forKey: $0)) }
+            // A LOANED tab rides the quick panel, which is no member: left
+            // out, it reads as cold everywhere (persist captures it
+            // unmounted, vacate strands it).
+            if floatingName == session.name,
+               let quick = quickController(create: false),
+               !quick.surfaceTree.isEmpty {
+                out.append(TabRuntime(tree: quick.surfaceTree, dock: loanedDock))
+            }
+            return out
         case .floating(let rest, let floatedDock, _):
             var out = rest
             if floatingName == session.name,
@@ -2200,6 +2209,9 @@ class VigilSessionManager {
         // (2026-08-07: click-mount + shapeshiftTab re-mount, each
         // materializing pane 8 into the survivor's tree).
         let bornAnchor = controller.surfaceTree.root?.leftmostLeaf()
+        // Adoption reaches into the manager from inside the deferred
+        // closure without juggling `self` through the nested materializer.
+        let adopt: (String) -> Ghostty.SurfaceView? = { [weak self] in self?.adoptable($0) }
         // The default delay exists for windows that have not PRESENTED yet
         // (splits against an unhosted surface drop); mounting into a live
         // window passes 0 and splits land on the next runloop tick.
@@ -2228,12 +2240,18 @@ class VigilSessionManager {
                         direction = .down
                         l = left; r = right
                     }
-                    guard r.firstLeaf < panes.count,
-                          let rightView = controller.newSplit(
-                              at: anchor,
-                              direction: direction,
-                              baseConfig: configFor(panes[r.firstLeaf]))
-                    else { return }
+                    guard r.firstLeaf < panes.count else { return }
+                    let rightPane = panes[r.firstLeaf]
+                    let rightView: Ghostty.SurfaceView
+                    if let existing = adopt(rightPane.id) {
+                        guard let tree = try? controller.surfaceTree.inserting(
+                            view: existing, at: anchor, direction: direction) else { return }
+                        controller.surfaceTree = tree
+                        rightView = existing
+                    } else if let minted = controller.newSplit(
+                        at: anchor, direction: direction, baseConfig: configFor(rightPane)) {
+                        rightView = minted
+                    } else { return }
                     materialize(l, anchor: anchor)
                     materialize(r, anchor: rightView)
                 }
@@ -2726,6 +2744,35 @@ class VigilSessionManager {
             return
         }
         guard Set(tabPaneIds(target)).isDisjoint(with: live) else { return } // already showing
+        // A tab on LOAN is displayed in the quick panel, which is no
+        // member: clicking its row TRANSFERS those exact views into this
+        // viewport. Mounting the capture instead would mint a second
+        // client on each of their daemons.
+        let ids = Set(tabPaneIds(target))
+        if floatingName == name, let quick = quickController(create: false),
+           quick.surfaceTree.contains(where: { $0.vigilAttachId.map(ids.contains) ?? false }) {
+            let tree = quick.surfaceTree
+            let dock = loanedDock
+            loanedDock = nil
+            floatingName = nil
+            quickTreeSwap = true
+            quick.surfaceTree = stashedQuickTree ?? SplitTree()
+            quickTreeSwap = false
+            stashedQuickTree = nil
+            quick.animateOut()
+            dockMap.object(forKey: controller)?.unmount()
+            dockMap.removeObject(forKey: controller)
+            swapTree(controller, tree)
+            if let dock {
+                dockMap.setObject(dock, forKey: controller)
+                VigilBars.shared.sync(controller)
+            }
+            focusLeftmost(controller)
+            vlog("shapeshiftTab: '\(name)' loan transferred into the viewport")
+            persist()
+            assertInvariants("loanTransfer")
+            return
+        }
         vlog("shapeshiftTab: '\(name)' -> tab anchored at \(anchor)")
 
         dockMap.object(forKey: controller)?.unmount()
@@ -2753,7 +2800,12 @@ class VigilSessionManager {
         }
         let panes = target.panes
         let firstIndex = min(target.layout?.firstLeaf ?? 0, panes.count - 1)
-        let view = Ghostty.SurfaceView(app, baseConfig: configFor(panes[firstIndex]))
+        let first = panes[firstIndex]
+        if adoptable(first.id) == nil, let existing = liveView(attachId: first.id), placed(existing) {
+            vlog("!! mount: '\(first.id)' is already displayed elsewhere - mount ABORTED (never mint a twin)")
+            return
+        }
+        let view = adoptable(first.id) ?? Ghostty.SurfaceView(app, baseConfig: configFor(first))
         swapTree(controller, SplitTree(view: view))
         materializeSplits(controller, tab: target, configFor: configFor, delay: 0)
         materializeDockCapture(controller, target.dock, configFor: configFor)
@@ -4248,9 +4300,50 @@ class VigilSessionManager {
         return child == fg
     }
 
+    /// The surface attached to a pane's daemon. `.first` over an UNORDERED
+    /// weak set once returned whichever twin the hash table happened to
+    /// yield, so focus, float and move all aimed at a WINDOWLESS view and
+    /// silently did nothing (2026-08-24, "I can't focus this session").
+    /// The windowed one is the answer; a second match is a leak to report.
     func liveView(attachId: String) -> Ghostty.SurfaceView? {
-        Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
-            .first { $0.vigilAttachId == attachId }
+        let matches = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
+            .filter { $0.vigilAttachId == attachId }
+        if matches.count > 1 {
+            vlog("!! liveView: \(matches.count) surfaces attached to '\(attachId)' - TWIN clients on one daemon")
+        }
+        return matches.first { $0.window != nil } ?? matches.first
+    }
+
+    /// Is this view currently DISPLAYED anywhere (a window's tree, a dock
+    /// strip, the quick panel)? A view that is placed belongs to that
+    /// placement; one that is placed nowhere is adoptable.
+    private func placed(_ view: Ghostty.SurfaceView) -> Bool {
+        if let quick = quickController(create: false),
+           quick.surfaceTree.contains(where: { $0 === view }) { return true }
+        for controller in TerminalController.all {
+            if controller.surfaceTree.contains(where: { $0 === view }) { return true }
+            if dockMap.object(forKey: controller)?.views.contains(where: { $0 === view }) ?? false { return true }
+        }
+        for session in sessions.values {
+            for runtime in runtimes(session) {
+                if runtime.tree.contains(where: { $0 === view }) { return true }
+                if runtime.dock?.views.contains(where: { $0 === view }) ?? false { return true }
+            }
+        }
+        return false
+    }
+
+    /// ONE daemon, ONE view. A surface that exists for this pane but sits
+    /// in no placement (released from a tree, still attached to its
+    /// daemon socket) is ADOPTED by the next mount instead of minting a
+    /// second client on the same socket — the twin manufacturer behind
+    /// unfocusable panes (2026-08-24: cold tabs measured holding two live
+    /// clients each, one per round trip through the sidebar). Minting is
+    /// for panes with no surface at all.
+    private func adoptable(_ id: String) -> Ghostty.SurfaceView? {
+        guard let view = liveView(attachId: id), !placed(view) else { return nil }
+        vlog("adopt: live surface '\(id)' reused by the mount (no second attach)")
+        return view
     }
 
     /// Relaunch what died: the exact captured argv, typed into the pane it
@@ -4787,11 +4880,15 @@ class VigilSessionManager {
         // One daemon = ONE live pane: twin surfaces on one socket replay
         // interleaved frames into garbage (the duplicated-lazygit
         // corruption).
-        var liveIds = Set<String>()
+        // Counted REGARDLESS of window: the twin that wedged panes for
+        // weeks was one windowed view plus one released-but-still-attached
+        // one, so a `window != nil` filter made the very thing this check
+        // exists for invisible (2026-08-24).
+        var seenIds = Set<String>()
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
-            guard let id = view.vigilAttachId, view.window != nil else { continue }
-            if !liveIds.insert(id).inserted {
-                vlog("!! IMPOSSIBLE [\(site)]: TWO live surfaces attached to '\(id)'")
+            guard let id = view.vigilAttachId else { continue }
+            if !seenIds.insert(id).inserted {
+                vlog("!! IMPOSSIBLE [\(site)]: TWO surfaces attached to '\(id)' (twin clients on one daemon)")
             }
         }
         #endif
