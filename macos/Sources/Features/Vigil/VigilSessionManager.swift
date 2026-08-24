@@ -4233,7 +4233,7 @@ class VigilSessionManager {
     /// reads, so an answered prompt (by ANY means, nod or keyboard) clears
     /// itself and the next blocked pane gets asked. A second store here is
     /// how the first version dropped back-to-back prompts.
-    private var nodAskedEpisode: Set<String> = []
+    private var nodAsked: [String: Date] = [:]
 
     func pumpNodGate() {
         // Every silent exit is LOGGED: "it said nothing" must be answerable
@@ -4244,14 +4244,21 @@ class VigilSessionManager {
             return
         }
         let blocked = midTurnAsks().filter { paneAgentState($0.pane)?.flavor == .permission }
-        // Episode key = pane AND block start. Keying by pane alone filtered a
-        // pane's SECOND prompt as already-asked whenever the pump missed the
-        // brief unblocked gap between two chained prompts — race-dependent,
-        // felt as "sometimes the second ask is silent" (2026-08-24, live).
-        func key(_ c: SummonCandidate) -> String { "\(c.pane)#\(c.since.timeIntervalSince1970)" }
-        nodAskedEpisode.formIntersection(Set(blocked.map(key)))
-        guard let next = blocked.first(where: { !nodAskedEpisode.contains(key($0)) }) else { return }
-        nodAskedEpisode.insert(key(next))
+        // Age gate: the hook now marks a pane blocked at PreToolUse time,
+        // BEFORE knowing whether the permission UI will actually appear.
+        // Auto-approved commands unblock within milliseconds; a block that
+        // SURVIVES 1.2s is a prompt a human is looking at.
+        let now = Date()
+        let ripe = blocked.filter { now.timeIntervalSince($0.since) > 1.2 }
+        // Asked-once per blocking episode, tolerant of the state file being
+        // rewritten mid-episode (hook double-writes bump the mtime): a
+        // candidate within 0.8s of the block we already asked for IS that
+        // block; a genuinely new block start asks fresh.
+        guard let next = ripe.first(where: { c in
+            guard let asked = nodAsked[c.pane] else { return true }
+            return abs(c.since.timeIntervalSince(asked)) > 0.8
+        }) else { return }
+        nodAsked[next.pane] = next.since
         vlog("nod gate: asking pane \(next.pane)")
         let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
         let bin = vigildBin
