@@ -1124,11 +1124,16 @@ class VigilSessionManager {
             // pane is on screen: presence governs ATTENTION, not the gate;
             // headphones in your ears mean your hands are elsewhere either
             // way. A timeout answers NOTHING and the prompt stays untouched.
+            // msg is REQUIRED, not decorative: only the claude hook's
+            // permission branch writes it. Every Stop is shadowed by a msg-less
+            // Notification event from another writer, so gating on the event
+            // name alone spoke a ghost ask at every turn end (seen live,
+            // 2026-08-24).
             if event.event == "Notification", VigilNod.enabled,
                let gatePane = event.pane, !gatePane.isEmpty,
+               let spoken = event.msg, !spoken.isEmpty,
                let ts = event.ts.flatMap(ISO8601DateFormatter().date(from:)),
                Date().timeIntervalSince(ts) < 45 {
-                let spoken = (event.msg?.isEmpty == false) ? event.msg! : "a permission request in \(name)"
                 let bin = vigildBin
                 VigilNod.ask(spoken) { [weak self] gesture in
                     guard let self, let gesture else { return }
