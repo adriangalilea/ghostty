@@ -1289,15 +1289,20 @@ class VigilSessionManager {
         .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since }
     }
 
-    /// Panes whose turn just FINISHED (state done), any session: the
-    /// done-chime feed. A finished turn dings SOFTER, lights the eye and
-    /// stays summonable (⌘⇧H) — but never moves glass; only blockers
-    /// float (Adrian 2026-08-23).
-    func doneTurns() -> [SummonCandidate] {
+    /// Panes whose TURN ENDED, any session: the soft-chime feed. Both
+    /// endings count — done, and a turn-end question (blocked/ask) —
+    /// because the sound answers "is claude waiting on me", and the
+    /// vocabulary is the interruption axis, not the state name: Glass =
+    /// stalled MID-work, Pop = your turn. A turn end dings softer, lights
+    /// the eye and stays summonable (⌘⇧H), but never moves glass; only
+    /// mid-turn blockers float (Adrian 2026-08-23).
+    func turnEnds() -> [SummonCandidate] {
         var out: [SummonCandidate] = []
         for session in sessions.values {
             for pane in ownedPaneIds(session) {
-                guard let s = paneAgentState(pane), s.state == .done else { continue }
+                guard let s = paneAgentState(pane) else { continue }
+                let ended = s.state == .done || (s.state == .blocked && s.flavor?.midTurn != true)
+                guard ended else { continue }
                 out.append(SummonCandidate(name: session.name, pane: pane, since: s.since))
             }
         }

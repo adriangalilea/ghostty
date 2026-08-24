@@ -89,9 +89,9 @@ final class VigilSummon {
     /// decides whether anything moves (Adrian 2026-08-23: prompts passing
     /// in silence, "it did not even make a noise").
     private var chimed: [String: Date] = [:]
-    /// One soft ding per (pane, done-turn): a finished turn is NEWS, not
-    /// an interruption — different sound, no glass moves (the eye and
-    /// ⌘⇧H already carry it).
+    /// One soft ding per (pane, turn end): a turn that ended — finished
+    /// or asking — is NEWS, not an interruption; different sound, no
+    /// glass moves (the eye and ⌘⇧H already carry it).
     private var chimedDone: [String: Date] = [:]
 
     static func chime() {
@@ -125,8 +125,8 @@ final class VigilSummon {
             manager.vlog("summon: chime")
             Self.chime()
         }
-        // Finished turns ding softer — news, not interruption.
-        let done = manager.doneTurns()
+        // Ended turns ding softer — news, not interruption.
+        let done = manager.turnEnds()
         let openDone = Set(done.map(\.pane))
         chimedDone = chimedDone.filter { openDone.contains($0.key) }
         var freshDone = false
