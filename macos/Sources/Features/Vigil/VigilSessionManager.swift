@@ -500,6 +500,11 @@ class VigilSessionManager {
         }
         startEventWatcher()
         startStateDirWatcher()
+        // The nod gate pumps at the same chokepoints the summon does: any
+        // state change may mean a pane just blocked on permission.
+        NotificationCenter.default.addObserver(
+            forName: Self.stateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in self?.pumpNodGate() }
         // The summon engine subscribes to the same chokepoints; next tick,
         // never re-entrant with this init.
         DispatchQueue.main.async { _ = VigilSummon.shared }
@@ -1124,24 +1129,14 @@ class VigilSessionManager {
             // pane is on screen: presence governs ATTENTION, not the gate;
             // headphones in your ears mean your hands are elsewhere either
             // way. A timeout answers NOTHING and the prompt stays untouched.
-            // msg is REQUIRED, not decorative: only the claude hook's
-            // permission branch writes it. Every Stop is shadowed by a msg-less
-            // Notification event from another writer, so gating on the event
-            // name alone spoke a ghost ask at every turn end (seen live,
-            // 2026-08-24).
-            if event.event == "Notification", VigilNod.enabled,
-               let gatePane = event.pane, !gatePane.isEmpty,
-               let spoken = event.msg, !spoken.isEmpty,
-               let ts = event.ts.flatMap(ISO8601DateFormatter().date(from:)),
-               Date().timeIntervalSince(ts) < 45 {
-                let bin = vigildBin
-                VigilNod.ask(spoken) { [weak self] gesture in
-                    guard let self, let gesture else { return }
-                    // "1" approves ONCE; escape backs out. Never the standing
-                    // grant: that is a seated decision, not a head movement.
-                    let keys = gesture == .nod ? "1" : "\u{1b}"
-                    self.runFireAndForget(bin, ["send", gatePane, keys])
-                }
+            // The gate itself pumps off state files (the same truth the
+            // summon derives from); events only contribute the SPOKEN text,
+            // since state files carry no message. msg is written solely by
+            // the claude hook's permission branch; msg-less Notification
+            // events shadow every Stop and must never feed this map.
+            if event.event == "Notification", let m = event.msg, !m.isEmpty,
+               let msgPane = event.pane, !msgPane.isEmpty {
+                nodPaneMsg[msgPane] = m
             }
             // Presence beats attention, PANE-granular: only an event whose
             // console is actually on screen is already answered. A watched
@@ -4203,6 +4198,41 @@ class VigilSessionManager {
     /// waiting for the sidebar's 2s ticker. (Whatever latency remains on a
     /// permission prompt latency is whatever its adapter/source reports.)
     private var stateDirWatcher: DispatchSourceFileSystemObject?
+
+    // MARK: Nod gate (permission prompts answered by head, one at a time)
+
+    /// What to SPEAK for a blocked pane; state files carry no message.
+    private var nodPaneMsg: [String: String] = [:]
+    /// Panes already asked during their CURRENT blocking episode. Pruned the
+    /// moment a pane stops being permission-blocked, so a fresh prompt asks
+    /// fresh, but a timeout does not re-ask in a loop while the same prompt
+    /// stands. The queue is NOT stored anywhere: it is derived from state
+    /// files on every pump, the same single source of truth the summon
+    /// reads, so an answered prompt (by ANY means, nod or keyboard) clears
+    /// itself and the next blocked pane gets asked. A second store here is
+    /// how the first version dropped back-to-back prompts.
+    private var nodAskedEpisode: Set<String> = []
+
+    func pumpNodGate() {
+        guard VigilNod.enabled, VigilNod.available else { return }
+        let blocked = midTurnAsks().filter { paneAgentState($0.pane)?.flavor == .permission }
+        nodAskedEpisode.formIntersection(Set(blocked.map(\.pane)))
+        guard let next = blocked.first(where: { !nodAskedEpisode.contains($0.pane) }) else { return }
+        nodAskedEpisode.insert(next.pane)
+        let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
+        let bin = vigildBin
+        VigilNod.ask(spoken, pane: next.pane) { [weak self] gesture in
+            if let gesture {
+                // "1" approves ONCE; escape backs out. Never the standing
+                // grant: that is a seated decision, not a head movement.
+                let keys = gesture == .nod ? "1" : "\u{1b}"
+                self?.runFireAndForget(bin, ["send", next.pane, keys])
+            }
+            // Answered, denied or timed out: the state file is the truth,
+            // pump again and the next still-blocked pane gets its ask.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self?.pumpNodGate() }
+        }
+    }
 
     private func startStateDirWatcher() {
         try? FileManager.default.createDirectory(at: agentStateDir, withIntermediateDirectories: true)

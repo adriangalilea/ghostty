@@ -30,25 +30,48 @@ enum VigilNod {
     private nonisolated(unsafe) static var engine: SignalEngine?
     private nonisolated(unsafe) static var listening = false
 
-    /// Queued asks. One gesture at a time (two recognizers racing over one
-    /// head is nonsense), but a prompt that arrives mid-question WAITS instead
-    /// of being silently dropped: the drop is exactly how a real prompt went
-    /// unheard while a ghost was being answered (seen live, 2026-08-24).
-    private nonisolated(unsafe) static var queue: [(String, TimeInterval, (HeadGesture?) -> Void)] = []
-
     /// Ask, then hand the verdict back. `nil` means no answer: a timeout NEVER
     /// approves, and the prompt is left exactly as it was.
+    /// One jsonl line per decision, alongside cmd-guard's ledger in spirit:
+    /// the permission state machine must know WHICH layer answered a prompt
+    /// (cmd-guard rule, auto-accept, keyboard, or a head gesture), so every
+    /// layer keeps its own truth and `wake prompts` composes them.
+    private static let ledgerURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/state/nod-gate/decisions.jsonl")
+
+    private static func ledger(_ verdict: String, pane: String?, spoken: String) {
+        let entry: [String: Any] = [
+            "ts": ISO8601DateFormatter().string(from: Date()),
+            "layer": "nod",
+            "verdict": verdict,
+            "pane": pane ?? "",
+            "spoken": spoken,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: entry) else { return }
+        let dir = ledgerURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: ledgerURL.path) {
+            FileManager.default.createFile(atPath: ledgerURL.path, contents: nil)
+        }
+        if let handle = try? FileHandle(forWritingTo: ledgerURL) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            handle.write(Data("\n".utf8))
+            try? handle.close()
+        }
+    }
+
     static func ask(
         _ spoken: String,
+        pane: String? = nil,
         timeout: TimeInterval = 20,
         completion: @escaping (HeadGesture?) -> Void
     ) {
         guard enabled, available else { return completion(nil) }
-        if listening {
-            queue.append((spoken, timeout, completion))
-            log.info("nod gate: queued behind the active ask (\(queue.count) waiting)")
-            return
-        }
+        // One ask at a time; ORDERING lives in the session manager's pump,
+        // which derives who is next from state files. A queue here would be
+        // a second brain disagreeing with it.
+        guard !listening else { return completion(nil) }
         listening = true
 
         let e = SignalEngine(tap: tap)
@@ -74,10 +97,9 @@ enum VigilNod {
             e.stop()
             engine = nil
             listening = false
-            await MainActor.run {
-                completion(answer)
-                drain()
-            }
+            ledger(answer == .nod ? "allow" : answer == .shake ? "deny" : "timeout",
+                   pane: pane, spoken: spoken)
+            await MainActor.run { completion(answer) }
         }
 
         // A gesture that never comes must not hold the gate forever.
@@ -86,15 +108,9 @@ enum VigilNod {
             e.stop()
             engine = nil
             listening = false
+            ledger("timeout", pane: pane, spoken: spoken)
             completion(nil)
-            drain()
         }
-    }
-
-    private static func drain() {
-        guard !queue.isEmpty else { return }
-        let (spoken, timeout, completion) = queue.removeFirst()
-        ask(spoken, timeout: timeout, completion: completion)
     }
 }
 #endif
