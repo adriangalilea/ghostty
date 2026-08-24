@@ -29,6 +29,7 @@ enum VigilNod {
     private static let tap = MotionTap()
     private nonisolated(unsafe) static var engine: SignalEngine?
     private nonisolated(unsafe) static var listening = false
+    private nonisolated(unsafe) static var lastAskEnded = Date.distantPast
 
     /// Ask, then hand the verdict back. `nil` means no answer: a timeout NEVER
     /// approves, and the prompt is left exactly as it was.
@@ -78,12 +79,15 @@ enum VigilNod {
         engine = e
 
         let deadline = Date().addingTimeInterval(timeout)
+        // The recognizer is LIVE from the first syllable: a wearer who knows
+        // the drill nods during the sentence, and the verdict cuts the rest of
+        // the speech off. Waiting for the sentence to finish before listening
+        // turned a half-second answer into a four-second one.
+        // The instruction suffix is for cold starts only; inside a minute of
+        // the last ask it is ritual noise.
+        let suffix = Date().timeIntervalSince(lastAskEnded) > 60 ? ". nod to allow, shake to deny" : ""
+        FeedbackPlayer.announceAsync("\(spoken)\(suffix)", policy: .on)
         Task {
-            // The engine owns its own feedback: blips per half-cycle teach the
-            // gesture, the outcome tone confirms it. announce() blocks until
-            // the sentence ends, which is WHY it lives in this task and not on
-            // the caller's thread (the event watcher runs on main).
-            e.announce("\(spoken). nod to allow, shake to deny.")
             var answer: HeadGesture?
             do {
                 for try await event in e.events() {
@@ -97,6 +101,8 @@ enum VigilNod {
             e.stop()
             engine = nil
             listening = false
+            FeedbackPlayer.cutAnnouncement()
+            lastAskEnded = Date()
             ledger(answer == .nod ? "allow" : answer == .shake ? "deny" : "timeout",
                    pane: pane, spoken: spoken)
             await MainActor.run { completion(answer) }
@@ -108,6 +114,7 @@ enum VigilNod {
             e.stop()
             engine = nil
             listening = false
+            lastAskEnded = Date()
             ledger("timeout", pane: pane, spoken: spoken)
             completion(nil)
         }

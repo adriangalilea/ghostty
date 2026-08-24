@@ -1316,6 +1316,20 @@ class VigilSessionManager {
     /// occlusion-based on-screen suppressor ate a real ask while Adrian
     /// watched a video with the vigil window standing beside Safari
     /// (2026-08-23, "just heard the bell, had to go to the terminal").
+    /// On ANY screen, not just the key window: a pane whose console is
+    /// visibly on a display is answerable in place (the nod gate speaks it,
+    /// eyes and keyboard are already there if wanted). Ripping its tab into
+    /// the floating panel takes glass Adrian can SEE and moves it somewhere
+    /// else (2026-08-24, second-screen pane floated: "nonsense, why switch
+    /// pane"). Distinct from the seen-rule on purpose: presence/acks stay
+    /// key-window (attention must not be forgiven sight-unseen); this gates
+    /// only whether the summon MOVES glass. Chime, eye, gate all still fire.
+    func paneOnAnyScreen(_ pane: String) -> Bool {
+        guard let view = liveView(attachId: pane), let window = view.window,
+              window.isVisible, !window.isMiniaturized else { return false }
+        return !view.isHiddenOrHasHiddenAncestor
+    }
+
     func summonQueue() -> [SummonCandidate] {
         midTurnAsks { session in
             if case .floating = session.state, session.name != floatingName { return false }
@@ -4230,7 +4244,7 @@ class VigilSessionManager {
             }
             // Answered, denied or timed out: the state file is the truth,
             // pump again and the next still-blocked pane gets its ask.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self?.pumpNodGate() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self?.pumpNodGate() }
         }
     }
 

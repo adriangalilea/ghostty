@@ -42,6 +42,8 @@ final class VigilSummon {
 
     private var work: DispatchWorkItem?
     private var settleWork: DispatchWorkItem?
+    /// Pending empty-queue dismissal; cancelled when a fresh ask retargets.
+    private var lingerWork: DispatchWorkItem?
     /// Consumed by the visibility observer: this dismissal is the engine
     /// draining its queue, not Adrian waving the panel away.
     private var engineDismiss = false
@@ -82,6 +84,9 @@ final class VigilSummon {
     private func queue() -> [VigilSessionManager.SummonCandidate] {
         VigilSessionManager.shared.summonQueue()
             .filter { $0.since > snoozeDate && $0.pane != current?.pane }
+            // A pane already visible on some display answers in place; the
+            // summon only moves glass for asks Adrian cannot see.
+            .filter { !VigilSessionManager.shared.paneOnAnyScreen($0.pane) }
     }
 
     /// One chime per (pane, block): every mid-turn blocker DINGS, visible
@@ -193,6 +198,8 @@ final class VigilSummon {
     }
 
     private func summon(_ candidate: VigilSessionManager.SummonCandidate) {
+        lingerWork?.cancel()
+        lingerWork = nil
         let manager = VigilSessionManager.shared
         let appearing = !manager.quickTerminalVisible
         manager.float(name: candidate.name, landOn: candidate.pane)
@@ -227,8 +234,29 @@ final class VigilSummon {
             current = nil
             summon(next)
         } else if manager.quickTerminalVisible {
-            engineDismiss = true
-            manager.dismissQuickTerminal()
+            // LINGER before dismissing: chained prompts in one turn land a
+            // few seconds apart, and out-then-in is the slowest possible
+            // rendering of "next question". Hold the panel; an ask arriving
+            // inside the window retargets the viewport in place, and only a
+            // quiet linger actually dismisses (Adrian 2026-08-24: "the whole
+            // routine vanishes, then reappears like 10s later").
+            let w = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.lingerWork = nil
+                if let next = self.queue().first {
+                    self.current = nil
+                    self.summon(next)
+                } else if VigilSessionManager.shared.quickTerminalVisible {
+                    self.engineDismiss = true
+                    VigilSessionManager.shared.dismissQuickTerminal()
+                } else {
+                    self.current = nil
+                    VigilHush.resume()
+                }
+            }
+            lingerWork?.cancel()
+            lingerWork = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: w)
         } else {
             current = nil
             VigilHush.resume()
@@ -244,6 +272,8 @@ final class VigilSummon {
         current = nil
         settleWork?.cancel()
         settleWork = nil
+        lingerWork?.cancel()
+        lingerWork = nil
         if !wasEngine,
            VigilSessionManager.shared.paneAgentState(cur.pane)?.state == .blocked {
             snoozeDate = Date()
