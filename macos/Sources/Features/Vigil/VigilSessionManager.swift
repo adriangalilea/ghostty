@@ -1037,6 +1037,10 @@ class VigilSessionManager {
         /// The permission notification's text, forwarded by the claude hook so
         /// the nod gate can SPEAK the request instead of a generic bell.
         let msg: String?
+        /// Hook-stamped time. The events log is offset-tailed and REPLAYS at
+        /// launch; attention wants that (it queues), the nod gate must not: a
+        /// spoken ask for a prompt answered hours ago is a ghost.
+        let ts: String?
         /// The vigild pane daemon the agent lives in. Ground truth for
         /// ownership: VIGIL_SESSION in the process env is stamped at birth
         /// and goes stale when a tab is dragged into another session.
@@ -1121,7 +1125,9 @@ class VigilSessionManager {
             // headphones in your ears mean your hands are elsewhere either
             // way. A timeout answers NOTHING and the prompt stays untouched.
             if event.event == "Notification", VigilNod.enabled,
-               let gatePane = event.pane, !gatePane.isEmpty {
+               let gatePane = event.pane, !gatePane.isEmpty,
+               let ts = event.ts.flatMap(ISO8601DateFormatter().date(from:)),
+               Date().timeIntervalSince(ts) < 45 {
                 let spoken = (event.msg?.isEmpty == false) ? event.msg! : "a permission request in \(name)"
                 let bin = vigildBin
                 VigilNod.ask(spoken) { [weak self] gesture in
