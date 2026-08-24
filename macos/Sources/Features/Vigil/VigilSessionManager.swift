@@ -4232,6 +4232,7 @@ class VigilSessionManager {
     /// itself and the next blocked pane gets asked. A second store here is
     /// how the first version dropped back-to-back prompts.
     private var nodAsked: [String: Date] = [:]
+    private var nodUnblockedAt: [String: Date] = [:]
     /// The pane whose ask is live right now; cancelled if answered elsewhere.
     private var nodAskingPane: String?
 
@@ -4266,15 +4267,21 @@ class VigilSessionManager {
                 DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.pumpNodGate() }
             }
         }
-        // Asked-once per blocking episode, tolerant of the state file being
-        // rewritten mid-episode (hook double-writes bump the mtime): a
-        // candidate within 0.8s of the block we already asked for IS that
-        // block; a genuinely new block start asks fresh.
+        // Asked-until-unblocked: one prompt arrives through TWO signal paths
+        // seconds apart (guard row at PreToolUse, Claude's Notification later),
+        // each bumping the block start. Time-window dedup cannot bridge that;
+        // observation can: a pane asked once is not asked again until the pump
+        // SEES it unblocked (or 22s pass, the ask timeout's ceiling).
+        let blockedPanes = Set(blocked.map(\.pane))
+        for pane in nodAsked.keys where !blockedPanes.contains(pane) {
+            nodUnblockedAt[pane] = now
+        }
         guard let next = ripe.first(where: { c in
             guard let asked = nodAsked[c.pane] else { return true }
-            return abs(c.since.timeIntervalSince(asked)) > 0.8
+            if let freed = nodUnblockedAt[c.pane], freed > asked { return true }
+            return now.timeIntervalSince(asked) > 22
         }) else { return }
-        nodAsked[next.pane] = next.since
+        nodAsked[next.pane] = now
         nodAskingPane = next.pane
         vlog("nod gate: asking pane \(next.pane)")
         let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
