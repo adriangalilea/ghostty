@@ -4233,6 +4233,10 @@ class VigilSessionManager {
     /// how the first version dropped back-to-back prompts.
     private var nodAsked: [String: Date] = [:]
     private var nodUnblockedAt: [String: Date] = [:]
+    /// A just-answered pane is DEAF for a beat: the answer needs time to flip
+    /// the state, and the prompt's second signal path (Notification arriving
+    /// after the guard row) otherwise re-blocks and re-asks a resolved prompt.
+    private var nodResolvedAt: [String: Date] = [:]
     /// The pane whose ask is live right now; cancelled if answered elsewhere.
     private var nodAskingPane: String?
 
@@ -4282,6 +4286,7 @@ class VigilSessionManager {
         // background session's stale prompt wedge the gate for 20s while the
         // prompt he was ANSWERING waited behind it (2026-08-24, T4).
         func eligible(_ c: SummonCandidate) -> Bool {
+            if let resolved = nodResolvedAt[c.pane], c.since.timeIntervalSince(resolved) < 2 { return false }
             guard let asked = nodAsked[c.pane] else { return true }
             if let freed = nodUnblockedAt[c.pane], freed > asked { return true }
             return now.timeIntervalSince(asked) > 22
@@ -4305,10 +4310,19 @@ class VigilSessionManager {
         VigilNod.ask(spoken, pane: next.pane) { [weak self] gesture, verdict in
             self?.nodAskingPane = nil
             if let gesture {
-                // "1" approves ONCE; escape backs out. Never the standing
-                // grant: that is a seated decision, not a head movement.
-                let keys = gesture == .nod ? "1" : "\u{1b}"
-                self?.runFireAndForget(bin, ["send", next.pane, keys])
+                // A verdict types ONLY into a still-blocked pane. A late
+                // duplicate signal once re-asked for an answered prompt and
+                // the nod's "1" landed in a pane with no prompt standing - a
+                // stray keystroke into the agent's input (2026-08-24 20:07).
+                if self?.paneAgentState(next.pane)?.state == .blocked {
+                    // "1" approves ONCE; escape backs out. Never the standing
+                    // grant: that is a seated decision, not a head movement.
+                    let keys = gesture == .nod ? "1" : "\u{1b}"
+                    self?.runFireAndForget(bin, ["send", next.pane, keys])
+                } else {
+                    self?.vlog("nod gate: verdict for \(next.pane) dropped, prompt no longer standing")
+                }
+                self?.nodResolvedAt[next.pane] = Date()
             }
             // An ANSWERED ask closes its episode by event: allow, deny and
             // superseded all mean THIS prompt is resolved, so the pane's next
