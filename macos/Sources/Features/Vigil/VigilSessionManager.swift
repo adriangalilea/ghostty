@@ -4230,9 +4230,14 @@ class VigilSessionManager {
     func pumpNodGate() {
         guard VigilNod.enabled, VigilNod.available else { return }
         let blocked = midTurnAsks().filter { paneAgentState($0.pane)?.flavor == .permission }
-        nodAskedEpisode.formIntersection(Set(blocked.map(\.pane)))
-        guard let next = blocked.first(where: { !nodAskedEpisode.contains($0.pane) }) else { return }
-        nodAskedEpisode.insert(next.pane)
+        // Episode key = pane AND block start. Keying by pane alone filtered a
+        // pane's SECOND prompt as already-asked whenever the pump missed the
+        // brief unblocked gap between two chained prompts — race-dependent,
+        // felt as "sometimes the second ask is silent" (2026-08-24, live).
+        func key(_ c: SummonCandidate) -> String { "\(c.pane)#\(c.since.timeIntervalSince1970)" }
+        nodAskedEpisode.formIntersection(Set(blocked.map(key)))
+        guard let next = blocked.first(where: { !nodAskedEpisode.contains(key($0)) }) else { return }
+        nodAskedEpisode.insert(key(next))
         let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
         let bin = vigildBin
         VigilNod.ask(spoken, pane: next.pane) { [weak self] gesture in
