@@ -72,6 +72,10 @@ final class VigilSummon {
         }
     }
 
+    /// The pane whose ask the panel is showing right now; the nod gate
+    /// follows THIS, never its own ordering. One queue, one head.
+    var currentAskPane: String? { current?.pane }
+
     private func schedule() {
         guard VigilFollowMode.current == .summon else { return }
         work?.cancel()

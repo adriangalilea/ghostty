@@ -4276,11 +4276,27 @@ class VigilSessionManager {
         for pane in nodAsked.keys where !blockedPanes.contains(pane) {
             nodUnblockedAt[pane] = now
         }
-        guard let next = ripe.first(where: { c in
+        // ONE queue: the gate asks for what is in FRONT of Adrian — the
+        // summoned pane, else the focused one, else visible glass — and only
+        // then the summon's own ordering. Its private oldest-first walk let a
+        // background session's stale prompt wedge the gate for 20s while the
+        // prompt he was ANSWERING waited behind it (2026-08-24, T4).
+        func eligible(_ c: SummonCandidate) -> Bool {
             guard let asked = nodAsked[c.pane] else { return true }
             if let freed = nodUnblockedAt[c.pane], freed > asked { return true }
             return now.timeIntervalSince(asked) > 22
-        }) else { return }
+        }
+        let summoned = VigilSummon.shared.currentAskPane
+        let preferred = ripe.first { $0.pane == summoned && eligible($0) }
+            ?? ripe.first { paneVisible($0.pane) && eligible($0) }
+            ?? ripe.first { paneOnAnyScreen($0.pane) && eligible($0) }
+        // In-front asks PREEMPT a wedged ask for glass he is not looking at.
+        if let front = preferred, let asking = nodAskingPane, asking != front.pane {
+            VigilNod.cancel(pane: asking, reason: "preempted")
+            nodAsked[asking] = nil   // it re-asks when its turn returns
+            nodAskingPane = nil
+        }
+        guard let next = preferred ?? ripe.first(where: eligible) else { return }
         nodAsked[next.pane] = now
         nodAskingPane = next.pane
         vlog("nod gate: asking pane \(next.pane)")
