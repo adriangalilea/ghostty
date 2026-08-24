@@ -1335,6 +1335,8 @@ class VigilSessionManager {
               // ask exists at all (the 2026-08-23 scar was occlusion used
               // to suppress attention; this only routes it).
               window.occlusionState.contains(.visible) else { return false }
+        // Log the raw ingredients once per verdict; occlusion is the usual liar.
+        vlog("paneOnAnyScreen \(pane): visible=\(window.isVisible) occluded=\(!window.occlusionState.contains(.visible)) mini=\(window.isMiniaturized)")
         return !view.isHiddenOrHasHiddenAncestor
     }
 

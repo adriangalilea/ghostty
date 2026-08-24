@@ -82,11 +82,21 @@ final class VigilSummon {
 
     /// Everything after the snooze gate and the current summon.
     private func queue() -> [VigilSessionManager.SummonCandidate] {
-        VigilSessionManager.shared.summonQueue()
-            .filter { $0.since > snoozeDate && $0.pane != current?.pane }
-            // A pane already visible on some display answers in place; the
-            // summon only moves glass for asks Adrian cannot see.
-            .filter { !VigilSessionManager.shared.paneOnAnyScreen($0.pane) }
+        // Every drop is LOGGED with its reason: "no float appeared" must be
+        // answerable from the log alone (2026-08-24, three rounds of guessing).
+        let manager = VigilSessionManager.shared
+        return manager.summonQueue().filter { c in
+            if c.since <= snoozeDate {
+                manager.vlog("summon: drop \(c.pane) (snoozed)")
+                return false
+            }
+            if c.pane == current?.pane { return false }
+            if manager.paneOnAnyScreen(c.pane) {
+                manager.vlog("summon: in-place \(c.pane) (glass visible, occlusion says shown)")
+                return false
+            }
+            return true
+        }
     }
 
     /// One chime per (pane, block): every mid-turn blocker DINGS, visible
@@ -193,7 +203,13 @@ final class VigilSummon {
                manager.paneAgentState(pane)?.state == .blocked { return }
             if key is NSPanel, !(key.windowController is QuickTerminalController) { return }
         }
-        guard let head = queue().first else { return }
+        let q = queue()
+        let all = manager.summonQueue()
+        if q.isEmpty, !all.isEmpty {
+            manager.vlog("summon: \(all.count) ask(s) standing, none float-eligible")
+            return
+        }
+        guard let head = q.first else { return }
         summon(head)
     }
 
