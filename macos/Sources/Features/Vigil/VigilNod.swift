@@ -106,6 +106,9 @@ enum VigilNod {
         // The instruction suffix is for cold starts only; inside a minute of
         // the last ask it is ritual noise.
         let suffix = Date().timeIntervalSince(lastAskEnded) > 60 ? ". nod to allow, shake to deny" : ""
+        // Clean channel before speaking: any stale narration from a resolved
+        // ask dies here even when its cancel lost the race.
+        FeedbackPlayer.cutAnnouncement()
         FeedbackPlayer.announceAsync("\(spoken)\(suffix)", policy: .on)
         // Cross-ask refractory: a fresh detector starting inside the tail of
         // the PREVIOUS ask's nod would consume that residual motion as an
