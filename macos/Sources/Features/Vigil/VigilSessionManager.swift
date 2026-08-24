@@ -1325,18 +1325,14 @@ class VigilSessionManager {
     /// key-window (attention must not be forgiven sight-unseen); this gates
     /// only whether the summon MOVES glass. Chime, eye, gate all still fire.
     func paneOnAnyScreen(_ pane: String) -> Bool {
+        // Ghostty frontmost + pane visible = Adrian can see it: answer in
+        // place. Ghostty NOT frontmost = float, ALWAYS - summoning over other
+        // apps is the point. occlusionState was tried and LIES (reported a
+        // Telegram-covered window as visible, 2026-08-24 19:22 log); NSApp
+        // activity is the only honest signal for "is the terminal his view".
+        guard NSApp.isActive else { return false }
         guard let view = liveView(attachId: pane), let window = view.window,
-              window.isVisible, !window.isMiniaturized,
-              // Ordered-in is not SEEN: a window fully covered by another
-              // app counts as visible to isVisible, and suppressing the
-              // float for covered glass left asks with nowhere to appear
-              // (2026-08-24, "on another app, no floating terminal").
-              // Occlusion decides RIP vs in-place here — never whether the
-              // ask exists at all (the 2026-08-23 scar was occlusion used
-              // to suppress attention; this only routes it).
-              window.occlusionState.contains(.visible) else { return false }
-        // Log the raw ingredients once per verdict; occlusion is the usual liar.
-        vlog("paneOnAnyScreen \(pane): visible=\(window.isVisible) occluded=\(!window.occlusionState.contains(.visible)) mini=\(window.isMiniaturized)")
+              window.isVisible, !window.isMiniaturized else { return false }
         return !view.isHiddenOrHasHiddenAncestor
     }
 
@@ -4236,6 +4232,8 @@ class VigilSessionManager {
     /// itself and the next blocked pane gets asked. A second store here is
     /// how the first version dropped back-to-back prompts.
     private var nodAsked: [String: Date] = [:]
+    /// The pane whose ask is live right now; cancelled if answered elsewhere.
+    private var nodAskingPane: String?
 
     func pumpNodGate() {
         // Every silent exit is LOGGED: "it said nothing" must be answerable
@@ -4250,8 +4248,24 @@ class VigilSessionManager {
         // BEFORE knowing whether the permission UI will actually appear.
         // Auto-approved commands unblock within milliseconds; a block that
         // SURVIVES 1.2s is a prompt a human is looking at.
+        // The active ask dies the moment its prompt is answered elsewhere:
+        // blips after a keyboard allow are noise about a decision already
+        // made (2026-08-24, "nod was still active in the background").
+        if let asking = nodAskingPane,
+           paneAgentState(asking)?.state != .blocked {
+            VigilNod.cancel(pane: asking)
+            nodAskingPane = nil
+        }
         let now = Date()
         let ripe = blocked.filter { now.timeIntervalSince($0.since) > 1.2 }
+        // A young block is SKIPPED, not dropped: nothing else re-pumps until
+        // the next state change, which once cost 7 silent seconds. Re-arm.
+        if ripe.isEmpty, let youngest = blocked.map(\.since).max() {
+            let wait = 1.3 - now.timeIntervalSince(youngest)
+            if wait > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.pumpNodGate() }
+            }
+        }
         // Asked-once per blocking episode, tolerant of the state file being
         // rewritten mid-episode (hook double-writes bump the mtime): a
         // candidate within 0.8s of the block we already asked for IS that
@@ -4261,10 +4275,12 @@ class VigilSessionManager {
             return abs(c.since.timeIntervalSince(asked)) > 0.8
         }) else { return }
         nodAsked[next.pane] = next.since
+        nodAskingPane = next.pane
         vlog("nod gate: asking pane \(next.pane)")
         let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
         let bin = vigildBin
         VigilNod.ask(spoken, pane: next.pane) { [weak self] gesture in
+            self?.nodAskingPane = nil
             if let gesture {
                 // "1" approves ONCE; escape backs out. Never the standing
                 // grant: that is a seated decision, not a head movement.

@@ -29,6 +29,17 @@ enum VigilNod {
     private static let tap = MotionTap()
     private nonisolated(unsafe) static var engine: SignalEngine?
     private nonisolated(unsafe) static var listening = false
+    private nonisolated(unsafe) static var activePane: String?
+    private nonisolated(unsafe) static var wasCancelled = false
+
+    /// The prompt was answered by other means (keyboard, another device):
+    /// kill the ask NOW. Blips after the decision are noise about it.
+    static func cancel(pane: String) {
+        guard listening, activePane == pane else { return }
+        wasCancelled = true
+        FeedbackPlayer.cutAnnouncement()
+        engine?.stop()
+    }
     private nonisolated(unsafe) static var lastAskEnded = Date.distantPast
 
     /// Ask, then hand the verdict back. `nil` means no answer: a timeout NEVER
@@ -74,6 +85,8 @@ enum VigilNod {
         // a second brain disagreeing with it.
         guard !listening else { return completion(nil) }
         listening = true
+        activePane = pane
+        wasCancelled = false
 
         let e = SignalEngine(tap: tap)
         engine = e
@@ -109,8 +122,10 @@ enum VigilNod {
             listening = false
             FeedbackPlayer.cutAnnouncement()
             lastAskEnded = Date()
-            ledger(answer == .nod ? "allow" : answer == .shake ? "deny" : "timeout",
-                   pane: pane, spoken: spoken)
+            let verdict = answer == .nod ? "allow"
+                : answer == .shake ? "deny"
+                : wasCancelled ? "superseded" : "timeout"
+            ledger(verdict, pane: pane, spoken: spoken)
             await MainActor.run { completion(answer) }
         }
 
@@ -121,7 +136,7 @@ enum VigilNod {
             engine = nil
             listening = false
             lastAskEnded = Date()
-            ledger("timeout", pane: pane, spoken: spoken)
+            ledger(wasCancelled ? "superseded" : "timeout", pane: pane, spoken: spoken)
             completion(nil)
         }
     }
