@@ -1326,7 +1326,15 @@ class VigilSessionManager {
     /// only whether the summon MOVES glass. Chime, eye, gate all still fire.
     func paneOnAnyScreen(_ pane: String) -> Bool {
         guard let view = liveView(attachId: pane), let window = view.window,
-              window.isVisible, !window.isMiniaturized else { return false }
+              window.isVisible, !window.isMiniaturized,
+              // Ordered-in is not SEEN: a window fully covered by another
+              // app counts as visible to isVisible, and suppressing the
+              // float for covered glass left asks with nowhere to appear
+              // (2026-08-24, "on another app, no floating terminal").
+              // Occlusion decides RIP vs in-place here — never whether the
+              // ask exists at all (the 2026-08-23 scar was occlusion used
+              // to suppress attention; this only routes it).
+              window.occlusionState.contains(.visible) else { return false }
         return !view.isHiddenOrHasHiddenAncestor
     }
 
@@ -4228,7 +4236,13 @@ class VigilSessionManager {
     private var nodAskedEpisode: Set<String> = []
 
     func pumpNodGate() {
-        guard VigilNod.enabled, VigilNod.available else { return }
+        // Every silent exit is LOGGED: "it said nothing" must be answerable
+        // from the log alone, or debugging is guesswork about AirPods.
+        guard VigilNod.enabled else { return }
+        guard VigilNod.available else {
+            vlog("nod gate: skipped, motion unavailable (airpods away?)")
+            return
+        }
         let blocked = midTurnAsks().filter { paneAgentState($0.pane)?.flavor == .permission }
         // Episode key = pane AND block start. Keying by pane alone filtered a
         // pane's SECOND prompt as already-asked whenever the pump missed the
@@ -4238,6 +4252,7 @@ class VigilSessionManager {
         nodAskedEpisode.formIntersection(Set(blocked.map(key)))
         guard let next = blocked.first(where: { !nodAskedEpisode.contains(key($0)) }) else { return }
         nodAskedEpisode.insert(key(next))
+        vlog("nod gate: asking pane \(next.pane)")
         let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
         let bin = vigildBin
         VigilNod.ask(spoken, pane: next.pane) { [weak self] gesture in
