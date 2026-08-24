@@ -87,7 +87,13 @@ enum VigilNod {
         // the last ask it is ritual noise.
         let suffix = Date().timeIntervalSince(lastAskEnded) > 60 ? ". nod to allow, shake to deny" : ""
         FeedbackPlayer.announceAsync("\(spoken)\(suffix)", policy: .on)
+        // Cross-ask refractory: a fresh detector starting inside the tail of
+        // the PREVIOUS ask's nod would consume that residual motion as an
+        // instant (unintended) answer. Speech starts immediately; listening
+        // waits out the tail.
+        let coolOff = max(0, 0.8 - Date().timeIntervalSince(lastAskEnded))
         Task {
+            if coolOff > 0 { try? await Task.sleep(for: .seconds(coolOff)) }
             var answer: HeadGesture?
             do {
                 for try await event in e.events() {
