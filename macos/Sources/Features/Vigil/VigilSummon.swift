@@ -168,6 +168,12 @@ final class VigilSummon {
         // distinguishable from the log alone.
         var fresh = false
         for ask in asks where (chimed[ask.pane] ?? .distantPast) < ask.since {
+            // The gate is TALKING to the human about this pane right now:
+            // the narration is the announcement, and a chime in the answer
+            // window masked the spoken word (drill two, 2026-08-25). Not
+            // marked chimed - an ask that times out unanswered leaves the
+            // pane blocked, and THEN the chime does its job.
+            if ask.pane == VigilAsk.askingPane { continue }
             chimed[ask.pane] = ask.since
             fresh = true
         }

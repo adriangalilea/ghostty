@@ -43,6 +43,12 @@ enum VigilAsk {
     private static var activePane: String?
     private nonisolated(unsafe) static var wired = false
 
+    /// The pane whose ask is in flight, nil when idle. VigilSummon holds
+    /// its chime for this pane: the narration IS the announcement, and a
+    /// chime landing in the answer window masked the human's word (drill
+    /// two, 2026-08-25).
+    static var askingPane: String? { activePane }
+
     /// Route flips on the log's own timeline, where they HAPPEN, not where
     /// the next ask trips over them - this watcher's flap trace is what
     /// convicted route reclaiming (2026-08-25 09:04).
