@@ -134,7 +134,7 @@ enum VigilVoice {
                     configuration.sink = VoiceLogSink()
                     session = try await TranscriptionSession(configuration: configuration)
                 }
-                let mic = MicCapture(voiceProcessing: true)
+                let mic = MicCapture(voiceProcessing: true, floorKind: "dictation", sink: VoiceLogSink())
                 guard generation == gen, activePane == pane else {
                     await session.finish()
                     return
@@ -145,7 +145,6 @@ enum VigilVoice {
                     session.feed(buffer)
                     spectrum.ingest(buffer)
                 }
-                VoiceFloor.claim(kind: "dictation")
                 trace?(
                     "voice: capture voiceProcessed=\(mic.voiceProcessed)"
                         + " (OS AEC \(mic.voiceProcessed ? "on - self-audio subtracted" : "OFF"))")
@@ -179,7 +178,6 @@ enum VigilVoice {
         trace?("voice: dictation stopped (\(reason))")
         generation += 1
         activePane = nil
-        VoiceFloor.release(kind: "dictation")
         spectrum.reset()
         if talk.engaged { talk.stop() }
         mic?.stop()
