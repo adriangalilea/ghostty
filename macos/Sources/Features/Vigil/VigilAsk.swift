@@ -129,7 +129,7 @@ enum VigilAsk {
         let offered = sources.map(\.id).joined(separator: "+")
         Ask.begin(spoken, sources: sources, timeout: timeout) { receipt in
             switch receipt.verdict {
-            case .allow, .deny, .timeout, .cancelled:
+            case .allow, .deny, .chose, .timeout, .cancelled:
                 ledger(receipt, pane: pane, offered: offered)
             case .blind, .busy:
                 break
