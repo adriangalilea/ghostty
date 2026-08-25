@@ -146,6 +146,19 @@ enum VigilNod {
         completion: @escaping (HeadGesture?, String) -> Void
     ) {
         guard enabled, available else { return completion(nil, "unavailable") }
+        // The wearer's ears are wherever the Bluetooth audio is. No BT
+        // output = the AirPods are on another device (or the route fell to
+        // speakers): narration would play to the ROOM, and motion follows
+        // the audio connection so a nod cannot come (every hijack-window
+        // ask timed out, receipted 2026-08-25 09:04). Reclaiming the route
+        // was tried and LOST its live drill - it joined the Mac/phone
+        // tug-of-war instead of ending it (route flaps on the same
+        // timeline). The gate stays out of fights it cannot win: float and
+        // chime still fire, the gate just does not speak.
+        guard AudioRoute.outputIsBluetooth else {
+            trace?("nod gate: ask skipped, audio route \"\(AudioRoute.outputName)\" is not the wearer")
+            return completion(nil, "route-not-wearer")
+        }
         // One ask at a time; ORDERING lives in the session manager's pump,
         // which derives who is next from state files. A queue here would be
         // a second brain disagreeing with it.
@@ -175,25 +188,11 @@ enum VigilNod {
         // Clean channel before speaking: any stale narration from a resolved
         // ask dies here even when its cancel lost the race.
         FeedbackPlayer.cutAnnouncement()
-        // A hijacked route (another device grabbed the A2DP stream, or macOS
-        // fell back to speakers) makes narration inaudible while this gate
-        // believes it asked. Reclaim the default output FIRST, bounded by
-        // AudioRoute.reclaim's budget, then speak - never half a question on
-        // the speakers and a silent swap mid-sentence. The already-target
-        // path is microseconds, so the common ask pays one task hop.
-        Task.detached {
-            let reclaim = AudioRoute.reclaim()
-            if reclaim.outcome != .alreadyTarget { trace?("nod ask#\(id): \(reclaim.line)") }
-            // A cancel that landed during the reclaim already resolved this
-            // ask; narrating now would be stale speech about a decision made.
-            guard !wasCancelled, askSeq == id else { return }
-            FeedbackPlayer.announceAsync("\(spoken)\(suffix)", policy: .on)
-        }
+        FeedbackPlayer.announceAsync("\(spoken)\(suffix)", policy: .on)
         // Cross-ask refractory: a fresh detector starting inside the tail of
         // the PREVIOUS ask's nod would consume that residual motion as an
-        // instant (unintended) answer. Speech starts the moment the route is
-        // settled (microseconds unless a reclaim runs); listening waits out
-        // the tail.
+        // instant (unintended) answer. Speech starts immediately; listening
+        // waits out the tail.
         let coolOff = max(0, 0.8 - Date().timeIntervalSince(lastAskEnded))
         Task {
             if coolOff > 0 { try? await Task.sleep(for: .seconds(coolOff)) }
