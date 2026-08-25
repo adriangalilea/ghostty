@@ -1,6 +1,9 @@
 // macOS only: dictation binds to the fork's daemon panes.
 #if os(macOS)
 import AppKit
+import Carbon.HIToolbox
+import Ink
+import Keymap
 import Listen
 
 /// Dictation as co-writing: speech lands in the focused pane's input line
@@ -17,6 +20,40 @@ enum VigilVoice {
     /// Fires on start/stop so the status item can show the mic.
     static var onStateChange: (() -> Void)?
 
+    /// Dictation language: "auto" (the session cortex's leaning, else the
+    /// system) or an explicit BCP-47 id - the sidebar mic button's context
+    /// menu writes it.
+    static let localeKey = "vigil.voice.locale"
+
+    /// THE interaction state machine (swift-utils Ink): hold-to-talk or
+    /// tap-to-latch, shared by the sidebar MicButton's gesture and the
+    /// global hotkey below.
+    static let talk: PushToTalk = {
+        let talk = PushToTalk()
+        talk.onChange = { engaged in
+            if engaged { startFocused() } else { stop(reason: "released") }
+        }
+        return talk
+    }()
+
+    /// ^⌥M system-wide, with Carbon's release event so a held key IS
+    /// push-to-talk. Registration failure (combo owned elsewhere) traces.
+    static let hotkeyHint = "⌃⌥M"
+    private static var hotkey: PressReleaseHotkey?
+    static func armHotkey() {
+        guard hotkey == nil else { return }
+        hotkey = PressReleaseHotkey(
+            keyCode: 46, carbonModifiers: UInt32(controlKey | optionKey),
+            onPress: { talk.pressBegan() },
+            onRelease: { talk.pressEnded() })
+        if hotkey?.registered != true {
+            trace?("voice: hotkey \(hotkeyHint) not registered (owned elsewhere)")
+        }
+    }
+
+    /// The live spectrum the MicButton renders; flat while idle.
+    static let spectrum = AudioSpectrum()
+
     private(set) static var activePane: String?
     static var isActive: Bool { activePane != nil }
     static var available: Bool { MicCapture.available }
@@ -29,17 +66,15 @@ enum VigilVoice {
     /// Dictate into the focused pane; toggling while active stops. The
     /// focused pane is resolved at START and injection sticks to it - a
     /// focus change mid-dictation must not spray text into another pane.
-    static func toggle() {
-        if isActive {
-            stop(reason: "toggled off")
-            return
-        }
+    static func startFocused() {
+        guard !isActive else { return }
         guard
             let surface = (NSApp.keyWindow?.windowController as? TerminalController)?
                 .focusedSurface,
             let pane = surface.vigilAttachId
         else {
             trace?("voice: no focused vigil pane to dictate into")
+            talk.stop()
             return
         }
         start(pane: pane)
@@ -56,10 +91,15 @@ enum VigilVoice {
         let gen = generation
         onStateChange?()
 
+        let preference = UserDefaults.standard.string(forKey: localeKey) ?? "auto"
         let identity = VigilSessionManager.shared.cortexIdentity(ofPane: pane)
         var locale = Locale.current
-        if let lang = identity?.lang, lang == "es" || lang == "en" {
-            locale = Locale(identifier: lang == "es" ? "es-ES" : "en-US")
+        if preference == "auto" {
+            if let lang = identity?.lang, lang == "es" || lang == "en" {
+                locale = Locale(identifier: lang == "es" ? "es-ES" : "en-US")
+            }
+        } else {
+            locale = Locale(identifier: preference)
         }
         var grounding = GroundingSet()
         if let keywords = identity?.keywords, !keywords.isEmpty {
@@ -84,7 +124,10 @@ enum VigilVoice {
                 }
                 Self.session = session
                 Self.mic = mic
-                try mic.start { buffer in session.feed(buffer) }
+                try mic.start { buffer in
+                    session.feed(buffer)
+                    spectrum.ingest(buffer)
+                }
                 Self.drain = Task {
                     do {
                         for try await segment in session.segments where segment.isFinal {
@@ -109,6 +152,8 @@ enum VigilVoice {
         trace?("voice: dictation stopped (\(reason))")
         generation += 1
         activePane = nil
+        spectrum.reset()
+        if talk.engaged { talk.stop() }
         mic?.stop()
         mic = nil
         let session = self.session

@@ -17,7 +17,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     let menuOverview = NSMenuItem(title: "Overview", action: #selector(overview(_:)), keyEquivalent: "")
     let menuNewSession = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
     let menuDetach = NSMenuItem(title: "Detach Front Window", action: #selector(detachFrontWindow(_:)), keyEquivalent: "")
-    let menuDictate = NSMenuItem(title: "Dictate into Focused Pane", action: #selector(toggleDictation(_:)), keyEquivalent: "")
 
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
@@ -42,9 +41,8 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
         VigilVoice.onStateChange = { [weak self] in
             self?.updateBadge()
-            self?.menuDictate.title =
-                VigilVoice.isActive ? "Stop Dictation" : "Dictate into Focused Pane"
         }
+        VigilVoice.armHotkey()
         updateBadge()
         installMainMenu()
 
@@ -74,7 +72,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         guard !mainMenu.items.contains(where: { $0.title == "Sessions" }) else { return }
 
         let menu = NSMenu(title: "Sessions")
-        for item in [menuNext, menuNextFloating, menuCycle, menuOverview, .separator(), menuNewSession, menuDetach, menuDictate] {
+        for item in [menuNext, menuNextFloating, menuCycle, menuOverview, .separator(), menuNewSession, menuDetach] {
             item.target = self
             item.menu?.removeItem(item)
             menu.addItem(item)
@@ -219,10 +217,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func nextSession(_ sender: NSMenuItem) {
         VigilSessionManager.shared.next()
-    }
-
-    @objc private func toggleDictation(_ sender: NSMenuItem) {
-        VigilVoice.toggle()
     }
 
     @objc private func cycleSession(_ sender: NSMenuItem) {

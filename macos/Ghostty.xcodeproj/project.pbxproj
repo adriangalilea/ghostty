@@ -20,6 +20,8 @@
 		0DAA111100000000000000B5 /* Ask in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B2 /* Ask */; };
 		0DAA111100000000000000B6 /* AskNod in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B3 /* AskNod */; };
 		0DAA111100000000000000B7 /* AskListen in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B4 /* AskListen */; };
+		0DAA111100000000000000C3 /* Ink in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000C2 /* Ink */; };
+		0DAA111100000000000000C5 /* Keymap in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000C4 /* Keymap */; };
 		A53D0C8E2B53B0EA00305CE6 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */; };
 		A53D0C952B53B4D800305CE6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
 		A546F1142D7B68D7003B11A0 /* locale in Resources */ = {isa = PBXBuildFile; fileRef = A546F1132D7B68D7003B11A0 /* locale */; };
@@ -312,6 +314,8 @@
 				0DAA111100000000000000B5 /* Ask in Frameworks */,
 				0DAA111100000000000000B6 /* AskNod in Frameworks */,
 				0DAA111100000000000000B7 /* AskListen in Frameworks */,
+				0DAA111100000000000000C3 /* Ink in Frameworks */,
+				0DAA111100000000000000C5 /* Keymap in Frameworks */,
 				A56B880B2A840447007A0E29 /* Carbon.framework in Frameworks */,
 				A571AB1D2A206FCF00248498 /* GhosttyKit.xcframework in Frameworks */,
 			);
@@ -479,6 +483,8 @@
 				0DAA111100000000000000B2 /* Ask */,
 				0DAA111100000000000000B3 /* AskNod */,
 				0DAA111100000000000000B4 /* AskListen */,
+				0DAA111100000000000000C2 /* Ink */,
+				0DAA111100000000000000C4 /* Keymap */,
 			);
 			productName = Ghostty;
 			productReference = A5B30531299BEAAA0047F10C /* Ghostty.app */;
@@ -547,6 +553,7 @@
 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "nod" */,
 				0DAA111100000000000000B1 /* XCLocalSwiftPackageReference "ask" */,
+				0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */,
 			);
 			productRefGroup = A5B30532299BEAAA0047F10C /* Products */;
 			projectDirPath = "";
@@ -1451,6 +1458,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../../untitled/experiments/ask";
 		};
+		0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../../swift-utils";
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -1494,6 +1505,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 0DAA111100000000000000B1 /* XCLocalSwiftPackageReference "ask" */;
 			productName = AskListen;
+		};
+		0DAA111100000000000000C2 /* Ink */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */;
+			productName = Ink;
+		};
+		0DAA111100000000000000C4 /* Keymap */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */;
+			productName = Keymap;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

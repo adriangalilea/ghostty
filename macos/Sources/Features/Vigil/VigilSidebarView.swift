@@ -1,4 +1,5 @@
 import AppKit
+import Ink
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -16,6 +17,11 @@ struct VigilSidebarView: View {
     @AppStorage(VigilHush.key) private var hushMedia = false
     @AppStorage(VigilAsk.nodKey) private var nodGate = false
     @AppStorage(VigilAsk.voiceKey) private var voiceGate = false
+    @AppStorage(VigilVoice.localeKey) private var voiceLocale = "auto"
+
+    private var dictationLocale: Binding<String> {
+        Binding(get: { voiceLocale }, set: { voiceLocale = $0 })
+    }
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
     private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
@@ -242,6 +248,25 @@ struct VigilSidebarView: View {
                         .labelsHidden()
                 }
                 .help("A permission prompt is read out loud; say yes to allow it once, no to deny. Races the nod when both are on - the first decisive answer wins. Silence answers nothing.")
+            }
+            if VigilVoice.available {
+                HStack(spacing: 5) {
+                    MicButton(
+                        talk: VigilVoice.talk,
+                        spectrum: { VigilVoice.spectrum.frame().bands },
+                        voiceActive: { VigilVoice.spectrum.frame().voiceActive },
+                        hint: VigilVoice.hotkeyHint,
+                        size: 22)
+                    Spacer()
+                }
+                .contextMenu {
+                    Picker("Language", selection: dictationLocale) {
+                        Text("Auto (session)").tag("auto")
+                        Text("Español").tag("es-ES")
+                        Text("English").tag("en-US")
+                    }
+                }
+                .help("Dictate into the focused pane: hold to talk, tap to lock on (tap again to stop), or \(VigilVoice.hotkeyHint) from anywhere. Speech lands in the input line - no Enter, you submit. Right-click to pick the language.")
             }
         }
         .padding(.horizontal, 11)
