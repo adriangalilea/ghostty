@@ -1145,7 +1145,7 @@ class VigilSessionManager {
             // events shadow every Stop and must never feed this map.
             if event.event == "Notification", let m = event.msg, !m.isEmpty,
                let msgPane = event.pane, !msgPane.isEmpty {
-                askGateMsg[msgPane] = m
+                askGateMsg[msgPane] = (m, Date())
             }
             // Presence beats attention, PANE-granular: only an event whose
             // console is actually on screen is already answered. A watched
@@ -4330,10 +4330,12 @@ class VigilSessionManager {
     // MARK: Nod gate (permission prompts answered by head, one at a time)
 
     /// What to SPEAK for a blocked pane; state files carry no message.
-    /// Pruned the moment the pump sees the pane unblocked, so a fresh
-    /// prompt can never be narrated with the previous prompt's text (the
-    /// msg row rides the 1s events drain; the pump rides the state dir).
-    private var askGateMsg: [String: String] = [:]
+    /// Stamped at ingest and honored only for a block it POSTDATES: the
+    /// msg rides the 1s events drain while the pump rides the state dir,
+    /// so a chained prompt's ask could otherwise narrate the previous
+    /// prompt's text. Pruned when the pump sees the pane unblocked, which
+    /// bounds the map; the stamp is the correctness gate.
+    private var askGateMsg: [String: (text: String, at: Date)] = [:]
     /// Panes already asked during their CURRENT blocking episode. Pruned the
     /// moment a pane stops being permission-blocked, so a fresh prompt asks
     /// fresh, but a timeout does not re-ask in a loop while the same prompt
@@ -4371,13 +4373,13 @@ class VigilSessionManager {
         // ears are already open. Idempotent, never prompts for the grant,
         // cools down on its own if no ask follows.
         if !blocked.isEmpty, VigilAsk.voiceEnabled {
-            MicTap.shared.sink = VoiceLogSink()
             MicTap.shared.prewarm()
         }
-        // Age gate: the hook now marks a pane blocked at PreToolUse time,
-        // BEFORE knowing whether the permission UI will actually appear.
-        // Auto-approved commands unblock within milliseconds; a block that
-        // SURVIVES 1.2s is a prompt a human is looking at.
+        // Age gate, the belt behind PermissionRequest's suspenders: the
+        // hooks mark blocked only when a prompt will exist, so ghost asks
+        // for auto-approved commands are structurally gone; a block that
+        // still SURVIVES the ripeness window is a prompt a human is
+        // looking at, anything younger may be a signal blip.
         // The active ask dies the moment its prompt is answered elsewhere:
         // blips after a keyboard allow are noise about a decision already
         // made (2026-08-24, "nod was still active in the background").
@@ -4482,7 +4484,14 @@ class VigilSessionManager {
             "ask gate: asking pane \(next.pane)"
                 + (UserDefaults.standard.bool(forKey: VigilAsk.eagerKey)
                     ? " (EAGER: screen announced, narration catches up)" : ""))
-        let spoken = askGateMsg[next.pane] ?? "a permission request in \(next.name)"
+        // Which wording plays: the gist lands on the events drain (≤1s),
+        // inside the 1.2s ripeness window, so the ripe path narrates the
+        // hook's message; an EAGER first ask usually beats the drain and
+        // narrates the generic line BY DESIGN - the screen already shows
+        // the exact prompt, narration is catch-up. A msg staged before
+        // this block began is the previous prompt's: generic, never wrong.
+        let spoken = askGateMsg[next.pane].flatMap { $0.at > next.since ? $0.text : nil }
+            ?? "a permission request in \(next.name)"
         VigilAsk.ask(spoken, pane: next.pane) { [weak self] answer, verdict in
             // The gate never begins while an ask is in flight; a busy
             // verdict means it raced a consumer it does not know about.
@@ -4534,6 +4543,11 @@ class VigilSessionManager {
         VigilAsk.watchRoute()
         VigilVoice.trace = { [weak self] line in self?.vlog(line) }
         VigilCortex.trace = { [weak self] line in self?.vlog(line) }
+        // The warm tap's receipts (mic_warm/mic_cool) land beside the
+        // gate's. ONE owner for the process-global sink, wired here with
+        // the traces; consumers (dictation, the pump's prewarm, the ask's
+        // VoiceSource) subscribe, they never re-point receipts.
+        MicTap.shared.sink = VoiceLogSink()
         try? FileManager.default.createDirectory(at: agentStateDir, withIntermediateDirectories: true)
         let fd = Darwin.open(agentStateDir.path, O_EVTONLY)
         guard fd >= 0 else { return }

@@ -122,10 +122,12 @@ enum VigilVoice {
         Task {
             do {
                 // The grant precedes everything: an unauthorized engine
-                // "runs" delivering zeros and MicCapture.start now throws.
+                // "runs" delivering zeros and MicCapture.start throws.
+                // Generation-guarded teardown: a stale denial that raced a
+                // stop + fresh start must not kill the successor's session.
                 guard await MicCapture.requestAccess() else {
                     trace?("voice: microphone DENIED - System Settings > Privacy > Microphone")
-                    stop(reason: "mic denied")
+                    if generation == gen { stop(reason: "mic denied") }
                     return
                 }
                 let session: any SpeechSession
@@ -148,8 +150,8 @@ enum VigilVoice {
                 Self.session = session
                 // The shared warm tap: consecutive dictations (and the ask
                 // gate) reuse one hot voice-processed engine instead of
-                // paying VPIO construction per start.
-                MicTap.shared.sink = VoiceLogSink()
+                // paying VPIO construction per start. Its receipts sink has
+                // ONE owner, wired at startup with the traces - never here.
                 Self.subscription = try MicTap.shared.subscribe { buffer in
                     session.feed(buffer)
                     spectrum.ingest(buffer)
@@ -177,8 +179,13 @@ enum VigilVoice {
                 }
             } catch {
                 trace?("voice: session failed to start: \(error)")
-                activePane = nil
-                onStateChange?()
+                // Generation-guarded like the drain's error path: a stale
+                // failure must not null a successor's activePane. stop() is
+                // the ONE teardown - it finishes a session a subscribe
+                // failure left behind, unlatches push-to-talk, and re-pumps
+                // the deferred ask gate.
+                guard generation == gen else { return }
+                stop(reason: "start failed")
             }
         }
     }

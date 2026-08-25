@@ -1,14 +1,13 @@
 // macOS only: the iOS target shares this synchronized source group and has
 // no reason to link answer channels for a terminal prompt.
 #if os(macOS)
-import AppKit
 import AskKit
 import AskListen
 import AskNod
+import Foundation
 import Listen
 import NodKit
 import Say
-import os
 
 /// Answer a permission prompt with your head or your voice: nod or "yes"
 /// allows, shake or "no" denies - whichever channel delivers first.
