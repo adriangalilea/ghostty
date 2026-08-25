@@ -50,6 +50,13 @@ enum VigilNod {
     /// is always the one with no record.
     nonisolated(unsafe) static var trace: ((String) -> Void)?
 
+    /// Route flips become visible when they HAPPEN, not when the next ask
+    /// trips over them: one line per default-output change, straight from
+    /// CoreAudio's own listener.
+    static func watchRoute() {
+        AudioRoute.onDefaultOutputChange { name in trace?("audio route -> \"\(name)\"") }
+    }
+
     private nonisolated(unsafe) static var askSeq = 0
     /// Milliseconds of THIS ask's narration that actually played, from the
     /// synthesizer's delegate: -1 no report yet, 0 never started.
@@ -168,11 +175,25 @@ enum VigilNod {
         // Clean channel before speaking: any stale narration from a resolved
         // ask dies here even when its cancel lost the race.
         FeedbackPlayer.cutAnnouncement()
-        FeedbackPlayer.announceAsync("\(spoken)\(suffix)", policy: .on)
+        // A hijacked route (another device grabbed the A2DP stream, or macOS
+        // fell back to speakers) makes narration inaudible while this gate
+        // believes it asked. Reclaim the default output FIRST, bounded by
+        // AudioRoute.reclaim's budget, then speak - never half a question on
+        // the speakers and a silent swap mid-sentence. The already-target
+        // path is microseconds, so the common ask pays one task hop.
+        Task.detached {
+            let reclaim = AudioRoute.reclaim()
+            if reclaim.outcome != .alreadyTarget { trace?("nod ask#\(id): \(reclaim.line)") }
+            // A cancel that landed during the reclaim already resolved this
+            // ask; narrating now would be stale speech about a decision made.
+            guard !wasCancelled, askSeq == id else { return }
+            FeedbackPlayer.announceAsync("\(spoken)\(suffix)", policy: .on)
+        }
         // Cross-ask refractory: a fresh detector starting inside the tail of
         // the PREVIOUS ask's nod would consume that residual motion as an
-        // instant (unintended) answer. Speech starts immediately; listening
-        // waits out the tail.
+        // instant (unintended) answer. Speech starts the moment the route is
+        // settled (microseconds unless a reclaim runs); listening waits out
+        // the tail.
         let coolOff = max(0, 0.8 - Date().timeIntervalSince(lastAskEnded))
         Task {
             if coolOff > 0 { try? await Task.sleep(for: .seconds(coolOff)) }

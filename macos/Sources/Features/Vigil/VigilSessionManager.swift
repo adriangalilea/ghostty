@@ -1333,6 +1333,12 @@ class VigilSessionManager {
         guard NSApp.isActive else { return false }
         guard let view = liveView(attachId: pane), let window = view.window,
               window.isVisible, !window.isMiniaturized else { return false }
+        // A background NATIVE TAB's window still reports isVisible and its
+        // views un-hidden (it is "part of the visible tab group") - but the
+        // pane is behind another tab and Adrian cannot see it. Not the
+        // selected tab = not on screen (2026-08-25, hollow's prompt refused
+        // a float with frontTab=false on the receipt).
+        if let group = window.tabGroup, group.selectedWindow !== window { return false }
         return !view.isHiddenOrHasHiddenAncestor
     }
 
@@ -2057,39 +2063,34 @@ class VigilSessionManager {
         try? p.run()
     }
 
-    /// The nod gate's keystroke, RECEIPTED: fire-and-forget was blind, and a
-    /// send that silently failed left a "stuck" prompt indistinguishable
-    /// from a recognizer bug (2026-08-25 07:46). Logs the exit code, then
-    /// samples the pane's state to prove the keystroke actually flipped it.
-    private func runNodSend(_ bin: String, pane: String, keys: String) {
+    /// The nod gate's answer, typed IN-PROCESS through the pane's own
+    /// surface: the exact bytes a keypress produces, no Enter. `vigild
+    /// send` is LINE delivery (payload + \r, queued if a resume is pending):
+    /// right for a verdict sentence, wrong for a prompt answer - its Enter
+    /// SUBMITTED a stray "1" as a message when the prompt had already gone
+    /// (2026-08-25 08:22), and a queued answer for a prompt that no longer
+    /// exists is exactly what must never be delivered. Receipted: the type
+    /// line, then the state sampled at 0.7s and 2.5s (the flip rides the
+    /// hook, over a second on a keyboard-equivalent path).
+    private func typeNodAnswer(pane: String, keys: String) {
         let label = keys == "1" ? "'1'" : "esc"
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = ["send", pane, keys]
-        p.standardOutput = FileHandle.nullDevice
-        let err = Pipe()
-        p.standardError = err
-        p.terminationHandler = { [weak self] proc in
-            let stderr = String(
-                data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            DispatchQueue.main.async {
-                self?.vlog(
-                    "nod gate: send \(label) -> \(pane) exit=\(proc.terminationStatus)"
-                        + (stderr.isEmpty ? "" : " stderr=\(stderr)"))
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                    guard let state = self?.paneAgentState(pane)?.state else {
-                        self?.vlog("nod gate: post-send \(pane) state file GONE")
-                        return
-                    }
-                    self?.vlog(
-                        "nod gate: post-send \(pane) state=\(state)"
-                            + (state == .blocked ? " !! STILL BLOCKED, keystroke did not land" : ""))
-                }
-            }
+        guard let view = liveView(attachId: pane), let surface = view.surface else {
+            vlog("nod gate: type \(label) -> \(pane) FAILED: no live surface")
+            return
         }
-        do { try p.run() } catch {
-            vlog("nod gate: send \(label) -> \(pane) FAILED to launch: \(error.localizedDescription)")
+        keys.withCString { ghostty_surface_text(surface, $0, UInt(strlen($0))) }
+        vlog("nod gate: typed \(label) -> \(pane) via surface")
+        for (delay, final) in [(0.7, false), (2.5, true)] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let state = self?.paneAgentState(pane)?.state else {
+                    self?.vlog("nod gate: post-type+\(delay)s \(pane) state file GONE")
+                    return
+                }
+                if state != .blocked, final { return }
+                self?.vlog(
+                    "nod gate: post-type+\(delay)s \(pane) state=\(state)"
+                        + (state == .blocked && final ? " !! STILL BLOCKED, keystroke did not land" : ""))
+            }
         }
     }
 
@@ -4361,7 +4362,6 @@ class VigilSessionManager {
         nodAskingPane = next.pane
         vlog("nod gate: asking pane \(next.pane)")
         let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
-        let bin = vigildBin
         VigilNod.ask(spoken, pane: next.pane) { [weak self] gesture, verdict in
             self?.nodAskingPane = nil
             if let gesture {
@@ -4373,7 +4373,7 @@ class VigilSessionManager {
                     // "1" approves ONCE; escape backs out. Never the standing
                     // grant: that is a seated decision, not a head movement.
                     let keys = gesture == .nod ? "1" : "\u{1b}"
-                    self?.runNodSend(bin, pane: next.pane, keys: keys)
+                    self?.typeNodAnswer(pane: next.pane, keys: keys)
                 } else {
                     self?.vlog("nod gate: verdict for \(next.pane) dropped, prompt no longer standing")
                 }
@@ -4396,6 +4396,7 @@ class VigilSessionManager {
         // start/cut/finish ms, verdict latency + confidence, send exit,
         // post-send state. One file answers "what did the gate do".
         VigilNod.trace = { [weak self] line in self?.vlog(line) }
+        VigilNod.watchRoute()
         try? FileManager.default.createDirectory(at: agentStateDir, withIntermediateDirectories: true)
         let fd = Darwin.open(agentStateDir.path, O_EVTONLY)
         guard fd >= 0 else { return }
