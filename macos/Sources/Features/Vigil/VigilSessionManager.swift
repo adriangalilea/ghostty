@@ -1,5 +1,6 @@
 import AppKit
 import AskKit
+import Listen
 import SwiftUI
 import GhosttyKit
 
@@ -4364,6 +4365,15 @@ class VigilSessionManager {
             return
         }
         let blocked = midTurnAsks().filter { paneAgentState($0.pane)?.flavor == .permission }
+        // PREWARM at first sight of a block, ripeness be damned: the human
+        // reads the prompt while the voice engine spins up, so by the time
+        // the ask begins (and often by the time they finish reading) the
+        // ears are already open. Idempotent, never prompts for the grant,
+        // cools down on its own if no ask follows.
+        if !blocked.isEmpty, VigilAsk.voiceEnabled {
+            MicTap.shared.sink = VoiceLogSink()
+            MicTap.shared.prewarm()
+        }
         // Age gate: the hook now marks a pane blocked at PreToolUse time,
         // BEFORE knowing whether the permission UI will actually appear.
         // Auto-approved commands unblock within milliseconds; a block that

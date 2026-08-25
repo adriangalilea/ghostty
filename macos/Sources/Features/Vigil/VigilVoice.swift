@@ -70,7 +70,7 @@ enum VigilVoice {
     static var isActive: Bool { activePane != nil }
     static var available: Bool { MicCapture.available }
 
-    private static var mic: MicCapture?
+    private static var subscription: MicTap.Subscription?
     private static var session: (any SpeechSession)?
     private static var drain: Task<Void, Never>?
     private static var generation = 0
@@ -121,6 +121,13 @@ enum VigilVoice {
 
         Task {
             do {
+                // The grant precedes everything: an unauthorized engine
+                // "runs" delivering zeros and MicCapture.start now throws.
+                guard await MicCapture.requestAccess() else {
+                    trace?("voice: microphone DENIED - System Settings > Privacy > Microphone")
+                    stop(reason: "mic denied")
+                    return
+                }
                 let session: any SpeechSession
                 if locales.count > 1 {
                     var configuration = ArbitratedSession.Configuration(locales: locales)
@@ -134,20 +141,23 @@ enum VigilVoice {
                     configuration.sink = VoiceLogSink()
                     session = try await TranscriptionSession(configuration: configuration)
                 }
-                let mic = MicCapture(voiceProcessing: true, floorKind: "dictation", sink: VoiceLogSink())
                 guard generation == gen, activePane == pane else {
                     await session.finish()
                     return
                 }
                 Self.session = session
-                Self.mic = mic
-                try mic.start { buffer in
+                // The shared warm tap: consecutive dictations (and the ask
+                // gate) reuse one hot voice-processed engine instead of
+                // paying VPIO construction per start.
+                MicTap.shared.sink = VoiceLogSink()
+                Self.subscription = try MicTap.shared.subscribe { buffer in
                     session.feed(buffer)
                     spectrum.ingest(buffer)
                 }
                 trace?(
-                    "voice: capture voiceProcessed=\(mic.voiceProcessed)"
-                        + " (OS AEC \(mic.voiceProcessed ? "on - self-audio subtracted" : "OFF"))")
+                    "voice: capture voiceProcessed=\(MicTap.shared.voiceProcessed)"
+                        + " (OS AEC \(MicTap.shared.voiceProcessed ? "on - self-audio subtracted" : "OFF"))"
+                )
                 Self.drain = Task {
                     do {
                         for try await segment in session.segments where segment.isFinal {
@@ -180,8 +190,8 @@ enum VigilVoice {
         activePane = nil
         spectrum.reset()
         if talk.engaged { talk.stop() }
-        mic?.stop()
-        mic = nil
+        subscription?.cancel()
+        subscription = nil
         let session = self.session
         self.session = nil
         drain = nil
