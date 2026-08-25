@@ -2,7 +2,7 @@
 // no reason to link answer channels for a terminal prompt.
 #if os(macOS)
 import AppKit
-import Ask
+import AskKit
 import AskListen
 import AskNod
 import Listen
@@ -69,7 +69,7 @@ enum VigilAsk {
     /// the channels that were offered. Blind and busy asks never reached
     /// the human - nothing to ledger.
     private static let ledgerURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".local/state/nod-gate/decisions.jsonl")
+        .appendingPathComponent(".local/state/ask-gate/decisions.jsonl")
 
     private static func ledger(_ receipt: AskReceipt, pane: String?, offered: String) {
         var entry: [String: Any] = [
@@ -116,7 +116,7 @@ enum VigilAsk {
         var sources: [any AnswerSource] = []
         if nodEnabled, nodAvailable { sources.append(NodSource()) }
         if voiceEnabled, voiceAvailable {
-            sources.append(VoiceSource(locale: Locale.current))
+            sources.append(VoiceSource(locales: VigilVoice.candidateLocales))
         }
         guard !sources.isEmpty else { return completion(nil, "unavailable") }
         guard !Ask.isAsking else { return completion(nil, "busy") }

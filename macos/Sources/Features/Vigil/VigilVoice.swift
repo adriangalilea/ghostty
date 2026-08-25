@@ -20,10 +20,22 @@ enum VigilVoice {
     /// Fires on start/stop so the status item can show the mic.
     static var onStateChange: (() -> Void)?
 
-    /// Dictation language: "auto" (the session cortex's leaning, else the
-    /// system) or an explicit BCP-47 id - the sidebar mic button's context
-    /// menu writes it.
+    /// Dictation language: "auto" runs the candidate locales ARBITRATED -
+    /// one recognizer each, per-utterance confidence verdict, the Spanglish
+    /// answer ("Hola que tal" through the English model alone was
+    /// "Oh, like it.") - or an explicit BCP-47 id for one recognizer. The
+    /// sidebar mic button's context menu writes it.
     static let localeKey = "vigil.voice.locale"
+    /// The arbitrated candidate set (comma-separated BCP-47).
+    static let localesKey = "vigil.voice.locales"
+
+    nonisolated static var candidateLocales: [Locale] {
+        let stored = UserDefaults.standard.string(forKey: localesKey) ?? "es-ES, en-US"
+        let ids = stored.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }.filter { !$0.isEmpty }
+        return ids.isEmpty ? [Locale.current] : ids.map(Locale.init(identifier:))
+    }
 
     /// THE interaction state machine (swift-utils Ink): hold-to-talk or
     /// tap-to-latch, shared by the sidebar MicButton's gesture and the
@@ -59,7 +71,7 @@ enum VigilVoice {
     static var available: Bool { MicCapture.available }
 
     private static var mic: MicCapture?
-    private static var session: TranscriptionSession?
+    private static var session: (any SpeechSession)?
     private static var drain: Task<Void, Never>?
     private static var generation = 0
 
@@ -93,30 +105,31 @@ enum VigilVoice {
 
         let preference = UserDefaults.standard.string(forKey: localeKey) ?? "auto"
         let identity = VigilSessionManager.shared.cortexIdentity(ofPane: pane)
-        var locale = Locale.current
-        if preference == "auto" {
-            if let lang = identity?.lang, lang == "es" || lang == "en" {
-                locale = Locale(identifier: lang == "es" ? "es-ES" : "en-US")
-            }
-        } else {
-            locale = Locale(identifier: preference)
-        }
+        let locales = preference == "auto" ? candidateLocales : [Locale(identifier: preference)]
         var grounding = GroundingSet()
         if let keywords = identity?.keywords, !keywords.isEmpty {
             grounding[.session] = keywords
         }
         trace?(
-            "voice: dictation -> \(pane) locale=\(locale.identifier(.bcp47))"
+            "voice: dictation -> \(pane)"
+                + " locales=\(locales.map { $0.identifier(.bcp47) }.joined(separator: "+"))"
                 + " grounding=\(grounding.totalCount) mic=\"\(MicCapture.inputName)\"")
 
         Task {
             do {
-                var configuration = TranscriptionSession.Configuration(locale: locale)
-                configuration.volatileResults = false
-                configuration.fastResults = true
-                configuration.grounding = grounding
-                configuration.sink = VoiceLogSink()
-                let session = try await TranscriptionSession(configuration: configuration)
+                let session: any SpeechSession
+                if locales.count > 1 {
+                    var configuration = ArbitratedSession.Configuration(locales: locales)
+                    configuration.grounding = grounding
+                    configuration.sink = VoiceLogSink()
+                    session = try await ArbitratedSession(configuration: configuration)
+                } else {
+                    var configuration = TranscriptionSession.Configuration(locale: locales[0])
+                    configuration.fastResults = true
+                    configuration.grounding = grounding
+                    configuration.sink = VoiceLogSink()
+                    session = try await TranscriptionSession(configuration: configuration)
+                }
                 let mic = MicCapture()
                 guard generation == gen, activePane == pane else {
                     await session.finish()

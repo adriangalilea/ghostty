@@ -1,5 +1,5 @@
 import AppKit
-import Ask
+import AskKit
 import SwiftUI
 import GhosttyKit
 
@@ -501,11 +501,11 @@ class VigilSessionManager {
         }
         startEventWatcher()
         startStateDirWatcher()
-        // The nod gate pumps at the same chokepoints the summon does: any
+        // The ask gate pumps at the same chokepoints the summon does: any
         // state change may mean a pane just blocked on permission.
         NotificationCenter.default.addObserver(
             forName: Self.stateDidChange, object: nil, queue: .main
-        ) { [weak self] _ in self?.pumpNodGate() }
+        ) { [weak self] _ in self?.pumpAskGate() }
         // The summon engine subscribes to the same chokepoints; next tick,
         // never re-entrant with this init.
         DispatchQueue.main.async { _ = VigilSummon.shared }
@@ -1041,10 +1041,10 @@ class VigilSessionManager {
         let container: String
         let event: String
         /// The permission notification's text, forwarded by the claude hook so
-        /// the nod gate can SPEAK the request instead of a generic bell.
+        /// the ask gate can SPEAK the request instead of a generic bell.
         let msg: String?
         /// Hook-stamped time. The events log is offset-tailed and REPLAYS at
-        /// launch; attention wants that (it queues), the nod gate must not: a
+        /// launch; attention wants that (it queues), the ask gate must not: a
         /// spoken ask for a prompt answered hours ago is a ghost.
         let ts: String?
         /// The vigild pane daemon the agent lives in. Ground truth for
@@ -1144,7 +1144,7 @@ class VigilSessionManager {
             // events shadow every Stop and must never feed this map.
             if event.event == "Notification", let m = event.msg, !m.isEmpty,
                let msgPane = event.pane, !msgPane.isEmpty {
-                nodPaneMsg[msgPane] = m
+                askGateMsg[msgPane] = m
             }
             // Presence beats attention, PANE-granular: only an event whose
             // console is actually on screen is already answered. A watched
@@ -1325,7 +1325,7 @@ class VigilSessionManager {
     /// watched a video with the vigil window standing beside Safari
     /// (2026-08-23, "just heard the bell, had to go to the terminal").
     /// On ANY screen, not just the key window: a pane whose console is
-    /// visibly on a display is answerable in place (the nod gate speaks it,
+    /// visibly on a display is answerable in place (the ask gate speaks it,
     /// eyes and keyboard are already there if wanted). Ripping its tab into
     /// the floating panel takes glass Adrian can SEE and moves it somewhere
     /// else (2026-08-24, second-screen pane floated: "nonsense, why switch
@@ -2086,7 +2086,7 @@ class VigilSessionManager {
         try? p.run()
     }
 
-    /// The nod gate's answer, typed IN-PROCESS through the pane's own
+    /// The ask gate's answer, typed IN-PROCESS through the pane's own
     /// surface: the exact bytes a keypress produces, no Enter. `vigild
     /// send` is LINE delivery (payload + \r, queued if a resume is pending):
     /// right for a verdict sentence, wrong for a prompt answer - its Enter
@@ -2095,7 +2095,7 @@ class VigilSessionManager {
     /// exists is exactly what must never be delivered. Receipted: the type
     /// line, then the state sampled at 0.7s and 2.5s (the flip rides the
     /// hook, over a second on a keyboard-equivalent path).
-    private func typeNodAnswer(pane: String, keys: String, since: Date) {
+    private func typeAskAnswer(pane: String, keys: String, since: Date) {
         let label = keys == "1" ? "'1'" : "esc"
         // `vigild sendraw` = one 'd' keystroke frame, the same bytes an
         // attached client sends per keypress: every daemon delivers it
@@ -2114,18 +2114,18 @@ class VigilSessionManager {
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             DispatchQueue.main.async {
                 self?.vlog(
-                    "nod gate: typed \(label) -> \(pane) via sendraw exit=\(proc.terminationStatus)"
+                    "ask gate: typed \(label) -> \(pane) via sendraw exit=\(proc.terminationStatus)"
                         + (stderr.isEmpty ? "" : " stderr=\(stderr)"))
             }
         }
         do { try p.run() } catch {
-            vlog("nod gate: type \(label) -> \(pane) FAILED to launch sendraw: \(error.localizedDescription)")
+            vlog("ask gate: type \(label) -> \(pane) FAILED to launch sendraw: \(error.localizedDescription)")
             return
         }
         for (delay, final) in [(0.7, false), (2.5, true)] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let state = self?.paneAgentState(pane)?.state else {
-                    self?.vlog("nod gate: post-type+\(delay)s \(pane) state file GONE")
+                    self?.vlog("ask gate: post-type+\(delay)s \(pane) state file GONE")
                     return
                 }
                 if state != .blocked, final { return }
@@ -2135,11 +2135,11 @@ class VigilSessionManager {
                 let sameBlock = abs(
                     (self?.paneAgentState(pane)?.since.timeIntervalSince(since)) ?? 1) < 0.5
                 if state == .blocked, !sameBlock {
-                    self?.vlog("nod gate: post-type+\(delay)s \(pane) blocked by the NEXT prompt (chained), answer landed")
+                    self?.vlog("ask gate: post-type+\(delay)s \(pane) blocked by the NEXT prompt (chained), answer landed")
                     return
                 }
                 self?.vlog(
-                    "nod gate: post-type+\(delay)s \(pane) state=\(state)"
+                    "ask gate: post-type+\(delay)s \(pane) state=\(state)"
                         + (state == .blocked && final ? " !! STILL BLOCKED, keystroke did not land" : ""))
             }
         }
@@ -4329,7 +4329,7 @@ class VigilSessionManager {
     // MARK: Nod gate (permission prompts answered by head, one at a time)
 
     /// What to SPEAK for a blocked pane; state files carry no message.
-    private var nodPaneMsg: [String: String] = [:]
+    private var askGateMsg: [String: String] = [:]
     /// Panes already asked during their CURRENT blocking episode. Pruned the
     /// moment a pane stops being permission-blocked, so a fresh prompt asks
     /// fresh, but a timeout does not re-ask in a loop while the same prompt
@@ -4338,21 +4338,21 @@ class VigilSessionManager {
     /// reads, so an answered prompt (by ANY means, nod or keyboard) clears
     /// itself and the next blocked pane gets asked. A second store here is
     /// how the first version dropped back-to-back prompts.
-    private var nodAsked: [String: Date] = [:]
-    private var nodUnblockedAt: [String: Date] = [:]
+    private var askGateAskedAt: [String: Date] = [:]
+    private var askGateUnblockedAt: [String: Date] = [:]
     /// A just-answered pane is DEAF for a beat: the answer needs time to flip
     /// the state, and the prompt's second signal path (Notification arriving
     /// after the guard row) otherwise re-blocks and re-asks a resolved prompt.
-    private var nodResolvedAt: [String: Date] = [:]
+    private var askGateResolvedAt: [String: Date] = [:]
     /// The pane whose ask is live right now; cancelled if answered elsewhere.
-    private var nodAskingPane: String?
+    private var askGatePane: String?
     /// Re-asks are BOUNDED: three narrations per (pane, block-start), then
     /// silence until the state file changes. Unbounded 22s re-asks narrated
     /// a stale blocked file forever and typed a verdict into a pane with no
     /// prompt standing (2026-08-25, the ghost "1").
-    private var nodAskCount: [String: (since: Date, count: Int)] = [:]
+    private var askGateCount: [String: (since: Date, count: Int)] = [:]
 
-    func pumpNodGate() {
+    func pumpAskGate() {
         // Every silent exit is LOGGED: "it said nothing" must be answerable
         // from the log alone, or debugging is guesswork about AirPods.
         guard VigilAsk.nodEnabled || VigilAsk.voiceEnabled else { return }
@@ -4368,10 +4368,10 @@ class VigilSessionManager {
         // The active ask dies the moment its prompt is answered elsewhere:
         // blips after a keyboard allow are noise about a decision already
         // made (2026-08-24, "nod was still active in the background").
-        if let asking = nodAskingPane,
+        if let asking = askGatePane,
            paneAgentState(asking)?.state != .blocked {
             VigilAsk.cancel(pane: asking)
-            nodAskingPane = nil
+            askGatePane = nil
         }
         let now = Date()
         let ripe = blocked.filter { now.timeIntervalSince($0.since) > 1.2 }
@@ -4380,7 +4380,7 @@ class VigilSessionManager {
         if ripe.isEmpty, let youngest = blocked.map(\.since).max() {
             let wait = 1.3 - now.timeIntervalSince(youngest)
             if wait > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.pumpNodGate() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.pumpAskGate() }
             }
         }
         // Asked-until-unblocked: one prompt arrives through TWO signal paths
@@ -4389,8 +4389,8 @@ class VigilSessionManager {
         // observation can: a pane asked once is not asked again until the pump
         // SEES it unblocked (or 22s pass, the ask timeout's ceiling).
         let blockedPanes = Set(blocked.map(\.pane))
-        for pane in nodAsked.keys where !blockedPanes.contains(pane) {
-            nodUnblockedAt[pane] = now
+        for pane in askGateAskedAt.keys where !blockedPanes.contains(pane) {
+            askGateUnblockedAt[pane] = now
         }
         // ONE queue: the gate asks for what is in FRONT of Adrian — the
         // summoned pane, else the focused one, else visible glass — and only
@@ -4398,10 +4398,10 @@ class VigilSessionManager {
         // background session's stale prompt wedge the gate for 20s while the
         // prompt he was ANSWERING waited behind it (2026-08-24, T4).
         func eligible(_ c: SummonCandidate) -> Bool {
-            if let resolved = nodResolvedAt[c.pane], c.since.timeIntervalSince(resolved) < 2 { return false }
-            if let tally = nodAskCount[c.pane], tally.since == c.since, tally.count >= 3 { return false }
-            guard let asked = nodAsked[c.pane] else { return true }
-            if let freed = nodUnblockedAt[c.pane], freed > asked { return true }
+            if let resolved = askGateResolvedAt[c.pane], c.since.timeIntervalSince(resolved) < 2 { return false }
+            if let tally = askGateCount[c.pane], tally.since == c.since, tally.count >= 3 { return false }
+            guard let asked = askGateAskedAt[c.pane] else { return true }
+            if let freed = askGateUnblockedAt[c.pane], freed > asked { return true }
             return now.timeIntervalSince(asked) > 22
         }
         let summoned = VigilSummon.shared.currentAskPane
@@ -4409,23 +4409,23 @@ class VigilSessionManager {
             ?? ripe.first { paneVisible($0.pane) && eligible($0) }
             ?? ripe.first { paneOnAnyScreen($0.pane) && eligible($0) }
         // In-front asks PREEMPT a wedged ask for glass he is not looking at.
-        if let front = preferred, let asking = nodAskingPane, asking != front.pane {
+        if let front = preferred, let asking = askGatePane, asking != front.pane {
             VigilAsk.cancel(pane: asking, reason: "preempted")
-            nodAsked[asking] = nil   // it re-asks when its turn returns
-            nodAskingPane = nil
+            askGateAskedAt[asking] = nil   // it re-asks when its turn returns
+            askGatePane = nil
         }
         guard let next = preferred ?? ripe.first(where: eligible) else { return }
-        nodAsked[next.pane] = now
-        if let tally = nodAskCount[next.pane], tally.since == next.since {
-            nodAskCount[next.pane] = (next.since, tally.count + 1)
+        askGateAskedAt[next.pane] = now
+        if let tally = askGateCount[next.pane], tally.since == next.since {
+            askGateCount[next.pane] = (next.since, tally.count + 1)
         } else {
-            nodAskCount[next.pane] = (next.since, 1)
+            askGateCount[next.pane] = (next.since, 1)
         }
-        nodAskingPane = next.pane
+        askGatePane = next.pane
         vlog("ask gate: asking pane \(next.pane)")
-        let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
+        let spoken = askGateMsg[next.pane] ?? "a permission request in \(next.name)"
         VigilAsk.ask(spoken, pane: next.pane) { [weak self] answer, verdict in
-            self?.nodAskingPane = nil
+            self?.askGatePane = nil
             if let answer {
                 // A verdict types ONLY into a still-blocked pane. A late
                 // duplicate signal once re-asked for an answered prompt and
@@ -4436,11 +4436,11 @@ class VigilSessionManager {
                     // grant: that is a seated decision, not a head movement
                     // or a word said across the room.
                     let keys = answer == .yes ? "1" : "\u{1b}"
-                    self?.typeNodAnswer(pane: next.pane, keys: keys, since: next.since)
+                    self?.typeAskAnswer(pane: next.pane, keys: keys, since: next.since)
                 } else {
-                    self?.vlog("nod gate: verdict for \(next.pane) dropped, prompt no longer standing")
+                    self?.vlog("ask gate: verdict for \(next.pane) dropped, prompt no longer standing")
                 }
-                self?.nodResolvedAt[next.pane] = Date()
+                self?.askGateResolvedAt[next.pane] = Date()
             }
             // An ANSWERED ask closes its episode by event: allow, deny and
             // superseded all mean THIS prompt is resolved, so the pane's next
@@ -4448,9 +4448,9 @@ class VigilSessionManager {
             // timeout keeps the 22s guard (the same unanswered prompt must
             // not re-ask in a loop); preempted was already cleared.
             if verdict == "allow" || verdict == "deny" || verdict == "superseded" {
-                self?.nodAsked[next.pane] = nil
+                self?.askGateAskedAt[next.pane] = nil
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self?.pumpNodGate() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self?.pumpAskGate() }
         }
     }
 

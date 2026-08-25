@@ -261,7 +261,7 @@ struct VigilSidebarView: View {
                 }
                 .contextMenu {
                     Picker("Language", selection: dictationLocale) {
-                        Text("Auto (session)").tag("auto")
+                        Text("Auto (es+en, arbitrated)").tag("auto")
                         Text("Español").tag("es-ES")
                         Text("English").tag("en-US")
                     }
