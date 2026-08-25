@@ -11,7 +11,7 @@ import Listen
 /// interleave freely and the human submits. (`vigild send` auto-submits;
 /// using it for prose is the stray-'1' class of bug.) Finalized phrases
 /// only; the live transcription session carries the session cortex's
-/// keywords as grounding and its language leaning as the locale.
+/// keywords as grounding.
 @MainActor
 enum VigilVoice {
     /// Receipts land in vigil.log: "I spoke and nothing happened" vs
@@ -80,9 +80,13 @@ enum VigilVoice {
     /// focus change mid-dictation must not spray text into another pane.
     static func startFocused() {
         guard !isActive else { return }
+        // ⌃⌥M is system-wide: with Ghostty inactive there is no key window,
+        // so the target falls back to the last-main terminal - the surface
+        // the human last worked in (the same resolution every other
+        // inactive-app action uses).
         guard
-            let surface = (NSApp.keyWindow?.windowController as? TerminalController)?
-                .focusedSurface,
+            let surface = ((NSApp.keyWindow?.windowController as? TerminalController)
+                ?? TerminalController.preferredParent)?.focusedSurface,
             let pane = surface.vigilAttachId
         else {
             trace?("voice: no focused vigil pane to dictate into")
@@ -152,7 +156,13 @@ enum VigilVoice {
                         }
                     } catch {
                         await MainActor.run {
-                            trace?("voice: session error \(error.localizedDescription)")
+                            // A mid-stream failure tears down through the ONE
+                            // path: a mic left hot with a claimed floor and a
+                            // lit glyph is a lying UI. Generation-guarded - a
+                            // deliberate stop that raced this error already
+                            // tore down a successor's session.
+                            guard generation == gen else { return }
+                            stop(reason: "session error: \(error.localizedDescription)")
                         }
                     }
                 }
@@ -169,7 +179,7 @@ enum VigilVoice {
         trace?("voice: dictation stopped (\(reason))")
         generation += 1
         activePane = nil
-        VoiceFloor.release()
+        VoiceFloor.release(kind: "dictation")
         spectrum.reset()
         if talk.engaged { talk.stop() }
         mic?.stop()
@@ -181,6 +191,9 @@ enum VigilVoice {
             Task { await session.finish() }
         }
         onStateChange?()
+        // The ask gate defers while dictation owns the voice channel;
+        // stopping IS its re-arm event (the gate polls nothing).
+        VigilSessionManager.shared.pumpAskGate()
     }
 
     /// One finalized phrase -> raw keystrokes, trailing space so the next
@@ -188,10 +201,8 @@ enum VigilVoice {
     private static func inject(_ text: String, into pane: String) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        let vigild = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin/vigild").path
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: vigild)
+        process.executableURL = URL(fileURLWithPath: VigilSessionManager.vigildBin)
         process.arguments = ["sendraw", pane, clean + " "]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice

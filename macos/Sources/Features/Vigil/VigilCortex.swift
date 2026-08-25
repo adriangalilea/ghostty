@@ -4,10 +4,9 @@ import Foundation
 import FoundationModels
 
 /// The session cortex: ONE on-device read of a session's context yields its
-/// whole identity - emoji, label, the proper nouns worth grounding a
-/// dictation with, and which language the session leans toward. The
-/// identity editor consumes emoji+label; dictation consumes keywords+lang.
-/// One schema, one model, no second brain.
+/// whole identity - emoji, label, and the proper nouns worth grounding a
+/// dictation with. The identity editor consumes emoji+label; dictation
+/// consumes keywords. One schema, one model, no second brain.
 ///
 /// Refresh is lazy + cached: `identity(ofPane:)` returns the cached read
 /// when it is fresh (same context hash, or under 10 minutes old) and
@@ -17,9 +16,6 @@ import FoundationModels
 enum VigilCortex {
     struct Read {
         let keywords: [String]
-        /// "en" / "es" / "mixed" - the session's leaning, not a per-message
-        /// verdict.
-        let lang: String?
         let contextHash: Int
         let at: Date
     }
@@ -31,7 +27,7 @@ enum VigilCortex {
 
     /// The generation target shared with the identity editor. anyOf over the
     /// palette + count guides: the model physically cannot emit an invalid
-    /// emoji, a wrong shape, or an unknown language tag.
+    /// emoji or a wrong shape.
     @available(macOS 26.0, *)
     @Generable(description: "An identity for a terminal workspace session")
     struct SessionRead {
@@ -49,10 +45,6 @@ enum VigilCortex {
                 "up to 6 proper nouns or rare technical terms from the work: names of people, places, projects, commands. Only words a speech recognizer would misspell; no common words",
             .maximumCount(6))
         var keywords: [String]
-        @Guide(
-            description: "the language the human's requests lean toward",
-            .anyOf(["en", "es", "mixed"]))
-        var lang: String
     }
 
     @available(macOS 26.0, *)
@@ -64,7 +56,7 @@ enum VigilCortex {
                 emoji plus a short evocative name, 2 to 4 lowercase words, no \
                 punctuation. Name the task being done, not the tools. You also \
                 extract the words a speech recognizer would need to be told \
-                about, and the language the human works in.
+                about.
                 """)
         var prompt = context
         if !avoiding.isEmpty {
@@ -102,12 +94,9 @@ enum VigilCortex {
             let entry = Read(
                 keywords: read.keywords.map { $0.trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty },
-                lang: read.lang,
                 contextHash: hash, at: Date())
             cache[name] = entry
-            trace?(
-                "cortex: \(name) lang=\(entry.lang ?? "?")"
-                    + " keywords=[\(entry.keywords.joined(separator: ", "))]")
+            trace?("cortex: \(name) keywords=[\(entry.keywords.joined(separator: ", "))]")
         }
     }
 }

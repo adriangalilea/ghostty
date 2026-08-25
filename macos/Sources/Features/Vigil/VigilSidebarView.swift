@@ -19,9 +19,6 @@ struct VigilSidebarView: View {
     @AppStorage(VigilAsk.voiceKey) private var voiceGate = false
     @AppStorage(VigilVoice.localeKey) private var voiceLocale = "auto"
 
-    private var dictationLocale: Binding<String> {
-        Binding(get: { voiceLocale }, set: { voiceLocale = $0 })
-    }
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
     private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
@@ -260,7 +257,7 @@ struct VigilSidebarView: View {
                     Spacer()
                 }
                 .contextMenu {
-                    Picker("Language", selection: dictationLocale) {
+                    Picker("Language", selection: $voiceLocale) {
                         Text("Auto (es+en, arbitrated)").tag("auto")
                         Text("Español").tag("es-ES")
                         Text("English").tag("en-US")

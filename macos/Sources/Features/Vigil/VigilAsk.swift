@@ -40,7 +40,7 @@ enum VigilAsk {
     /// session manager; the package's receipts flow through it with an
     /// "ask " prefix, so the log reads as one voice.
     nonisolated(unsafe) static var trace: ((String) -> Void)?
-    private nonisolated(unsafe) static var activePane: String?
+    private static var activePane: String?
     private nonisolated(unsafe) static var wired = false
 
     /// Route flips on the log's own timeline, where they HAPPEN, not where
@@ -61,6 +61,11 @@ enum VigilAsk {
         guard activePane == pane else { return }
         Ask.cancel(reason: reason)
     }
+
+    /// A begun ask that has not COMPLETED yet, teardown included: a
+    /// cancelled ask stays in flight until its epilogue lands. The pump's
+    /// begin guard - asking through it would land "busy".
+    static var inFlight: Bool { Ask.isAsking }
 
     /// One jsonl line per DECISION, alongside cmd-guard's ledger in spirit:
     /// the permission state machine must know WHICH layer answered a prompt
@@ -134,7 +139,13 @@ enum VigilAsk {
             case .blind, .busy:
                 break
             }
-            DispatchQueue.main.async {
+            // Ask's completion runs on the main actor in the SAME turn that
+            // flips it out of flight: cleanup and the caller's completion
+            // are atomic against every other main-queue event. The async
+            // re-hop that used to sit here opened a window where a stale
+            // epilogue nulled a successor ask's activePane, making its own
+            // answered-elsewhere cancel a no-op.
+            MainActor.assumeIsolated {
                 activePane = nil
                 completion(receipt.verdict.answer, receipt.verdict.label)
             }

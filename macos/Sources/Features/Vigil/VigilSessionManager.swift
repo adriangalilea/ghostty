@@ -985,13 +985,13 @@ class VigilSessionManager {
     /// claim. Write-only from here; never read back to second-guess the
     /// registry.
     private func chown(_ id: String, to owner: String) {
-        runFireAndForget(vigildBin, ["chown", id, owner])
+        runFireAndForget(Self.vigildBin, ["chown", id, owner])
     }
 
-    private var vigildBin: String {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/bin/vigild").path
-    }
+    /// THE vigild path: every spawn (chown, sendraw, restore) and
+    /// VigilVoice's inject derive it here, nowhere else.
+    static let vigildBin = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/bin/vigild").path
 
     // MARK: Recency (the successor order when the session you are in dies)
 
@@ -1059,8 +1059,8 @@ class VigilSessionManager {
         sessions.first { ownedPaneIds($0.value).contains(pane) }?.key
     }
 
-    /// The cortex read (grounding keywords + language leaning) for the
-    /// session owning this pane; nil while no read exists yet.
+    /// The cortex read (grounding keywords) for the session owning this
+    /// pane; nil while no read exists yet.
     func cortexIdentity(ofPane pane: String) -> VigilCortex.Read? {
         guard let name = sessionOwning(pane: pane) else { return nil }
         return VigilCortex.identity(session: name)
@@ -2103,7 +2103,7 @@ class VigilSessionManager {
         // ghostty_surface_text was tried and never reached the pty
         // (receipted 2026-08-25 08:42: allow -> STILL BLOCKED).
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: vigildBin)
+        p.executableURL = URL(fileURLWithPath: Self.vigildBin)
         p.arguments = ["sendraw", pane, keys]
         p.standardOutput = FileHandle.nullDevice
         let err = Pipe()
@@ -3970,7 +3970,7 @@ class VigilSessionManager {
     /// log and the state files of the dead are pruned when it returns.
     private func killDaemons(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }
-        let bin = vigildBin
+        let bin = Self.vigildBin
         let sorted = ids.sorted()
         let stateDir = vigildStateDir
         let agentDir = agentStateDir
@@ -4329,6 +4329,9 @@ class VigilSessionManager {
     // MARK: Nod gate (permission prompts answered by head, one at a time)
 
     /// What to SPEAK for a blocked pane; state files carry no message.
+    /// Pruned the moment the pump sees the pane unblocked, so a fresh
+    /// prompt can never be narrated with the previous prompt's text (the
+    /// msg row rides the 1s events drain; the pump rides the state dir).
     private var askGateMsg: [String: String] = [:]
     /// Panes already asked during their CURRENT blocking episode. Pruned the
     /// moment a pane stops being permission-blocked, so a fresh prompt asks
@@ -4368,10 +4371,26 @@ class VigilSessionManager {
         // The active ask dies the moment its prompt is answered elsewhere:
         // blips after a keyboard allow are noise about a decision already
         // made (2026-08-24, "nod was still active in the background").
+        // Cancel is TERMINAL for this pass: teardown is async (Ask stays
+        // in flight until its epilogue lands) and every completion re-pumps
+        // at +0.25s, so the handoff to the next pane is completion-driven.
+        // Beginning here landed "busy" with the stamp already written and
+        // muted the very prompt the handoff serves (the T4 wedge rebuilt).
         if let asking = askGatePane,
            paneAgentState(asking)?.state != .blocked {
             VigilAsk.cancel(pane: asking)
             askGatePane = nil
+            return
+        }
+        // One owner of the voice channel (cancellation above still wins):
+        // live dictation means the human is mid-utterance. Asking now would
+        // narrate over them AND hear their answer twice - the gate types "1"
+        // while dictation injects "yes " into the input line as prose (the
+        // stray-'1' class of bug through the front door). VigilVoice.stop
+        // re-pumps; nothing polls.
+        guard !VigilVoice.isActive else {
+            vlog("ask gate: deferred, dictation live")
+            return
         }
         let now = Date()
         let ripe = blocked.filter { now.timeIntervalSince($0.since) > 1.2 }
@@ -4392,6 +4411,9 @@ class VigilSessionManager {
         for pane in askGateAskedAt.keys where !blockedPanes.contains(pane) {
             askGateUnblockedAt[pane] = now
         }
+        for pane in askGateMsg.keys where !blockedPanes.contains(pane) {
+            askGateMsg[pane] = nil
+        }
         // ONE queue: the gate asks for what is in FRONT of Adrian — the
         // summoned pane, else the focused one, else visible glass — and only
         // then the summon's own ordering. Its private oldest-first walk let a
@@ -4409,10 +4431,22 @@ class VigilSessionManager {
             ?? ripe.first { paneVisible($0.pane) && eligible($0) }
             ?? ripe.first { paneOnAnyScreen($0.pane) && eligible($0) }
         // In-front asks PREEMPT a wedged ask for glass he is not looking at.
+        // Terminal for this pass, same as the cancel above: the preempted
+        // ask's completion re-pumps once teardown lands, and THAT pass
+        // starts the front pane's ask cleanly.
         if let front = preferred, let asking = askGatePane, asking != front.pane {
             VigilAsk.cancel(pane: asking, reason: "preempted")
             askGateAskedAt[asking] = nil   // it re-asks when its turn returns
             askGatePane = nil
+            return
+        }
+        // One ask at a time, teardown included: in-flight spans begin to
+        // epilogue, so this also covers the gap after a cancel whose
+        // completion has not landed yet. The live ask's completion re-pumps;
+        // beginning here is the "busy" path, deleted from the gate entirely.
+        guard !VigilAsk.inFlight else {
+            vlog("ask gate: ask in flight, deferred")
+            return
         }
         guard let next = preferred ?? ripe.first(where: eligible) else { return }
         askGateAskedAt[next.pane] = now
@@ -4425,6 +4459,9 @@ class VigilSessionManager {
         vlog("ask gate: asking pane \(next.pane)")
         let spoken = askGateMsg[next.pane] ?? "a permission request in \(next.name)"
         VigilAsk.ask(spoken, pane: next.pane) { [weak self] answer, verdict in
+            // The gate never begins while an ask is in flight; a busy
+            // verdict means it raced a consumer it does not know about.
+            assert(verdict != "busy", "ask gate: busy verdict - a second ask consumer exists")
             self?.askGatePane = nil
             if let answer {
                 // A verdict types ONLY into a still-blocked pane. A late
@@ -4432,11 +4469,21 @@ class VigilSessionManager {
                 // the nod's "1" landed in a pane with no prompt standing - a
                 // stray keystroke into the agent's input (2026-08-24 20:07).
                 if self?.paneAgentState(next.pane)?.state == .blocked {
+                    switch answer {
                     // "1" approves ONCE; escape backs out. Never the standing
                     // grant: that is a seated decision, not a head movement
                     // or a word said across the room.
-                    let keys = answer == .yes ? "1" : "\u{1b}"
-                    self?.typeAskAnswer(pane: next.pane, keys: keys, since: next.since)
+                    case .yes:
+                        self?.typeAskAnswer(pane: next.pane, keys: "1", since: next.since)
+                    case .no:
+                        self?.typeAskAnswer(pane: next.pane, keys: "\u{1b}", since: next.since)
+                    // The gate offers no choice asks; a .option verdict
+                    // mapped onto yes/no would silently deny the human's
+                    // "option one". Scream and touch nothing.
+                    case .option:
+                        assertionFailure("ask gate: .option verdict with no choice ask offered")
+                        self?.vlog("ask gate: .option verdict for \(next.pane) dropped, no choice ask offered")
+                    }
                 } else {
                     self?.vlog("ask gate: verdict for \(next.pane) dropped, prompt no longer standing")
                 }
