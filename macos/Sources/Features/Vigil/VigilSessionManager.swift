@@ -1614,6 +1614,8 @@ class VigilSessionManager {
             // with this one live tab.
             let dock = loanedDock
             loanedDock = nil
+            let reselect = loanedWasSelected
+            loanedWasSelected = false
             if !tree.isEmpty {
                 if let ghostty = ghosttyApp,
                    let host = (focusWindow(of: name)?.windowController as? TerminalController)
@@ -1624,7 +1626,11 @@ class VigilSessionManager {
                         dockMap.setObject(dock, forKey: controller)
                         VigilBars.shared.sync(controller)
                     }
-                    vlog("reclaim: loaned tab of '\(name)' returned as native tab")
+                    if reselect, let w = controller.window, let group = w.tabGroup {
+                        group.selectedWindow = w
+                    }
+                    vlog("reclaim: loaned tab of '\(name)' returned as native tab"
+                        + (reselect ? " (re-selected, it was his tab)" : ""))
                 } else {
                     sessions[name]!.state = .detached([TabRuntime(tree: tree, dock: dock)])
                     vlog("reclaim: loaned tab of '\(name)' -> detached (windows died while away)")
@@ -1658,6 +1664,11 @@ class VigilSessionManager {
     /// floats); part of the panel-occupancy trio with floatingName and
     /// stashedQuickTree.
     private var loanedDock: VigilDockRuntime?
+    /// The loaned tab was its window's SELECTED tab when it left: the loan
+    /// yanks it and AppKit selects a neighbor, so Adrian returns from
+    /// another app to find himself on the wrong tab unless reclaim
+    /// re-selects (2026-08-25). Selection only, never app activation.
+    private var loanedWasSelected = false
 
     /// Take ONE live hidden native tab of an embedded session into the
     /// quick terminal. Membership ends before the member window closes
@@ -1672,6 +1683,9 @@ class VigilSessionManager {
         guard !tree.isEmpty else { return }
         vlog("float: loan tab \(tree.compactMap(\.vigilAttachId)) of '\(name)' -> quick terminal")
         let dock = dockMap.object(forKey: member)
+        let wasSelected = member.window.map { w in
+            w.tabGroup?.selectedWindow === w || w.tabGroup == nil
+        } ?? false
         dock?.unmount()
         dockMap.removeObject(forKey: member)
         memberships.removeObject(forKey: member)
@@ -1683,6 +1697,7 @@ class VigilSessionManager {
             stashedQuickTree = quick.surfaceTree
         }
         loanedDock = dock
+        loanedWasSelected = wasSelected
         floatingName = name
         quickTreeSwap = true
         quick.surfaceTree = tree
