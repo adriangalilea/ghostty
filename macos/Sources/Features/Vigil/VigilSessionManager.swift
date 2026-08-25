@@ -2074,12 +2074,31 @@ class VigilSessionManager {
     /// hook, over a second on a keyboard-equivalent path).
     private func typeNodAnswer(pane: String, keys: String) {
         let label = keys == "1" ? "'1'" : "esc"
-        guard let view = liveView(attachId: pane), let surface = view.surface else {
-            vlog("nod gate: type \(label) -> \(pane) FAILED: no live surface")
+        // `vigild sendraw` = one 'd' keystroke frame, the same bytes an
+        // attached client sends per keypress: every daemon delivers it
+        // verbatim, immediately, no Enter, never queued. In-process
+        // ghostty_surface_text was tried and never reached the pty
+        // (receipted 2026-08-25 08:42: allow -> STILL BLOCKED).
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: vigildBin)
+        p.arguments = ["sendraw", pane, keys]
+        p.standardOutput = FileHandle.nullDevice
+        let err = Pipe()
+        p.standardError = err
+        p.terminationHandler = { [weak self] proc in
+            let stderr = String(
+                data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            DispatchQueue.main.async {
+                self?.vlog(
+                    "nod gate: typed \(label) -> \(pane) via sendraw exit=\(proc.terminationStatus)"
+                        + (stderr.isEmpty ? "" : " stderr=\(stderr)"))
+            }
+        }
+        do { try p.run() } catch {
+            vlog("nod gate: type \(label) -> \(pane) FAILED to launch sendraw: \(error.localizedDescription)")
             return
         }
-        keys.withCString { ghostty_surface_text(surface, $0, UInt(strlen($0))) }
-        vlog("nod gate: typed \(label) -> \(pane) via surface")
         for (delay, final) in [(0.7, false), (2.5, true)] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let state = self?.paneAgentState(pane)?.state else {
