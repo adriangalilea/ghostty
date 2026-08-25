@@ -4393,11 +4393,23 @@ class VigilSessionManager {
             return
         }
         let now = Date()
-        let ripe = blocked.filter { now.timeIntervalSince($0.since) > 1.2 }
+        // EAGER (EXPERIMENTAL, defaults-gated, off by default): the human
+        // SEES the prompt the instant it renders - the 1.2s ripeness gate
+        // plus ~1s of mic/recognizer arming made the first seconds deaf,
+        // and a yes spoken at first sight vanished (drill three,
+        // 2026-08-25). With `vigil.voice.eager` the gate asks almost
+        // immediately: the SCREEN is the announcement, narration is
+        // catch-up. The risks are accepted EXPLICITLY by turning it on:
+        // a decisive word can be accepted before one spoken word of the
+        // question, and a transient block earns a narration stomp
+        // (the terminal cancel above cleans it up). Vigil-only; the ask
+        // package itself never accepts before its sources are live.
+        let minAge = UserDefaults.standard.bool(forKey: VigilAsk.eagerKey) ? 0.15 : 1.2
+        let ripe = blocked.filter { now.timeIntervalSince($0.since) > minAge }
         // A young block is SKIPPED, not dropped: nothing else re-pumps until
         // the next state change, which once cost 7 silent seconds. Re-arm.
         if ripe.isEmpty, let youngest = blocked.map(\.since).max() {
-            let wait = 1.3 - now.timeIntervalSince(youngest)
+            let wait = minAge + 0.1 - now.timeIntervalSince(youngest)
             if wait > 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.pumpAskGate() }
             }
@@ -4456,7 +4468,10 @@ class VigilSessionManager {
             askGateCount[next.pane] = (next.since, 1)
         }
         askGatePane = next.pane
-        vlog("ask gate: asking pane \(next.pane)")
+        vlog(
+            "ask gate: asking pane \(next.pane)"
+                + (UserDefaults.standard.bool(forKey: VigilAsk.eagerKey)
+                    ? " (EAGER: screen announced, narration catches up)" : ""))
         let spoken = askGateMsg[next.pane] ?? "a permission request in \(next.name)"
         VigilAsk.ask(spoken, pane: next.pane) { [weak self] answer, verdict in
             // The gate never begins while an ask is in flight; a busy

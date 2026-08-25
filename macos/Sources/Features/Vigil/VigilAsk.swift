@@ -22,6 +22,13 @@ import os
 enum VigilAsk {
     static let nodKey = "vigil.nod.gate"
     static let voiceKey = "vigil.voice.gate"
+    /// EXPERIMENTAL early-answer window (`defaults write com.mitchellh.ghostty.debug
+    /// vigil.voice.eager -bool true`): the gate asks at prompt ARRIVAL
+    /// instead of the 1.2s ripeness gate, so a yes spoken at first sight of
+    /// the on-screen prompt lands on a live mic. Explicitly accepted risk:
+    /// an answer can be accepted before narration says a word - the screen
+    /// is the announcement. Off by default; vigil-only, never ask-core.
+    static let eagerKey = "vigil.voice.eager"
     static var nodEnabled: Bool { UserDefaults.standard.bool(forKey: nodKey) }
     static var voiceEnabled: Bool { UserDefaults.standard.bool(forKey: voiceKey) }
 
