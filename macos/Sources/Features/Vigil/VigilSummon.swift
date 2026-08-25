@@ -96,7 +96,12 @@ final class VigilSummon {
             }
             if c.pane == current?.pane { return false }
             if manager.paneOnAnyScreen(c.pane) {
-                manager.vlog("summon: in-place \(c.pane) (glass visible, occlusion says shown)")
+                // The full visibility breakdown rides the log line: "it said
+                // in-place but I could not see it" must be decidable from
+                // this receipt alone (2026-08-25, hollow prompts narrated
+                // with no float and the old text blamed occlusion, which
+                // this path stopped consulting a day earlier).
+                manager.vlog("summon: in-place \(c.pane) (\(manager.paneOnScreenReceipt(c.pane)))")
                 return false
             }
             return true

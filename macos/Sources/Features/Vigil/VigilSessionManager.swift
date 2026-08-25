@@ -1336,6 +1336,25 @@ class VigilSessionManager {
         return !view.isHiddenOrHasHiddenAncestor
     }
 
+    /// Why paneOnAnyScreen answered what it answered, as one log-ready
+    /// string. Never used for the decision itself: same inputs, spelled out.
+    func paneOnScreenReceipt(_ pane: String) -> String {
+        var parts: [String] = ["appActive=\(NSApp.isActive)"]
+        guard let view = liveView(attachId: pane) else { return parts.joined(separator: " ") + " view=GONE" }
+        guard let window = view.window else { return parts.joined(separator: " ") + " window=nil (detached)" }
+        parts.append("winVisible=\(window.isVisible)")
+        parts.append("mini=\(window.isMiniaturized)")
+        parts.append("key=\(window.isKeyWindow)")
+        parts.append("hidden=\(view.isHiddenOrHasHiddenAncestor)")
+        if let group = window.tabGroup {
+            parts.append("frontTab=\(group.selectedWindow === window)")
+        }
+        if let controller = window.windowController as? TerminalController {
+            parts.append("mounted='\(sessionName(of: controller) ?? "stray")'")
+        }
+        return parts.joined(separator: " ")
+    }
+
     func summonQueue() -> [SummonCandidate] {
         midTurnAsks { session in
             if case .floating = session.state, session.name != floatingName { return false }
@@ -2036,6 +2055,42 @@ class VigilSessionManager {
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         try? p.run()
+    }
+
+    /// The nod gate's keystroke, RECEIPTED: fire-and-forget was blind, and a
+    /// send that silently failed left a "stuck" prompt indistinguishable
+    /// from a recognizer bug (2026-08-25 07:46). Logs the exit code, then
+    /// samples the pane's state to prove the keystroke actually flipped it.
+    private func runNodSend(_ bin: String, pane: String, keys: String) {
+        let label = keys == "1" ? "'1'" : "esc"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.arguments = ["send", pane, keys]
+        p.standardOutput = FileHandle.nullDevice
+        let err = Pipe()
+        p.standardError = err
+        p.terminationHandler = { [weak self] proc in
+            let stderr = String(
+                data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            DispatchQueue.main.async {
+                self?.vlog(
+                    "nod gate: send \(label) -> \(pane) exit=\(proc.terminationStatus)"
+                        + (stderr.isEmpty ? "" : " stderr=\(stderr)"))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                    guard let state = self?.paneAgentState(pane)?.state else {
+                        self?.vlog("nod gate: post-send \(pane) state file GONE")
+                        return
+                    }
+                    self?.vlog(
+                        "nod gate: post-send \(pane) state=\(state)"
+                            + (state == .blocked ? " !! STILL BLOCKED, keystroke did not land" : ""))
+                }
+            }
+        }
+        do { try p.run() } catch {
+            vlog("nod gate: send \(label) -> \(pane) FAILED to launch: \(error.localizedDescription)")
+        }
     }
 
     /// Refresh live thumbnails for embedded sessions (overview open path).
@@ -4318,7 +4373,7 @@ class VigilSessionManager {
                     // "1" approves ONCE; escape backs out. Never the standing
                     // grant: that is a seated decision, not a head movement.
                     let keys = gesture == .nod ? "1" : "\u{1b}"
-                    self?.runFireAndForget(bin, ["send", next.pane, keys])
+                    self?.runNodSend(bin, pane: next.pane, keys: keys)
                 } else {
                     self?.vlog("nod gate: verdict for \(next.pane) dropped, prompt no longer standing")
                 }
@@ -4337,6 +4392,10 @@ class VigilSessionManager {
     }
 
     private func startStateDirWatcher() {
+        // Gate receipts land beside the summon's in vigil.log: route, speech
+        // start/cut/finish ms, verdict latency + confidence, send exit,
+        // post-send state. One file answers "what did the gate do".
+        VigilNod.trace = { [weak self] line in self?.vlog(line) }
         try? FileManager.default.createDirectory(at: agentStateDir, withIntermediateDirectories: true)
         let fd = Darwin.open(agentStateDir.path, O_EVTONLY)
         guard fd >= 0 else { return }

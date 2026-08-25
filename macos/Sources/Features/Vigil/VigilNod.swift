@@ -32,6 +32,49 @@ enum VigilNod {
     private nonisolated(unsafe) static var activePane: String?
     private nonisolated(unsafe) static var wasCancelled = false
     private nonisolated(unsafe) static var cancelReason = "superseded"
+    private nonisolated(unsafe) static var timedOut = false
+    private nonisolated(unsafe) static var lastAskEnded = Date.distantPast
+
+    // ------------------------------------------------------------------
+    // Instrumentation. Every ask must be reconstructible from receipts
+    // alone: which device the audio went to, whether the narration actually
+    // STARTED, how much of it played before it was cut, how long the
+    // verdict took, what the recognizer scored, and (in the session
+    // manager) whether the keystroke landed. "No narration and my nod did
+    // nothing" was undecidable without these (2026-08-25 07:46).
+    // ------------------------------------------------------------------
+
+    /// Gate lines land in vigil.log beside the summon's, wired by the
+    /// session manager. os_signpost alone proved useless here: signposts
+    /// are not persisted to the log store, so the occurrence that matters
+    /// is always the one with no record.
+    nonisolated(unsafe) static var trace: ((String) -> Void)?
+
+    private nonisolated(unsafe) static var askSeq = 0
+    /// Milliseconds of THIS ask's narration that actually played, from the
+    /// synthesizer's delegate: -1 no report yet, 0 never started.
+    private nonisolated(unsafe) static var narratedMs = -1
+    private nonisolated(unsafe) static var speechWired = false
+
+    private static func wireSpeechOnce() {
+        guard !speechWired else { return }
+        speechWired = true
+        Announcer.onSpeech = { event in
+            switch event {
+            case .started(let text):
+                trace?("nod ask#\(askSeq): speech STARTED \"\(text.prefix(48))\"")
+            case .finished(_, let after):
+                narratedMs = Int(after * 1000)
+                trace?("nod ask#\(askSeq): speech finished after \(narratedMs)ms")
+            case .cut(_, let after):
+                narratedMs = Int(after * 1000)
+                trace?("nod ask#\(askSeq): speech CUT after \(narratedMs)ms")
+            case .droppedBeforeStart:
+                narratedMs = 0
+                trace?("nod ask#\(askSeq): speech NEVER STARTED (cancelled before the first syllable)")
+            }
+        }
+    }
 
     /// The prompt was answered by other means (keyboard, another device):
     /// kill the ask NOW. Blips after the decision are noise about it.
@@ -39,13 +82,11 @@ enum VigilNod {
         guard listening, activePane == pane else { return }
         wasCancelled = true
         cancelReason = reason
+        trace?("nod ask#\(askSeq): cancelled (\(reason))")
         FeedbackPlayer.cutAnnouncement()
         engine?.stop()
     }
-    private nonisolated(unsafe) static var lastAskEnded = Date.distantPast
 
-    /// Ask, then hand the verdict back. `nil` means no answer: a timeout NEVER
-    /// approves, and the prompt is left exactly as it was.
     /// One jsonl line per decision, alongside cmd-guard's ledger in spirit:
     /// the permission state machine must know WHICH layer answered a prompt
     /// (cmd-guard rule, auto-accept, keyboard, or a head gesture), so every
@@ -53,14 +94,22 @@ enum VigilNod {
     private static let ledgerURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".local/state/nod-gate/decisions.jsonl")
 
-    private static func ledger(_ verdict: String, pane: String?, spoken: String) {
-        let entry: [String: Any] = [
+    private static func ledger(
+        _ verdict: String, pane: String?, spoken: String,
+        ask: Int, askedAt: Date, confidence: Double?, route: String
+    ) {
+        var entry: [String: Any] = [
             "ts": ISO8601DateFormatter().string(from: Date()),
             "layer": "nod",
             "verdict": verdict,
             "pane": pane ?? "",
             "spoken": spoken,
+            "ask": ask,
+            "latency_ms": Int(Date().timeIntervalSince(askedAt) * 1000),
+            "narrated_ms": narratedMs,
+            "route": route,
         ]
+        if let confidence { entry["confidence"] = (confidence * 100).rounded() / 100 }
         guard let data = try? JSONSerialization.data(withJSONObject: entry) else { return }
         let dir = ledgerURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -80,6 +129,9 @@ enum VigilNod {
     /// prompt (allow/deny/superseded) closes its episode by EVENT, never by
     /// the pump happening to sample the unblocked gap between two chained
     /// prompts — sampling missed that gap on every chained run all night.
+    ///
+    /// Ask, then hand the verdict back. `nil` means no answer: a timeout NEVER
+    /// approves, and the prompt is left exactly as it was.
     static func ask(
         _ spoken: String,
         pane: String? = nil,
@@ -91,14 +143,21 @@ enum VigilNod {
         // which derives who is next from state files. A queue here would be
         // a second brain disagreeing with it.
         guard !listening else { return completion(nil, "busy") }
+        wireSpeechOnce()
         listening = true
         activePane = pane
         wasCancelled = false
+        timedOut = false
+        narratedMs = -1
+        askSeq += 1
+        let id = askSeq
+        let askedAt = Date()
+        let route = AudioRoute.outputName
+        trace?("nod ask#\(id): pane \(pane ?? "?") route=\"\(route)\" spoken=\"\(spoken.prefix(48))\"")
 
         let e = SignalEngine(tap: tap)
         engine = e
 
-        let deadline = Date().addingTimeInterval(timeout)
         // The recognizer is LIVE from the first syllable: a wearer who knows
         // the drill nods during the sentence, and the verdict cuts the rest of
         // the speech off. Waiting for the sentence to finish before listening
@@ -118,37 +177,59 @@ enum VigilNod {
         Task {
             if coolOff > 0 { try? await Task.sleep(for: .seconds(coolOff)) }
             var answer: HeadGesture?
+            var confidence: Double?
             do {
-                for try await event in e.events() {
-                    answer = event.gesture
-                    break
+                // A cancel during the cool-off arrives before the engine has a
+                // task to stop; honoring the flag here is what makes that
+                // cancel stick instead of racing a subscription that hasn't
+                // happened yet.
+                if !wasCancelled {
+                    for try await event in e.events() {
+                        answer = event.gesture
+                        confidence = event.confidence
+                        trace?(
+                            "nod ask#\(id): recognized \(event.gesture.rawValue)"
+                                + " conf=\(String(format: "%.2f", event.confidence))"
+                                + " +\(Int(Date().timeIntervalSince(askedAt) * 1000))ms")
+                        break
+                    }
                 }
+            } catch is CancellationError {
+                // engine.stop() (cancel/timeout): the silence IS the answer.
             } catch {
+                trace?("nod ask#\(id): engine error \(error.localizedDescription)")
                 log.error("nod gate: \(error.localizedDescription, privacy: .public)")
             }
-            if answer == nil, Date() > deadline { log.info("nod gate: no answer") }
             e.stop()
             engine = nil
-            listening = false
             FeedbackPlayer.cutAnnouncement()
+            // The cut reports through the synthesizer's delegate a beat
+            // later; the pause lets narrated_ms be truth instead of a race.
+            try? await Task.sleep(for: .milliseconds(80))
+            listening = false
             lastAskEnded = Date()
             let verdict = answer == .nod ? "allow"
                 : answer == .shake ? "deny"
                 : wasCancelled ? cancelReason : "timeout"
-            ledger(verdict, pane: pane, spoken: spoken)
+            ledger(verdict, pane: pane, spoken: spoken,
+                   ask: id, askedAt: askedAt, confidence: confidence, route: route)
+            trace?(
+                "nod ask#\(id): verdict \(verdict)"
+                    + " latency=\(Int(Date().timeIntervalSince(askedAt) * 1000))ms"
+                    + " narrated=\(narratedMs)ms")
             await MainActor.run { completion(answer, verdict) }
         }
 
-        // A gesture that never comes must not hold the gate forever.
+        // A gesture that never comes must not hold the gate forever. The
+        // timeout only STOPS the engine: the consumer task above is the one
+        // and only completion path. (Two independent paths once raced when
+        // the stream finished while the timeout closure ran: double ledger
+        // rows, double completions.)
         DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
-            guard listening else { return }
+            guard listening, askSeq == id, !wasCancelled else { return }
+            timedOut = true
+            trace?("nod ask#\(id): timeout after \(Int(timeout))s -> stopping engine")
             e.stop()
-            engine = nil
-            listening = false
-            lastAskEnded = Date()
-            let verdict = wasCancelled ? cancelReason : "timeout"
-            ledger(verdict, pane: pane, spoken: spoken)
-            completion(nil, verdict)
         }
     }
 }
