@@ -1435,7 +1435,7 @@
 /* Begin XCLocalSwiftPackageReference section */
 		0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "nod" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "/Users/adrian/Developer/untitled/experiments/nod";
+			relativePath = "../../../untitled/experiments/nod";
 		};
 /* End XCLocalSwiftPackageReference section */
 
