@@ -47,6 +47,12 @@ final class VigilSummon {
     /// Consumed by the visibility observer: this dismissal is the engine
     /// draining its queue, not Adrian waving the panel away.
     private var engineDismiss = false
+    /// Adrian moved INTO the panel this episode: a click inside it, or real
+    /// typing (printable text beyond an answer key). An answer that never
+    /// touched the glass - a nod, a bare enter/arrow/1/esc - leaves nothing
+    /// to preserve, and the panel dismisses the moment its queue drains
+    /// instead of lingering over the video he was watching.
+    private var engaged = false
 
     private init() {
         NotificationCenter.default.addObserver(
@@ -60,6 +66,26 @@ final class VigilSummon {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { VigilSummon.shared.schedule() }
             }
+        }
+        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .keyDown]) { event in
+            MainActor.assumeIsolated {
+                let summon = VigilSummon.shared
+                guard summon.current != nil,
+                      let quick = VigilSessionManager.shared.quickTerminalWindow,
+                      event.window === quick else { return }
+                if event.type == .leftMouseDown {
+                    summon.engaged = true
+                    return
+                }
+                guard let chars = event.charactersIgnoringModifiers,
+                      let first = chars.first, let scalar = chars.unicodeScalars.first else { return }
+                let answerKeys: Set<Character> = ["\r", "\u{1b}", "\t", "1", "2"]
+                let isFunctionKey = (0xF700...0xF8FF).contains(scalar.value)
+                if !isFunctionKey, scalar.value >= 0x20, !answerKeys.contains(first) {
+                    summon.engaged = true
+                }
+            }
+            return event
         }
         NotificationCenter.default.addObserver(
             forName: .quickTerminalDidChangeVisibility, object: nil, queue: .main
@@ -237,6 +263,7 @@ final class VigilSummon {
         // behind the fresh ask again.
         snoozeDate = .distantPast
         current = candidate
+        engaged = false
         manager.vlog("summon: '\(candidate.name)' pane \(candidate.pane)")
         // The content under the cursor just changed (or appeared): shield
         // the panel's terminal briefly, and the pill names the arrival.
@@ -259,6 +286,12 @@ final class VigilSummon {
             current = nil
             summon(next)
         } else if manager.quickTerminalVisible {
+            if !engaged {
+                manager.vlog("summon: drained, unengaged -> dismiss now")
+                engineDismiss = true
+                manager.dismissQuickTerminal()
+                return
+            }
             // LINGER before dismissing: chained prompts in one turn land a
             // few seconds apart, and out-then-in is the slowest possible
             // rendering of "next question". Hold the panel; an ask arriving
@@ -293,6 +326,7 @@ final class VigilSummon {
     private func panelDidHide() {
         let wasEngine = engineDismiss
         engineDismiss = false
+        engaged = false
         guard let cur = current else { return }
         current = nil
         settleWork?.cancel()
