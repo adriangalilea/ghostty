@@ -1,4 +1,5 @@
 import AppKit
+import Ask
 import SwiftUI
 import GhosttyKit
 
@@ -1056,6 +1057,13 @@ class VigilSessionManager {
     /// captured sentinels). Ownership is derived, never parsed from the id.
     private func sessionOwning(pane: String) -> String? {
         sessions.first { ownedPaneIds($0.value).contains(pane) }?.key
+    }
+
+    /// The cortex read (grounding keywords + language leaning) for the
+    /// session owning this pane; nil while no read exists yet.
+    func cortexIdentity(ofPane pane: String) -> VigilCortex.Read? {
+        guard let name = sessionOwning(pane: pane) else { return nil }
+        return VigilCortex.identity(session: name)
     }
 
     /// Tail the events log agent adapters append to. A 1s poll is honest
@@ -4347,9 +4355,9 @@ class VigilSessionManager {
     func pumpNodGate() {
         // Every silent exit is LOGGED: "it said nothing" must be answerable
         // from the log alone, or debugging is guesswork about AirPods.
-        guard VigilNod.enabled else { return }
-        guard VigilNod.available else {
-            vlog("nod gate: skipped, motion unavailable (airpods away?)")
+        guard VigilAsk.nodEnabled || VigilAsk.voiceEnabled else { return }
+        guard VigilAsk.armed else {
+            vlog("ask gate: skipped, no channel available (airpods away, no mic?)")
             return
         }
         let blocked = midTurnAsks().filter { paneAgentState($0.pane)?.flavor == .permission }
@@ -4362,7 +4370,7 @@ class VigilSessionManager {
         // made (2026-08-24, "nod was still active in the background").
         if let asking = nodAskingPane,
            paneAgentState(asking)?.state != .blocked {
-            VigilNod.cancel(pane: asking)
+            VigilAsk.cancel(pane: asking)
             nodAskingPane = nil
         }
         let now = Date()
@@ -4402,7 +4410,7 @@ class VigilSessionManager {
             ?? ripe.first { paneOnAnyScreen($0.pane) && eligible($0) }
         // In-front asks PREEMPT a wedged ask for glass he is not looking at.
         if let front = preferred, let asking = nodAskingPane, asking != front.pane {
-            VigilNod.cancel(pane: asking, reason: "preempted")
+            VigilAsk.cancel(pane: asking, reason: "preempted")
             nodAsked[asking] = nil   // it re-asks when its turn returns
             nodAskingPane = nil
         }
@@ -4414,19 +4422,20 @@ class VigilSessionManager {
             nodAskCount[next.pane] = (next.since, 1)
         }
         nodAskingPane = next.pane
-        vlog("nod gate: asking pane \(next.pane)")
+        vlog("ask gate: asking pane \(next.pane)")
         let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
-        VigilNod.ask(spoken, pane: next.pane) { [weak self] gesture, verdict in
+        VigilAsk.ask(spoken, pane: next.pane) { [weak self] answer, verdict in
             self?.nodAskingPane = nil
-            if let gesture {
+            if let answer {
                 // A verdict types ONLY into a still-blocked pane. A late
                 // duplicate signal once re-asked for an answered prompt and
                 // the nod's "1" landed in a pane with no prompt standing - a
                 // stray keystroke into the agent's input (2026-08-24 20:07).
                 if self?.paneAgentState(next.pane)?.state == .blocked {
                     // "1" approves ONCE; escape backs out. Never the standing
-                    // grant: that is a seated decision, not a head movement.
-                    let keys = gesture == .nod ? "1" : "\u{1b}"
+                    // grant: that is a seated decision, not a head movement
+                    // or a word said across the room.
+                    let keys = answer == .yes ? "1" : "\u{1b}"
                     self?.typeNodAnswer(pane: next.pane, keys: keys, since: next.since)
                 } else {
                     self?.vlog("nod gate: verdict for \(next.pane) dropped, prompt no longer standing")
@@ -4449,8 +4458,10 @@ class VigilSessionManager {
         // Gate receipts land beside the summon's in vigil.log: route, speech
         // start/cut/finish ms, verdict latency + confidence, send exit,
         // post-send state. One file answers "what did the gate do".
-        VigilNod.trace = { [weak self] line in self?.vlog(line) }
-        VigilNod.watchRoute()
+        VigilAsk.trace = { [weak self] line in self?.vlog(line) }
+        VigilAsk.watchRoute()
+        VigilVoice.trace = { [weak self] line in self?.vlog(line) }
+        VigilCortex.trace = { [weak self] line in self?.vlog(line) }
         try? FileManager.default.createDirectory(at: agentStateDir, withIntermediateDirectories: true)
         let fd = Darwin.open(agentStateDir.path, O_EVTONLY)
         guard fd >= 0 else { return }

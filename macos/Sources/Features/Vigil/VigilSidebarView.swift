@@ -14,7 +14,8 @@ struct VigilSidebarView: View {
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
     @AppStorage(VigilHush.key) private var hushMedia = false
-    @AppStorage(VigilNod.key) private var nodGate = false
+    @AppStorage(VigilAsk.nodKey) private var nodGate = false
+    @AppStorage(VigilAsk.voiceKey) private var voiceGate = false
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
     private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
@@ -210,7 +211,7 @@ struct VigilSidebarView: View {
             }
             // Only offered when motion-capable AirPods are actually connected:
             // a toggle for a feature that cannot work is worse than no toggle.
-            if VigilNod.available {
+            if VigilAsk.nodAvailable {
                 HStack(spacing: 5) {
                     Image(systemName: "airpods.pro")
                         .font(.system(size: 9))
@@ -225,6 +226,22 @@ struct VigilSidebarView: View {
                         .labelsHidden()
                 }
                 .help("A permission prompt is read out on your AirPods; nod to allow it once, shake to deny. No gesture answers nothing and leaves the prompt untouched.")
+            }
+            if VigilAsk.voiceAvailable {
+                HStack(spacing: 5) {
+                    Image(systemName: "mic")
+                        .font(.system(size: 9))
+                        .foregroundColor(voiceGate ? .orange : .secondary)
+                    Text("voice to allow")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(voiceGate ? .primary : .secondary)
+                    Spacer()
+                    Toggle("", isOn: $voiceGate)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                }
+                .help("A permission prompt is read out loud; say yes to allow it once, no to deny. Races the nod when both are on - the first decisive answer wins. Silence answers nothing.")
             }
         }
         .padding(.horizontal, 11)

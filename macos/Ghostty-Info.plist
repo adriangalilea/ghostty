@@ -4,6 +4,10 @@
 <dict>
 	<key>NSMotionUsageDescription</key>
 	<string>Reads AirPods head motion so a permission prompt can be answered with a nod or a shake.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Listens for a spoken yes or no to answer a permission prompt, and for dictation into the focused pane.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Transcribes your voice on-device; nothing leaves this Mac.</string>
 	<key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key>
 	<true/>
 	<key>NSDockTilePlugIn</key>

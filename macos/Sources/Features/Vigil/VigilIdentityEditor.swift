@@ -100,22 +100,16 @@ enum VigilIdentity {
     /// `avoiding` carries earlier suggestions so a re-roll diversifies.
     static func suggest(context: String, avoiding: [String]) async -> (emoji: String, label: String)? {
         guard #available(macOS 26.0, *) else { return nil }
-        guard SystemLanguageModel.default.availability == .available else { return nil }
-        let lm = LanguageModelSession(instructions: """
-            You give terminal workspace sessions an identity: one or two \
-            emoji plus a short evocative name, 2 to 4 lowercase words, no \
-            punctuation. Name the task being done, not the tools.
-            """)
-        var prompt = context
-        if !avoiding.isEmpty {
-            prompt += "\nAlready suggested, answer with something different: \(avoiding.joined(separator: ", "))"
+        // The cortex's SessionRead is the one schema for session identity;
+        // this consumer takes emoji+label, dictation takes keywords+lang.
+        guard let read = await VigilCortex.read(context: context, avoiding: avoiding) else {
+            return nil
         }
-        guard let response = try? await lm.respond(to: prompt, generating: SuggestedIdentity.self) else { return nil }
-        let label = response.content.label
+        let label = read.label
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard !label.isEmpty, label.count <= 48 else { return nil }
-        return (filterEmoji(response.content.emoji.joined()), label)
+        return (filterEmoji(read.emoji.joined()), label)
     }
 
     /// The modal identity editor (menu bar "Rename…", the titlebar chip):
@@ -178,17 +172,6 @@ enum VigilIdentity {
             trimmed.isEmpty ? nil : trimmed,
             draft.emoji.isEmpty ? nil : draft.emoji)
     }
-}
-
-/// The generation target. anyOf over the palette + a count guide: the model
-/// physically cannot emit an invalid emoji or a wrong shape.
-@available(macOS 26.0, *)
-@Generable(description: "An identity for a terminal workspace session")
-private struct SuggestedIdentity {
-    @Guide(description: "emoji evoking the task", .count(1), .element(.anyOf(VigilIdentity.palette)))
-    var emoji: [String]
-    @Guide(description: "short evocative name: 2 to 4 lowercase words, no punctuation, the task not the tools")
-    var label: String
 }
 
 struct VigilIdentityEditor: View {
