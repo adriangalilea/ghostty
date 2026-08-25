@@ -4295,6 +4295,11 @@ class VigilSessionManager {
     private var nodResolvedAt: [String: Date] = [:]
     /// The pane whose ask is live right now; cancelled if answered elsewhere.
     private var nodAskingPane: String?
+    /// Re-asks are BOUNDED: three narrations per (pane, block-start), then
+    /// silence until the state file changes. Unbounded 22s re-asks narrated
+    /// a stale blocked file forever and typed a verdict into a pane with no
+    /// prompt standing (2026-08-25, the ghost "1").
+    private var nodAskCount: [String: (since: Date, count: Int)] = [:]
 
     func pumpNodGate() {
         // Every silent exit is LOGGED: "it said nothing" must be answerable
@@ -4343,6 +4348,7 @@ class VigilSessionManager {
         // prompt he was ANSWERING waited behind it (2026-08-24, T4).
         func eligible(_ c: SummonCandidate) -> Bool {
             if let resolved = nodResolvedAt[c.pane], c.since.timeIntervalSince(resolved) < 2 { return false }
+            if let tally = nodAskCount[c.pane], tally.since == c.since, tally.count >= 3 { return false }
             guard let asked = nodAsked[c.pane] else { return true }
             if let freed = nodUnblockedAt[c.pane], freed > asked { return true }
             return now.timeIntervalSince(asked) > 22
@@ -4359,6 +4365,11 @@ class VigilSessionManager {
         }
         guard let next = preferred ?? ripe.first(where: eligible) else { return }
         nodAsked[next.pane] = now
+        if let tally = nodAskCount[next.pane], tally.since == next.since {
+            nodAskCount[next.pane] = (next.since, tally.count + 1)
+        } else {
+            nodAskCount[next.pane] = (next.since, 1)
+        }
         nodAskingPane = next.pane
         vlog("nod gate: asking pane \(next.pane)")
         let spoken = nodPaneMsg[next.pane] ?? "a permission request in \(next.name)"
