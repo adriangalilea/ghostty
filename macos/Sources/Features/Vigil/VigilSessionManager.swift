@@ -2072,7 +2072,7 @@ class VigilSessionManager {
     /// exists is exactly what must never be delivered. Receipted: the type
     /// line, then the state sampled at 0.7s and 2.5s (the flip rides the
     /// hook, over a second on a keyboard-equivalent path).
-    private func typeNodAnswer(pane: String, keys: String) {
+    private func typeNodAnswer(pane: String, keys: String, since: Date) {
         let label = keys == "1" ? "'1'" : "esc"
         // `vigild sendraw` = one 'd' keystroke frame, the same bytes an
         // attached client sends per keypress: every daemon delivers it
@@ -2106,6 +2106,15 @@ class VigilSessionManager {
                     return
                 }
                 if state != .blocked, final { return }
+                // A chained NEXT prompt re-blocks the pane before the 2.5s
+                // verdict; only the SAME block (same start) convicts the
+                // keystroke (ask#6 cried STILL BLOCKED at q2's block).
+                let sameBlock = abs(
+                    (self?.paneAgentState(pane)?.since.timeIntervalSince(since)) ?? 1) < 0.5
+                if state == .blocked, !sameBlock {
+                    self?.vlog("nod gate: post-type+\(delay)s \(pane) blocked by the NEXT prompt (chained), answer landed")
+                    return
+                }
                 self?.vlog(
                     "nod gate: post-type+\(delay)s \(pane) state=\(state)"
                         + (state == .blocked && final ? " !! STILL BLOCKED, keystroke did not land" : ""))
@@ -4403,7 +4412,7 @@ class VigilSessionManager {
                     // "1" approves ONCE; escape backs out. Never the standing
                     // grant: that is a seated decision, not a head movement.
                     let keys = gesture == .nod ? "1" : "\u{1b}"
-                    self?.typeNodAnswer(pane: next.pane, keys: keys)
+                    self?.typeNodAnswer(pane: next.pane, keys: keys, since: next.since)
                 } else {
                     self?.vlog("nod gate: verdict for \(next.pane) dropped, prompt no longer standing")
                 }
