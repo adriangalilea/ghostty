@@ -220,7 +220,7 @@ enum VigilVoice {
 }
 
 /// Listen instrumentation into vigil.log with a stable prefix.
-private struct VoiceLogSink: ListenSink {
+struct VoiceLogSink: ListenSink {
     func emit(_ event: ListenEvent) {
         var parts = ["voice:", event.kind]
         if let ms = event.ms { parts.append(String(format: "%.0fms", ms)) }
