@@ -2122,7 +2122,8 @@ class VigilSessionManager {
     /// digit that already selected flips the state first; a prompt that
     /// vanished gets nothing - the stray-Enter class, 2026-08-25 08:22).
     private func typeAskAnswer(pane: String, keys: String, since: Date, confirm: Bool = false) {
-        let label = keys == "\u{1b}" ? "esc" : keys == "\r" ? "enter" : keys == " " ? "space" : "'\(keys.prefix(24))'"
+        let label =
+            keys == "\u{1b}" ? "esc" : keys == "\r" ? "enter" : keys == "\u{1b}[C" ? "right" : keys == " " ? "space" : "'\(keys.prefix(24))'"
         // `vigild sendraw` = one 'd' keystroke frame, the same bytes an
         // attached client sends per keypress: every daemon delivers it
         // verbatim, immediately, no Enter, never queued. In-process
@@ -4642,20 +4643,22 @@ class VigilSessionManager {
                                 self?.typeAskAnswer(pane: next.pane, keys: "\r", since: next.since)
                             }
                         }
-                    // A multi-select: each digit moves to its option and
-                    // space toggles it, then Enter confirms.
+                    // A multi-select: a digit TOGGLES its row (no space - a
+                    // space toggled it straight back, 2026-08-26), then the
+                    // right arrow moves to the chooser's Submit tab and
+                    // Enter submits (Enter on a row only toggles it).
                     case (.options(let indices), .some):
                         var delay = 0.0
                         for index in indices {
                             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                                 self?.typeAskAnswer(pane: next.pane, keys: "\(index + 1)", since: next.since)
                             }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.15) {
-                                self?.typeAskAnswer(pane: next.pane, keys: " ", since: next.since)
-                            }
-                            delay += 0.3
+                            delay += 0.2
                         }
                         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            self?.typeAskAnswer(pane: next.pane, keys: "\u{1b}[C", since: next.since)
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.25) {
                             self?.typeAskAnswer(pane: next.pane, keys: "\r", since: next.since)
                         }
                     // Shape mismatches never touch the pane: a yes has no
