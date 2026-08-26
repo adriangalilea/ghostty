@@ -2177,6 +2177,13 @@ class VigilSessionManager {
         }
     }
 
+    /// The AskUserQuestion chooser's footer, as claude draws it. Any of the
+    /// three phrases on screen = a chooser stands.
+    static func chooserStanding(in screen: String) -> Bool {
+        screen.contains("Esc to cancel") || screen.contains("to navigate")
+            || screen.contains("Enter to select")
+    }
+
     /// Refresh live thumbnails for embedded sessions (overview open path).
     /// A successful snapshot is also persisted to thumb.png so the card
     /// always has SOMETHING to show, even if a later snapshot fails (a
@@ -4455,12 +4462,22 @@ class VigilSessionManager {
             return
         }
         // A DECLINED question fires no hook (esc in the chooser produces
-        // nothing until the next prompt) and the pane's title cannot tell:
-        // claude wears the idle marker WHILE the chooser stands (it is
-        // waiting for the human) - a rule that read the marker as "chooser
-        // gone" killed every question ask within a second and re-asked in
-        // a loop (2026-08-26 21:49). A declined question ends by the ask's
-        // own timeout or the HUD's esc until a real signal exists.
+        // nothing until the next prompt) and the title cannot tell (claude
+        // wears the idle marker WHILE the chooser stands). The SCREEN can:
+        // the chooser's own footer is on the pane while it stands and gone
+        // the instant it is dismissed - ghostty's visible text, read once a
+        // second while a question ask is live.
+        if let asking = askGatePane, paneAgentState(asking)?.flavor == .question,
+           let view = liveView(attachId: asking) {
+            let visible = view.cachedVisibleContents.get()
+            if !visible.isEmpty, !Self.chooserStanding(in: visible) {
+                vlog("ask gate: chooser footer gone from \(asking) - declined or answered elsewhere, superseded")
+                VigilAsk.cancel(pane: asking, reason: "superseded")
+                askGatePane = nil
+                askGateAskedAt[asking] = Date()
+                return
+            }
+        }
         // Title changes wake nobody: while an ask is live, look again each
         // second.
         if askGatePane != nil {
