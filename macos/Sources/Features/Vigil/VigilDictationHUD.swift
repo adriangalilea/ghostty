@@ -1,6 +1,7 @@
 // macOS only: floats over the fork's windows.
 #if os(macOS)
 import AppKit
+import Face
 import Ink
 import Say
 import SwiftUI

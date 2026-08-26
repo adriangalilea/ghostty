@@ -2,6 +2,7 @@
 #if os(macOS)
 import AppKit
 import AskKit
+import Face
 import Ink
 import SwiftUI
 
@@ -29,17 +30,15 @@ final class VigilAskHUD {
 
     private func handle(_ event: Ask.SurfaceEvent) {
         switch event {
-        case .began(_, let spoken, let channels):
+        case .began:
             generation += 1
-            model.ask(spoken, channels: channels)
+            model.handle(event)
             let panel = self.panel ?? VigilHUDChrome.makePanel { AskPrompt(model: model) }
             self.panel = panel
             VigilHUDChrome.position(panel)
             panel.orderFrontRegardless()
-        case .verdict(_, let label, let answered, let source, let confidence):
-            model.resolve(
-                Self.word(label: label, answered: answered), decided: answered,
-                source: source, confidence: confidence)
+        case .verdict:
+            model.handle(event)
         case .ended:
             generation += 1
             let gen = generation
@@ -50,20 +49,6 @@ final class VigilAskHUD {
                 guard let self, self.generation == gen else { return }
                 self.panel?.orderOut(nil)
             }
-        }
-    }
-
-    /// The verdict word the human reads: answers in the human's register,
-    /// everything undecided stays the ledger label ("timeout",
-    /// "superseded" - true and self-explaining).
-    private static func word(label: String, answered: Bool) -> String {
-        guard answered else { return label }
-        switch label {
-        case "allow": return "yes"
-        case "deny": return "no"
-        default:
-            if label.hasPrefix("chose-") { return String(label.dropFirst("chose-".count)) }
-            return label
         }
     }
 }

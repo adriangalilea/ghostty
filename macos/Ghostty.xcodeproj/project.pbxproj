@@ -18,6 +18,7 @@
 		0DAA111100000000000000A4 /* NodKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000A2 /* NodKit */; };
 		0DAA111100000000000000A5 /* NodSignal in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000A3 /* NodSignal */; };
 		0DAA111100000000000000B5 /* AskKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B2 /* AskKit */; };
+		0DAA111100000000000000E5 /* Face in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000E2 /* Face */; };
 		0DAA111100000000000000B6 /* AskNod in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B3 /* AskNod */; };
 		0DAA111100000000000000B7 /* AskListen in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B4 /* AskListen */; };
 		0DAA111100000000000000D3 /* Listen in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000D2 /* Listen */; };
@@ -314,6 +315,7 @@
 				0DAA111100000000000000A4 /* NodKit in Frameworks */,
 				0DAA111100000000000000A5 /* NodSignal in Frameworks */,
 				0DAA111100000000000000B5 /* AskKit in Frameworks */,
+				0DAA111100000000000000E5 /* Face in Frameworks */,
 				0DAA111100000000000000B6 /* AskNod in Frameworks */,
 				0DAA111100000000000000B7 /* AskListen in Frameworks */,
 				0DAA111100000000000000D3 /* Listen in Frameworks */,
@@ -485,6 +487,7 @@
 				0DAA111100000000000000A2 /* NodKit */,
 				0DAA111100000000000000A3 /* NodSignal */,
 				0DAA111100000000000000B2 /* AskKit */,
+				0DAA111100000000000000E2 /* Face */,
 				0DAA111100000000000000B3 /* AskNod */,
 				0DAA111100000000000000B4 /* AskListen */,
 				0DAA111100000000000000D2 /* Listen */,
@@ -1496,6 +1499,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */;
 			productName = AskKit;
+		};
+		0DAA111100000000000000E2 /* Face */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */;
+			productName = Face;
 		};
 		0DAA111100000000000000B3 /* AskNod */ = {
 			isa = XCSwiftPackageProductDependency;
