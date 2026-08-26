@@ -1,4 +1,5 @@
 import AppKit
+import AskKit
 
 /// Follow has three modes, one control (two toggles that both move focus
 /// would fight; a mode selector cannot):
@@ -207,7 +208,7 @@ final class VigilSummon {
             guard manager.panelSession == cur.name else {
                 current = nil
                 settleWork?.cancel()
-                VigilHush.resume()
+                Hush.release("summon")
                 schedule()
                 return
             }
@@ -264,7 +265,10 @@ final class VigilSummon {
             manager.vlog("summon: float REFUSED for '\(candidate.name)'")
             return
         }
-        if appearing { VigilHush.pause() }
+        // One claim for the whole summon flow: chained asks inside it each
+        // claim too (ask-core), but the panel's own claim keeps media down
+        // across the gaps between them.
+        if appearing { Hush.claim("summon") }
         // A summon re-opens the whole flow: everything snoozed queues
         // behind the fresh ask again.
         snoozeDate = .distantPast
@@ -315,7 +319,7 @@ final class VigilSummon {
                     VigilSessionManager.shared.dismissQuickTerminal()
                 } else {
                     self.current = nil
-                    VigilHush.resume()
+                    Hush.release("summon")
                 }
             }
             lingerWork?.cancel()
@@ -323,7 +327,7 @@ final class VigilSummon {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: w)
         } else {
             current = nil
-            VigilHush.resume()
+            Hush.release("summon")
         }
     }
 
@@ -344,6 +348,6 @@ final class VigilSummon {
             snoozeDate = Date()
             VigilSessionManager.shared.vlog("summon: snoozed (manual dismissal mid-ask)")
         }
-        VigilHush.resume()
+        Hush.release("summon")
     }
 }

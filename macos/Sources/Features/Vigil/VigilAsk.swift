@@ -19,8 +19,6 @@ import Say
 /// the live ask, the gate's ledger row, and the pump's completion contract.
 /// The human still decides; only the input device changes.
 enum VigilAsk {
-    static let nodKey = "vigil.nod.gate"
-    static let voiceKey = "vigil.voice.gate"
     /// EXPERIMENTAL early-answer window (`defaults write com.mitchellh.ghostty.debug
     /// vigil.voice.eager -bool true`): the gate asks at prompt ARRIVAL
     /// instead of the 1.2s ripeness gate, so a yes spoken at first sight of
@@ -28,8 +26,10 @@ enum VigilAsk {
     /// an answer can be accepted before narration says a word - the screen
     /// is the announcement. Off by default; vigil-only, never ask-core.
     static let eagerKey = "vigil.voice.eager"
-    static var nodEnabled: Bool { UserDefaults.standard.bool(forKey: nodKey) }
-    static var voiceEnabled: Bool { UserDefaults.standard.bool(forKey: voiceKey) }
+    // Channel preferences are ask-core (AskSettings, one namespace every
+    // host shares); vigil only reads them.
+    static var nodEnabled: Bool { AskSettings.nod }
+    static var voiceEnabled: Bool { AskSettings.voice }
 
     /// Whether each toggle should be offered at all. A toggle for a feature
     /// that cannot work is worse than no toggle, so the row hides rather

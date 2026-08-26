@@ -1,4 +1,5 @@
 import AppKit
+import Face
 import Ink
 import SwiftUI
 import UniformTypeIdentifiers
@@ -14,9 +15,6 @@ struct VigilSidebarView: View {
     @ObservedObject private var collapse = VigilSidebarCollapse.shared
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
-    @AppStorage(VigilHush.key) private var hushMedia = false
-    @AppStorage(VigilAsk.nodKey) private var nodGate = false
-    @AppStorage(VigilAsk.voiceKey) private var voiceGate = false
     @AppStorage(VigilVoice.localeKey) private var voiceLocale = "auto"
 
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
@@ -196,56 +194,13 @@ struct VigilSidebarView: View {
                 .fixedSize()
             }
             .help("off: asks stay in the queue (keycap, badge, ⌘⇧J). summon: a permission prompt or question mid-turn pulls the quick terminal in on the asking pane; answering advances in place. window: this window shapeshifts to any unseen ask.")
-            if followMode == .summon {
-                HStack(spacing: 5) {
-                    Image(systemName: "speaker.slash.circle")
-                        .font(.system(size: 9))
-                        .foregroundColor(hushMedia ? .orange : .secondary)
-                    Text("hush media")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(hushMedia ? .primary : .secondary)
-                    Spacer()
-                    Toggle("", isOn: $hushMedia)
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .labelsHidden()
-                }
-                .help("A summon pauses playing media; the queue draining resumes it (only if hush paused it, and never against a manual pause/resume).")
-            }
-            // Only offered when motion-capable AirPods are actually connected:
-            // a toggle for a feature that cannot work is worse than no toggle.
-            if VigilAsk.nodAvailable {
-                HStack(spacing: 5) {
-                    Image(systemName: "airpods.pro")
-                        .font(.system(size: 9))
-                        .foregroundColor(nodGate ? .orange : .secondary)
-                    Text("nod to allow")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(nodGate ? .primary : .secondary)
-                    Spacer()
-                    Toggle("", isOn: $nodGate)
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .labelsHidden()
-                }
-                .help("A permission prompt is read out on your AirPods; nod to allow it once, shake to deny. No gesture answers nothing and leaves the prompt untouched.")
-            }
-            if VigilAsk.voiceAvailable {
-                HStack(spacing: 5) {
-                    Image(systemName: "mic")
-                        .font(.system(size: 9))
-                        .foregroundColor(voiceGate ? .orange : .secondary)
-                    Text("voice to allow")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(voiceGate ? .primary : .secondary)
-                    Spacer()
-                    Toggle("", isOn: $voiceGate)
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .labelsHidden()
-                }
-                .help("A permission prompt is read out loud; say yes to allow it once, no to deny. Races the nod when both are on - the first decisive answer wins. Silence answers nothing.")
-            }
+            // The ask suite's rows, embedded (the MicButton contract): the
+            // suite owns the switches and the keys, vigil only says which
+            // rows this hardware can honor.
+            AskToggles(
+                hush: true,
+                nod: VigilAsk.nodAvailable,
+                voice: VigilAsk.voiceAvailable)
             if VigilVoice.available {
                 HStack(spacing: 5) {
                     MicButton(
