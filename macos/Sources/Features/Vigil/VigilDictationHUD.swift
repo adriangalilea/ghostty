@@ -49,24 +49,19 @@ enum VigilHUDChrome {
 /// The dictation captions: wet-ink volatiles drawn while they form, finals
 /// crystallizing solid the instant they land in the pane, then fading like
 /// captions (the words already live where they were written - the readout
-/// is about the PRESENT). Ink's `LiveTranscript` owns the feel; this file
-/// owns the PREVIEW POLICY for arbitrated runs: one recognizer per locale
-/// emits interleaved previews, and the one shown is the locale that most
-/// recently won a FINAL (the language being spoken), else the longest
-/// current preview.
+/// is about the PRESENT). Ink's `LiveTranscript` owns the feel AND the
+/// race policy (every candidate shown divided until a final crowns a
+/// winner, losers silenced after, stale ink evaporating); this file only
+/// forwards segments and owns the panel.
 @MainActor
 final class VigilDictationHUD {
     static let shared = VigilDictationHUD()
 
     private let model = LiveTranscriptModel()
     private var panel: NSPanel?
-    private var previews: [String: String] = [:]
-    private var stickyLocale: String?
 
     func begin() {
         model.reset()
-        previews = [:]
-        stickyLocale = nil
         let panel = self.panel ?? VigilHUDChrome.makePanel { LiveTranscript(model: model) }
         self.panel = panel
         VigilHUDChrome.position(panel)
@@ -74,28 +69,10 @@ final class VigilDictationHUD {
     }
 
     func preview(_ text: String, locale: String?) {
-        // Once a final crowned a winner, the losers are SILENCED outright:
-        // showing the losing recognizer's garbage because the winner is
-        // momentarily quiet cluttered the screen with wrong-language wet
-        // ink ("Elo,ó." over an English run, 2026-08-26). Before any
-        // final, the longest preview speaks for the race.
-        if let sticky = stickyLocale, let locale, locale != sticky { return }
-        previews[locale ?? ""] = text
-        let shown: (text: String, locale: String?)
-        if let sticky = stickyLocale, let held = previews[sticky], !held.isEmpty {
-            shown = (held, sticky)
-        } else if let longest = previews.max(by: { $0.value.count < $1.value.count }) {
-            shown = (longest.value, longest.key.isEmpty ? nil : longest.key)
-        } else {
-            return
-        }
-        model.preview(shown.text, locale: shown.locale)
+        model.preview(text, locale: locale)
     }
 
     func commit(_ text: String, locale: String?, confidence: Double?) {
-        stickyLocale = locale
-        // The final consumed every recognizer's in-progress guess.
-        previews = [:]
         model.commit(text, locale: locale, confidence: confidence)
     }
 
