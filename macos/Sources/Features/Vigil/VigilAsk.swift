@@ -148,7 +148,15 @@ enum VigilAsk {
         }
         activePane = pane
         let offered = sources.map(\.id).joined(separator: "+")
-        Ask.begin(spoken, sources: sources, timeout: timeout) { receipt in
+        // The wording is the hook's rule-derived gist (tier 1 of the
+        // composer architecture); the raw command is NOT re-shipped here -
+        // it stands in cmd-guard's ledger, and the distiller joins the two
+        // by timestamp when it mines the compose corpus.
+        Ask.begin(
+            spoken, sources: sources,
+            composition: Composition(input: spoken, tier: "static-gist"),
+            timeout: timeout
+        ) { receipt in
             switch receipt.verdict {
             case .allow, .deny, .chose, .timeout, .cancelled:
                 ledger(receipt, pane: pane, offered: offered)
