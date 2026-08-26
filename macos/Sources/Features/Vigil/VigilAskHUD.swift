@@ -53,9 +53,15 @@ final class VigilAskHUD {
             let hud = self.hud ?? makeHUD()
             self.hud = hud
             hud.show()
-        case .levels, .heard, .deadline, .verdict:
+        case .stage(_, let stage):
+            // The text stage owns the keyboard: the panel takes key focus
+            // so the input's caret is live the instant it opens, and gives
+            // it back when the options return.
+            if case .entering = stage { hud?.focusForTyping() } else { hud?.releaseFocus() }
+        case .levels, .heard, .picks, .deadline, .verdict:
             break
         case .ended:
+            hud?.releaseFocus()
             generation += 1
             let gen = generation
             Task { [weak self] in
