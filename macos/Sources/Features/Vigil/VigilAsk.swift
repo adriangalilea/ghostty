@@ -125,8 +125,12 @@ enum VigilAsk {
     /// caller's episode bookkeeping keys off HOW the ask ended: an answered
     /// prompt (allow/deny/superseded) closes its episode by EVENT, never by
     /// the pump sampling the unblocked gap between chained prompts.
+    /// `options` makes it a choice (an AskUserQuestion's labels): the
+    /// package narrates them numbered, voice answers by ordinal, the HUD
+    /// by click or digit; nod sits a choice out (binary by nature).
     static func ask(
         _ spoken: String,
+        options: [String]? = nil,
         pane: String? = nil,
         timeout: TimeInterval = 20,
         completion: @escaping (Answer?, String) -> Void
@@ -154,8 +158,8 @@ enum VigilAsk {
         // it stands in cmd-guard's ledger, and the distiller joins the two
         // by timestamp when it mines the compose corpus.
         Ask.begin(
-            spoken, sources: sources,
-            composition: Composition(input: spoken, tier: "static-gist"),
+            spoken, sources: sources, options: options,
+            composition: Composition(input: spoken, tier: options == nil ? "static-gist" : "question-literal"),
             timeout: timeout
         ) { receipt in
             switch receipt.verdict {
