@@ -4454,6 +4454,25 @@ class VigilSessionManager {
             askGatePane = nil
             return
         }
+        // A DECLINED question fires no hook (esc in the chooser produces
+        // nothing until the next prompt): the pane's own title is the
+        // corrective - claude wears the idle marker the moment the chooser
+        // is gone. Positive marker only, question asks only.
+        if let asking = askGatePane, paneAgentState(asking)?.flavor == .question,
+           let first = liveView(attachId: asking)?.title.unicodeScalars.first, first == "✳" {
+            vlog("ask gate: \(asking) wears the idle marker mid-question - the chooser is gone, superseded")
+            VigilAsk.cancel(pane: asking, reason: "superseded")
+            askGatePane = nil
+            askGateAskedAt[asking] = Date()
+            return
+        }
+        // Title changes wake nobody: while an ask is live, look again each
+        // second.
+        if askGatePane != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                if self?.askGatePane != nil { self?.pumpAskGate() }
+            }
+        }
         // One owner of the voice channel (cancellation above still wins):
         // live dictation means the human is mid-utterance. Asking now would
         // narrate over them AND hear their answer twice - the gate types "1"

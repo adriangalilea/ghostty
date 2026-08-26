@@ -29,7 +29,14 @@ final class VigilAskHUD {
     }
 
     private func makeHUD() -> FloatingHUD {
-        let hud = FloatingHUD(hoverAware: true) { [model] in AskPrompt(model: model) }
+        let hud = FloatingHUD(hoverAware: true) { [model] in
+            AskPrompt(
+                model: model,
+                languages: LanguagePicker(
+                    options: VigilVoice.candidateLocales.map { $0.identifier(.bcp47) },
+                    selected: VigilDictationHUD.shared.forcedLocale,
+                    onSelect: { VigilDictationHUD.shared.select(locale: $0) }))
+        }
         hud.onKey = { [model] event in
             model.key(
                 event.charactersIgnoringModifiers ?? "", escape: event.keyCode == 53,
