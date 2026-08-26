@@ -51,13 +51,11 @@ enum VigilAsk {
 
     /// The pane whose ask is in flight, nil when idle. VigilSummon holds
     /// its chime for this pane: the narration IS the announcement, and a
-    /// chime landing in the answer window masked the human's word (drill
-    /// two, 2026-08-25).
+    /// chime landing in the answer window masks the human's word.
     static var askingPane: String? { activePane }
 
-    /// Route flips on the log's own timeline, where they HAPPEN, not where
-    /// the next ask trips over them - this watcher's flap trace is what
-    /// convicted route reclaiming (2026-08-25 09:04).
+    /// Route flips on the log's own timeline, where they happen, not where
+    /// the next ask trips over them.
     private nonisolated(unsafe) static var routeWatched = false
     static func watchRoute() {
         guard !routeWatched else { return }
@@ -141,8 +139,7 @@ enum VigilAsk {
         if nodEnabled, nodAvailable { sources.append(NodSource()) }
         if voiceEnabled, voiceAvailable {
             // The sink is the difference between "voice said nothing" and
-            // "voice dropped your yes as echo / AEC never engaged" - the
-            // 2026-08-25 drill was undiagnosable without it.
+            // "voice dropped your yes as echo / AEC never engaged".
             sources.append(
                 VoiceSource(locales: VigilVoice.chosenLocales, sink: VoiceLogSink()))
         }
@@ -172,10 +169,10 @@ enum VigilAsk {
             }
             // Ask's completion runs on the main actor in the SAME turn that
             // flips it out of flight: cleanup and the caller's completion
-            // are atomic against every other main-queue event. The async
-            // re-hop that used to sit here opened a window where a stale
-            // epilogue nulled a successor ask's activePane, making its own
-            // answered-elsewhere cancel a no-op.
+            // are atomic against every other main-queue event. An async
+            // re-hop here would open a window where a stale epilogue nulls
+            // a successor ask's activePane, making its answered-elsewhere
+            // cancel a no-op.
             MainActor.assumeIsolated {
                 activePane = nil
                 completion(receipt.verdict.answer, receipt.verdict.label)

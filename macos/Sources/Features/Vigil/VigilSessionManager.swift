@@ -2107,28 +2107,27 @@ class VigilSessionManager {
         try? p.run()
     }
 
-    /// The ask gate's answer, typed IN-PROCESS through the pane's own
-    /// surface: the exact bytes a keypress produces, no Enter. `vigild
-    /// send` is LINE delivery (payload + \r, queued if a resume is pending):
-    /// right for a verdict sentence, wrong for a prompt answer - its Enter
-    /// SUBMITTED a stray "1" as a message when the prompt had already gone
-    /// (2026-08-25 08:22), and a queued answer for a prompt that no longer
-    /// exists is exactly what must never be delivered. Receipted: the type
-    /// line, then the state sampled at 0.7s and 2.5s (the flip rides the
-    /// hook, over a second on a keyboard-equivalent path).
-    /// `confirm`: the chooser's contract is "Enter to select" - a digit
+    /// The ask gate's answer, typed through `vigild sendraw`: the exact
+    /// bytes a keypress produces, no Enter. `vigild send` is LINE delivery
+    /// (payload + \r, queued if a resume is pending): right for a verdict
+    /// sentence, wrong for a prompt answer, because its Enter submits a
+    /// stray "1" as a message when the prompt has already gone, and a
+    /// queued answer for a prompt that no longer exists is exactly what
+    /// must never be delivered. Receipted: the type line, then the state
+    /// sampled at 0.7s and 2.5s (the flip rides the hook, over a second on
+    /// a keyboard-equivalent path).
+    /// `confirm`: the chooser's contract is "Enter to select": a digit
     /// moves the cursor, Enter commits. The Enter is GUARDED, never blind:
     /// typed only if 0.7s after the digit the SAME block still stands (a
     /// digit that already selected flips the state first; a prompt that
-    /// vanished gets nothing - the stray-Enter class, 2026-08-25 08:22).
+    /// vanished gets nothing).
     private func typeAskAnswer(pane: String, keys: String, since: Date, confirm: Bool = false) {
         let label =
             keys == "\u{1b}" ? "esc" : keys == "\r" ? "enter" : keys == "\u{1b}[C" ? "right" : keys == " " ? "space" : "'\(keys.prefix(24))'"
         // `vigild sendraw` = one 'd' keystroke frame, the same bytes an
         // attached client sends per keypress: every daemon delivers it
         // verbatim, immediately, no Enter, never queued. In-process
-        // ghostty_surface_text was tried and never reached the pty
-        // (receipted 2026-08-25 08:42: allow -> STILL BLOCKED).
+        // ghostty_surface_text does not reach the pty.
         let p = Process()
         p.executableURL = URL(fileURLWithPath: Self.vigildBin)
         p.arguments = ["sendraw", pane, keys]
@@ -2164,7 +2163,7 @@ class VigilSessionManager {
                 }
                 // A chained NEXT prompt re-blocks the pane before the 2.5s
                 // verdict; only the SAME block (same start) convicts the
-                // keystroke (ask#6 cried STILL BLOCKED at q2's block).
+                // keystroke.
                 let sameBlock = abs(
                     (self?.paneAgentState(pane)?.since.timeIntervalSince(since)) ?? 1) < 0.5
                 if state == .blocked, !sameBlock {
@@ -4395,8 +4394,8 @@ class VigilSessionManager {
     /// stands. The queue is NOT stored anywhere: it is derived from state
     /// files on every pump, the same single source of truth the summon
     /// reads, so an answered prompt (by ANY means, nod or keyboard) clears
-    /// itself and the next blocked pane gets asked. A second store here is
-    /// how the first version dropped back-to-back prompts.
+    /// itself and the next blocked pane gets asked. A second store here
+    /// drops back-to-back prompts.
     private var askGateAskedAt: [String: Date] = [:]
     private var askGateUnblockedAt: [String: Date] = [:]
     /// A just-answered pane is DEAF for a beat: the answer needs time to flip
@@ -4406,9 +4405,9 @@ class VigilSessionManager {
     /// The pane whose ask is live right now; cancelled if answered elsewhere.
     private var askGatePane: String?
     /// Re-asks are BOUNDED: three narrations per (pane, block-start), then
-    /// silence until the state file changes. Unbounded 22s re-asks narrated
-    /// a stale blocked file forever and typed a verdict into a pane with no
-    /// prompt standing (2026-08-25, the ghost "1").
+    /// silence until the state file changes. Unbounded 22s re-asks would
+    /// narrate a stale blocked file forever and type a verdict into a pane
+    /// with no prompt standing.
     private var askGateCount: [String: (since: Date, count: Int)] = [:]
 
     func pumpAskGate() {
@@ -4454,12 +4453,11 @@ class VigilSessionManager {
         // looking at, anything younger may be a signal blip.
         // The active ask dies the moment its prompt is answered elsewhere:
         // blips after a keyboard allow are noise about a decision already
-        // made (2026-08-24, "nod was still active in the background").
-        // Cancel is TERMINAL for this pass: teardown is async (Ask stays
-        // in flight until its epilogue lands) and every completion re-pumps
-        // at +0.25s, so the handoff to the next pane is completion-driven.
-        // Beginning here landed "busy" with the stamp already written and
-        // muted the very prompt the handoff serves (the T4 wedge rebuilt).
+        // made. Cancel is TERMINAL for this pass: teardown is async (Ask
+        // stays in flight until its epilogue lands) and every completion
+        // re-pumps at +0.25s, so the handoff to the next pane is
+        // completion-driven. Beginning here lands "busy" with the stamp
+        // already written and mutes the very prompt the handoff serves.
         if let asking = askGatePane,
            paneAgentState(asking)?.state != .blocked {
             VigilAsk.cancel(pane: asking)
@@ -4502,12 +4500,12 @@ class VigilSessionManager {
         }
         let now = Date()
         // EAGER (EXPERIMENTAL, defaults-gated, off by default): the human
-        // SEES the prompt the instant it renders - the 1.2s ripeness gate
-        // plus ~1s of mic/recognizer arming made the first seconds deaf,
-        // and a yes spoken at first sight vanished (drill three,
-        // 2026-08-25). With `vigil.voice.eager` the gate asks almost
-        // immediately: the SCREEN is the announcement, narration is
-        // catch-up. The risks are accepted EXPLICITLY by turning it on:
+        // SEES the prompt the instant it renders; the 1.2s ripeness gate
+        // plus ~1s of mic/recognizer arming leaves the first seconds deaf,
+        // and a yes spoken at first sight vanishes. With
+        // `vigil.voice.eager` the gate asks almost immediately: the SCREEN
+        // is the announcement, narration is catch-up. The risks are
+        // accepted EXPLICITLY by turning it on:
         // a decisive word can be accepted before one spoken word of the
         // question, and a transient block earns a narration stomp
         // (the terminal cancel above cleans it up). Vigil-only; the ask
@@ -4515,7 +4513,7 @@ class VigilSessionManager {
         let minAge = UserDefaults.standard.bool(forKey: VigilAsk.eagerKey) ? 0.15 : 1.2
         let ripe = blocked.filter { now.timeIntervalSince($0.since) > minAge }
         // A young block is SKIPPED, not dropped: nothing else re-pumps until
-        // the next state change, which once cost 7 silent seconds. Re-arm.
+        // the next state change, which can be many silent seconds. Re-arm.
         if ripe.isEmpty, let youngest = blocked.map(\.since).max() {
             let wait = minAge + 0.1 - now.timeIntervalSince(youngest)
             if wait > 0 {
@@ -4537,11 +4535,11 @@ class VigilSessionManager {
         for pane in askGateQuestion.keys where !blockedPanes.contains(pane) {
             askGateQuestion[pane] = nil
         }
-        // ONE queue: the gate asks for what is in FRONT of Adrian — the
-        // summoned pane, else the focused one, else visible glass — and only
-        // then the summon's own ordering. Its private oldest-first walk let a
-        // background session's stale prompt wedge the gate for 20s while the
-        // prompt he was ANSWERING waited behind it (2026-08-24, T4).
+        // ONE queue: the gate asks for what is in FRONT of Adrian (the
+        // summoned pane, else the focused one, else visible glass) and only
+        // then the summon's own ordering. An oldest-first walk lets a
+        // background session's stale prompt wedge the gate while the prompt
+        // he is ANSWERING waits behind it.
         func eligible(_ c: SummonCandidate) -> Bool {
             if let dismissed = askGateDismissed[c.pane], abs(dismissed.timeIntervalSince(c.since)) < 0.5 { return false }
             if let resolved = askGateResolvedAt[c.pane], c.since.timeIntervalSince(resolved) < 2 { return false }
@@ -4587,12 +4585,11 @@ class VigilSessionManager {
         // Which wording plays: the gist lands on the events drain (≤1s),
         // inside the 1.2s ripeness window, so the ripe path narrates the
         // hook's message; an EAGER first ask usually beats the drain and
-        // narrates the concise generic BY DESIGN - the screen already
+        // narrates the concise generic BY DESIGN: the screen already
         // shows the exact prompt, narration is catch-up, so the generic
         // carries ONLY the question ("a permission request in <session>"
-        // was information-free noise - Adrian, 2026-08-26). A msg staged
-        // before this block began is the previous prompt's: generic,
-        // never wrong.
+        // is information-free). A msg staged before this block began is
+        // the previous prompt's: generic, never wrong.
         // A question narrates ITSELF with its options (the ask package
         // numbers them; the verdict is the chosen index); a permission
         // prompt narrates the hook's gist, generic when none postdates it.
@@ -4615,10 +4612,10 @@ class VigilSessionManager {
             assert(verdict != "busy", "ask gate: busy verdict - a second ask consumer exists")
             self?.askGatePane = nil
             if let answer {
-                // A verdict types ONLY into a still-blocked pane. A late
-                // duplicate signal once re-asked for an answered prompt and
-                // the nod's "1" landed in a pane with no prompt standing - a
-                // stray keystroke into the agent's input (2026-08-24 20:07).
+                // A verdict types ONLY into a still-blocked pane: a late
+                // duplicate signal can re-ask for an answered prompt, and
+                // the "1" would land in a pane with no prompt standing, a
+                // stray keystroke into the agent's input.
                 if self?.paneAgentState(next.pane)?.state == .blocked {
                     switch (answer, question) {
                     // "1" approves ONCE; escape backs out. Never the standing
@@ -4643,8 +4640,8 @@ class VigilSessionManager {
                                 self?.typeAskAnswer(pane: next.pane, keys: "\r", since: next.since)
                             }
                         }
-                    // A multi-select: a digit TOGGLES its row (no space - a
-                    // space toggled it straight back, 2026-08-26), then the
+                    // A multi-select: a digit TOGGLES its row (never a
+                    // space: it toggles the row straight back), then the
                     // right arrow moves to the chooser's Submit tab and
                     // Enter submits (Enter on a row only toggles it).
                     case (.options(let indices), .some):

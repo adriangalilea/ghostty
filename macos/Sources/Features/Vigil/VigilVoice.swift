@@ -20,11 +20,11 @@ enum VigilVoice {
     /// Fires on start/stop so the status item can show the mic.
     static var onStateChange: (() -> Void)?
 
-    /// Dictation language: "auto" runs the candidate locales ARBITRATED -
-    /// one recognizer each, per-utterance confidence verdict, the Spanglish
-    /// answer ("Hola que tal" through the English model alone was
-    /// "Oh, like it.") - or an explicit BCP-47 id for one recognizer. The
-    /// sidebar mic button's context menu writes it.
+    /// Dictation language: "auto" runs the candidate locales ARBITRATED
+    /// (one recognizer each, per-utterance confidence verdict, the
+    /// Spanglish answer: one English recognizer alone mangles Spanish), or
+    /// an explicit BCP-47 id for one recognizer. The sidebar mic button's
+    /// context menu writes it.
     static let localeKey = "vigil.voice.locale"
     /// The arbitrated candidate set (comma-separated BCP-47).
     static let localesKey = "vigil.voice.locales"
@@ -33,8 +33,7 @@ enum VigilVoice {
     /// ask gate: the session's chosen language (`vigil.voice.locale`, the
     /// flag picker persists it) narrows the race to one recognizer; auto
     /// runs every candidate. One rule, or the flag and the engine disagree
-    /// (the picker said en-US while the ask's source raced both with an
-    /// es crown, 2026-08-26).
+    /// (a picker showing one language while the ask's source races both).
     nonisolated static var chosenLocales: [Locale] {
         let preference = UserDefaults.standard.string(forKey: localeKey) ?? "auto"
         return preference == "auto" ? candidateLocales : [Locale(identifier: preference)]
