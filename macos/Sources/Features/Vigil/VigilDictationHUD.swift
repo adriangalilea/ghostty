@@ -74,6 +74,12 @@ final class VigilDictationHUD {
     }
 
     func preview(_ text: String, locale: String?) {
+        // Once a final crowned a winner, the losers are SILENCED outright:
+        // showing the losing recognizer's garbage because the winner is
+        // momentarily quiet cluttered the screen with wrong-language wet
+        // ink ("Elo,ó." over an English run, 2026-08-26). Before any
+        // final, the longest preview speaks for the race.
+        if let sticky = stickyLocale, let locale, locale != sticky { return }
         previews[locale ?? ""] = text
         let shown: (text: String, locale: String?)
         if let sticky = stickyLocale, let held = previews[sticky], !held.isEmpty {
