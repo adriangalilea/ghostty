@@ -5203,7 +5203,11 @@ class VigilSessionManager {
     /// Dev builds only: a public (Release) build writes nothing to disk.
     func vlog(_ msg: String) {
         #if DEBUG
-        let line = "\(Date()) \(msg)\n"
+        // LOCAL wall-clock time: the reader is a human cross-referencing
+        // "what did I just hear" against the log; Date()'s UTC description
+        // cost a 2h mental offset on every receipt read.
+        let stamp = Self.vlogStamp.string(from: Date())
+        let line = "\(stamp) \(msg)\n"
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/wake/vigil.log")
         if let h = try? FileHandle(forWritingTo: url) {
@@ -5213,6 +5217,12 @@ class VigilSessionManager {
         }
         #endif
     }
+
+    private static let vlogStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return f
+    }()
 
     private func stateTag(_ s: State) -> String {
         switch s {
