@@ -4381,6 +4381,10 @@ class VigilSessionManager {
     /// bumped by the tool's own permission-channel Notification seconds
     /// later; a stamp rule would starve the ask.)
     private var askGateQuestion: [String: (q: WakeQuestion, at: Date)] = [:]
+    /// A question block whose chooser left the screen: never asked again
+    /// for the SAME block (the state file stays blocked - no hook fires on
+    /// a decline); a new block is a new question.
+    private var askGateDismissed: [String: Date] = [:]
     /// The chooser's own tail, appended to every AskUserQuestion on screen.
     static let chooserTypeSomething = "type something"
     static let chooserChatAboutThis = "chat about this"
@@ -4474,7 +4478,7 @@ class VigilSessionManager {
                 vlog("ask gate: chooser footer gone from \(asking) - declined or answered elsewhere, superseded")
                 VigilAsk.cancel(pane: asking, reason: "superseded")
                 askGatePane = nil
-                askGateAskedAt[asking] = Date()
+                askGateDismissed[asking] = paneAgentState(asking)?.since
                 return
             }
         }
@@ -4538,6 +4542,7 @@ class VigilSessionManager {
         // background session's stale prompt wedge the gate for 20s while the
         // prompt he was ANSWERING waited behind it (2026-08-24, T4).
         func eligible(_ c: SummonCandidate) -> Bool {
+            if let dismissed = askGateDismissed[c.pane], abs(dismissed.timeIntervalSince(c.since)) < 0.5 { return false }
             if let resolved = askGateResolvedAt[c.pane], c.since.timeIntervalSince(resolved) < 2 { return false }
             if let tally = askGateCount[c.pane], tally.since == c.since, tally.count >= 3 { return false }
             guard let asked = askGateAskedAt[c.pane] else { return true }
