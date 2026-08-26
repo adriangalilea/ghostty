@@ -145,6 +145,7 @@ enum VigilAsk {
         if !wired {
             wired = true
             Ask.trace = { line in trace?("ask \(line)") }
+            VigilAskHUD.arm()
         }
         activePane = pane
         let offered = sources.map(\.id).joined(separator: "+")
