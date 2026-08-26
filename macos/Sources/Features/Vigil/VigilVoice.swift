@@ -137,12 +137,14 @@ enum VigilVoice {
                     var configuration = ArbitratedSession.Configuration(locales: locales)
                     configuration.grounding = grounding
                     configuration.volatileResults = true
+                    configuration.reportAlternatives = true
                     configuration.sink = VoiceLogSink()
                     session = try await ArbitratedSession(configuration: configuration)
                 } else {
                     var configuration = TranscriptionSession.Configuration(locale: locales[0])
                     configuration.fastResults = true
                     configuration.volatileResults = true
+                    configuration.reportAlternatives = true
                     configuration.grounding = grounding
                     configuration.sink = VoiceLogSink()
                     session = try await TranscriptionSession(configuration: configuration)
@@ -164,17 +166,20 @@ enum VigilVoice {
                     "voice: capture voiceProcessed=\(MicTap.shared.voiceProcessed)"
                         + " (OS AEC \(MicTap.shared.voiceProcessed ? "on - self-audio subtracted" : "OFF"))"
                 )
-                VigilDictationHUD.shared.begin()
+                VigilDictationHUD.shared.begin(pane: pane)
                 Self.drain = Task {
                     do {
                         for try await segment in session.segments {
                             if segment.isFinal {
+                                // The HUD holds the line through its edit
+                                // window; injection happens at expiry (or
+                                // when the human seals a correction).
                                 await MainActor.run {
                                     VigilDictationHUD.shared.commit(
                                         segment.text, locale: segment.locale,
-                                        confidence: segment.confidence)
+                                        confidence: segment.confidence,
+                                        alternatives: segment.alternatives)
                                 }
-                                await Self.inject(segment.text, into: pane)
                             } else {
                                 await MainActor.run {
                                     VigilDictationHUD.shared.preview(
@@ -231,7 +236,7 @@ enum VigilVoice {
 
     /// One finalized phrase -> raw keystrokes, trailing space so the next
     /// phrase (spoken or typed) lands a word apart. Never a newline.
-    private static func inject(_ text: String, into pane: String) {
+    static func inject(_ text: String, into pane: String) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         let process = Process()
