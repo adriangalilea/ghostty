@@ -1643,7 +1643,6 @@ class VigilSessionManager {
     struct Mirror {
         let name: String
         let pane: String
-        weak var home: Ghostty.SurfaceView?
         let view: Ghostty.SurfaceView
     }
     private(set) var mirror: Mirror?
@@ -1663,8 +1662,9 @@ class VigilSessionManager {
     /// Show `pane` in the native quick terminal as a mirror of `home`: the
     /// panel keeps its own configured position, size and animation; the
     /// mirror is only the surface inside it. The daemon has ONE pty size,
-    /// so the home follows the panel's grid while the mirror is up and
-    /// re-sends its own when it ends. Mirroring the pane already shown
+    /// so the home follows the panel's grid while the mirror is up; when
+    /// the mirror client leaves, vigild re-applies the home's own size
+    /// (jiggled, so the TUI repaints). Mirroring the pane already shown
     /// just brings the panel in.
     private func mirror(
         name: String, pane: String, home: Ghostty.SurfaceView,
@@ -1689,7 +1689,7 @@ class VigilSessionManager {
         var config = resurrectConfig(name: name, pane: registered)
         config.vigilMirror = true
         let view = Ghostty.SurfaceView(app, baseConfig: config)
-        mirror = Mirror(name: name, pane: pane, home: home, view: view)
+        mirror = Mirror(name: name, pane: pane, view: view)
         quickTreeSwap = true
         quick.surfaceTree = SplitTree(view: view)
         quickTreeSwap = false
@@ -1700,9 +1700,8 @@ class VigilSessionManager {
     }
 
     /// The mirror leaves the panel: its client dies with its view, and the
-    /// home view re-sends its own size (the daemon's pty keeps whichever
-    /// client resized it last). `restoreStash: false` is the
-    /// panel-replaces-panel path, same contract as reclaim's.
+    /// daemon restores the surviving client's size. `restoreStash: false`
+    /// is the panel-replaces-panel path, same contract as reclaim's.
     func endMirror(restoreStash: Bool = true) {
         guard let current = mirror else { return }
         mirror = nil
@@ -1711,9 +1710,6 @@ class VigilSessionManager {
             quick.surfaceTree = stashedQuickTree ?? SplitTree()
             quickTreeSwap = false
             stashedQuickTree = nil
-        }
-        if let home = current.home {
-            DispatchQueue.main.async { home.sizeDidChange(home.bounds.size) }
         }
         vlog("float: mirror of \(current.pane) ended")
     }
