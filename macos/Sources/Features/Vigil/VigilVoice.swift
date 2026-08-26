@@ -266,6 +266,7 @@ struct VoiceLogSink: ListenSink {
             parts.append(String(format: "conf=%.2f", confidence))
         }
         if let count = event.count { parts.append("n=\(count)") }
+        if let note = event.note { parts.append(note) }
         DispatchQueue.main.async {
             VigilVoice.trace?(parts.joined(separator: " "))
         }
