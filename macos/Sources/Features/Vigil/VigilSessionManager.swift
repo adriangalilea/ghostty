@@ -4488,11 +4488,14 @@ class VigilSessionManager {
         // Which wording plays: the gist lands on the events drain (≤1s),
         // inside the 1.2s ripeness window, so the ripe path narrates the
         // hook's message; an EAGER first ask usually beats the drain and
-        // narrates the generic line BY DESIGN - the screen already shows
-        // the exact prompt, narration is catch-up. A msg staged before
-        // this block began is the previous prompt's: generic, never wrong.
+        // narrates the concise generic BY DESIGN - the screen already
+        // shows the exact prompt, narration is catch-up, so the generic
+        // carries ONLY the question ("a permission request in <session>"
+        // was information-free noise - Adrian, 2026-08-26). A msg staged
+        // before this block began is the previous prompt's: generic,
+        // never wrong.
         let spoken = askGateMsg[next.pane].flatMap { $0.at > next.since ? $0.text : nil }
-            ?? "a permission request in \(next.name)"
+            ?? "do you allow it?"
         VigilAsk.ask(spoken, pane: next.pane) { [weak self] answer, verdict in
             // The gate never begins while an ask is in flight; a busy
             // verdict means it raced a consumer it does not know about.
