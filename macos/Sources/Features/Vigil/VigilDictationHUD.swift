@@ -52,6 +52,13 @@ final class VigilDictationHUD: ObservableObject {
             guard let self, closing else { return }
             hide()
         }
+        // An in-place edit borrows keyboard focus for the panel and returns
+        // it to the pane; clicking elsewhere cancels the edit.
+        model.onEditingChange = { [weak self] editing in
+            guard let self else { return }
+            if editing { hud?.focusForTyping() } else { hud?.releaseFocus() }
+            model.paused = editing || (hud?.hovering ?? false)
+        }
         let preference = UserDefaults.standard.string(forKey: VigilVoice.localeKey) ?? "auto"
         forcedLocale = preference == "auto" ? nil : preference
         let doubt = UserDefaults.standard.double(forKey: Self.doubtKey)
@@ -74,6 +81,7 @@ final class VigilDictationHUD: ObservableObject {
                 guard let self else { return }
                 model.paused = on || model.editing != nil
             }
+            hud.onFocusLost = { [weak self] in self?.model.cancelEdit() }
             self.hud = hud
         }
         hud?.show()
