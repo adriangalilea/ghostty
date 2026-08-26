@@ -2113,8 +2113,13 @@ class VigilSessionManager {
     /// exists is exactly what must never be delivered. Receipted: the type
     /// line, then the state sampled at 0.7s and 2.5s (the flip rides the
     /// hook, over a second on a keyboard-equivalent path).
-    private func typeAskAnswer(pane: String, keys: String, since: Date) {
-        let label = keys == "\u{1b}" ? "esc" : "'\(keys)'"
+    /// `confirm`: the chooser's contract is "Enter to select" - a digit
+    /// moves the cursor, Enter commits. The Enter is GUARDED, never blind:
+    /// typed only if 0.7s after the digit the SAME block still stands (a
+    /// digit that already selected flips the state first; a prompt that
+    /// vanished gets nothing - the stray-Enter class, 2026-08-25 08:22).
+    private func typeAskAnswer(pane: String, keys: String, since: Date, confirm: Bool = false) {
+        let label = keys == "\u{1b}" ? "esc" : keys == "\r" ? "enter" : "'\(keys)'"
         // `vigild sendraw` = one 'd' keystroke frame, the same bytes an
         // attached client sends per keypress: every daemon delivers it
         // verbatim, immediately, no Enter, never queued. In-process
@@ -2147,6 +2152,12 @@ class VigilSessionManager {
                     return
                 }
                 if state != .blocked, final { return }
+                if confirm, !final, state == .blocked,
+                   abs((self?.paneAgentState(pane)?.since.timeIntervalSince(since)) ?? 1) < 0.5 {
+                    self?.vlog("ask gate: \(label) moved the cursor, same question standing - Enter to select")
+                    self?.typeAskAnswer(pane: pane, keys: "\r", since: since)
+                    return
+                }
                 // A chained NEXT prompt re-blocks the pane before the 2.5s
                 // verdict; only the SAME block (same start) convicts the
                 // keystroke (ask#6 cried STILL BLOCKED at q2's block).
@@ -4353,8 +4364,12 @@ class VigilSessionManager {
     /// prompt's text. Pruned when the pump sees the pane unblocked, which
     /// bounds the map; the stamp is the correctness gate.
     private var askGateMsg: [String: (text: String, at: Date)] = [:]
-    /// An AskUserQuestion's payload per pane, same stamp discipline as
-    /// the msg: honored only for a block it postdates, pruned on unblock.
+    /// An AskUserQuestion's payload per pane. Unlike the msg it needs no
+    /// postdate check: the tool's PostToolUse unblocks the pane between
+    /// two questions, and the prune below empties it there, so a staged
+    /// question is always the standing one. (The block's `since` is
+    /// bumped by the tool's own permission-channel Notification seconds
+    /// later; a stamp rule would starve the ask.)
     private var askGateQuestion: [String: (q: WakeQuestion, at: Date)] = [:]
     /// Panes already asked during their CURRENT blocking episode. Pruned the
     /// moment a pane stops being permission-blocked, so a fresh prompt asks
@@ -4394,7 +4409,7 @@ class VigilSessionManager {
             switch paneAgentState(candidate.pane)?.flavor {
             case .permission: return true
             case .question:
-                guard let staged = askGateQuestion[candidate.pane], staged.at > candidate.since else { return false }
+                guard let staged = askGateQuestion[candidate.pane] else { return false }
                 if staged.q.multi || staged.q.count > 1 || staged.q.options.isEmpty {
                     if askGateAskedAt[candidate.pane] == nil {
                         askGateAskedAt[candidate.pane] = Date()
@@ -4538,7 +4553,7 @@ class VigilSessionManager {
         // A question narrates ITSELF with its options (the ask package
         // numbers them; the verdict is the chosen index); a permission
         // prompt narrates the hook's gist, generic when none postdates it.
-        let question = askGateQuestion[next.pane].flatMap { $0.at > next.since ? $0.q : nil }
+        let question = askGateQuestion[next.pane]?.q
         let spoken = question?.question
             ?? askGateMsg[next.pane].flatMap { $0.at > next.since ? $0.text : nil }
             ?? "do you allow it?"
@@ -4564,7 +4579,7 @@ class VigilSessionManager {
                     // A chosen option types its digit into the question's
                     // list - the same keystroke a seated human presses.
                     case (.option(let index), .some):
-                        self?.typeAskAnswer(pane: next.pane, keys: "\(index + 1)", since: next.since)
+                        self?.typeAskAnswer(pane: next.pane, keys: "\(index + 1)", since: next.since, confirm: true)
                     // Shape mismatches never touch the pane: a yes has no
                     // meaning in a choice list, an option none in a
                     // permission prompt. Scream, type nothing.
