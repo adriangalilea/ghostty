@@ -1660,17 +1660,17 @@ class VigilSessionManager {
             ?? controller.surfaceTree.root?.leftmostLeaf().vigilAttachId
     }
 
-    /// Show `pane` in the panel as a mirror of `home`. The panel takes the
-    /// home view's own point size so both clients share a grid: the
-    /// daemon has ONE pty size, and two grids would re-wrap whatever
-    /// Adrian is reading in the window. Mirroring the pane already shown
+    /// Show `pane` in the native quick terminal as a mirror of `home`: the
+    /// panel keeps its own configured position, size and animation; the
+    /// mirror is only the surface inside it. The daemon has ONE pty size,
+    /// so the home follows the panel's grid while the mirror is up and
+    /// re-sends its own when it ends. Mirroring the pane already shown
     /// just brings the panel in.
     private func mirror(
         name: String, pane: String, home: Ghostty.SurfaceView,
         quick: QuickTerminalController
     ) {
         if let current = mirror, current.pane == pane {
-            quick.vigilMirrorSize = home.bounds.size
             quick.animateIn()
             DispatchQueue.main.async { Ghostty.moveFocus(to: current.view) }
             return
@@ -1690,14 +1690,12 @@ class VigilSessionManager {
         config.vigilMirror = true
         let view = Ghostty.SurfaceView(app, baseConfig: config)
         mirror = Mirror(name: name, pane: pane, home: home, view: view)
-        let size = home.bounds.size
-        quick.vigilMirrorSize = size
         quickTreeSwap = true
         quick.surfaceTree = SplitTree(view: view)
         quickTreeSwap = false
         quick.animateIn()
         DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
-        vlog("float: mirror \(pane) of '\(name)' -> quick terminal (\(Int(size.width))x\(Int(size.height)))")
+        vlog("float: mirror \(pane) of '\(name)' -> quick terminal")
         touchRecent(name)
     }
 
@@ -1708,9 +1706,7 @@ class VigilSessionManager {
     func endMirror(restoreStash: Bool = true) {
         guard let current = mirror else { return }
         mirror = nil
-        let quick = quickController(create: false)
-        quick?.vigilMirrorSize = nil
-        if restoreStash, let quick {
+        if restoreStash, let quick = quickController(create: false) {
             quickTreeSwap = true
             quick.surfaceTree = stashedQuickTree ?? SplitTree()
             quickTreeSwap = false
