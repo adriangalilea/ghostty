@@ -4549,13 +4549,13 @@ class VigilSessionManager {
         // the traces; consumers (dictation, the pump's prewarm, the ask's
         // VoiceSource) subscribe, they never re-point receipts.
         MicTap.shared.sink = VoiceLogSink()
-        // The English narration backend (Kokoro CoreML) pays a ~5s cold
-        // load once per process; a long-lived app pays it HERE at startup,
+        // The voice engine pays its cold costs (Kokoro's ~5s CoreML load)
+        // once per process; a long-lived app pays it HERE at startup,
         // never inside the human's first ask.
         Announcer.trace = { [weak self] line in
             Task { @MainActor in self?.vlog(line) }
         }
-        KokoroBackend.warm()
+        SpeechRouter.warmAll()
         try? FileManager.default.createDirectory(at: agentStateDir, withIntermediateDirectories: true)
         let fd = Darwin.open(agentStateDir.path, O_EVTONLY)
         guard fd >= 0 else { return }
