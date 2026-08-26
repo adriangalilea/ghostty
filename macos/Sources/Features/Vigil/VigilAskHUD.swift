@@ -3,21 +3,18 @@
 import AppKit
 import AskKit
 import Face
-import Ink
 import SwiftUI
 
-/// The ask prompt's face: the question, the channels actually listening
-/// ("voice · nod" - only the reachable ones), and the verdict
-/// crystallizing in place - Ink's `AskPrompt` in the shared HUD chrome.
-/// Driven entirely by `Ask.surface` events, so every ask any consumer in
-/// this process runs gets the same face for free; the panel lingers just
+/// The ask prompt's face: Face's `AskPrompt` in Face's `FloatingHUD`,
+/// driven entirely by `Ask.surface` events - every ask any consumer in
+/// this process runs gets the same face for free. The panel lingers just
 /// long enough to SHOW the verdict, then leaves.
 @MainActor
 final class VigilAskHUD {
     static let shared = VigilAskHUD()
 
     private let model = AskPromptModel()
-    private var panel: NSPanel?
+    private var hud: FloatingHUD?
     private var generation = 0
 
     /// Wire once at startup, beside Ask.trace. Nonisolated: callers sit
@@ -29,16 +26,15 @@ final class VigilAskHUD {
     }
 
     private func handle(_ event: Ask.SurfaceEvent) {
+        model.handle(event)
         switch event {
         case .began:
             generation += 1
-            model.handle(event)
-            let panel = self.panel ?? VigilHUDChrome.makePanel { AskPrompt(model: model) }
-            self.panel = panel
-            VigilHUDChrome.position(panel)
-            panel.orderFrontRegardless()
+            let hud = self.hud ?? FloatingHUD { [model] in AskPrompt(model: model) }
+            self.hud = hud
+            hud.show()
         case .verdict:
-            model.handle(event)
+            break
         case .ended:
             generation += 1
             let gen = generation
@@ -47,7 +43,7 @@ final class VigilAskHUD {
                 // in the window keeps the panel.
                 try? await Task.sleep(for: .seconds(1.2))
                 guard let self, self.generation == gen else { return }
-                self.panel?.orderOut(nil)
+                self.hud?.hide()
             }
         }
     }
