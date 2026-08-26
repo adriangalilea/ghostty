@@ -144,7 +144,7 @@ enum VigilAsk {
             // "voice dropped your yes as echo / AEC never engaged" - the
             // 2026-08-25 drill was undiagnosable without it.
             sources.append(
-                VoiceSource(locales: VigilVoice.candidateLocales, sink: VoiceLogSink()))
+                VoiceSource(locales: VigilVoice.chosenLocales, sink: VoiceLogSink()))
         }
         guard !sources.isEmpty else { return completion(nil, "unavailable") }
         guard !Ask.isAsking else { return completion(nil, "busy") }

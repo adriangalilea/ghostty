@@ -29,6 +29,17 @@ enum VigilVoice {
     /// The arbitrated candidate set (comma-separated BCP-47).
     static let localesKey = "vigil.voice.locales"
 
+    /// THE language truth every voice consumer reads - dictation AND the
+    /// ask gate: the session's chosen language (`vigil.voice.locale`, the
+    /// flag picker persists it) narrows the race to one recognizer; auto
+    /// runs every candidate. One rule, or the flag and the engine disagree
+    /// (the picker said en-US while the ask's source raced both with an
+    /// es crown, 2026-08-26).
+    nonisolated static var chosenLocales: [Locale] {
+        let preference = UserDefaults.standard.string(forKey: localeKey) ?? "auto"
+        return preference == "auto" ? candidateLocales : [Locale(identifier: preference)]
+    }
+
     nonisolated static var candidateLocales: [Locale] {
         let stored = UserDefaults.standard.string(forKey: localesKey) ?? "es-ES, en-US"
         let ids = stored.split(separator: ",").map {
@@ -107,9 +118,8 @@ enum VigilVoice {
         let gen = generation
         onStateChange?()
 
-        let preference = UserDefaults.standard.string(forKey: localeKey) ?? "auto"
         let identity = VigilSessionManager.shared.cortexIdentity(ofPane: pane)
-        let locales = preference == "auto" ? candidateLocales : [Locale(identifier: preference)]
+        let locales = chosenLocales
         var grounding = GroundingSet()
         if let keywords = identity?.keywords, !keywords.isEmpty {
             grounding[.session] = keywords
