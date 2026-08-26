@@ -118,7 +118,16 @@ final class VigilDictationHUD: ObservableObject {
         }
         let preference = UserDefaults.standard.string(forKey: VigilVoice.localeKey) ?? "auto"
         forcedLocale = preference == "auto" ? nil : preference
+        // The doubt threshold persists beside the language; 0 = unset.
+        let doubt = UserDefaults.standard.double(forKey: Self.doubtKey)
+        if doubt > 0 { model.doubtBelow = doubt }
+        model.onDoubtChange = { value in
+            UserDefaults.standard.set(value, forKey: Self.doubtKey)
+            VigilVoice.trace?("voice: doubt threshold -> \(value)")
+        }
     }
+
+    static let doubtKey = "vigil.voice.doubtBelow"
 
     func begin(pane: String) {
         self.pane = pane
