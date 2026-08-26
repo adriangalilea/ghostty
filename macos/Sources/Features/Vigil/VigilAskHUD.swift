@@ -7,8 +7,11 @@ import SwiftUI
 
 /// The ask prompt's face: Face's `AskPrompt` in Face's `FloatingHUD`,
 /// driven entirely by `Ask.surface` events - every ask any consumer in
-/// this process runs gets the same face for free. The panel lingers just
-/// long enough to SHOW the verdict, then leaves.
+/// this process runs gets the same face for free, and the face ANSWERS:
+/// hover the glass and the yes/no (or option) buttons click through,
+/// y/n/1-9 answer, esc cancels - the `surface` channel racing nod and
+/// voice, ledgered like them. The panel lingers just long enough to SHOW
+/// the verdict, then leaves.
 @MainActor
 final class VigilAskHUD {
     static let shared = VigilAskHUD()
@@ -25,15 +28,23 @@ final class VigilAskHUD {
         }
     }
 
+    private func makeHUD() -> FloatingHUD {
+        let hud = FloatingHUD(hoverAware: true) { [model] in AskPrompt(model: model) }
+        hud.onKey = { [model] event in
+            model.key(event.charactersIgnoringModifiers ?? "", escape: event.keyCode == 53)
+        }
+        return hud
+    }
+
     private func handle(_ event: Ask.SurfaceEvent) {
         model.handle(event)
         switch event {
         case .began:
             generation += 1
-            let hud = self.hud ?? FloatingHUD { [model] in AskPrompt(model: model) }
+            let hud = self.hud ?? makeHUD()
             self.hud = hud
             hud.show()
-        case .verdict:
+        case .levels, .verdict:
             break
         case .ended:
             generation += 1
