@@ -1163,6 +1163,9 @@ class VigilSessionManager {
             // options); a question-blocked pane without one never asks.
             if event.event == "Question", let q = event.q, let qPane = event.pane, !qPane.isEmpty {
                 askGateQuestion[qPane] = (q, Date())
+                // The payload is what makes a question askable; nothing
+                // else re-pumps once the block itself has been seen.
+                DispatchQueue.main.async { [weak self] in self?.pumpAskGate() }
             }
             // Presence beats attention, PANE-granular: only an event whose
             // console is actually on screen is already answered. A watched
