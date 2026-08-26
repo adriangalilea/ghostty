@@ -24,6 +24,32 @@ class QuickTerminalController: BaseTerminalController {
     /// Cache for per-screen window state.
     let screenStateCache: QuickTerminalScreenStateCache
 
+    /// vigil: the size a MIRROR needs, the home pane's own point size, so
+    /// both clients of one daemon share a grid and nothing re-wraps. While
+    /// set, the configured size and the remembered frame both yield, and
+    /// the frame this shows at is never remembered. Clamped to the screen
+    /// the panel appears on.
+    var vigilMirrorSize: CGSize?
+
+    private var terminalSize: QuickTerminalSize {
+        guard let size = vigilMirrorSize,
+              let screen = derivedConfig.quickTerminalScreen.screen else {
+            return derivedConfig.quickTerminalSize
+        }
+        let w = UInt32(min(size.width, screen.visibleFrame.width))
+        let h = UInt32(min(size.height, screen.visibleFrame.height))
+        // Mirrors QuickTerminalSize.calculate: which axis is "primary"
+        // depends on the position (and, for center, the screen's aspect).
+        let widthIsPrimary: Bool = switch position {
+        case .left, .right: true
+        case .top, .bottom: false
+        case .center: screen.visibleFrame.width >= screen.visibleFrame.height
+        }
+        return widthIsPrimary
+            ? QuickTerminalSize(primary: .pixels(w), secondary: .pixels(h))
+            : QuickTerminalSize(primary: .pixels(h), secondary: .pixels(w))
+    }
+
     /// Non-nil if we have hidden dock state.
     private var hiddenDock: HiddenDock?
 
@@ -429,7 +455,8 @@ class QuickTerminalController: BaseTerminalController {
         // the user's preferred window size and position for when the quick
         // terminal is reactivated with a new surface. Without this, SwiftUI
         // would reset the window to its minimum content size.
-        if window.frame.width > 0 && window.frame.height > 0, let screen = window.screen {
+        if vigilMirrorSize == nil, window.frame.width > 0 && window.frame.height > 0,
+           let screen = window.screen {
             screenStateCache.save(frame: window.frame, for: screen)
         }
     }
@@ -438,13 +465,13 @@ class QuickTerminalController: BaseTerminalController {
         guard let screen = derivedConfig.quickTerminalScreen.screen else { return }
 
         // Grab our last closed frame to use from the cache.
-        let closedFrame = screenStateCache.frame(for: screen)
+        let closedFrame = vigilMirrorSize == nil ? screenStateCache.frame(for: screen) : nil
 
         // Move our window off screen to the initial animation position.
         position.setInitial(
             in: window,
             on: screen,
-            terminalSize: derivedConfig.quickTerminalSize,
+            terminalSize: terminalSize,
             closedFrame: closedFrame)
 
         // We need to set our window level to a high value. In testing, only
@@ -479,7 +506,7 @@ class QuickTerminalController: BaseTerminalController {
             position.setFinal(
                 in: window.animator(),
                 on: screen,
-                terminalSize: derivedConfig.quickTerminalSize,
+                terminalSize: terminalSize,
                 closedFrame: closedFrame)
         }, completionHandler: {
             // There is a very minor delay here so waiting at least an event loop tick
@@ -602,7 +629,7 @@ class QuickTerminalController: BaseTerminalController {
             position.setInitial(
                 in: window.animator(),
                 on: screen,
-                terminalSize: derivedConfig.quickTerminalSize,
+                terminalSize: terminalSize,
                 closedFrame: window.frame)
         }, completionHandler: {
             // This causes the window to be removed from the screen list and macOS

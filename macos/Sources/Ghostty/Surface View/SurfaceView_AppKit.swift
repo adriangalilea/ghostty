@@ -223,6 +223,12 @@ extension Ghostty {
         /// any. Session capture preserves it so resurrection reattaches.
         private(set) var vigilAttachId: String?
 
+        /// Vigil: a mirror is a second client on a pane whose HOME view
+        /// sits in a session window (the summon panel). Never the pane's
+        /// live view, never an owner: every ownership and liveness lookup
+        /// skips it.
+        private(set) var vigilMirror = false
+
         /// Vigil: every live attach-backed surface, weakly. ARC truth for
         /// daemon reachability: while any surface holds an attach id (in a
         /// tree, a detached session, an undo corpse), its daemon is owned;
@@ -231,6 +237,7 @@ extension Ghostty {
 
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             self.vigilAttachId = baseConfig?.vigilAttach
+            self.vigilMirror = baseConfig?.vigilMirror ?? false
             self.markedText = NSMutableAttributedString()
 
             // Our initial config always is our application wide config.

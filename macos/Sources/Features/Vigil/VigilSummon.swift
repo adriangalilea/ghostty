@@ -204,7 +204,7 @@ final class VigilSummon {
         if let cur = current {
             // Adrian moved the flow himself (manual float of another
             // session, a mount): the summon is over, his gesture wins.
-            guard manager.floatingName == cur.name else {
+            guard manager.panelSession == cur.name else {
                 current = nil
                 settleWork?.cancel()
                 VigilHush.resume()
@@ -260,7 +260,7 @@ final class VigilSummon {
         let manager = VigilSessionManager.shared
         let appearing = !manager.quickTerminalVisible
         manager.float(name: candidate.name, landOn: candidate.pane)
-        guard manager.floatingName == candidate.name else {
+        guard manager.panelSession == candidate.name else {
             manager.vlog("summon: float REFUSED for '\(candidate.name)'")
             return
         }

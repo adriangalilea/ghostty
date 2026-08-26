@@ -453,9 +453,9 @@ class AppDelegate: NSObject,
         // Only bail if a LIVE window exists (visible or miniaturized). Detached
         // sessions leave corpse controllers in TerminalController.all (empty
         // tree, window closed) that must not count: with all sessions detached
-        // in the background, clicking the dock icon must open a new window, not
-        // nothing (Adrian 2026-07-19). A miniaturized live window returns true
-        // so AppKit deminiaturizes it instead.
+        // in the background, clicking the dock icon must open a window, not
+        // nothing. A miniaturized live window returns true so AppKit
+        // deminiaturizes it instead.
         let hasLiveWindow = TerminalController.all.contains {
             guard let window = $0.window else { return false }
             return (window.isVisible || window.isMiniaturized) && !$0.surfaceTree.isEmpty
@@ -467,7 +467,11 @@ class AppDelegate: NSObject,
         // but I haven't seen it happen in releases. I'm unsure why.
         guard applicationHasBecomeActive else { return true }
 
-        // No visible windows, open a new one.
+        // vigil: no live window means the fleet is in the background. The
+        // most recent session comes back; a NEW session is born by ⌘N
+        // alone, never by activating the app. Only an empty fleet gets a
+        // fresh window.
+        if VigilSessionManager.shared.reopen() { return false }
         _ = TerminalController.newWindow(ghostty)
         return false
     }

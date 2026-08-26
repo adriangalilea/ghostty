@@ -652,6 +652,11 @@ extension Ghostty {
         /// of processes that survive it.
         var vigilAttach: String?
 
+        /// Vigil: this surface is a MIRROR of `vigilAttach`, a second
+        /// client on a daemon whose home view lives in a session window.
+        /// It owns nothing: not the pane, not the daemon, no registry row.
+        var vigilMirror: Bool = false
+
         /// Wait after the command
         var waitAfterCommand: Bool = false
 

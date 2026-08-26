@@ -552,7 +552,8 @@ class VigilSessionManager {
             }
         }
         // The quick terminal dismissing (any way: toggle, esc-out, focus
-        // loss) is the moment a floating session returns to detached.
+        // loss) is the moment a floating session returns to detached, and
+        // the moment a mirror ends.
         NotificationCenter.default.addObserver(
             forName: .quickTerminalDidChangeVisibility,
             object: nil,
@@ -561,9 +562,12 @@ class VigilSessionManager {
             MainActor.assumeIsolated {
                 let manager = VigilSessionManager.shared
                 guard let quick = notification.object as? QuickTerminalController,
-                      !quick.visible,
-                      let name = manager.floatingName else { return }
-                manager.reclaim(name, from: quick)
+                      !quick.visible else { return }
+                if let name = manager.floatingName {
+                    manager.reclaim(name, from: quick)
+                } else {
+                    manager.endMirror()
+                }
             }
         }
     }
@@ -721,18 +725,9 @@ class VigilSessionManager {
     private func runtimes(_ session: Session) -> [TabRuntime] {
         switch session.state {
         case .embedded:
-            var out = members(of: session.name)
+            return members(of: session.name)
                 .filter { !$0.surfaceTree.isEmpty }
                 .map { TabRuntime(tree: $0.surfaceTree, dock: dockMap.object(forKey: $0)) }
-            // A LOANED tab rides the quick panel, which is no member: left
-            // out, it reads as cold everywhere (persist captures it
-            // unmounted, vacate strands it).
-            if floatingName == session.name,
-               let quick = quickController(create: false),
-               !quick.surfaceTree.isEmpty {
-                out.append(TabRuntime(tree: quick.surfaceTree, dock: loanedDock))
-            }
-            return out
         case .floating(let rest, let floatedDock, _):
             var out = rest
             if floatingName == session.name,
@@ -816,6 +811,11 @@ class VigilSessionManager {
                 }
             }
             runtimes.removeAll { $0.tree.isEmpty && ($0.dock?.views.isEmpty ?? true) }
+        }
+        // A mirror of a pane that just died shows a corpse: the panel goes.
+        if mirror?.pane == id {
+            quickController(create: false)?.animateOut()
+            endMirror()
         }
         switch session.state {
         case .detached(var held):
@@ -1208,18 +1208,20 @@ class VigilSessionManager {
     /// (or the quick terminal hosting it) is key and the app is active.
     private func isWatching(_ name: String) -> Bool {
         guard NSApp.isActive else { return false }
-        if floatingName == name,
+        if panelSession == name,
            quickController(create: false)?.window?.isKeyWindow == true { return true }
         guard let window = focusWindow(of: name) else { return false }
         return window.isKeyWindow
     }
 
-    /// A pane is under the eyes RIGHT NOW: its view sits in the key
-    /// window's hierarchy, unhidden (a collapsed dock hides its tenants),
-    /// app active.
+    /// A pane is under the eyes RIGHT NOW: its view (or its mirror) sits
+    /// in the key window's hierarchy, unhidden (a collapsed dock hides its
+    /// tenants), app active.
     private func paneVisible(_ pane: String) -> Bool {
-        guard NSApp.isActive,
-              let view = liveView(attachId: pane),
+        guard NSApp.isActive else { return false }
+        if mirror?.pane == pane,
+           quickController(create: false)?.window?.isKeyWindow == true { return true }
+        guard let view = liveView(attachId: pane),
               let window = view.window, window.isKeyWindow else { return false }
         return !view.isHiddenOrHasHiddenAncestor
     }
@@ -1240,7 +1242,7 @@ class VigilSessionManager {
             views = Array(controller.surfaceTree)
             if let dock = dockMap.object(forKey: controller) { views += dock.views }
         } else if let quick = window.windowController as? QuickTerminalController {
-            name = floatingName
+            name = panelSession
             views = Array(quick.surfaceTree)
         } else {
             return
@@ -1332,13 +1334,11 @@ class VigilSessionManager {
 
     /// The summon's queue, DERIVED on every read (state files + ownership,
     /// no second store to go stale): panes stalled MID-TURN (permission or
-    /// question flavor), unseen, in any session that is NOT embedded —
-    /// detached, asleep and cold panes all summon (asleep/cold resurrect
-    /// their tab straight into the panel; "asleep never summons" meant the
-    /// whole fleet was MUTE after every app restart, Adrian 2026-08-23).
-    /// Oldest first. Embedded sessions never summon (a placement Adrian
-    /// chose is never auto-ripped from its window) — their asks chime and
-    /// pill through embeddedAsks() instead.
+    /// question flavor), unseen, in any session state, oldest first:
+    /// embedded panes MIRROR into the panel (their placement is never
+    /// touched), detached/asleep/cold ones resurrect their tab into it
+    /// ("asleep never summons" meant the whole fleet was MUTE after every
+    /// app restart).
     /// Eligibility is ATTENDED-truth alone: unseen per the ack ledger
     /// (key-window visibility, the one presence chokepoint). "Some pixels
     /// of the prompt exist on some monitor" is not attention — an
@@ -1463,7 +1463,7 @@ class VigilSessionManager {
     /// you are in right now. That last fallback is why the key felt dead:
     /// with nothing pending it used to no-op.
     func nextFloating() {
-        if floatingName != nil {
+        if panelSession != nil {
             quickController(create: false)?.animateOut()
             return
         }
@@ -1481,13 +1481,15 @@ class VigilSessionManager {
         float(name: name)
     }
 
-    /// Host a session in the quick terminal. An embedded session surrenders
-    /// its window first (a detach, capture included) and floats its SELECTED
-    /// tab; the other tabs wait detached. Asleep ones resurrect into a real
-    /// window instead (a rebuild belongs in a workspace, not a peek).
+    /// Host a session in the quick terminal. An embedded session is
+    /// MIRRORED: the panel shows a second client of one pane's daemon and
+    /// the session's windows are never touched (the float is a viewport
+    /// onto the session, not a move of it). A detached session floats one
+    /// of its held tabs; an asleep one resurrects into a real window
+    /// instead (a rebuild belongs in a workspace, not a peek).
     /// `landOn` makes the landing pane-precise (the summon's contract, the
-    /// same rule as follow()): the tab CONTAINING that pane floats and the
-    /// pane takes focus, never merely the first tab.
+    /// same rule as follow()): THAT pane mirrors, or the tab CONTAINING it
+    /// floats with the pane focused, never merely the first tab.
     func float(name: String, landOn pane: String? = nil) {
         guard let session = sessions[name] else { return }
         guard let quick = quickController(create: true) else { return }
@@ -1497,57 +1499,28 @@ class VigilSessionManager {
         var floatedIndex = 0
         switch session.state {
         case .embedded:
-            // The LOAN (2026-08-23): a pane-precise float of an embedded
-            // session whose asking tab no glass shows takes THAT TAB into
-            // the panel and returns it home on release — a placement is
-            // never destroyed, and a placement never mutes an ask. A live
-            // hidden native tab is borrowed whole; a cold tab resurrects.
-            if let pane {
-                // Already riding the panel as a loan: focus, nothing moves.
-                if floatingName == name, quick.surfaceTree.contains(where: { $0.vigilAttachId == pane }) {
-                    quick.animateIn()
-                    if let view = quick.surfaceTree.first(where: { $0.vigilAttachId == pane }) {
-                        DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
-                    }
-                    return
-                }
-                if let member = members(of: name).first(where: { m in
-                    // Loanable = anything but the KEY window (the one
-                    // surface Adrian is actively USING; a window merely
-                    // visible somewhere is not attention).
-                    m.window !== NSApp.keyWindow
-                        && m.surfaceTree.contains { $0.vigilAttachId == pane }
-                }) {
-                    loanMember(member, of: name, landOn: pane, quick: quick)
-                    return
-                }
-                if liveView(attachId: pane) == nil,
-                   let tabIndex = sessions[name]!.tabs.firstIndex(where: { $0.panes.contains { $0.id == pane } }) {
-                    floatCapturedTab(name: name, tabIndex: tabIndex, rest: [], landOn: pane, quick: quick)
-                    return
-                }
-                // A pane-precise float of an embedded session is a LOAN or
-                // nothing: falling through to the whole-session detach
-                // would rip Adrian's window over an occlusion race between
-                // queue derivation and this call. Refuse loudly; the
-                // engine retries next tick.
-                vlog("float: pane \(pane) of embedded '\(name)' neither loanable nor cold - refused")
+            guard let target = pane ?? focusedPane(of: name) else {
+                vlog("float: embedded '\(name)' has no pane to mirror - refused")
                 return
             }
-            // Which tab floats: the one you were looking at. Identified by
-            // its leaf view, not an index: detach stashes runtimes in
-            // REGISTRY order, which need not match the native member order.
-            let selectedLeaf = (focusWindow(of: name)?.windowController as? TerminalController)?
-                .surfaceTree.root?.leftmostLeaf()
-            detach(name: name)
-            guard case .detached(let held) = sessions[name]!.state, !held.isEmpty else { return }
-            floatedIndex = held.firstIndex { tab in
-                if let pane { return tab.tree.contains { $0.vigilAttachId == pane } }
-                return tab.tree.root?.leftmostLeaf() === selectedLeaf
-            } ?? 0
-            floated = held[floatedIndex]
-            rest = held
-            rest.remove(at: floatedIndex)
+            if liveView(attachId: target) == nil {
+                // A cold tab (registered, daemon alive, no view) becomes a
+                // silent native tab of its home window first, so the
+                // mirror always has a home to match. The home window is
+                // never the panel.
+                guard let tabIndex = sessions[name]!.tabs.firstIndex(where: { $0.panes.contains { $0.id == target } }),
+                      let host = anchorController(of: name) else {
+                    vlog("float: pane \(target) of embedded '\(name)' neither live nor cold - refused")
+                    return
+                }
+                materializeColdTab(name: name, tabIndex: tabIndex, host: host)
+            }
+            guard let home = liveView(attachId: target), home.window != nil else {
+                vlog("float: pane \(target) of embedded '\(name)' has no windowed view - refused")
+                return
+            }
+            mirror(name: name, pane: target, home: home, quick: quick)
+            return
         case .floating:
             // Already hosted here. A pane in the floated tab just takes
             // focus; a pane waiting in a REST tab re-floats on its own tab
@@ -1604,6 +1577,8 @@ class VigilSessionManager {
         // silently.
         if let current = floatingName {
             reclaim(current, from: quick, restoreStash: false)
+        } else if mirror != nil {
+            endMirror(restoreStash: false)
         } else if !quick.surfaceTree.isEmpty {
             stashedQuickTree = quick.surfaceTree
         }
@@ -1634,38 +1609,7 @@ class VigilSessionManager {
         guard floatingName == name else { return }
         floatingName = nil
         let tree = quick.surfaceTree
-        if let session = sessions[name], case .embedded = session.state {
-            // The LOAN returns home: a silent, unselected native tab of
-            // the session's window (appended; capture order is untouched,
-            // a later detach/resurrect restores strip order). If every
-            // window died while the tab was away, the session is no
-            // longer embedded-with-glass: it takes the detached shape
-            // with this one live tab.
-            let dock = loanedDock
-            loanedDock = nil
-            let reselect = loanedWasSelected
-            loanedWasSelected = false
-            if !tree.isEmpty {
-                if let ghostty = ghosttyApp,
-                   let host = (focusWindow(of: name)?.windowController as? TerminalController)
-                       ?? members(of: name).first {
-                    let controller = TerminalController.vigilNewTab(ghostty, parent: host, tree: tree)
-                    registerMember(controller, name: name)
-                    if let dock {
-                        dockMap.setObject(dock, forKey: controller)
-                        VigilBars.shared.sync(controller)
-                    }
-                    if reselect, let w = controller.window, let group = w.tabGroup {
-                        group.selectedWindow = w
-                    }
-                    vlog("reclaim: loaned tab of '\(name)' returned as native tab"
-                        + (reselect ? " (re-selected, it was his tab)" : ""))
-                } else {
-                    sessions[name]!.state = .detached([TabRuntime(tree: tree, dock: dock)])
-                    vlog("reclaim: loaned tab of '\(name)' -> detached (windows died while away)")
-                }
-            }
-        } else if let session = sessions[name] {
+        if let session = sessions[name] {
             var held: [TabRuntime] = []
             var index = 0
             var dock: VigilDockRuntime?
@@ -1688,55 +1632,127 @@ class VigilSessionManager {
         persist()
     }
 
-    /// The loaned tab's dock while an EMBEDDED session's tab rides the
-    /// panel (the .floating state slot exists only for non-embedded
-    /// floats); part of the panel-occupancy trio with floatingName and
-    /// stashedQuickTree.
-    private var loanedDock: VigilDockRuntime?
-    /// The loaned tab was its window's SELECTED tab when it left: the loan
-    /// yanks it and AppKit selects a neighbor, so Adrian returns from
-    /// another app to find himself on the wrong tab unless reclaim
-    /// re-selects (2026-08-25). Selection only, never app activation.
-    private var loanedWasSelected = false
+    // MARK: Mirroring (the quick terminal shows a pane that lives in a window)
 
-    /// Take ONE live hidden native tab of an embedded session into the
-    /// quick terminal. Membership ends before the member window closes
-    /// (the close cascade must see a session-less controller, the vacate
-    /// rule); the tree survives by reference and reclaim returns it home
-    /// as a silent native tab.
-    private func loanMember(
-        _ member: TerminalController, of name: String,
-        landOn pane: String, quick: QuickTerminalController
+    /// A second client on one daemon: `view` rides the panel, `home` stays
+    /// in its session window. The mirror owns nothing (no registry row,
+    /// never persisted, never the pane's live view); it exists exactly
+    /// while the panel is up. Part of the panel-occupancy set with
+    /// floatingName and stashedQuickTree: at most one of floatingName /
+    /// mirror is set.
+    struct Mirror {
+        let name: String
+        let pane: String
+        weak var home: Ghostty.SurfaceView?
+        let view: Ghostty.SurfaceView
+    }
+    private(set) var mirror: Mirror?
+
+    /// The session the panel shows right now, hosted (floating) or
+    /// mirrored. Presence, the summon engine and the kill key read this.
+    var panelSession: String? { floatingName ?? mirror?.name }
+
+    /// The pane under the eyes in a session's focus window, else its first
+    /// leaf; nil when no member window has a surface.
+    private func focusedPane(of name: String) -> String? {
+        guard let controller = anchorController(of: name) else { return nil }
+        return controller.focusedSurface?.vigilAttachId
+            ?? controller.surfaceTree.root?.leftmostLeaf().vigilAttachId
+    }
+
+    /// Show `pane` in the panel as a mirror of `home`. The panel takes the
+    /// home view's own point size so both clients share a grid: the
+    /// daemon has ONE pty size, and two grids would re-wrap whatever
+    /// Adrian is reading in the window. Mirroring the pane already shown
+    /// just brings the panel in.
+    private func mirror(
+        name: String, pane: String, home: Ghostty.SurfaceView,
+        quick: QuickTerminalController
     ) {
-        let tree = member.surfaceTree
-        guard !tree.isEmpty else { return }
-        vlog("float: loan tab \(tree.compactMap(\.vigilAttachId)) of '\(name)' -> quick terminal")
-        let dock = dockMap.object(forKey: member)
-        let wasSelected = member.window.map { w in
-            w.tabGroup?.selectedWindow === w || w.tabGroup == nil
-        } ?? false
-        dock?.unmount()
-        dockMap.removeObject(forKey: member)
-        memberships.removeObject(forKey: member)
-        killController(member)
-
+        if let current = mirror, current.pane == pane {
+            quick.vigilMirrorSize = home.bounds.size
+            quick.animateIn()
+            DispatchQueue.main.async { Ghostty.moveFocus(to: current.view) }
+            return
+        }
+        guard let app = ghosttyApp?.app, let registered = registered(pane) else {
+            vlog("float: pane \(pane) of '\(name)' not registered - mirror refused")
+            return
+        }
         if let current = floatingName {
             reclaim(current, from: quick, restoreStash: false)
+        } else if mirror != nil {
+            endMirror(restoreStash: false)
         } else if !quick.surfaceTree.isEmpty {
             stashedQuickTree = quick.surfaceTree
         }
-        loanedDock = dock
-        loanedWasSelected = wasSelected
-        floatingName = name
+        var config = resurrectConfig(name: name, pane: registered)
+        config.vigilMirror = true
+        let view = Ghostty.SurfaceView(app, baseConfig: config)
+        mirror = Mirror(name: name, pane: pane, home: home, view: view)
+        let size = home.bounds.size
+        quick.vigilMirrorSize = size
         quickTreeSwap = true
-        quick.surfaceTree = tree
+        quick.surfaceTree = SplitTree(view: view)
         quickTreeSwap = false
         quick.animateIn()
-        if let view = tree.first(where: { $0.vigilAttachId == pane }) ?? tree.root?.leftmostLeaf() {
-            DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
-        }
+        DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
+        vlog("float: mirror \(pane) of '\(name)' -> quick terminal (\(Int(size.width))x\(Int(size.height)))")
         touchRecent(name)
+    }
+
+    /// The mirror leaves the panel: its client dies with its view, and the
+    /// home view re-sends its own size (the daemon's pty keeps whichever
+    /// client resized it last). `restoreStash: false` is the
+    /// panel-replaces-panel path, same contract as reclaim's.
+    func endMirror(restoreStash: Bool = true) {
+        guard let current = mirror else { return }
+        mirror = nil
+        let quick = quickController(create: false)
+        quick?.vigilMirrorSize = nil
+        if restoreStash, let quick {
+            quickTreeSwap = true
+            quick.surfaceTree = stashedQuickTree ?? SplitTree()
+            quickTreeSwap = false
+            stashedQuickTree = nil
+        }
+        if let home = current.home {
+            DispatchQueue.main.async { home.sizeDidChange(home.bounds.size) }
+        }
+        vlog("float: mirror of \(current.pane) ended")
+    }
+
+    /// A registered COLD tab of an embedded session materializes as a
+    /// silent native tab of its home window (native reattach, splits and
+    /// dock included), unselected: the window keeps showing what it
+    /// showed. What the panel then mirrors has a home.
+    private func materializeColdTab(name: String, tabIndex: Int, host: TerminalController) {
+        guard let ghostty = ghosttyApp, let app = ghostty.app else { return }
+        let tab = sessions[name]!.tabs[tabIndex]
+        guard !tab.panes.isEmpty else { return }
+        let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [self] in
+            resurrectConfig(name: name, pane: $0)
+        }
+        let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
+        let view = Ghostty.SurfaceView(app, baseConfig: configFor(tab.panes[firstPane]))
+        let controller = TerminalController.vigilNewTab(ghostty, parent: host, tree: SplitTree(view: view))
+        registerMember(controller, name: name)
+        materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
+        materializeDockCapture(controller, tab.dock, configFor: configFor)
+        focusLeftmost(controller)
+        vlog("float: cold tab \(tabIndex) of '\(name)' materialized as a silent native tab")
         persist()
+    }
+
+    /// Dock-icon reopen with no live window: the most recent session comes
+    /// back. A session is born by ⌘N alone, never by activating the app
+    /// (every ghost `born(window)` session came from this path). False
+    /// when nothing exists to reopen.
+    func reopen() -> Bool {
+        guard let name = successor(excluding: "") else { return false }
+        vlog("reopen: no live window -> '\(name)'")
+        open(name: name)
+        return true
     }
 
     /// Resurrect ONE captured tab straight into the quick terminal: an
@@ -1760,6 +1776,8 @@ class VigilSessionManager {
 
         if let current = floatingName {
             reclaim(current, from: quick, restoreStash: false)
+        } else if mirror != nil {
+            endMirror(restoreStash: false)
         } else if !quick.surfaceTree.isEmpty {
             stashedQuickTree = quick.surfaceTree
         }
@@ -1779,15 +1797,8 @@ class VigilSessionManager {
                 width: CGFloat(capture.width),
                 collapsed: capture.collapsed)
         }
-        if case .embedded = sessions[name]!.state {
-            // A LOAN: the session keeps its windows and stays embedded;
-            // reclaim returns the tab as a native tab (or hands it to
-            // detached if the windows died while it was away).
-            loanedDock = floatedDock
-        } else {
-            sessions[name]!.state = .floating(
-                rest: rest, floatedDock: floatedDock, floatedIndex: min(tabIndex, rest.count))
-        }
+        sessions[name]!.state = .floating(
+            rest: rest, floatedDock: floatedDock, floatedIndex: min(tabIndex, rest.count))
         floatingName = name
         quickTreeSwap = true
         quick.surfaceTree = SplitTree(view: anchor)
@@ -2936,35 +2947,6 @@ class VigilSessionManager {
             return
         }
         guard Set(tabPaneIds(target)).isDisjoint(with: live) else { return } // already showing
-        // A tab on LOAN is displayed in the quick panel, which is no
-        // member: clicking its row TRANSFERS those exact views into this
-        // viewport. Mounting the capture instead would mint a second
-        // client on each of their daemons.
-        let ids = Set(tabPaneIds(target))
-        if floatingName == name, let quick = quickController(create: false),
-           quick.surfaceTree.contains(where: { $0.vigilAttachId.map(ids.contains) ?? false }) {
-            let tree = quick.surfaceTree
-            let dock = loanedDock
-            loanedDock = nil
-            floatingName = nil
-            quickTreeSwap = true
-            quick.surfaceTree = stashedQuickTree ?? SplitTree()
-            quickTreeSwap = false
-            stashedQuickTree = nil
-            quick.animateOut()
-            dockMap.object(forKey: controller)?.unmount()
-            dockMap.removeObject(forKey: controller)
-            swapTree(controller, tree)
-            if let dock {
-                dockMap.setObject(dock, forKey: controller)
-                VigilBars.shared.sync(controller)
-            }
-            focusLeftmost(controller)
-            vlog("shapeshiftTab: '\(name)' loan transferred into the viewport")
-            persist()
-            assertInvariants("loanTransfer")
-            return
-        }
         vlog("shapeshiftTab: '\(name)' -> tab anchored at \(anchor)")
 
         dockMap.object(forKey: controller)?.unmount()
@@ -3777,6 +3759,10 @@ class VigilSessionManager {
             quick.animateOut()
             reclaim(name, from: quick)
         }
+        if mirror?.name == name {
+            quickController(create: false)?.animateOut()
+            endMirror()
+        }
         var kept: TerminalController?
         if case .embedded = sessions[name]!.state {
             kept = keepViewport
@@ -3889,14 +3875,14 @@ class VigilSessionManager {
     /// something runs (a keystroke that kills processes must ask), then
     /// undo grace.
     func killCurrent() {
-        if let name = floatingName,
+        if let name = panelSession,
            let quick = quickController(create: false),
            quick.window?.isKeyWindow == true {
             confirmKill(name: name) { self.kill(name: name) }
             return
         }
         guard let controller = TerminalController.preferredParent else {
-            if let name = floatingName { confirmKill(name: name) { self.kill(name: name) } }
+            if let name = panelSession { confirmKill(name: name) { self.kill(name: name) } }
             return
         }
         if let name = sessionName(of: controller) {
@@ -4835,7 +4821,7 @@ class VigilSessionManager {
     /// The windowed one is the answer; a second match is a leak to report.
     func liveView(attachId: String) -> Ghostty.SurfaceView? {
         let matches = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
-            .filter { $0.vigilAttachId == attachId }
+            .filter { $0.vigilAttachId == attachId && !$0.vigilMirror }
         if matches.count > 1 {
             vlog("!! liveView: \(matches.count) surfaces attached to '\(attachId)' - TWIN clients on one daemon")
         }
@@ -5262,6 +5248,7 @@ class VigilSessionManager {
         if let name = floatingName, let quick = quickController(create: false) {
             reclaim(name, from: quick)
         }
+        endMirror()
         // Every session detaches and keeps running (service mode).
         // Snapshot names first: detach mutates sessions, which must not
         // happen while iterating it.
@@ -5399,7 +5386,7 @@ class VigilSessionManager {
         var owned = Set<String>()
         for session in sessions.values { owned.formUnion(ownedPaneIds(session)) }
         for session in graveyard.values { owned.formUnion(ownedPaneIds(session)) }
-        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
+        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects where !view.vigilMirror {
             guard let id = view.vigilAttachId, !owned.contains(id) else { continue }
             vlog("!! IMPOSSIBLE [\(site)]: surface for '\(id)' is \(view.window == nil ? "windowless (LEAKED)" : "live") but registered NOWHERE")
         }
@@ -5422,8 +5409,11 @@ class VigilSessionManager {
         // weeks was one windowed view plus one released-but-still-attached
         // one, so a `window != nil` filter made the very thing this check
         // exists for invisible (2026-08-24).
+        // A MIRROR is the sanctioned second client (the panel's viewport
+        // onto a windowed pane): sized to the home grid, gone with the
+        // panel. It is not a twin.
         var seenIds = Set<String>()
-        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
+        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects where !view.vigilMirror {
             guard let id = view.vigilAttachId else { continue }
             if !seenIds.insert(id).inserted {
                 vlog("!! IMPOSSIBLE [\(site)]: TWO surfaces attached to '\(id)' (twin clients on one daemon)")
