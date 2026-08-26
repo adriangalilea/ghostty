@@ -29,14 +29,7 @@ final class VigilAskHUD {
     }
 
     private func makeHUD() -> FloatingHUD {
-        let hud = FloatingHUD(hoverAware: true) { [model] in
-            AskPrompt(
-                model: model,
-                languages: LanguagePicker(
-                    options: VigilVoice.candidateLocales.map { $0.identifier(.bcp47) },
-                    selected: VigilDictationHUD.shared.forcedLocale,
-                    onSelect: { VigilDictationHUD.shared.select(locale: $0) }))
-        }
+        let hud = FloatingHUD(hoverAware: true) { [model] in AskHUDView(model: model) }
         hud.onKey = { [model] event in
             model.key(
                 event.charactersIgnoringModifiers ?? "", escape: event.keyCode == 53,
@@ -72,6 +65,22 @@ final class VigilAskHUD {
                 self.hud?.hide()
             }
         }
+    }
+}
+
+/// The prompt with a LIVE language picker: the flag slot follows the
+/// session preference (`VigilDictationHUD.forcedLocale`) as it changes.
+private struct AskHUDView: View {
+    @ObservedObject var model: AskPromptModel
+    @ObservedObject var dictation = VigilDictationHUD.shared
+
+    var body: some View {
+        AskPrompt(
+            model: model,
+            languages: LanguagePicker(
+                options: VigilVoice.candidateLocales.map { $0.identifier(.bcp47) },
+                selected: dictation.forcedLocale,
+                onSelect: { dictation.select(locale: $0) }))
     }
 }
 #endif
