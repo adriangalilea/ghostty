@@ -4455,17 +4455,12 @@ class VigilSessionManager {
             return
         }
         // A DECLINED question fires no hook (esc in the chooser produces
-        // nothing until the next prompt): the pane's own title is the
-        // corrective - claude wears the idle marker the moment the chooser
-        // is gone. Positive marker only, question asks only.
-        if let asking = askGatePane, paneAgentState(asking)?.flavor == .question,
-           let first = liveView(attachId: asking)?.title.unicodeScalars.first, first == "✳" {
-            vlog("ask gate: \(asking) wears the idle marker mid-question - the chooser is gone, superseded")
-            VigilAsk.cancel(pane: asking, reason: "superseded")
-            askGatePane = nil
-            askGateAskedAt[asking] = Date()
-            return
-        }
+        // nothing until the next prompt) and the pane's title cannot tell:
+        // claude wears the idle marker WHILE the chooser stands (it is
+        // waiting for the human) - a rule that read the marker as "chooser
+        // gone" killed every question ask within a second and re-asked in
+        // a loop (2026-08-26 21:49). A declined question ends by the ask's
+        // own timeout or the HUD's esc until a real signal exists.
         // Title changes wake nobody: while an ask is live, look again each
         // second.
         if askGatePane != nil {
