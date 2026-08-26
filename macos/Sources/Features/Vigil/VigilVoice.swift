@@ -130,15 +130,19 @@ enum VigilVoice {
                     if generation == gen { stop(reason: "mic denied") }
                     return
                 }
+                // Volatiles feed the floating HUD (wet-ink preview); only
+                // FINALS ever reach the pane.
                 let session: any SpeechSession
                 if locales.count > 1 {
                     var configuration = ArbitratedSession.Configuration(locales: locales)
                     configuration.grounding = grounding
+                    configuration.volatileResults = true
                     configuration.sink = VoiceLogSink()
                     session = try await ArbitratedSession(configuration: configuration)
                 } else {
                     var configuration = TranscriptionSession.Configuration(locale: locales[0])
                     configuration.fastResults = true
+                    configuration.volatileResults = true
                     configuration.grounding = grounding
                     configuration.sink = VoiceLogSink()
                     session = try await TranscriptionSession(configuration: configuration)
@@ -160,10 +164,23 @@ enum VigilVoice {
                     "voice: capture voiceProcessed=\(MicTap.shared.voiceProcessed)"
                         + " (OS AEC \(MicTap.shared.voiceProcessed ? "on - self-audio subtracted" : "OFF"))"
                 )
+                VigilDictationHUD.shared.begin()
                 Self.drain = Task {
                     do {
-                        for try await segment in session.segments where segment.isFinal {
-                            await Self.inject(segment.text, into: pane)
+                        for try await segment in session.segments {
+                            if segment.isFinal {
+                                await MainActor.run {
+                                    VigilDictationHUD.shared.commit(
+                                        segment.text, locale: segment.locale,
+                                        confidence: segment.confidence)
+                                }
+                                await Self.inject(segment.text, into: pane)
+                            } else {
+                                await MainActor.run {
+                                    VigilDictationHUD.shared.preview(
+                                        segment.text, locale: segment.locale)
+                                }
+                            }
                         }
                     } catch {
                         await MainActor.run {
@@ -195,6 +212,7 @@ enum VigilVoice {
         trace?("voice: dictation stopped (\(reason))")
         generation += 1
         activePane = nil
+        VigilDictationHUD.shared.end()
         spectrum.reset()
         if talk.engaged { talk.stop() }
         subscription?.cancel()
