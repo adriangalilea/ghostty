@@ -131,6 +131,8 @@ enum VigilAsk {
     static func ask(
         _ spoken: String,
         options: [String]? = nil,
+        textOptions: Set<Int> = [],
+        multi: Bool = false,
         pane: String? = nil,
         timeout: TimeInterval = 20,
         completion: @escaping (Answer?, String) -> Void
@@ -158,7 +160,7 @@ enum VigilAsk {
         // it stands in cmd-guard's ledger, and the distiller joins the two
         // by timestamp when it mines the compose corpus.
         Ask.begin(
-            spoken, sources: sources, options: options,
+            spoken, sources: sources, options: options, textOptions: textOptions, multi: multi,
             composition: Composition(input: spoken, tier: options == nil ? "static-gist" : "question-literal"),
             timeout: timeout
         ) { receipt in

@@ -31,7 +31,9 @@ final class VigilAskHUD {
     private func makeHUD() -> FloatingHUD {
         let hud = FloatingHUD(hoverAware: true) { [model] in AskPrompt(model: model) }
         hud.onKey = { [model] event in
-            model.key(event.charactersIgnoringModifiers ?? "", escape: event.keyCode == 53)
+            model.key(
+                event.charactersIgnoringModifiers ?? "", escape: event.keyCode == 53,
+                enter: event.keyCode == 36 || event.keyCode == 76)
         }
         return hud
     }
@@ -44,7 +46,7 @@ final class VigilAskHUD {
             let hud = self.hud ?? makeHUD()
             self.hud = hud
             hud.show()
-        case .levels, .verdict:
+        case .levels, .heard, .deadline, .verdict:
             break
         case .ended:
             generation += 1

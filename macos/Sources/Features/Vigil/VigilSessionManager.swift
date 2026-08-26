@@ -2122,7 +2122,7 @@ class VigilSessionManager {
     /// digit that already selected flips the state first; a prompt that
     /// vanished gets nothing - the stray-Enter class, 2026-08-25 08:22).
     private func typeAskAnswer(pane: String, keys: String, since: Date, confirm: Bool = false) {
-        let label = keys == "\u{1b}" ? "esc" : keys == "\r" ? "enter" : "'\(keys)'"
+        let label = keys == "\u{1b}" ? "esc" : keys == "\r" ? "enter" : keys == " " ? "space" : "'\(keys.prefix(24))'"
         // `vigild sendraw` = one 'd' keystroke frame, the same bytes an
         // attached client sends per keypress: every daemon delivers it
         // verbatim, immediately, no Enter, never queued. In-process
@@ -4374,6 +4374,9 @@ class VigilSessionManager {
     /// bumped by the tool's own permission-channel Notification seconds
     /// later; a stamp rule would starve the ask.)
     private var askGateQuestion: [String: (q: WakeQuestion, at: Date)] = [:]
+    /// The chooser's own tail, appended to every AskUserQuestion on screen.
+    static let chooserTypeSomething = "type something"
+    static let chooserChatAboutThis = "chat about this"
     /// Panes already asked during their CURRENT blocking episode. Pruned the
     /// moment a pane stops being permission-blocked, so a fresh prompt asks
     /// fresh, but a timeout does not re-ask in a loop while the same prompt
@@ -4413,10 +4416,10 @@ class VigilSessionManager {
             case .permission: return true
             case .question:
                 guard let staged = askGateQuestion[candidate.pane] else { return false }
-                if staged.q.multi || staged.q.count > 1 || staged.q.options.isEmpty {
+                if staged.q.count > 1 || staged.q.options.isEmpty {
                     if askGateAskedAt[candidate.pane] == nil {
                         askGateAskedAt[candidate.pane] = Date()
-                        vlog("ask gate: question in \(candidate.pane) not askable by voice (multi=\(staged.q.multi) count=\(staged.q.count) options=\(staged.q.options.count)) - keyboard only")
+                        vlog("ask gate: question in \(candidate.pane) not askable by voice (count=\(staged.q.count) options=\(staged.q.options.count)) - keyboard only")
                     }
                     return false
                 }
@@ -4560,7 +4563,16 @@ class VigilSessionManager {
         let spoken = question?.question
             ?? askGateMsg[next.pane].flatMap { $0.at > next.since ? $0.text : nil }
             ?? "do you allow it?"
-        VigilAsk.ask(spoken, options: question?.options, pane: next.pane) { [weak self] answer, verdict in
+        // The chooser appends two answers of its own to every question -
+        // "Type something." and "Chat about this" - both free text after
+        // their digit. They are offered like the tool's options (the
+        // human sees them on screen; the narration says them).
+        let offered: [String]? = question.map { $0.options + [Self.chooserTypeSomething, Self.chooserChatAboutThis] }
+        let textOptions: Set<Int> = question.map { [$0.options.count, $0.options.count + 1] } ?? []
+        VigilAsk.ask(
+            spoken, options: offered, textOptions: textOptions, multi: question?.multi ?? false,
+            pane: next.pane
+        ) { [weak self] answer, verdict in
             // The gate never begins while an ask is in flight; a busy
             // verdict means it raced a consumer it does not know about.
             assert(verdict != "busy", "ask gate: busy verdict - a second ask consumer exists")
@@ -4583,10 +4595,37 @@ class VigilSessionManager {
                     // list - the same keystroke a seated human presses.
                     case (.option(let index), .some):
                         self?.typeAskAnswer(pane: next.pane, keys: "\(index + 1)", since: next.since, confirm: true)
+                    // Free text: the option's digit opens the chooser's
+                    // entry, the words follow, Enter sends - each step a
+                    // beat apart so the TUI has drawn the field.
+                    case (.text(let text, let option), .some):
+                        self?.typeAskAnswer(pane: next.pane, keys: "\(option + 1)", since: next.since)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            self?.typeAskAnswer(pane: next.pane, keys: text, since: next.since)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                self?.typeAskAnswer(pane: next.pane, keys: "\r", since: next.since)
+                            }
+                        }
+                    // A multi-select: each digit moves to its option and
+                    // space toggles it, then Enter confirms.
+                    case (.options(let indices), .some):
+                        var delay = 0.0
+                        for index in indices {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                                self?.typeAskAnswer(pane: next.pane, keys: "\(index + 1)", since: next.since)
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.15) {
+                                self?.typeAskAnswer(pane: next.pane, keys: " ", since: next.since)
+                            }
+                            delay += 0.3
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                            self?.typeAskAnswer(pane: next.pane, keys: "\r", since: next.since)
+                        }
                     // Shape mismatches never touch the pane: a yes has no
                     // meaning in a choice list, an option none in a
                     // permission prompt. Scream, type nothing.
-                    case (.yes, .some), (.option, nil):
+                    case (.yes, .some), (.option, nil), (.text, nil), (.options, nil):
                         assertionFailure("ask gate: verdict shape does not match the ask offered")
                         self?.vlog("ask gate: verdict \(verdict) for \(next.pane) dropped, shape mismatch")
                     }
@@ -4600,7 +4639,7 @@ class VigilSessionManager {
             // block is a new question no matter how invisible the gap was.
             // timeout keeps the 22s guard (the same unanswered prompt must
             // not re-ask in a loop); preempted was already cleared.
-            if verdict == "allow" || verdict == "deny" || verdict == "superseded" || verdict.hasPrefix("chose-") {
+            if verdict == "allow" || verdict == "deny" || verdict == "superseded" || verdict.hasPrefix("chose-") || verdict.hasPrefix("text-") {
                 self?.askGateAskedAt[next.pane] = nil
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self?.pumpAskGate() }
