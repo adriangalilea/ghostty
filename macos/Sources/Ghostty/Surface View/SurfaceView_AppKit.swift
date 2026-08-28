@@ -229,6 +229,17 @@ extension Ghostty {
         /// skips it.
         private(set) var vigilMirror = false
 
+        /// Vigil: end the core surface NOW, whoever still holds the view.
+        /// Frees it synchronously (the io thread exits, the daemon sees
+        /// EOF on this client's socket). A view released from a tree can
+        /// stay retained for a long time (focus chains, undo corpses,
+        /// async closures), and a daemon client must never wait on ARC:
+        /// a mirror whose socket outlived the panel kept the pty at the
+        /// panel's size for every window that came after (2026-08-28).
+        func vigilDestroySurface() {
+            surfaceModel = nil
+        }
+
         /// Vigil: every live attach-backed surface, weakly. ARC truth for
         /// daemon reachability: while any surface holds an attach id (in a
         /// tree, a detached session, an undo corpse), its daemon is owned;

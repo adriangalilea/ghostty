@@ -1699,7 +1699,7 @@ class VigilSessionManager {
         touchRecent(name)
     }
 
-    /// The mirror leaves the panel: its client dies with its view, and the
+    /// The mirror leaves the panel: its client is closed explicitly, and the
     /// daemon restores the surviving client's size. `restoreStash: false`
     /// is the panel-replaces-panel path, same contract as reclaim's.
     func endMirror(restoreStash: Bool = true) {
@@ -1711,7 +1711,11 @@ class VigilSessionManager {
             quickTreeSwap = false
             stashedQuickTree = nil
         }
-        vlog("float: mirror of \(current.pane) ended")
+        // The client dies HERE, explicitly: the daemon restores the home's
+        // size on this EOF, and a mirror view retained past its panel
+        // must never keep a second client alive.
+        current.view.vigilDestroySurface()
+        vlog("float: mirror of \(current.pane) ended, client closed")
     }
 
     /// A registered COLD tab of an embedded session materializes as a
