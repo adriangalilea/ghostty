@@ -379,4 +379,22 @@ final class VigilPhone: ObservableObject {
     func releasePreview(_ pane: String) {
         previews.removeObject(forKey: pane as NSString)
     }
+
+    /// The pane screen ADOPTS the row's live preview surface instead of
+    /// dialing a second stream and waiting for a replay across the VPN:
+    /// the thumbnail becomes the screen, instantly (it only resizes and
+    /// claims the pty on focus). The preview row must then not end it.
+    private var adopted = Set<ObjectIdentifier>()
+
+    func adoptPreview(_ pane: String) -> Ghostty.SurfaceView? {
+        guard let view = previews.object(forKey: pane as NSString) as? Ghostty.SurfaceView, view.surface != nil else { return nil }
+        previews.removeObject(forKey: pane as NSString)
+        adopted.insert(ObjectIdentifier(view))
+        log("attach: \(pane) adopted the preview surface")
+        return view
+    }
+
+    func wasAdopted(_ view: Ghostty.SurfaceView) -> Bool {
+        adopted.remove(ObjectIdentifier(view)) != nil
+    }
 }

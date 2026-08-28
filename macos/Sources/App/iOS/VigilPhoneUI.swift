@@ -243,8 +243,10 @@ struct PanePreview: View {
 
     private func end() {
         guard let view = surfaceView else { return }
-        view.vigilDetach()
         surfaceView = nil
+        // Adopted by the pane screen: it is theirs now, alive.
+        if model.wasAdopted(view) { return }
+        view.vigilDetach()
         model.releasePreview(ref.pane)
     }
 }
@@ -443,6 +445,11 @@ struct PaneScreen: View {
 
     private func attach(_ ref: PaneRef) async {
         guard let app = ghostty.app else { error = "ghostty not ready"; return }
+        if let view = model.adoptPreview(ref.pane) {
+            surfaceView = view
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = view.becomeFirstResponder() }
+            return
+        }
         do {
             let fd = try await model.attach(ref.host, pane: ref.pane)
             var config = Ghostty.SurfaceConfiguration()
