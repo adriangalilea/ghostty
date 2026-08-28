@@ -21,6 +21,7 @@ struct VigilPhoneRoot: View {
 
 struct HomeView: View {
     @EnvironmentObject private var model: VigilPhone
+    @EnvironmentObject private var ghostty: Ghostty.App
     @State private var adding = false
     @State private var settings = false
 
@@ -40,6 +41,7 @@ struct HomeView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
+        .background(Color(ghostty.config.backgroundColor).ignoresSafeArea())
         .navigationTitle("vigil")
         .navigationBarTitleDisplayMode(.large)
         .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref) }

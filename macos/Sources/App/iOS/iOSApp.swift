@@ -19,6 +19,9 @@ struct VigilPhoneApp: App {
         WindowGroup {
             VigilPhoneRoot()
                 .environmentObject(ghostty)
+                // A terminal app is dark; never flash light chrome between
+                // a dark pane and the tree (Adrian 2026-08-28).
+                .preferredColorScheme(.dark)
         }
     }
 }
