@@ -1166,6 +1166,19 @@ command: ?Command = null,
 /// through the embedding API, never in a config file.
 @"vigil-attach": ?[:0]const u8 = null,
 
+/// Vigil: the ssh alias of the Mac that owns `vigil-attach`'s daemon;
+/// empty = this machine. The surface then attaches through
+/// `ssh <alias> vigild proxy <id>` (the daemon is never spawned remotely).
+/// Set per-surface through the embedding API, never in a config file.
+@"vigil-host": ?[:0]const u8 = null,
+
+/// Vigil: other Macs whose sessions this app lists and can view, as a
+/// comma-separated list of ssh aliases (`vigil-hosts = m4,studio`). Each
+/// is read through `ssh <alias> vigild dir` and its panes attach through
+/// `ssh <alias> vigild proxy <id>`: everything about reachability, keys
+/// and the network is the user's ssh config, never vigil's.
+@"vigil-hosts": ?[:0]const u8 = null,
+
 /// This is the same as "command", but only applies to the first terminal
 /// surface created when Ghostty starts. Subsequent terminal surfaces will use
 /// the `command` configuration.

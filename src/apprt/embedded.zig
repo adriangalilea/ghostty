@@ -466,6 +466,9 @@ pub const Surface = struct {
         /// Vigil: attach to (or create) the vigild session daemon with this
         /// id instead of spawning a subprocess.
         vigil_attach: ?[*:0]const u8 = null,
+
+        /// Vigil: ssh alias of the Mac owning the daemon (null = local).
+        vigil_host: ?[*:0]const u8 = null,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -584,6 +587,12 @@ pub const Surface = struct {
             const id = std.mem.sliceTo(c_id, 0);
             if (id.len > 0) {
                 config.@"vigil-attach" = try config.arenaAlloc().dupeZ(u8, id);
+            }
+        }
+        if (opts.vigil_host) |c_host| {
+            const host = std.mem.sliceTo(c_host, 0);
+            if (host.len > 0) {
+                config.@"vigil-host" = try config.arenaAlloc().dupeZ(u8, host);
             }
         }
 

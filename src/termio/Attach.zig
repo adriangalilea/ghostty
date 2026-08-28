@@ -49,10 +49,21 @@ session: ?[]const u8,
 /// it survives detach, quit and reboot like the shell does.
 command: ?configpkg.Command,
 
+/// ssh alias of the Mac that owns the daemon; null = local. Remote =
+/// `ssh <host> vigild proxy <id>` as a child whose stdout is our read fd
+/// and stdin our write fd. The daemon is never spawned remotely.
+host: ?[]const u8,
+
 alloc: Allocator,
 
-/// Connected socket; -1 until threadEnter.
+/// Read side: the socket, or the ssh child's stdout; -1 until threadEnter.
 sock_fd: posix.fd_t = -1,
+/// Write side: the same socket, or the ssh child's stdin.
+write_fd: posix.fd_t = -1,
+/// The ssh child for a remote pane (0 = local). Severing a pipe stream
+/// means killing it: a pipe has no shutdown(), and the reader only sees
+/// EOF once the child is gone.
+ssh_pid: posix.pid_t = 0,
 
 /// Cached tty name of the daemon's pty (from its pidfile).
 cached_tty: ?[:0]const u8 = null,
@@ -74,6 +85,7 @@ pub const Config = struct {
     cwd: ?[]const u8 = null,
     session: ?[]const u8 = null,
     command: ?configpkg.Command = null,
+    host: ?[]const u8 = null,
 };
 
 pub fn init(alloc: Allocator, cfg: Config) !Attach {
@@ -83,6 +95,7 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .cwd = if (cfg.cwd) |v| try alloc.dupe(u8, v) else null,
         .session = if (cfg.session) |v| try alloc.dupe(u8, v) else null,
         .command = if (cfg.command) |v| try v.clone(alloc) else null,
+        .host = if (cfg.host) |v| if (v.len > 0) try alloc.dupe(u8, v) else null else null,
     };
 }
 
@@ -91,6 +104,7 @@ pub fn deinit(self: *Attach) void {
     if (self.cwd) |v| self.alloc.free(v);
     if (self.session) |v| self.alloc.free(v);
     if (self.command) |v| v.deinit(self.alloc);
+    if (self.host) |v| self.alloc.free(v);
     if (self.cached_tty) |v| self.alloc.free(v);
     self.write_buf.deinit(self.alloc);
 }
@@ -119,6 +133,46 @@ fn connectSock(self: *Attach) !posix.fd_t {
     var addr: std.net.Address = try .initUnix(path);
     try posix.connect(fd, &addr.any, addr.getOsSockLen());
     return fd;
+}
+
+/// The remote transport: `ssh <host> vigild proxy <id>` as a child, its
+/// stdout our read fd, its stdin our write fd. Everything about the
+/// network (LAN, tailnet, jump host, keys) is the user's ssh config.
+/// `vigild` must be on the remote's non-interactive PATH; a missing
+/// binary surfaces as the child's immediate EOF (a failed launch).
+fn connectSSH(self: *Attach, host: []const u8) !void {
+    const argv = [_][]const u8{ "/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-T", host, "vigild", "proxy", self.id };
+    var child = std.process.Child.init(&argv, self.alloc);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    const stdin = child.stdin.?;
+    const stdout = child.stdout.?;
+    // Never inherited by anything we spawn later.
+    _ = try posix.fcntl(stdin.handle, posix.F.SETFD, posix.FD_CLOEXEC);
+    _ = try posix.fcntl(stdout.handle, posix.F.SETFD, posix.FD_CLOEXEC);
+    self.sock_fd = stdout.handle;
+    self.write_fd = stdin.handle;
+    self.ssh_pid = child.id;
+    log.info("attach: remote {s} via ssh {s} (pid {d})", .{ self.id, host, child.id });
+}
+
+/// Cut the stream so the reader sees EOF: shutdown for a socket, kill
+/// the ssh child for a pipe (a pipe cannot be shut down).
+fn sever(self: *Attach) void {
+    if (self.ssh_pid != 0) {
+        posix.kill(self.ssh_pid, posix.SIG.TERM) catch {};
+        return;
+    }
+    if (self.sock_fd >= 0) posix.shutdown(self.sock_fd, .both) catch {};
+}
+
+/// Hello: who this client is, for the daemon's receipts.
+fn sendHello(self: *Attach, kind: []const u8) void {
+    var buf: [64]u8 = undefined;
+    const hello = std.fmt.bufPrint(&buf, "{s} ghostty:{d}", .{ kind, std.c.getpid() }) catch return;
+    self.enqueueFrame('h', hello);
 }
 
 /// Spawn `vigild new <id> [-c cmd | -- argv]` to bring the daemon up. No
@@ -174,23 +228,37 @@ pub fn threadEnter(
 ) !void {
     _ = alloc;
 
-    // Attach, creating the daemon on first contact.
-    const fd = self.connectSock() catch fd: {
-        try self.spawnDaemon();
-        break :fd try self.connectSock();
-    };
-    errdefer posix.close(fd);
-    self.sock_fd = fd;
+    // Attach: locally, creating the daemon on first contact; remotely,
+    // through an ssh child (never creating anything).
+    if (self.host) |host| {
+        try self.connectSSH(host);
+    } else {
+        const fd = self.connectSock() catch fd: {
+            try self.spawnDaemon();
+            break :fd try self.connectSock();
+        };
+        self.sock_fd = fd;
+        self.write_fd = fd;
+    }
+    const fd = self.sock_fd;
+    errdefer {
+        posix.close(fd);
+        if (self.write_fd != fd) posix.close(self.write_fd);
+        self.sock_fd = -1;
+        self.write_fd = -1;
+    }
 
-    // The writer: sole owner of socket writes. Born before the first
+    // The writer: sole owner of stream writes. Born before the first
     // frame so nothing ever writes inline.
     self.write_closed = false;
-    const write_thread = try std.Thread.spawn(.{}, writeThreadMain, .{ self, fd });
+    const write_thread = try std.Thread.spawn(.{}, writeThreadMain, .{self});
     write_thread.setName("io-writer") catch {};
     self.write_thread = write_thread;
 
-    // First frame is our size: the daemon applies it (and jiggles on
-    // reattach so full-screen TUIs repaint).
+    // Hello, then our size. The size is RECORDED by the daemon; it is
+    // applied to the pty only while this client owns the size (claimed
+    // on focus, or adopted when nobody owns it yet).
+    self.sendHello(if (self.host != null) "remote" else "surface");
     self.sendResize();
 
     // Quit pipe + read thread, exactly Exec's shape: the ReadThread just
@@ -232,10 +300,10 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
         error.BrokenPipe => {},
         else => log.warn("error writing to read thread quit pipe err={}", .{err}),
     };
-    posix.shutdown(attach.sock_fd, .both) catch {};
+    self.sever();
     attach.read_thread.join();
     // The writer: close the queue, wake it, join BEFORE the fd closes (a
-    // writer blocked in POLLOUT sees the shutdown as writable-then-EPIPE
+    // writer blocked in POLLOUT sees the sever as writable-then-EPIPE
     // and severs its way out; it must never touch a closed fd).
     self.write_mutex.lock();
     self.write_closed = true;
@@ -245,24 +313,35 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
         t.join();
         self.write_thread = null;
     }
+    if (self.write_fd != attach.sock_fd and self.write_fd >= 0) posix.close(self.write_fd);
     posix.close(attach.sock_fd);
+    if (self.ssh_pid != 0) {
+        _ = posix.waitpid(self.ssh_pid, 0);
+        self.ssh_pid = 0;
+    }
     self.sock_fd = -1;
+    self.write_fd = -1;
 }
 
+/// The ownership chokepoint: the focused surface is the one being looked
+/// at, so it claims the pty size ('o'). Presence beats attention, applied
+/// to the grid: a mirror, a remote viewport or a silently materialized
+/// tab records its size and gets it applied only when focused.
 pub fn focusGained(
     self: *Attach,
     td: *termio.Termio.ThreadData,
     focused: bool,
 ) !void {
-    _ = self;
     _ = td;
-    _ = focused;
+    if (!focused or self.write_fd < 0) return;
+    self.enqueueFrame('o', "");
 }
 
 /// Runs ONLY on the writer thread. Blocking on POLLOUT here is the whole
 /// design: this thread exists to absorb the stall the io thread must
 /// never feel. Returns false when the stream was severed.
-fn writeAll(fd: posix.fd_t, data: []const u8) bool {
+fn writeAll(self: *Attach, data: []const u8) bool {
+    const fd = self.write_fd;
     var off: usize = 0;
     while (off < data.len) {
         const n = posix.write(fd, data[off..]) catch |err| switch (err) {
@@ -279,14 +358,14 @@ fn writeAll(fd: posix.fd_t, data: []const u8) bool {
                 const ready = posix.poll(&pfds, 10_000) catch 0;
                 if (ready == 0) {
                     log.warn("attach write stalled 10s -> sever", .{});
-                    posix.shutdown(fd, .both) catch {};
+                    self.sever();
                     return false;
                 }
                 continue;
             },
             else => {
                 log.warn("attach write failed err={} -> sever", .{err});
-                posix.shutdown(fd, .both) catch {};
+                self.sever();
                 return false;
             },
         };
@@ -305,7 +384,7 @@ fn enqueueFrame(self: *Attach, typ: u8, payload: []const u8) void {
     if (self.write_closed) return;
     if (self.write_buf.items.len > 4 << 20) {
         log.warn("attach write queue past 4MB -> sever", .{});
-        posix.shutdown(self.sock_fd, .both) catch {};
+        self.sever();
         self.write_closed = true;
         self.write_cond.signal();
         return;
@@ -320,7 +399,7 @@ fn enqueueFrame(self: *Attach, typ: u8, payload: []const u8) void {
     self.write_cond.signal();
 }
 
-fn writeThreadMain(self: *Attach, fd: posix.fd_t) void {
+fn writeThreadMain(self: *Attach) void {
     var local: std.ArrayListUnmanaged(u8) = .{};
     defer local.deinit(self.alloc);
     while (true) {
@@ -337,7 +416,7 @@ fn writeThreadMain(self: *Attach, fd: posix.fd_t) void {
         std.mem.swap(std.ArrayListUnmanaged(u8), &local, &self.write_buf);
         self.write_mutex.unlock();
 
-        if (!writeAll(fd, local.items)) {
+        if (!self.writeAll(local.items)) {
             // Severed: everything still queued is dead bytes.
             self.write_mutex.lock();
             self.write_closed = true;
@@ -350,7 +429,7 @@ fn writeThreadMain(self: *Attach, fd: posix.fd_t) void {
 }
 
 fn sendResize(self: *Attach) void {
-    if (self.sock_fd < 0) return;
+    if (self.write_fd < 0) return;
     const rows: u16 = @intCast(self.grid_size.rows);
     const cols: u16 = @intCast(self.grid_size.columns);
     const payload: [4]u8 = .{
@@ -379,7 +458,7 @@ pub fn queueWrite(
 ) !void {
     _ = alloc;
     _ = td;
-    if (self.sock_fd < 0) return;
+    if (self.write_fd < 0) return;
 
     if (!linefeed) {
         var i: usize = 0;

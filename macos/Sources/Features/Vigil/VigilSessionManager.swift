@@ -685,7 +685,10 @@ class VigilSessionManager {
         }
         guard !names.isEmpty else { return false }
         for name in names { detach(name: name) }
-        for stray in strayControllers() { stray.closeWindowImmediately() }
+        for stray in strayControllers() {
+            endMirrorViewport(stray)
+            stray.closeWindowImmediately()
+        }
         return true
     }
 
@@ -1654,6 +1657,103 @@ class VigilSessionManager {
     }
     private(set) var mirror: Mirror?
 
+    /// MIRROR VIEWPORTS: windows showing a second view of a session that
+    /// is embedded elsewhere (a sidebar click on it from another window,
+    /// Adrian 2026-08-28: "it should just open it in this window, even
+    /// if already opened in another"). The same problem as the phone,
+    /// local: two clients on one daemon. The viewport is NOT a member:
+    /// its views are mirrors (own nothing, never captured, never counted
+    /// as the pane's live view), the size follows whichever client is
+    /// focused (vigild's owner claim), and the mirrors die explicitly
+    /// when the viewport shows something else or closes.
+    private let mirrorViewports = NSMapTable<TerminalController, NSString>(
+        keyOptions: .weakMemory, valueOptions: .strongMemory)
+
+    func mirroredSession(of controller: TerminalController) -> String? {
+        mirrorViewports.object(forKey: controller) as String?
+    }
+
+    /// This viewport becomes a mirror of `name`'s anchored tab (else its
+    /// first). Its current occupant leaves as any shapeshift's does.
+    private func mirrorInto(_ controller: TerminalController, name: String, anchor: String?) {
+        guard let app = ghosttyApp?.app, let session = sessions[name], !session.tabs.isEmpty else { return }
+        let tab = anchor.flatMap { a in session.tabs.first { tabPaneIds($0).contains(a) } } ?? session.tabs[0]
+        guard !tab.panes.isEmpty else { return }
+        if mirroredSession(of: controller) != nil {
+            endMirrorViewport(controller)
+        } else {
+            releaseOccupant(of: controller)
+        }
+        let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [self] pane in
+            var config = resurrectConfig(name: name, pane: pane)
+            config.vigilMirror = true
+            return config
+        }
+        let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
+        let view = Ghostty.SurfaceView(app, baseConfig: configFor(tab.panes[firstPane]))
+        swapTree(controller, SplitTree(view: view))
+        mirrorViewports.setObject(name as NSString, forKey: controller)
+        materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
+        let landing = anchor.flatMap { a in controller.surfaceTree.first { $0.vigilAttachId == a } } ?? view
+        DispatchQueue.main.async { Ghostty.moveFocus(to: landing) }
+        vlog("mirror: window of '\(sessionName(of: controller) ?? "-")' -> viewport onto '\(name)' (\(tab.panes.count) panes)")
+        touchRecent(name)
+        NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+    }
+
+    /// A REMOTE session (another Mac, VigilRemote) in this viewport: the
+    /// same mirror viewport, its surfaces attached through
+    /// `ssh <alias> vigild proxy <pane>`. Nothing is spawned or owned
+    /// remotely; the remote's own app keeps every fact.
+    private func mountRemote(_ controller: TerminalController, composite: String, anchor: String?) {
+        guard let app = ghosttyApp?.app, controller.window != nil,
+              let (alias, session) = VigilRemote.shared.session(composite) else {
+            vlog("remote: '\(composite)' unknown or unreachable - refused")
+            return
+        }
+        let rawAnchor = anchor.flatMap { VigilRemote.split($0)?.name }
+        let tabs = session.tabs ?? []
+        let tab = rawAnchor.flatMap { a in tabs.first { tabPaneIds($0).contains(a) } } ?? tabs.first
+        guard let tab, !tab.panes.isEmpty else { return }
+        if mirroredSession(of: controller) != nil {
+            endMirrorViewport(controller)
+        } else {
+            releaseOccupant(of: controller)
+        }
+        let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { pane in
+            var config = Ghostty.SurfaceConfiguration()
+            config.workingDirectory = pane.cwd
+            config.vigilAttach = pane.id
+            config.vigilHost = alias
+            config.vigilMirror = true
+            return config
+        }
+        let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
+        let view = Ghostty.SurfaceView(app, baseConfig: configFor(tab.panes[firstPane]))
+        swapTree(controller, SplitTree(view: view))
+        mirrorViewports.setObject(composite as NSString, forKey: controller)
+        materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
+        let landing = rawAnchor.flatMap { a in controller.surfaceTree.first { $0.vigilAttachId == a } } ?? view
+        DispatchQueue.main.async { Ghostty.moveFocus(to: landing) }
+        vlog("remote: window -> viewport onto '\(composite)' via ssh \(alias) (\(tab.panes.count) panes)")
+        NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+    }
+
+    /// The mirrors of this viewport die NOW, explicitly (a mirror view
+    /// retained past its viewport must never keep a client alive); the
+    /// window itself is the caller's business.
+    @discardableResult
+    func endMirrorViewport(_ controller: TerminalController) -> Bool {
+        guard let name = mirroredSession(of: controller) else { return false }
+        mirrorViewports.removeObject(forKey: controller)
+        for view in controller.surfaceTree where view.vigilMirror { view.vigilDestroySurface() }
+        if let dock = dockMap.object(forKey: controller) {
+            for view in dock.views where view.vigilMirror { view.vigilDestroySurface() }
+        }
+        vlog("mirror: viewport onto '\(name)' ended, clients closed")
+        return true
+    }
+
     /// The session the panel shows right now, hosted (floating) or
     /// mirrored. Presence, the summon engine and the kill key read this.
     var panelSession: String? { floatingName ?? mirror?.name }
@@ -2536,6 +2636,13 @@ class VigilSessionManager {
         in controller: TerminalController,
         withConfirmation: Bool
     ) -> Bool {
+        // A split closed inside a mirror viewport: the mirror client ends
+        // here, explicitly, and the split closes plain (nothing buries,
+        // the pane lives on in its home).
+        if mirroredSession(of: controller) != nil {
+            for view in node where view.vigilMirror { view.vigilDestroySurface() }
+            return false
+        }
         guard withConfirmation, sessionName(of: controller) != nil else { return false }
         let busy = busyPrograms(panes: node.compactMap(\.vigilAttachId))
         guard !busy.isEmpty else {
@@ -2732,10 +2839,19 @@ class VigilSessionManager {
     /// window. The current occupant leaves honestly: detached, running,
     /// invisible (a session-less stray is minted a real session first).
     func shapeshift(in controller: TerminalController, to targetName: String, anchor: String? = nil) {
+        if VigilRemote.split(targetName) != nil {
+            mountRemote(controller, composite: targetName, anchor: anchor)
+            return
+        }
         guard let target = sessions[targetName], let ghostty = ghosttyApp else { return }
         switch target.state {
         case .embedded, .floating:
-            open(name: targetName)
+            // Live elsewhere: THIS window becomes a second view of it (a
+            // mirror viewport), never a jump to its home window. Its own
+            // home window clicking itself is a no-op.
+            if members(of: targetName).contains(controller) { return }
+            guard controller.window != nil else { open(name: targetName); return }
+            mirrorInto(controller, name: targetName, anchor: anchor)
             return
         case .detached, .asleep:
             break
@@ -2789,6 +2905,7 @@ class VigilSessionManager {
     /// surfaces: native tabs regroup from live trees, no VT replay, titles
     /// intact); this controller's tree is left for mount to REPLACE.
     private func releaseOccupant(of controller: TerminalController) {
+        if endMirrorViewport(controller) { return }
         if let current = sessionName(of: controller) {
             let held = vacate(current, keeping: controller)
             sessions[current]!.state = held.isEmpty ? .asleep : .detached(held)
@@ -3670,7 +3787,14 @@ class VigilSessionManager {
     /// shapeshift the session here, then swap the tab if it stayed cold.
     func activateTab(name: String, anchor: String?, in controller: TerminalController?) {
         if let anchor, let view = liveView(attachId: anchor), let window = view.window {
-            window.makeKeyAndOrderFront(nil)
+            // Live in THIS window (or no window asked): focus it. Live in
+            // another window: this viewport mirrors it (shapeshift's rule).
+            if controller == nil || window.windowController === controller
+                || (window.tabGroup?.windows.contains(controller!.window ?? window) ?? false) {
+                window.makeKeyAndOrderFront(nil)
+                return
+            }
+            mirrorInto(controller!, name: name, anchor: anchor)
             return
         }
         guard let controller else { open(name: name); return }
@@ -3697,7 +3821,9 @@ class VigilSessionManager {
             activateTab(name: name, anchor: nil, in: controller)
             return
         }
-        if let view = liveView(attachId: paneId), let window = view.window {
+        if let view = liveView(attachId: paneId), let window = view.window,
+           controller == nil || window.windowController === controller
+            || (window.tabGroup?.windows.contains(controller!.window ?? window) ?? false) {
             window.makeKeyAndOrderFront(nil)
             Ghostty.moveFocus(to: view)
             return
@@ -4206,7 +4332,7 @@ class VigilSessionManager {
 
     /// Compact human label for one tree line's argv; nil for noise (shells,
     /// wrappers, caffeinate). Interpreters are named by their script.
-    private static func processLabel(_ argv: String) -> String? {
+    static func processLabel(_ argv: String) -> String? {
         let parts = argv.split(separator: " ")
         guard let first = parts.first else { return nil }
         let base = URL(fileURLWithPath: String(first)).lastPathComponent
@@ -4703,6 +4829,14 @@ class VigilSessionManager {
         VigilAsk.watchRoute()
         VigilVoice.trace = { [weak self] line in self?.vlog(line) }
         VigilCortex.trace = { [weak self] line in self?.vlog(line) }
+        VigilRemote.trace = { [weak self] line in self?.vlog(line) }
+        // `vigil-hosts` is read at attach time and on every config reload.
+        NotificationCenter.default.addObserver(
+            forName: .ghosttyConfigDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, let config = self.ghosttyApp?.config else { return }
+            VigilRemote.shared.configure(aliases: config.vigilHosts)
+        }
         // The warm tap's receipts (mic_warm/mic_cool) land beside the
         // gate's. ONE owner for the process-global sink, wired here with
         // the traces; consumers (dictation, the pump's prewarm, the ask's
@@ -5023,6 +5157,10 @@ class VigilSessionManager {
         /// idle only when it is the only one: the collapsed row's cluster.
         let states: [AgentState]
         let tabs: [SidebarTab]
+        /// A remote host's session (VigilRemote): the header text of the
+        /// host group it sits under; nil = this Mac. Row ids of remote
+        /// sessions are `alias/name`.
+        var host: String? = nil
 
         /// The ONE tab whose row the tree elides: a lone tab that carries
         /// no information of its own (no name, no face). A lone NAMED tab
@@ -5048,9 +5186,20 @@ class VigilSessionManager {
 
     func activeChain(in host: TerminalController? = nil) -> ActiveChain? {
         guard let front = host ?? (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController as? TerminalController,
-              let name = sessionName(of: front), let session = sessions[name] else { return nil }
+              let name = sessionName(of: front) ?? mirroredSession(of: front) else { return nil }
         let ids = Set(front.surfaceTree.compactMap(\.vigilAttachId)
             + (dockMap.object(forKey: front)?.views.compactMap(\.vigilAttachId) ?? []))
+        // A remote viewport: the chain's ids are alias-namespaced like the
+        // remote rows'.
+        if let (alias, remote) = VigilRemote.shared.session(name) {
+            let tab = (remote.tabs ?? []).first { !Set(tabPaneIds($0)).isDisjoint(with: ids) }
+            let anchor = tab.flatMap { $0.panes.first?.id ?? $0.dock?.panes.first?.id }
+            return ActiveChain(
+                session: name,
+                tab: anchor.map { Self.tabRowId(name, anchor: VigilRemote.compositeId(alias, $0)) },
+                pane: front.focusedSurface?.vigilAttachId.map { VigilRemote.compositeId(alias, $0) })
+        }
+        guard let session = sessions[name] else { return nil }
         let tab = session.tabs.first { !Set(tabPaneIds($0)).isDisjoint(with: ids) }
         let anchor = tab.flatMap { $0.panes.first?.id ?? $0.dock?.panes.first?.id }
         return ActiveChain(
@@ -5181,7 +5330,7 @@ class VigilSessionManager {
                 states: Self.clusterStates(tabs.flatMap(\.panes).compactMap(\.state)),
                 tabs: tabs))
         }
-        return rows
+        return rows + VigilRemote.shared.sidebarRows()
     }
 
     // MARK: Pin on top

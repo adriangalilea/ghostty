@@ -480,6 +480,8 @@ typedef struct {
   // Vigil: non-NULL/non-empty makes this surface attach to (or create) the
   // vigild session daemon with this id instead of spawning a subprocess.
   const char* vigil_attach;
+  // Vigil: ssh alias of the Mac that owns the daemon; NULL/empty = local.
+  const char* vigil_host;
 } ghostty_surface_config_s;
 
 typedef struct {

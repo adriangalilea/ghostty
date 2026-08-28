@@ -656,6 +656,7 @@ pub fn init(
                     .cwd = if (config.@"working-directory") |wd| wd.value() else null,
                     .session = config.env.map.get("VIGIL_SESSION"),
                     .command = command,
+                    .host = config.@"vigil-host",
                 }) };
             };
 

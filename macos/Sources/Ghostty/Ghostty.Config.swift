@@ -266,6 +266,18 @@ extension Ghostty {
             return String(cString: ptr)
         }
 
+        /// Vigil: ssh aliases of other Macs whose sessions this app lists.
+        var vigilHosts: [String] {
+            guard let config = self.config else { return [] }
+            var v: UnsafePointer<Int8>?
+            let key = "vigil-hosts"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return [] }
+            guard let ptr = v else { return [] }
+            return String(cString: ptr).split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        }
+
         var windowStepResize: Bool {
             guard let config = self.config else { return true }
             var v = false

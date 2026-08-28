@@ -657,6 +657,10 @@ extension Ghostty {
         /// It owns nothing: not the pane, not the daemon, no registry row.
         var vigilMirror: Bool = false
 
+        /// Vigil: ssh alias of the Mac that owns `vigilAttach`'s daemon;
+        /// nil = this machine. A remote pane is a viewport, never an owner.
+        var vigilHost: String?
+
         /// Wait after the command
         var waitAfterCommand: Bool = false
 
@@ -733,6 +737,8 @@ extension Ghostty {
 
                         return try vigilAttach.withCString { cAttach in
                         config.vigil_attach = cAttach
+                        return try vigilHost.withCString { cHost in
+                        config.vigil_host = cHost
 
                         // Convert dictionary to arrays for easier processing
                         let keys = Array(environmentVariables.keys)
@@ -757,6 +763,7 @@ extension Ghostty {
                                     return try body(&config)
                                 }
                             }
+                        }
                         }
                         }
                     }

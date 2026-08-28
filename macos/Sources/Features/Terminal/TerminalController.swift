@@ -1438,6 +1438,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // (every surface is daemon-backed, it would fire on every close).
         // One session spans the whole tabGroup; handle each session ONCE and
         // let stray session-less tabs close plain.
+        // A mirror viewport (a second view of a session living elsewhere)
+        // closes plain: its mirror clients end, nothing detaches, nothing
+        // dies.
+        if group.contains(where: { VigilSessionManager.shared.mirroredSession(of: $0) != nil }) {
+            for c in group {
+                VigilSessionManager.shared.endMirrorViewport(c)
+                c.closeWindowImmediately()
+            }
+            return
+        }
+
         let sessionNames = group.compactMap { VigilSessionManager.shared.sessionName(of: $0) }
         if !sessionNames.isEmpty {
             var handled = Set<String>()

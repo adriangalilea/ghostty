@@ -49,7 +49,21 @@ struct VigilSidebarView: View {
                         // thousands.
                         VStack(spacing: 0) {
                             VStack(alignment: .leading, spacing: 5) {
-                                ForEach(model.rows) { row in
+                                ForEach(Array(model.rows.enumerated()), id: \.element.id) { index, row in
+                                    // Remote hosts group under a header:
+                                    // another Mac's sessions, viewports
+                                    // only (VigilRemote).
+                                    if let host = row.host,
+                                       index == 0 || model.rows[index - 1].host != host {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "desktopcomputer")
+                                            Text(host)
+                                        }
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.top, 10)
+                                        .padding(.horizontal, 6)
+                                    }
                                     sessionGroup(row)
                                 }
                             }

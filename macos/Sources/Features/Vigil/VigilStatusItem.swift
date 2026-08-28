@@ -27,6 +27,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         super.init()
 
         VigilSessionManager.shared.ghosttyApp = ghostty
+        VigilRemote.shared.configure(aliases: ghostty.config.vigilHosts)
 
         // Let macOS persist the item's menu-bar position across launches
         // (the Apple-standard mechanism; without it the item jumps around).
