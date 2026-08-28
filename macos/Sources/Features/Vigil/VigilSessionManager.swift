@@ -4426,9 +4426,7 @@ class VigilSessionManager {
         // ears are already open. Idempotent, never prompts for the grant,
         // cools down on its own if no ask follows.
         if !blocked.isEmpty, VigilAsk.voiceEnabled {
-            VigilWatchdog.breadcrumb("ask gate: prewarm")
-            MicTap.shared.prewarm()
-            VigilWatchdog.breadcrumb("ask gate: pump")
+            VigilWatchdog.mark("ask gate: prewarm") { MicTap.shared.prewarm() }
         }
         // Age gate, the belt behind PermissionRequest's suspenders: the
         // hooks mark blocked only when a prompt will exist, so ghost asks
