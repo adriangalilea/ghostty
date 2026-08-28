@@ -98,6 +98,10 @@ enum VigilAsk {
             "latency_ms": receipt.latencyMs,
             "narrated_ms": receipt.narratedMs,
             "route": receipt.route,
+            // The flight (motion + audio + events of THIS ask) the row
+            // joins to: `senses flight <id>` reviews it, `senses flag`
+            // pins it as a false positive or a miss.
+            "flight": Flight.last ?? "",
         ]
         if let detail = receipt.verdict.event?.detail {
             entry["detail"] = detail
@@ -156,6 +160,7 @@ enum VigilAsk {
         // composer architecture); the raw command is NOT re-shipped here -
         // it stands in cmd-guard's ledger, and the distiller joins the two
         // by timestamp when it mines the compose corpus.
+        Flight.pane = pane
         Ask.begin(
             spoken, sources: sources, options: options, textOptions: textOptions, multi: multi,
             composition: Composition(input: spoken, tier: options == nil ? "static-gist" : "question-literal"),
