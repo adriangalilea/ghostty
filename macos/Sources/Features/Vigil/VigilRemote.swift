@@ -131,6 +131,19 @@ final class VigilRemote: ObservableObject {
                 self.inflight.remove(alias)
                 switch result {
                 case .success((let dir, let data)):
+                    // An alias that resolves to THIS Mac would list every
+                    // local session twice under a host header: not a
+                    // remote, dropped with a receipt.
+                    if dir.host == ProcessInfo.processInfo.hostName.split(separator: ".").first.map(String.init) {
+                        if self.hosts[index].error != "this Mac" {
+                            Self.trace?("remote: \(alias) is this Mac (\(dir.host)), ignored")
+                            self.hosts[index].error = "this Mac"
+                            self.hosts[index].directory = nil
+                            self.hosts[index].raw = nil
+                            NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+                        }
+                        return
+                    }
                     let changed = self.hosts[index].raw != data
                     self.hosts[index].directory = dir
                     self.hosts[index].raw = data

@@ -469,6 +469,9 @@ pub const Surface = struct {
 
         /// Vigil: ssh alias of the Mac owning the daemon (null = local).
         vigil_host: ?[*:0]const u8 = null,
+
+        /// Vigil: a pre-connected stream to the daemon (-1 = none).
+        vigil_fd: c_int = -1,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -595,6 +598,7 @@ pub const Surface = struct {
                 config.@"vigil-host" = try config.arenaAlloc().dupeZ(u8, host);
             }
         }
+        if (opts.vigil_fd >= 0) config.@"vigil-fd" = opts.vigil_fd;
 
         // Initialize our surface right away. We're given a view that is
         // ready to use.

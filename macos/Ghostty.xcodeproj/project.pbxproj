@@ -15,6 +15,7 @@
 		8F3A9B4C2FA6B88000A18D13 /* Ghostty.sdef in Resources */ = {isa = PBXBuildFile; fileRef = 8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */; };
 		9351BE8E3D22937F003B3499 /* nvim in Resources */ = {isa = PBXBuildFile; fileRef = 9351BE8E2D22937F003B3499 /* nvim */; };
 		A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A51BFC262B30F1B800E92F16 /* Sparkle */; };
+		0DAA11110000000000000F03 /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000000F02 /* NIOSSH */; };
 		0DAA111100000000000000A4 /* NodKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000A2 /* NodKit */; };
 		0DAA111100000000000000A5 /* NodSignal in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000A3 /* NodSignal */; };
 		0DAA111100000000000000B5 /* AskKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B2 /* AskKit */; };
@@ -265,6 +266,27 @@
 				Helpers/TabGroupCloseCoordinator.swift,
 				Helpers/TabTitleEditor.swift,
 				Helpers/VibrantLayer.m,
+				Features/Vigil/VigilAsk.swift,
+				Features/Vigil/VigilAskHUD.swift,
+				Features/Vigil/VigilBars.swift,
+				Features/Vigil/VigilCortex.swift,
+				Features/Vigil/VigilDictationHUD.swift,
+				Features/Vigil/VigilDock.swift,
+				Features/Vigil/VigilFaceButton.swift,
+				Features/Vigil/VigilFollowSplash.swift,
+				Features/Vigil/VigilIdentityEditor.swift,
+				Features/Vigil/VigilNameCell.swift,
+				Features/Vigil/VigilOverview.swift,
+				Features/Vigil/VigilRemote.swift,
+				Features/Vigil/VigilSessionManager.swift,
+				Features/Vigil/VigilSidebar.swift,
+				Features/Vigil/VigilSidebarView.swift,
+				Features/Vigil/VigilStatusItem.swift,
+				Features/Vigil/VigilSummon.swift,
+				Features/Vigil/VigilTabFaceControl.swift,
+				Features/Vigil/VigilVoice.swift,
+				Features/Vigil/VigilWatchdog.swift,
+				Features/Vigil/VigilWindowMark.swift,
 			);
 			target = A5D4499C2B53AE7B000F5B83 /* Ghostty-iOS */;
 		};
@@ -272,6 +294,9 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				App/iOS/iOSApp.swift,
+				App/iOS/VigilSSH.swift,
+				App/iOS/VigilPhone.swift,
+				App/iOS/VigilPhoneUI.swift,
 				"Features/Custom App Icon/DockTilePlugin.swift",
 				"Ghostty/Surface View/SurfaceView_UIKit.swift",
 			);
@@ -332,6 +357,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A53D0C8E2B53B0EA00305CE6 /* GhosttyKit.xcframework in Frameworks */,
+				0DAA11110000000000000F03 /* NIOSSH in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -515,6 +541,9 @@
 				81F82BC72E82815D001EDFA7 /* Sources */,
 			);
 			name = "Ghostty-iOS";
+			packageProductDependencies = (
+				0DAA11110000000000000F02 /* NIOSSH */,
+			);
 			productName = "Ghostty-iOS";
 			productReference = A5D4499D2B53AE7B000F5B83 /* Ghostty-iOS.app */;
 			productType = "com.apple.product-type.application";
@@ -562,6 +591,7 @@
 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */,
 				0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */,
+				0DAA11110000000000000F01 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */,
 			);
 			productRefGroup = A5B30532299BEAAA0047F10C /* Products */;
 			projectDirPath = "";
@@ -1477,9 +1507,22 @@
 				minimumVersion = 2.5.1;
 			};
 		};
+		0DAA11110000000000000F01 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-nio-ssh";
+			requirement = {
+				kind = exactVersion;
+				version = 0.15.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		0DAA11110000000000000F02 /* NIOSSH */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0DAA11110000000000000F01 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */;
+			productName = NIOSSH;
+		};
 		A51BFC262B30F1B800E92F16 /* Sparkle */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */;

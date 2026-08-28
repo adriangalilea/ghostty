@@ -45,6 +45,90 @@ extension Ghostty {
             ghostty_surface_free(surface)
         }
 
+        /// Vigil: end the core surface NOW (the attach client closes, the
+        /// daemon hands the pty size back), whoever still holds the view.
+        func vigilDetach() {
+            resignFirstResponder()
+            guard let surface = _surface else { return }
+            _surface = nil
+            ghostty_surface_free(surface)
+        }
+
+        // MARK: Input
+
+        /// Text or control bytes to the terminal, as a key event carrying
+        /// text (the IME path the Mac uses): escapes, control chars and
+        /// arrows all ride this.
+        func sendKeys(_ text: String) {
+            guard let surface = self.surface, !text.isEmpty else { return }
+            var ev = ghostty_input_key_s()
+            ev.action = GHOSTTY_ACTION_PRESS
+            ev.mods = GHOSTTY_MODS_NONE
+            ev.consumed_mods = GHOSTTY_MODS_NONE
+            ev.keycode = 0
+            ev.unshifted_codepoint = 0
+            ev.composing = false
+            text.withCString { ptr in
+                ev.text = ptr
+                _ = ghostty_surface_key(surface, ev)
+            }
+        }
+
+        override var canBecomeFirstResponder: Bool { true }
+
+        override func becomeFirstResponder() -> Bool {
+            let ok = super.becomeFirstResponder()
+            if ok { focusDidChange(true) }
+            return ok
+        }
+
+        override func resignFirstResponder() -> Bool {
+            let ok = super.resignFirstResponder()
+            if ok { focusDidChange(false) }
+            return ok
+        }
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            super.touchesBegan(touches, with: event)
+            if !isFirstResponder { _ = becomeFirstResponder() }
+        }
+
+        /// Hardware keyboard: control combos and navigation keys become
+        /// their bytes; everything else is the key's characters.
+        override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            var handled = false
+            for press in presses {
+                guard let key = press.key else { continue }
+                if let bytes = Self.bytes(for: key) {
+                    sendKeys(bytes)
+                    handled = true
+                }
+            }
+            if !handled { super.pressesBegan(presses, with: event) }
+        }
+
+        private static func bytes(for key: UIKey) -> String? {
+            let mods = key.modifierFlags
+            switch key.keyCode {
+            case .keyboardEscape: return "\u{1b}"
+            case .keyboardTab: return "\t"
+            case .keyboardReturnOrEnter: return "\r"
+            case .keyboardDeleteOrBackspace: return "\u{7f}"
+            case .keyboardUpArrow: return "\u{1b}[A"
+            case .keyboardDownArrow: return "\u{1b}[B"
+            case .keyboardRightArrow: return "\u{1b}[C"
+            case .keyboardLeftArrow: return "\u{1b}[D"
+            default: break
+            }
+            if mods.contains(.control), let ch = key.charactersIgnoringModifiers.lowercased().unicodeScalars.first,
+               ch.value >= 0x61, ch.value <= 0x7a {
+                return String(UnicodeScalar(ch.value - 0x60)!)
+            }
+            if mods.contains(.command) { return nil }
+            let text = key.characters
+            return text.isEmpty ? nil : text
+        }
+
         override func focusDidChange(_ focused: Bool) {
             guard let surface = self.surface else { return }
             ghostty_surface_set_focus(surface, focused)
@@ -81,4 +165,20 @@ extension Ghostty {
             sizeDidChange(frame.size)
         }
     }
+}
+
+/// The software keyboard types into the surface as text; delete is DEL.
+/// Traits keep autocorrect and smart punctuation out of a terminal.
+extension Ghostty.SurfaceView: UIKeyInput {
+    var hasText: Bool { true }
+    func insertText(_ text: String) { sendKeys(text) }
+    func deleteBackward() { sendKeys("\u{7f}") }
+
+    var keyboardType: UIKeyboardType { get { .asciiCapable } set {} }
+    var autocorrectionType: UITextAutocorrectionType { get { .no } set {} }
+    var autocapitalizationType: UITextAutocapitalizationType { get { .none } set {} }
+    var smartQuotesType: UITextSmartQuotesType { get { .no } set {} }
+    var smartDashesType: UITextSmartDashesType { get { .no } set {} }
+    var smartInsertDeleteType: UITextSmartInsertDeleteType { get { .no } set {} }
+    var spellCheckingType: UITextSpellCheckingType { get { .no } set {} }
 }

@@ -657,6 +657,7 @@ pub fn init(
                     .session = config.env.map.get("VIGIL_SESSION"),
                     .command = command,
                     .host = config.@"vigil-host",
+                    .fd = if (config.@"vigil-fd" >= 0) @intCast(config.@"vigil-fd") else null,
                 }) };
             };
 

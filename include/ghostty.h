@@ -482,6 +482,10 @@ typedef struct {
   const char* vigil_attach;
   // Vigil: ssh alias of the Mac that owns the daemon; NULL/empty = local.
   const char* vigil_host;
+  // Vigil: an already-connected stream to the daemon (a socketpair end the
+  // embedder pumps to its own transport: ssh on iOS, anything later); -1 =
+  // none. The surface reads and writes frames on it and closes it.
+  int vigil_fd;
 } ghostty_surface_config_s;
 
 typedef struct {

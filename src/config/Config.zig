@@ -1179,6 +1179,11 @@ command: ?Command = null,
 /// and the network is the user's ssh config, never vigil's.
 @"vigil-hosts": ?[:0]const u8 = null,
 
+/// Vigil: an already-connected stream to `vigil-attach`'s daemon, owned
+/// by the embedder's transport (a socketpair end on iOS, pumped to an ssh
+/// channel). -1 = none. Set per-surface through the embedding API only.
+@"vigil-fd": i32 = -1,
+
 /// This is the same as "command", but only applies to the first terminal
 /// surface created when Ghostty starts. Subsequent terminal surfaces will use
 /// the `command` configuration.

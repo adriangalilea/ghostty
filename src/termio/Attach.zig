@@ -54,6 +54,11 @@ command: ?configpkg.Command,
 /// and stdin our write fd. The daemon is never spawned remotely.
 host: ?[]const u8,
 
+/// A stream handed in already connected (iOS: a socketpair end the app
+/// pumps to its ssh channel). The transport is the embedder's; this
+/// backend only speaks frames on whatever fd it is given.
+given_fd: ?posix.fd_t,
+
 alloc: Allocator,
 
 /// Read side: the socket, or the ssh child's stdout; -1 until threadEnter.
@@ -86,6 +91,9 @@ pub const Config = struct {
     session: ?[]const u8 = null,
     command: ?configpkg.Command = null,
     host: ?[]const u8 = null,
+    /// A pre-connected stream (the embedder's transport); overrides both
+    /// the local socket and ssh.
+    fd: ?posix.fd_t = null,
 };
 
 pub fn init(alloc: Allocator, cfg: Config) !Attach {
@@ -96,6 +104,7 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .session = if (cfg.session) |v| try alloc.dupe(u8, v) else null,
         .command = if (cfg.command) |v| try v.clone(alloc) else null,
         .host = if (cfg.host) |v| if (v.len > 0) try alloc.dupe(u8, v) else null else null,
+        .given_fd = cfg.fd,
     };
 }
 
@@ -230,7 +239,11 @@ pub fn threadEnter(
 
     // Attach: locally, creating the daemon on first contact; remotely,
     // through an ssh child (never creating anything).
-    if (self.host) |host| {
+    if (self.given_fd) |given| {
+        self.sock_fd = given;
+        self.write_fd = given;
+        log.info("attach: {s} on a given fd {d}", .{ self.id, given });
+    } else if (self.host) |host| {
         try self.connectSSH(host);
     } else {
         const fd = self.connectSock() catch fd: {
@@ -258,7 +271,7 @@ pub fn threadEnter(
     // Hello, then our size. The size is RECORDED by the daemon; it is
     // applied to the pty only while this client owns the size (claimed
     // on focus, or adopted when nobody owns it yet).
-    self.sendHello(if (self.host != null) "remote" else "surface");
+    self.sendHello(if (self.given_fd != null) "app" else if (self.host != null) "remote" else "surface");
     self.sendResize();
 
     // Quit pipe + read thread, exactly Exec's shape: the ReadThread just

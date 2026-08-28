@@ -661,6 +661,10 @@ extension Ghostty {
         /// nil = this machine. A remote pane is a viewport, never an owner.
         var vigilHost: String?
 
+        /// Vigil: an already-connected stream to the daemon, owned by the
+        /// app's transport (iOS: a socketpair end pumped to ssh); -1 = none.
+        var vigilFd: Int32 = -1
+
         /// Wait after the command
         var waitAfterCommand: Bool = false
 
@@ -724,6 +728,7 @@ extension Ghostty {
 
             // Set context
             config.context = context
+            config.vigil_fd = vigilFd
 
             // Use withCString to ensure strings remain valid for the duration of the closure
             return try workingDirectory.withCString { cWorkingDir in
