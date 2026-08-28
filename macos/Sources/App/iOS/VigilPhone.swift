@@ -198,8 +198,15 @@ final class VigilPhone: ObservableObject {
         refreshing.insert(host.id)
         defer { refreshing.remove(host.id) }
         do {
-            let ssh = try await connection(for: host)
-            let data = try await ssh.exec("vigild dir")
+            var ssh = try await connection(for: host)
+            var data: Data
+            do {
+                data = try await ssh.exec("vigild dir")
+            } catch VigilSSH.Failure.timeout {
+                // Dead under us (network change): dial again, once.
+                ssh = try await connection(for: host)
+                data = try await ssh.exec("vigild dir")
+            }
             let dir = try JSONDecoder().decode(Directory.self, from: data)
             directories[host.id] = dir
             errors[host.id] = nil
@@ -324,10 +331,20 @@ final class VigilPhone: ObservableObject {
 
     /// A live stream to one pane, as an fd for the Attach backend.
     func attach(_ host: Host, pane: String, preview: Bool = false) async throws -> Int32 {
-        let ssh = try await connection(for: host)
-        let fd = try await ssh.stream("vigild proxy \(pane)")
-        log("\(preview ? "preview" : "attach"): \(host.name) \(pane) fd \(fd)")
-        return fd
+        // One retry: a stream that times out declared its connection
+        // dead, and the second attempt dials a fresh one.
+        for attempt in 1...2 {
+            do {
+                let ssh = try await connection(for: host)
+                let fd = try await ssh.stream("vigild proxy \(pane)")
+                log("\(preview ? "preview" : "attach"): \(host.name) \(pane) fd \(fd)\(attempt > 1 ? " (retry)" : "")")
+                return fd
+            } catch {
+                log("\(preview ? "preview" : "attach"): \(host.name) \(pane) attempt \(attempt) failed: \(error.localizedDescription)")
+                if attempt == 2 { throw error }
+            }
+        }
+        fatalError("unreachable")
     }
 
     // MARK: Previews (each is a full surface + ssh channel: bounded)

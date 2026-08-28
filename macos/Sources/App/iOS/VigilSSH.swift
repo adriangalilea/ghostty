@@ -150,7 +150,7 @@ final class VigilSSH {
         }
         let child: Channel
         do {
-            child = try await created.futureResult.get()
+            child = try await opened(created, what: "exec \(command)")
         } catch {
             // No channel, no collector: nobody else will complete `done`.
             done.fail(error)
@@ -198,7 +198,7 @@ final class VigilSSH {
             }
         }
         do {
-            let child = try await created.futureResult.get()
+            let child = try await opened(created, what: "stream \(command)")
             try await child.eventLoop.flatSubmit {
                 child.triggerUserOutboundEvent(SSHChannelRequestEvent.ExecRequest(command: command, wantReply: true))
             }.get()
@@ -209,6 +209,24 @@ final class VigilSSH {
         }
         Self.trace?("ssh: stream '\(command)' open, app fd \(fds[0]), pump fd \(fds[1])")
         return fds[0]
+    }
+
+    /// A child channel that does not open within 8s means the transport is
+    /// dead under us (a network change drops TCP without an EOF for
+    /// minutes): the connection is declared closed so the next call
+    /// re-dials, and the caller gets a timeout instead of a hang.
+    private func opened(_ created: EventLoopPromise<Channel>, what: String) async throws -> Channel {
+        let timer = loop.scheduleTask(in: .seconds(8)) {
+            created.fail(Failure.timeout("open \(what)"))
+        }
+        defer { timer.cancel() }
+        do {
+            return try await created.futureResult.get()
+        } catch Failure.timeout(let w) {
+            setState(.closed("dead connection: \(w)"), why: "open timeout")
+            close()
+            throw Failure.timeout(w)
+        }
     }
 
     private static func ms(since t0: ContinuousClock.Instant) -> Int {
