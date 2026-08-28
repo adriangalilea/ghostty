@@ -4,6 +4,13 @@ import NIOSSH
 import OSLog
 import Security
 
+/// A pane on a Mac, the navigation value the tree hands to the pane screen.
+struct PaneRef: Hashable {
+    let host: VigilPhone.Host
+    let pane: String
+    let title: String
+}
+
 /// The phone's model: the Macs it knows (ssh endpoints), one ed25519 key
 /// born on first launch and kept in the Keychain, each Mac's directory
 /// (`vigild dir`, the same document the Mac's own remote sidebar reads)
@@ -56,21 +63,6 @@ final class VigilPhone: ObservableObject {
         var host: String
         var sessions: [Session]
         var panes: [String: PaneTruth]
-    }
-
-    /// One row of the tree, flattened (session / tab / pane), the same
-    /// order and naming as the Mac's sidebar and `vigil tree`.
-    struct Row: Identifiable, Equatable {
-        enum Kind: Equatable { case session, tab, pane }
-        let id: String
-        let kind: Kind
-        let depth: Int
-        let title: String
-        let emoji: String?
-        let state: String?     // working / blocked / done / idle
-        let alive: Bool
-        let paneId: String?
-        let session: String
     }
 
     @Published var hosts: [Host] {
@@ -214,43 +206,93 @@ final class VigilPhone: ObservableObject {
         }
     }
 
-    /// The tree rows for one Mac, sidebar order.
-    func rows(for host: Host) -> [Row] {
-        guard let dir = directories[host.id] else { return [] }
-        var out: [Row] = []
-        let sessions = dir.sessions.sorted { ($0.order ?? 0, $0.label) < ($1.order ?? 0, $1.label) }
-        for s in sessions {
-            let tabs = s.tabs ?? []
-            let ids = tabs.flatMap { $0.panes.map(\.id) + ($0.dock?.panes.map(\.id) ?? []) }
-            let anyAlive = ids.contains { dir.panes[$0]?.alive ?? false }
-            let states = ids.compactMap { dir.panes[$0]?.state?.split(separator: " ").first.map(String.init) }
-            out.append(Row(id: s.name, kind: .session, depth: 0, title: s.label, emoji: s.emoji,
-                           state: Self.rollup(states), alive: anyAlive, paneId: nil, session: s.name))
-            for (ti, t) in tabs.enumerated() {
-                let showTab = tabs.count > 1 || t.label != nil || t.emoji != nil
-                if showTab {
-                    let name = t.label ?? URL(fileURLWithPath: t.panes.first?.cwd ?? "").lastPathComponent
-                    out.append(Row(id: "\(s.name)/t\(ti)", kind: .tab, depth: 1,
-                                   title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji,
-                                   state: nil, alive: true, paneId: nil, session: s.name))
-                }
-                for p in t.panes + (t.dock?.panes ?? []) {
+    /// The home tree: hosts → sessions → tabs → panes, one collapsible
+    /// tree with the sidebar's rollup semantics (a collapsed node wears
+    /// its descendants' state cluster: distinct active states, blocked
+    /// first, capped at 4; idle only when idle is all there is).
+    struct Node: Identifiable, Equatable {
+        enum Kind: Equatable { case host, session, tab, pane }
+        let id: String
+        let kind: Kind
+        let title: String
+        var subtitle: String? = nil
+        var emoji: String? = nil
+        /// A pane's own state; nodes above carry the cluster.
+        var state: String? = nil
+        var alive: Bool = true
+        var pane: PaneRef? = nil
+        var children: [Node] = []
+
+        /// The cluster this node shows when collapsed (its own state for a
+        /// pane), the sidebar's rule.
+        var cluster: [String] {
+            if kind == .pane { return alive ? [state ?? "idle"] : [] }
+            let all = children.flatMap { $0.leafStates }
+            let active = all.filter { $0 != "idle" }
+                .sorted { Self.rank($0) > Self.rank($1) }
+            var seen = Set<String>()
+            let distinct = active.filter { seen.insert($0).inserted }
+            if !distinct.isEmpty { return Array(distinct.prefix(4)) }
+            return all.isEmpty ? [] : ["idle"]
+        }
+        var leafStates: [String] {
+            if kind == .pane { return alive ? [state ?? "idle"] : [] }
+            return children.flatMap { $0.leafStates }
+        }
+        static func rank(_ s: String) -> Int {
+            switch s { case "blocked": return 3; case "working": return 2; case "done": return 1; default: return 0 }
+        }
+    }
+
+    /// Collapse state, persisted: node ids the user folded.
+    @Published var collapsed: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vigil.collapsed") ?? []) {
+        didSet { UserDefaults.standard.set(Array(collapsed), forKey: "vigil.collapsed") }
+    }
+
+    func tree() -> [Node] {
+        hosts.map { host in
+            let dir = directories[host.id]
+            var node = Node(id: "host:\(host.id.uuidString)", kind: .host,
+                            title: dir?.host ?? host.name,
+                            subtitle: errors[host.id] ?? (dir == nil ? "connecting…" : nil))
+            guard let dir else { return node }
+            let sessions = dir.sessions.sorted { ($0.order ?? 0, $0.label) < ($1.order ?? 0, $1.label) }
+            node.children = sessions.map { s in
+                let tabs = s.tabs ?? []
+                let sid = "\(host.id.uuidString)/\(s.name)"
+                var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji)
+                func paneNode(_ p: Pane) -> Node {
                     let truth = dir.panes[p.id]
                     let program = Self.program(truth?.tree)
                     let title = p.label ?? program
                         ?? p.command.map { String($0.split(separator: " ").first ?? "").split(separator: "/").last.map(String.init) ?? $0 }
                         ?? p.title ?? URL(fileURLWithPath: p.cwd).lastPathComponent
-                    out.append(Row(id: p.id, kind: .pane, depth: showTab ? 2 : 1, title: title, emoji: p.emoji,
-                                   state: truth?.state?.split(separator: " ").first.map(String.init),
-                                   alive: truth?.alive ?? false, paneId: p.id, session: s.name))
+                    let alive = truth?.alive ?? false
+                    return Node(id: "\(sid)/\(p.id)", kind: .pane, title: title, emoji: p.emoji,
+                                state: truth?.state?.split(separator: " ").first.map(String.init),
+                                alive: alive,
+                                pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil)
                 }
+                for (ti, t) in tabs.enumerated() {
+                    let all = t.panes + (t.dock?.panes ?? [])
+                    let showTab = tabs.count > 1 || t.label != nil || t.emoji != nil
+                    if showTab {
+                        let name = t.label ?? URL(fileURLWithPath: t.panes.first?.cwd ?? "").lastPathComponent
+                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji)
+                        tab.children = all.map(paneNode)
+                        sess.children.append(tab)
+                    } else {
+                        sess.children.append(contentsOf: all.map(paneNode))
+                    }
+                }
+                return sess
             }
+            return node
         }
-        return out
     }
 
     private static let shells: Set<String> = ["fish", "bash", "zsh", "sh", "login", "caffeinate"]
-    private static func program(_ tree: [String]?) -> String? {
+    nonisolated private static func program(_ tree: [String]?) -> String? {
         var out: String?
         for line in tree ?? [] {
             let argv = line.split(separator: "\t", maxSplits: 1).last.map(String.init) ?? ""
@@ -266,12 +308,6 @@ final class VigilPhone: ObservableObject {
             }
         }
         return out
-    }
-
-    /// blocked > working > done > idle, the sidebar's cluster head.
-    private static func rollup(_ states: [String]) -> String? {
-        for s in ["blocked", "working", "done"] where states.contains(s) { return s }
-        return states.isEmpty ? nil : "idle"
     }
 
     // MARK: Attach

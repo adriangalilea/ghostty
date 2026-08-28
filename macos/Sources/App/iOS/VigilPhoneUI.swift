@@ -1,75 +1,180 @@
 import SwiftUI
 import GhosttyKit
 
-/// The phone's screens: Macs → a Mac's tree → one pane, full screen, with
-/// a key strip the software keyboard lacks. The pane IS a Ghostty surface
-/// (Metal, the same renderer as the Mac) attached through the ssh bridge.
+/// The phone's screens: ONE home tree (Macs → sessions → tabs → panes,
+/// collapsible, the sidebar's rollup dots on every folded row) and a pane,
+/// full screen, with a key strip the software keyboard lacks. The pane IS
+/// a Ghostty surface (Metal, the Mac's renderer) attached through ssh.
 struct VigilPhoneRoot: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @StateObject private var model = VigilPhone.shared
 
     var body: some View {
         NavigationStack {
-            HostsView()
+            HomeView()
         }
         .environmentObject(model)
     }
 }
 
-struct HostsView: View {
+// MARK: - Home: the tree
+
+struct HomeView: View {
     @EnvironmentObject private var model: VigilPhone
     @State private var adding = false
-    @State private var showKey = false
+    @State private var settings = false
 
     var body: some View {
-        List {
-            Section("Macs") {
-                ForEach(model.hosts) { host in
-                    NavigationLink(value: host) {
-                        HStack {
-                            Image(systemName: "desktopcomputer")
-                            VStack(alignment: .leading) {
-                                Text(host.name).font(.headline)
-                                Text("\(host.user)@\(host.hostname):\(host.port)")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if let err = model.errors[host.id] {
-                                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
-                                    .help(err)
-                            } else if model.directories[host.id] != nil {
-                                Image(systemName: "circle.fill").foregroundStyle(.green).font(.caption2)
-                            }
-                        }
-                    }
-                    .contextMenu {
-                        Button("Forget host key") { model.forgetHostKey(host) }
-                        Button("Refresh") { Task { await model.refresh(host) } }
-                    }
+        let tree = model.tree()
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                if tree.isEmpty {
+                    ContentUnavailableView("No Macs yet", systemImage: "desktopcomputer",
+                                           description: Text("Add one with +, then enrol this phone's key (⚙︎)."))
+                        .padding(.top, 80)
                 }
-                .onDelete { model.hosts.remove(atOffsets: $0) }
-            }
-            Section {
-                Button { showKey = true } label: { Label("This phone's key", systemImage: "key") }
-            } footer: {
-                Text("Add the key to ~/.ssh/authorized_keys on each Mac. vigild must be on the Mac's PATH for ssh.")
-            }
-            Section("Receipts") {
-                ForEach(Array(model.trace.suffix(30).enumerated()), id: \.offset) { _, line in
-                    Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                ForEach(tree) { node in
+                    TreeNodeView(node: node, depth: 0)
                 }
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
         .navigationTitle("vigil")
-        .navigationDestination(for: VigilPhone.Host.self) { host in TreeView(host: host) }
+        .navigationBarTitleDisplayMode(.large)
+        .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref) }
         .toolbar {
-            Button { adding = true } label: { Image(systemName: "plus") }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { settings = true } label: { Image(systemName: "gearshape") }
+                Button { adding = true } label: { Image(systemName: "plus") }
+            }
         }
         .sheet(isPresented: $adding) { AddHostView() }
-        .sheet(isPresented: $showKey) { KeyView() }
+        .sheet(isPresented: $settings) { SettingsView() }
+        .refreshable { model.refreshAll() }
         .onAppear { model.refreshAll() }
     }
 }
+
+/// One row of the tree and, unfolded, its children. Chevron folds; the
+/// row body opens a pane. A folded row wears its cluster.
+struct TreeNodeView: View {
+    let node: VigilPhone.Node
+    let depth: Int
+    @EnvironmentObject private var model: VigilPhone
+
+    private var folded: Bool { model.collapsed.contains(node.id) }
+    private var foldable: Bool { !node.children.isEmpty }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            row
+            if foldable && !folded {
+                ForEach(node.children) { child in
+                    TreeNodeView(node: child, depth: depth + 1)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var row: some View {
+        let content = HStack(spacing: 8) {
+            Spacer().frame(width: CGFloat(depth) * 18)
+            if foldable {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(folded ? 0 : 90))
+                    .frame(width: 16)
+                    .contentShape(Rectangle())
+                    .onTapGesture { toggle() }
+            } else {
+                Spacer().frame(width: 16)
+            }
+            icon
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    if let e = node.emoji { Text(e) }
+                    Text(node.title)
+                        .font(font)
+                        .foregroundStyle(node.alive ? .primary : .secondary)
+                        .lineLimit(1)
+                }
+                if let sub = node.subtitle {
+                    Text(sub).font(.caption2)
+                        .foregroundStyle(sub.hasPrefix("connecting") ? .secondary : Color.orange)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 4)
+            if node.kind == .pane && !node.alive {
+                Text("cold").font(.caption2).foregroundStyle(.tertiary)
+            }
+            cluster
+        }
+        .padding(.vertical, node.kind == .host ? 8 : 6)
+        .padding(.horizontal, 8)
+        .background(node.kind == .host ? Color.secondary.opacity(0.08) : .clear,
+                    in: RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+
+        if let ref = node.pane {
+            NavigationLink(value: ref) { content }.buttonStyle(.plain)
+        } else {
+            content.onTapGesture { if foldable { toggle() } }
+        }
+    }
+
+    private func toggle() {
+        withAnimation(.snappy(duration: 0.2)) {
+            if folded { model.collapsed.remove(node.id) } else { model.collapsed.insert(node.id) }
+        }
+    }
+
+    private var font: Font {
+        switch node.kind {
+        case .host: return .headline
+        case .session: return .body.weight(.semibold)
+        case .tab: return .subheadline
+        case .pane: return .body
+        }
+    }
+
+    @ViewBuilder private var icon: some View {
+        switch node.kind {
+        case .host: Image(systemName: "desktopcomputer").foregroundStyle(.secondary)
+        case .session: EmptyView()
+        case .tab: Image(systemName: "rectangle.on.rectangle").font(.caption).foregroundStyle(.secondary)
+        case .pane: Image(systemName: "terminal").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    /// dot = agent state. A pane shows its own; a folded node its
+    /// descendants' cluster; an unfolded node nothing (its children speak).
+    @ViewBuilder private var cluster: some View {
+        let states: [String] = node.kind == .pane || folded ? node.cluster : []
+        HStack(spacing: 4) {
+            ForEach(Array(states.enumerated()), id: \.offset) { _, s in
+                Circle().fill(StateColor.of(s, alive: true)).frame(width: 8, height: 8)
+            }
+        }
+        .frame(minWidth: 8)
+    }
+}
+
+enum StateColor {
+    static func of(_ state: String?, alive: Bool) -> Color {
+        guard alive else { return .gray.opacity(0.3) }
+        switch state {
+        case "blocked": return .orange
+        case "working": return .yellow
+        case "done": return .teal
+        default: return .gray
+        }
+    }
+}
+
+// MARK: - Sheets
 
 struct AddHostView: View {
     @EnvironmentObject private var model: VigilPhone
@@ -103,90 +208,45 @@ struct AddHostView: View {
     }
 }
 
-struct KeyView: View {
+/// Macs (edit, forget host key, remove), this phone's key, receipts.
+struct SettingsView: View {
     @EnvironmentObject private var model: VigilPhone
+    @Environment(\.dismiss) private var dismiss
+
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Append this line to ~/.ssh/authorized_keys on the Mac:")
-                Text(model.publicKeyLine).font(.caption.monospaced()).textSelection(.enabled)
-                Button {
-                    UIPasteboard.general.string = model.publicKeyLine
-                } label: { Label("Copy", systemImage: "doc.on.doc") }
-                Spacer()
-            }
-            .padding()
-            .navigationTitle("Phone key")
-        }
-    }
-}
-
-struct TreeView: View {
-    let host: VigilPhone.Host
-    @EnvironmentObject private var model: VigilPhone
-
-    var body: some View {
-        let rows = model.rows(for: host)
-        List {
-            if let err = model.errors[host.id] {
-                Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
-                    .font(.caption)
-            }
-            ForEach(rows) { row in
-                if row.kind == .pane, let pane = row.paneId, row.alive {
-                    NavigationLink(value: PaneRef(host: host, pane: pane, title: row.title)) {
-                        RowView(row: row)
+            List {
+                Section("Macs") {
+                    ForEach(model.hosts) { host in
+                        VStack(alignment: .leading) {
+                            Text(host.name).font(.headline)
+                            Text("\(host.user)@\(host.hostname):\(host.port)").font(.caption).foregroundStyle(.secondary)
+                        }
+                        .swipeActions {
+                            Button(role: .destructive) { model.hosts.removeAll { $0.id == host.id } } label: { Label("Remove", systemImage: "trash") }
+                            Button { model.forgetHostKey(host) } label: { Label("Forget key", systemImage: "key.slash") }
+                        }
                     }
-                } else {
-                    RowView(row: row)
+                }
+                Section {
+                    Text(model.publicKeyLine).font(.caption2.monospaced()).textSelection(.enabled)
+                    Button { UIPasteboard.general.string = model.publicKeyLine } label: { Label("Copy", systemImage: "doc.on.doc") }
+                } header: { Text("This phone's key") } footer: {
+                    Text("Append it to ~/.ssh/authorized_keys on each Mac. vigild must be on the Mac's PATH for ssh.")
+                }
+                Section("Receipts") {
+                    ForEach(Array(model.trace.suffix(60).reversed().enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                    }
                 }
             }
-        }
-        .listStyle(.plain)
-        .navigationTitle(model.directories[host.id]?.host ?? host.name)
-        .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref) }
-        .refreshable { await model.refresh(host) }
-        .task { await model.refresh(host) }
-    }
-}
-
-struct PaneRef: Hashable {
-    let host: VigilPhone.Host
-    let pane: String
-    let title: String
-}
-
-struct RowView: View {
-    let row: VigilPhone.Row
-    var body: some View {
-        HStack(spacing: 8) {
-            Spacer().frame(width: CGFloat(row.depth) * 16)
-            if row.kind == .pane {
-                Circle().fill(stateColor).frame(width: 8, height: 8)
-            }
-            if let e = row.emoji { Text(e) }
-            Text(row.title)
-                .font(row.kind == .session ? .headline : .body)
-                .foregroundStyle(row.alive ? .primary : .secondary)
-            if row.kind == .pane && !row.alive {
-                Text("cold").font(.caption2).foregroundStyle(.tertiary)
-            }
-            Spacer()
-        }
-    }
-    private var stateColor: Color { Self.stateColor(row) }
-
-    /// dot = agent state (the Mac sidebar's vocabulary).
-    static func stateColor(_ row: VigilPhone.Row) -> Color {
-        guard row.alive else { return .gray.opacity(0.3) }
-        switch row.state {
-        case "blocked": return .orange
-        case "working": return .yellow
-        case "done": return .teal
-        default: return .gray
+            .navigationTitle("Settings")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
     }
 }
+
+// MARK: - Pane
 
 /// One pane, full screen: the surface attaches on appear (an fd from the
 /// ssh bridge), claims the pty size when it takes focus, and lets go on
@@ -197,12 +257,19 @@ struct PaneScreen: View {
     @EnvironmentObject private var model: VigilPhone
     @Environment(\.dismiss) private var dismiss
     @State private var surfaceView: Ghostty.SurfaceView?
+    @State private var current: PaneRef
     @State private var error: String?
     @State private var ctrl = false
 
-    /// The pane's live row (state, program) from the last directory read.
-    private var row: VigilPhone.Row? {
-        model.rows(for: ref.host).first { $0.paneId == ref.pane }
+    init(ref: PaneRef) {
+        self.ref = ref
+        _current = State(initialValue: ref)
+    }
+
+    /// The pane's live row (state) from the last directory read.
+    private var node: VigilPhone.Node? {
+        model.tree().flatMap { $0.children }.flatMap { $0.children + $0.children.flatMap(\.children) }
+            .first { $0.pane == current }
     }
 
     var body: some View {
@@ -232,12 +299,10 @@ struct PaneScreen: View {
             }
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
-                    Text(ref.title).font(.headline)
+                    Text(current.title).font(.headline)
                     HStack(spacing: 4) {
-                        if let row {
-                            Circle().fill(RowView.stateColor(row)).frame(width: 6, height: 6)
-                        }
-                        Text("\(ref.host.name) · \(row?.session ?? "")")
+                        Circle().fill(StateColor.of(node?.state, alive: node?.alive ?? true)).frame(width: 6, height: 6)
+                        Text("\(current.host.name) · \(sessionName)")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -248,32 +313,53 @@ struct PaneScreen: View {
                 Button { surfaceView?.zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
                 Button { surfaceView?.zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
                 Menu {
-                    ForEach(model.rows(for: ref.host).filter { $0.kind == .pane && $0.alive && $0.paneId != ref.pane }) { other in
+                    ForEach(livePanes.filter { $0.pane != current }, id: \.id) { other in
                         Button {
                             // Swap the viewport in place: same screen, new pane.
                             surfaceView?.vigilDetach()
                             surfaceView = nil
-                            Task { await attach(pane: other.paneId!, title: other.title) }
+                            current = other.pane!
+                            Task { await attach(current) }
                         } label: {
-                            Label("\(other.session) · \(other.title)", systemImage: "terminal")
+                            Label("\(other.subtitle ?? "") \(other.title)", systemImage: "terminal")
                         }
                     }
                 } label: { Image(systemName: "rectangle.stack") }
             }
         }
-        .task { await attach(pane: ref.pane, title: ref.title) }
+        .task { await attach(current) }
         .onDisappear {
             surfaceView?.vigilDetach()
             surfaceView = nil
         }
     }
 
-    private func attach(pane: String, title: String) async {
+    /// Every live pane on this pane's Mac, labelled by its session.
+    private var livePanes: [VigilPhone.Node] {
+        guard let host = model.tree().first(where: { $0.children.contains { s in s.leafStates.count >= 0 && s.id.hasPrefix(current.host.id.uuidString) } }) else { return [] }
+        var out: [VigilPhone.Node] = []
+        for s in host.children {
+            func walk(_ n: VigilPhone.Node) {
+                if let _ = n.pane { var m = n; m.subtitle = s.title; out.append(m) }
+                n.children.forEach(walk)
+            }
+            s.children.forEach(walk)
+        }
+        return out
+    }
+
+    private var sessionName: String {
+        model.tree().flatMap(\.children).first { s in
+            s.children.contains { $0.pane == current || $0.children.contains { $0.pane == current } }
+        }?.title ?? ""
+    }
+
+    private func attach(_ ref: PaneRef) async {
         guard let app = ghostty.app else { error = "ghostty not ready"; return }
         do {
-            let fd = try await model.attach(ref.host, pane: pane)
+            let fd = try await model.attach(ref.host, pane: ref.pane)
             var config = Ghostty.SurfaceConfiguration()
-            config.vigilAttach = pane
+            config.vigilAttach = ref.pane
             config.vigilFd = fd
             config.vigilMirror = true
             // A phone reads at 8pt (the Mac's 13 minus five loupe taps,
@@ -284,7 +370,7 @@ struct PaneScreen: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = view.becomeFirstResponder() }
         } catch {
             self.error = error.localizedDescription
-            model.log("attach: \(pane) failed: \(error.localizedDescription)")
+            model.log("attach: \(ref.pane) failed: \(error.localizedDescription)")
         }
     }
 }
