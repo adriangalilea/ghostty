@@ -58,6 +58,12 @@ final class VigilPhone: ObservableObject {
         var alive: Bool
         var state: String?
         var tree: [String]?
+        /// "rows cols", the owner's pty grid (a preview renders it scaled).
+        var size: String?
+        var grid: (rows: Int, cols: Int)? {
+            let p = (size ?? "").split(separator: " ").compactMap { Int($0) }
+            return p.count == 2 && p[0] > 0 && p[1] > 0 ? (p[0], p[1]) : nil
+        }
     }
     struct Directory: Decodable {
         var host: String
@@ -221,6 +227,9 @@ final class VigilPhone: ObservableObject {
         var state: String? = nil
         var alive: Bool = true
         var pane: PaneRef? = nil
+        /// The owner's grid, for the row's live preview.
+        var rows: Int = 0
+        var cols: Int = 0
         var children: [Node] = []
 
         /// The cluster this node shows when collapsed (its own state for a
@@ -271,7 +280,8 @@ final class VigilPhone: ObservableObject {
                     return Node(id: "\(sid)/\(p.id)", kind: .pane, title: title, emoji: p.emoji,
                                 state: truth?.state?.split(separator: " ").first.map(String.init),
                                 alive: alive,
-                                pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil)
+                                pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil,
+                                rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0)
                 }
                 for (ti, t) in tabs.enumerated() {
                     let all = t.panes + (t.dock?.panes ?? [])
@@ -313,10 +323,29 @@ final class VigilPhone: ObservableObject {
     // MARK: Attach
 
     /// A live stream to one pane, as an fd for the Attach backend.
-    func attach(_ host: Host, pane: String) async throws -> Int32 {
+    func attach(_ host: Host, pane: String, preview: Bool = false) async throws -> Int32 {
         let ssh = try await connection(for: host)
         let fd = try await ssh.stream("vigild proxy \(pane)")
-        log("attach: \(host.name) \(pane) fd \(fd)")
+        log("\(preview ? "preview" : "attach"): \(host.name) \(pane) fd \(fd)")
         return fd
+    }
+
+    // MARK: Previews (each is a full surface + ssh channel: bounded)
+
+    static let previewCap = 6
+    private var previews = Set<String>()
+
+    func claimPreview(_ pane: String) -> Bool {
+        if previews.contains(pane) { return true }
+        guard previews.count < Self.previewCap else {
+            log("preview: cap \(Self.previewCap) reached, \(pane) not shown")
+            return false
+        }
+        previews.insert(pane)
+        return true
+    }
+
+    func releasePreview(_ pane: String) {
+        previews.remove(pane)
     }
 }

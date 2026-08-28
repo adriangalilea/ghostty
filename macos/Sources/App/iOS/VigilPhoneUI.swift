@@ -71,6 +71,15 @@ struct TreeNodeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             row
+            if let ref = node.pane, node.rows > 0, node.cols > 0 {
+                NavigationLink(value: ref) {
+                    PanePreview(ref: ref, rows: node.rows, cols: node.cols)
+                        .padding(.leading, CGFloat(depth) * 18 + 24)
+                        .padding(.trailing, 8)
+                        .padding(.bottom, 4)
+                }
+                .buttonStyle(.plain)
+            }
             if foldable && !folded {
                 ForEach(node.children) { child in
                     TreeNodeView(node: child, depth: depth + 1)
@@ -161,6 +170,73 @@ struct TreeNodeView: View {
             }
         }
         .frame(minWidth: 8)
+    }
+}
+
+/// A LIVE thumbnail of a pane: a second client on its daemon (a mirror,
+/// owning nothing), rendered by a real Ghostty surface laid out at the
+/// OWNER's grid and scaled down to the row, so it is the Mac's screen in
+/// miniature, updating as it streams. Born when the row scrolls in, ended
+/// when it scrolls out; at most `VigilPhone.previewCap` alive at once.
+struct PanePreview: View {
+    let ref: PaneRef
+    let rows: Int
+    let cols: Int
+    @EnvironmentObject private var ghostty: Ghostty.App
+    @EnvironmentObject private var model: VigilPhone
+    @State private var surfaceView: Ghostty.SurfaceView?
+    @State private var denied = false
+
+    /// 8pt monospace cell, the pane screen's font: the preview is laid out
+    /// in the same metrics and then scaled.
+    private let cell = CGSize(width: 4.8, height: 10.0)
+    private var fullSize: CGSize { CGSize(width: CGFloat(cols) * cell.width, height: CGFloat(rows) * cell.height) }
+
+    var body: some View {
+        GeometryReader { geo in
+            let scale = min(geo.size.width / fullSize.width, 1)
+            ZStack(alignment: .topLeading) {
+                Color(ghostty.config.backgroundColor)
+                if let surfaceView {
+                    Ghostty.SurfaceWrapper(surfaceView: surfaceView)
+                        .frame(width: fullSize.width, height: fullSize.height)
+                        .scaleEffect(scale, anchor: .topLeading)
+                        .allowsHitTesting(false)
+                } else if denied {
+                    Text("preview limit").font(.caption2).foregroundStyle(.tertiary).padding(6)
+                }
+            }
+            .frame(width: geo.size.width, height: fullSize.height * scale)
+        }
+        .aspectRatio(fullSize.width / fullSize.height, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.08)))
+        .task { await attach() }
+        .onDisappear { end() }
+    }
+
+    private func attach() async {
+        guard surfaceView == nil, let app = ghostty.app else { return }
+        guard model.claimPreview(ref.pane) else { denied = true; return }
+        do {
+            let fd = try await model.attach(ref.host, pane: ref.pane, preview: true)
+            var config = Ghostty.SurfaceConfiguration()
+            config.vigilAttach = ref.pane
+            config.vigilFd = fd
+            config.vigilMirror = true
+            config.fontSize = 8
+            surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
+        } catch {
+            model.releasePreview(ref.pane)
+            model.log("preview: \(ref.pane) failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func end() {
+        guard let view = surfaceView else { return }
+        view.vigilDetach()
+        surfaceView = nil
+        model.releasePreview(ref.pane)
     }
 }
 
