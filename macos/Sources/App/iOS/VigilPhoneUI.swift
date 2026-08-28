@@ -174,7 +174,10 @@ struct RowView: View {
             Spacer()
         }
     }
-    private var stateColor: Color {
+    private var stateColor: Color { Self.stateColor(row) }
+
+    /// dot = agent state (the Mac sidebar's vocabulary).
+    static func stateColor(_ row: VigilPhone.Row) -> Color {
         guard row.alive else { return .gray.opacity(0.3) }
         switch row.state {
         case "blocked": return .orange
@@ -192,9 +195,15 @@ struct PaneScreen: View {
     let ref: PaneRef
     @EnvironmentObject private var ghostty: Ghostty.App
     @EnvironmentObject private var model: VigilPhone
+    @Environment(\.dismiss) private var dismiss
     @State private var surfaceView: Ghostty.SurfaceView?
     @State private var error: String?
     @State private var ctrl = false
+
+    /// The pane's live row (state, program) from the last directory read.
+    private var row: VigilPhone.Row? {
+        model.rows(for: ref.host).first { $0.paneId == ref.pane }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -211,30 +220,71 @@ struct PaneScreen: View {
             KeyStrip(ctrl: $ctrl, send: { keys in surfaceView?.sendKeys(keys) },
                      hideKeyboard: { _ = surfaceView?.resignFirstResponder() })
         }
-        .navigationTitle(ref.title)
-        .navigationBarTitleDisplayMode(.inline)
-        .ignoresSafeArea(.container, edges: .bottom)
-        .task { await attach() }
+        // The terminal runs edge to edge; the bar floats over it as glass
+        // (iOS 26 renders toolbar items as Liquid Glass once the bar's own
+        // background is gone), Telegram's shape: back · name capsule · menu.
+        .ignoresSafeArea(.container, edges: [.top, .bottom])
+        .navigationBarBackButtonHidden(true)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { dismiss() } label: { Image(systemName: "chevron.left") }
+            }
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text(ref.title).font(.headline)
+                    HStack(spacing: 4) {
+                        if let row {
+                            Circle().fill(RowView.stateColor(row)).frame(width: 6, height: 6)
+                        }
+                        Text("\(ref.host.name) · \(row?.session ?? "")")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 6)
+                .glassEffect(.regular, in: Capsule())
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { surfaceView?.zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
+                Button { surfaceView?.zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
+                Menu {
+                    ForEach(model.rows(for: ref.host).filter { $0.kind == .pane && $0.alive && $0.paneId != ref.pane }) { other in
+                        Button {
+                            // Swap the viewport in place: same screen, new pane.
+                            surfaceView?.vigilDetach()
+                            surfaceView = nil
+                            Task { await attach(pane: other.paneId!, title: other.title) }
+                        } label: {
+                            Label("\(other.session) · \(other.title)", systemImage: "terminal")
+                        }
+                    }
+                } label: { Image(systemName: "rectangle.stack") }
+            }
+        }
+        .task { await attach(pane: ref.pane, title: ref.title) }
         .onDisappear {
             surfaceView?.vigilDetach()
             surfaceView = nil
         }
     }
 
-    private func attach() async {
+    private func attach(pane: String, title: String) async {
         guard let app = ghostty.app else { error = "ghostty not ready"; return }
         do {
-            let fd = try await model.attach(ref.host, pane: ref.pane)
+            let fd = try await model.attach(ref.host, pane: pane)
             var config = Ghostty.SurfaceConfiguration()
-            config.vigilAttach = ref.pane
+            config.vigilAttach = pane
             config.vigilFd = fd
             config.vigilMirror = true
+            // A phone reads at 8pt (the Mac's 13 minus five loupe taps,
+            // Adrian 2026-08-28); the loupe adjusts from here.
+            config.fontSize = 8
             let view = Ghostty.SurfaceView(app, baseConfig: config)
             surfaceView = view
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = view.becomeFirstResponder() }
         } catch {
             self.error = error.localizedDescription
-            model.log("attach: \(ref.pane) failed: \(error.localizedDescription)")
+            model.log("attach: \(pane) failed: \(error.localizedDescription)")
         }
     }
 }

@@ -89,38 +89,78 @@ extension Ghostty {
             return ok
         }
 
-        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-            super.touchesBegan(touches, with: event)
+        /// The keyboard comes on a TAP, never on a touch: a scroll must
+        /// not raise it (real estate is the whole game on a phone).
+        @objc private func handleTap(_ g: UITapGestureRecognizer) {
+            guard let surface = self.surface else { return }
+            let p = g.location(in: self)
+            ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
             if !isFirstResponder { _ = becomeFirstResponder() }
         }
 
-        /// Touch scrolling: a one-finger pan is the wheel. Deltas are
-        /// points, sent as precise scroll units the way a trackpad does on
-        /// the Mac (2x, upstream's feel), so scrollback and TUI mouse
-        /// wheel both work. Installed by `installScrollGesture`.
-        private var lastPan: CGPoint = .zero
+        /// Touch scrolling with Apple's physics: an invisible UIScrollView
+        /// OWNS the gesture (deceleration, momentum, rubber band, the exact
+        /// feel of every native list), and each offset change becomes a
+        /// precise wheel event in PIXELS (points × screen scale; feeding
+        /// points into a 3× surface was the crawl). The offset is re-centered
+        /// after every hand-off so the runway never ends.
+        private var scroller: UIScrollView?
+        private var lastOffset: CGPoint = .zero
+        private var scrollReceipts = 0
+
+        /// Zoom = ghostty's own font-size actions, the Mac's ⌘+/⌘−.
+        func zoom(_ direction: Int) {
+            guard let surface = self.surface else { return }
+            let action = direction > 0 ? "increase_font_size:1" : direction < 0 ? "decrease_font_size:1" : "reset_font_size"
+            _ = action.withCString { ghostty_surface_binding_action(surface, $0, UInt(action.utf8.count)) }
+        }
+        private static let runway: CGFloat = 100_000
+
         func installScrollGesture() {
-            let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
-            pan.maximumNumberOfTouches = 1
-            addGestureRecognizer(pan)
+            let sv = UIScrollView(frame: bounds)
+            sv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            sv.backgroundColor = .clear
+            sv.showsVerticalScrollIndicator = false
+            sv.showsHorizontalScrollIndicator = false
+            sv.alwaysBounceVertical = true
+            sv.contentInsetAdjustmentBehavior = .never
+            sv.decelerationRate = .normal
+            sv.delaysContentTouches = false
+            sv.contentSize = CGSize(width: bounds.width, height: Self.runway * 2)
+            sv.contentOffset = CGPoint(x: 0, y: Self.runway)
+            sv.delegate = self
+            lastOffset = sv.contentOffset
+            addSubview(sv)
+            scroller = sv
+            let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+            sv.addGestureRecognizer(tap)
         }
 
-        @objc private func handlePan(_ g: UIPanGestureRecognizer) {
+        fileprivate func scrollerMoved(_ sv: UIScrollView) {
             guard let surface = self.surface else { return }
-            switch g.state {
-            case .began:
-                lastPan = .zero
-            case .changed, .ended:
-                let t = g.translation(in: self)
-                let dx = Double(t.x - lastPan.x) * 2
-                let dy = Double(t.y - lastPan.y) * 2
-                lastPan = t
-                // mods bit 0 = precision (Ghostty.Input.ScrollMods' layout;
-                // that file is macOS-only).
-                ghostty_surface_mouse_scroll(surface, dx, dy, ghostty_input_scroll_mods_t(1))
-            default:
-                break
+            let dy = lastOffset.y - sv.contentOffset.y
+            lastOffset = sv.contentOffset
+            guard dy != 0 else { return }
+            let scale = window?.screen.scale ?? contentScaleFactor
+            // The core resolves scroll against the pointer: the finger is
+            // the pointer, placed before every delta (without it nothing
+            // moved, 2026-08-28).
+            let p = sv.panGestureRecognizer.location(in: self)
+            ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
+            // mods bit 0 = precision (Ghostty.Input.ScrollMods' layout;
+            // that file is macOS-only).
+            ghostty_surface_mouse_scroll(surface, 0, Double(dy * scale), ghostty_input_scroll_mods_t(1))
+            scrollReceipts += 1
+            if scrollReceipts % 20 == 1 {
+                FileHandle.standardError.write(Data("vigil: scroll dy=\(dy) px=\(dy * scale) offset=\(sv.contentOffset.y) frame=\(sv.frame)\n".utf8))
             }
+        }
+
+        fileprivate func scrollerSettled(_ sv: UIScrollView) {
+            // Re-center silently so the next drag has runway both ways.
+            let center = CGPoint(x: 0, y: Self.runway)
+            sv.contentOffset = center
+            lastOffset = center
         }
 
         /// Hardware keyboard: control combos and navigation keys become
@@ -211,10 +251,19 @@ extension Ghostty {
             super.layoutSubviews()
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            for sub in layer.sublayers ?? [] { sub.frame = bounds }
+            for sub in layer.sublayers ?? [] where sub !== scroller?.layer { sub.frame = bounds }
             CATransaction.commit()
+            scroller?.contentSize = CGSize(width: bounds.width, height: Self.runway * 2)
             sizeDidChange(bounds.size)
         }
+    }
+}
+
+extension Ghostty.SurfaceView: UIScrollViewDelegate {
+    func scrollViewDidScroll(_ scrollView: UIScrollView) { scrollerMoved(scrollView) }
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { scrollerSettled(scrollView) }
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate { scrollerSettled(scrollView) }
     }
 }
 
