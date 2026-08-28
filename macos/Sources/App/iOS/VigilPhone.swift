@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Network
 import NIOSSH
 import OSLog
 import Security
@@ -273,6 +274,11 @@ final class VigilPhone: ObservableObject {
             if kind == .pane { return alive ? [state ?? "idle"] : [] }
             return children.flatMap { $0.leafStates }
         }
+        /// Every pane node under this one.
+        var leaves: [Node] {
+            if kind == .pane { return [self] }
+            return children.flatMap { $0.leaves }
+        }
         static func rank(_ s: String) -> Int {
             switch s { case "blocked": return 3; case "working": return 2; case "done": return 1; default: return 0 }
         }
@@ -350,6 +356,65 @@ final class VigilPhone: ObservableObject {
             }
         }
         return out
+    }
+
+    // MARK: Discovery (Bonjour: the Macs on THIS network)
+
+    /// A Mac advertising ssh on the local network (macOS Remote Login
+    /// publishes `_ssh._tcp`). Its `.local` name resolves on any LAN the
+    /// phone shares with it: a hotel's wifi, the phone's own hotspot.
+    struct DiscoveredMac: Identifiable, Equatable {
+        var id: String { name }
+        let name: String
+        var hostname: String { "\(name).local" }
+    }
+    @Published private(set) var discovered: [DiscoveredMac] = []
+    private var browser: NWBrowser?
+
+    func startDiscovery() {
+        guard browser == nil else { return }
+        let b = NWBrowser(for: .bonjour(type: "_ssh._tcp", domain: nil), using: .tcp)
+        b.browseResultsChangedHandler = { [weak self] results, _ in
+            let macs = results.compactMap { r -> DiscoveredMac? in
+                if case .service(let name, _, _, _) = r.endpoint { return DiscoveredMac(name: name) }
+                return nil
+            }.sorted { $0.name < $1.name }
+            Task { @MainActor in
+                guard let self else { return }
+                if macs != self.discovered {
+                    self.discovered = macs
+                    self.log("bonjour: \(macs.map(\.name))")
+                }
+            }
+        }
+        b.stateUpdateHandler = { [weak self] state in
+            if case .failed(let err) = state { Task { @MainActor in self?.log("bonjour: failed \(err)") } }
+        }
+        b.start(queue: .global(qos: .utility))
+        browser = b
+    }
+
+    // MARK: URLs (vigil://<host>/<session>/<pane>)
+
+    /// The landing for an alert: resolve a host by name or hostname, make
+    /// sure its directory is loaded, and hand back the pane to show.
+    func resolve(url: URL) async -> PaneRef? {
+        guard url.scheme == "vigil", let hostName = url.host else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard parts.count == 2 else { log("url: \(url) wants /<session>/<pane>"); return nil }
+        let (session, pane) = (parts[0], parts[1])
+        guard let host = hosts.first(where: {
+            $0.name.caseInsensitiveCompare(hostName) == .orderedSame
+                || $0.hostname.caseInsensitiveCompare(hostName) == .orderedSame
+                || $0.hostname.caseInsensitiveCompare("\(hostName).local") == .orderedSame
+                || (directories[$0.id]?.host).map { $0.caseInsensitiveCompare(hostName) == .orderedSame } ?? false
+        }) else { log("url: no Mac named \(hostName)"); return nil }
+        if directories[host.id] == nil { await refresh(host) }
+        let title = nodes.first { $0.id == "host:\(host.id.uuidString)" }?
+            .children.first { $0.title == session || $0.id.hasSuffix("/\(session)") }?
+            .leaves.first { $0.pane?.pane == pane }?.title ?? pane
+        log("url: \(url) -> \(host.name) \(pane)")
+        return PaneRef(host: host, pane: pane, title: title)
     }
 
     // MARK: Attach

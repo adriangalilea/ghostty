@@ -8,12 +8,20 @@ import GhosttyKit
 struct VigilPhoneRoot: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @StateObject private var model = VigilPhone.shared
+    @State private var path: [PaneRef] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             HomeView()
         }
         .environmentObject(model)
+        // vigil://<host>/<session>/<pane>: an alert's landing.
+        .onOpenURL { url in
+            Task { @MainActor in
+                if let ref = await model.resolve(url: url) { path = [ref] }
+            }
+        }
+        .onAppear { model.startDiscovery() }
     }
 }
 
@@ -183,21 +191,16 @@ struct TreeNodeView: View {
 /// the viewport when the terminal is at its edge).
 struct FittedSurface: View {
     @ObservedObject var surfaceView: Ghostty.SurfaceView
-    let grid: (rows: Int, cols: Int)
-    private let cell = CGSize(width: 4.8, height: 10.0)
+    let full: CGSize
+    let scale: CGFloat
 
     var body: some View {
         GeometryReader { geo in
-            let full = CGSize(width: CGFloat(grid.cols) * cell.width, height: CGFloat(grid.rows) * cell.height)
-            let scale = min(1, geo.size.width / full.width)
-            ScrollView(.vertical, showsIndicators: false) {
+            ScrollView(full.width * scale > geo.size.width ? [.vertical, .horizontal] : .vertical, showsIndicators: false) {
+                // The view's render layout was set before it got here
+                // (PaneScreen.layout); this only sizes the frame it fills.
                 Ghostty.SurfaceWrapper(surfaceView: surfaceView)
                     .frame(width: full.width * scale, height: full.height * scale)
-                    .onAppear {
-                        surfaceView.renderSize = full
-                        surfaceView.renderScale = scale
-                        surfaceView.anchorBottom = false
-                    }
             }
             .defaultScrollAnchor(.bottom)
         }
@@ -219,20 +222,20 @@ struct PanePreview: View {
     @State private var denied = false
     @State private var generation = 0
 
-    /// 8pt monospace cell, the pane screen's font: the preview is laid out
-    /// in the same metrics, scaled to the row's width, and clipped to a
-    /// short window anchored at the BOTTOM of the grid: a terminal's
-    /// action is at the bottom.
-    private let cell = CGSize(width: 4.8, height: 10.0)
+    /// The owner's grid at the surface's REAL cell size (ghostty publishes
+    /// it once the font is set; until then the render size is held at a
+    /// dot so no frame is ever reported), scaled to the row's width, and
+    /// clipped to a short window anchored at the BOTTOM of the grid: a
+    /// terminal's action is at the bottom.
     private let height: CGFloat = 150
-    private var fullSize: CGSize { CGSize(width: CGFloat(cols) * cell.width, height: CGFloat(rows) * cell.height) }
+    private func fullSize(_ view: Ghostty.SurfaceView) -> CGSize? {
+        let cell = view.liveCell
+        guard cell.width > 0, cell.height > 0 else { return nil }
+        return CGSize(width: CGFloat(cols) * cell.width, height: CGFloat(rows) * cell.height)
+    }
 
     var body: some View {
         GeometryReader { geo in
-            // Readable, never shrunk below 0.8: a wide grid shows its
-            // bottom-LEFT window (content is left-aligned), clipped, rather
-            // than the whole grid at half size (unreadable, 2026-08-28).
-            let scale = min(1, max(0.8, geo.size.width / fullSize.width))
             ZStack(alignment: .bottomLeading) {
                 Color(ghostty.config.backgroundColor)
                 if let surfaceView {
@@ -243,11 +246,12 @@ struct PanePreview: View {
                     Ghostty.SurfaceWrapper(surfaceView: surfaceView)
                         .id(generation)
                         .frame(width: geo.size.width, height: height)
-                        .onAppear { configure(surfaceView, scale: scale) }
-                        .onChange(of: scale) { _, s in configure(surfaceView, scale: s) }
+                        .onAppear { configure(surfaceView, width: geo.size.width) }
+                        .onChange(of: geo.size.width) { _, w in configure(surfaceView, width: w) }
+                        .onChange(of: surfaceView.cellSize) { _, _ in configure(surfaceView, width: geo.size.width) }
                         .onChange(of: model.returnTick) { _, _ in
                             if surfaceView.superview == nil { generation += 1 }
-                            configure(surfaceView, scale: scale)
+                            configure(surfaceView, width: geo.size.width)
                         }
                 } else if denied {
                     Text("preview limit").font(.caption2).foregroundStyle(.tertiary).padding(6)
@@ -263,8 +267,14 @@ struct PanePreview: View {
         .onDisappear { end() }
     }
 
-    private func configure(_ view: Ghostty.SurfaceView, scale: CGFloat) {
-        view.thumbnail = (fullSize, scale)
+    /// Readable, never shrunk below 0.8: a wide grid shows its bottom-LEFT
+    /// window (content is left-aligned), clipped, rather than the whole
+    /// grid at half size (unreadable, 2026-08-28).
+    private func configure(_ view: Ghostty.SurfaceView, width: CGFloat) {
+        // Unknown metrics yet: the grid is still set (the view reports
+        // nothing until the core has metrics), the scale is provisional.
+        let scale = fullSize(view).map { min(1, max(0.8, width / $0.width)) } ?? 1
+        view.thumbnail = ((rows, cols), scale)
         view.applyThumbnail()
     }
 
@@ -324,7 +334,9 @@ enum StateColor {
 
 // MARK: - Sheets
 
+/// Add a Mac, or edit one (`editing`): the same form.
 struct AddHostView: View {
+    var editing: VigilPhone.Host? = nil
     @EnvironmentObject private var model: VigilPhone
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
@@ -332,21 +344,53 @@ struct AddHostView: View {
     @State private var port = "22"
     @State private var user = ""
 
+    init(editing: VigilPhone.Host? = nil) {
+        self.editing = editing
+        if let h = editing {
+            _name = State(initialValue: h.name)
+            _hostname = State(initialValue: h.hostname)
+            _port = State(initialValue: String(h.port))
+            _user = State(initialValue: h.user)
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Name", text: $name)
-                TextField("Host or IP", text: $hostname).textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Port", text: $port).keyboardType(.numberPad)
-                TextField("User", text: $user).textInputAutocapitalization(.never).autocorrectionDisabled()
+                if !model.discovered.isEmpty {
+                    Section("On this network") {
+                        ForEach(model.discovered) { mac in
+                            Button {
+                                name = mac.name
+                                hostname = mac.hostname
+                            } label: {
+                                Label(mac.name, systemImage: "desktopcomputer")
+                            }
+                        }
+                    }
+                }
+                Section {
+                    TextField("Name", text: $name)
+                    TextField("Host or IP", text: $hostname).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("Port", text: $port).keyboardType(.numberPad)
+                    TextField("User", text: $user).textInputAutocapitalization(.never).autocorrectionDisabled()
+                } footer: {
+                    Text("A .local name follows the Mac onto any network you share with it. An IP is for a fixed address (your VPN).")
+                }
             }
-            .navigationTitle("Add Mac")
+            .navigationTitle(editing == nil ? "Add Mac" : "Edit Mac")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        model.hosts.append(.init(name: name.isEmpty ? hostname : name, hostname: hostname,
-                                                 port: Int(port) ?? 22, user: user))
+                    Button(editing == nil ? "Add" : "Save") {
+                        let host = VigilPhone.Host(id: editing?.id ?? UUID(),
+                                                   name: name.isEmpty ? hostname : name, hostname: hostname,
+                                                   port: Int(port) ?? 22, user: user)
+                        if let i = model.hosts.firstIndex(where: { $0.id == host.id }) {
+                            model.hosts[i] = host
+                        } else {
+                            model.hosts.append(host)
+                        }
                         dismiss()
                     }
                     .disabled(hostname.isEmpty || user.isEmpty)
@@ -360,16 +404,24 @@ struct AddHostView: View {
 struct SettingsView: View {
     @EnvironmentObject private var model: VigilPhone
     @Environment(\.dismiss) private var dismiss
+    @State private var editing: VigilPhone.Host?
 
     var body: some View {
         NavigationStack {
             List {
                 Section("Macs") {
                     ForEach(model.hosts) { host in
-                        VStack(alignment: .leading) {
-                            Text(host.name).font(.headline)
-                            Text("\(host.user)@\(host.hostname):\(host.port)").font(.caption).foregroundStyle(.secondary)
+                        Button { editing = host } label: {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(host.name).font(.headline)
+                                    Text("\(host.user)@\(host.hostname):\(host.port)").font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "pencil").foregroundStyle(.secondary)
+                            }
                         }
+                        .buttonStyle(.plain)
                         .swipeActions {
                             Button(role: .destructive) { model.hosts.removeAll { $0.id == host.id } } label: { Label("Remove", systemImage: "trash") }
                             Button { model.forgetHostKey(host) } label: { Label("Forget key", systemImage: "key.slash") }
@@ -386,6 +438,7 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .sheet(item: $editing) { host in AddHostView(editing: host) }
         }
     }
 }
@@ -420,6 +473,11 @@ struct PaneScreen: View {
     /// pane reflows (a TUI repaint, seconds across a VPN) and the Mac
     /// follows the phone while it is open.
     @State private var ownSize = false
+    /// FIT zoom is a PICTURE zoom (render scale), never a font change: a
+    /// font change alters the cell size, the grid derived from the fixed
+    /// render size changes with it, and the phone, as owner, resized the
+    /// Mac's real pty (41x51 → 27x32 → 66x70 in the daemon log, 2026-08-28).
+    @State private var fitZoom: CGFloat = 1
 
     init(ref: PaneRef) {
         self.ref = ref
@@ -440,7 +498,8 @@ struct PaneScreen: View {
                     if ownSize || grid == nil {
                         Ghostty.SurfaceWrapper(surfaceView: surfaceView)
                     } else {
-                        FittedSurface(surfaceView: surfaceView, grid: grid!)
+                        FittedSurface(surfaceView: surfaceView, full: fullSize(surfaceView) ?? UIScreen.main.bounds.size, scale: fitScale(surfaceView))
+                            .onChange(of: surfaceView.cellSize) { _, _ in layout(surfaceView) }
                     }
                 } else if let error {
                     Text(error).foregroundStyle(.orange).padding()
@@ -475,12 +534,15 @@ struct PaneScreen: View {
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if grid != nil {
-                    Button { ownSize.toggle() } label: {
+                    Button {
+                        ownSize.toggle()
+                        if let v = surfaceView { layout(v) }
+                    } label: {
                         Image(systemName: ownSize ? "rectangle.compress.vertical" : "arrow.up.left.and.arrow.down.right")
                     }
                 }
-                Button { surfaceView?.zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
-                Button { surfaceView?.zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
+                Button { zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
+                Button { zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
                 Menu {
                     ForEach(livePanes.filter { $0.pane != current }, id: \.id) { other in
                         Button {
@@ -539,9 +601,7 @@ struct PaneScreen: View {
         guard let app = ghostty.app else { error = "ghostty not ready"; return }
         if let view = model.adoptPreview(ref.pane) {
             view.isUserInteractionEnabled = true
-            view.renderSize = nil
-            view.renderScale = 1
-            view.anchorBottom = false
+            layout(view)
             surfaceView = view
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = view.becomeFirstResponder() }
             return
@@ -556,11 +616,54 @@ struct PaneScreen: View {
             // Adrian 2026-08-28); the loupe adjusts from here.
             config.fontSize = 8
             let view = Ghostty.SurfaceView(app, baseConfig: config)
+            layout(view)
             surfaceView = view
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = view.becomeFirstResponder() }
         } catch {
             self.error = error.localizedDescription
             model.log("attach: \(ref.pane) failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func zoom(_ direction: Int) {
+        if ownSize || grid == nil {
+            surfaceView?.zoom(direction)
+        } else {
+            fitZoom = min(3, max(0.5, fitZoom * (direction > 0 ? 1.2 : 1 / 1.2)))
+            if let v = surfaceView { layout(v) }
+        }
+    }
+
+    /// FIT: the owner's grid at the surface's REAL cell size (published by
+    /// ghostty once the font is set; a guessed 4.8×10 resized the Mac's
+    /// pty to 95x126), scaled to the width times the picture zoom.
+    private func fullSize(_ view: Ghostty.SurfaceView) -> CGSize? {
+        let cell = view.liveCell
+        guard let grid, cell.width > 0, cell.height > 0 else { return nil }
+        return CGSize(width: CGFloat(grid.cols) * cell.width, height: CGFloat(grid.rows) * cell.height)
+    }
+
+    private func fitScale(_ view: Ghostty.SurfaceView) -> CGFloat {
+        guard let full = fullSize(view) else { return 1 }
+        return min(1, UIScreen.main.bounds.width / full.width) * fitZoom
+    }
+
+    /// The view's layout is decided BEFORE it enters the view tree: a
+    /// wrapper that reports its own small frame first resizes the pty (the
+    /// phone owns it once focused) and a TUI re-lays out at a dozen
+    /// columns (2026-08-28). FIT = the owner's grid at 8pt metrics scaled
+    /// to the screen width; OWN = whatever the screen gives.
+    private func layout(_ view: Ghostty.SurfaceView) {
+        if !ownSize, let grid {
+            // The grid in CELLS: exact pixels come from the core's metrics
+            // (nothing is reported until they exist).
+            view.renderGrid = grid
+            view.renderScale = fitScale(view)
+            view.anchorBottom = false
+        } else {
+            view.renderGrid = nil
+            view.renderScale = 1
+            view.anchorBottom = false
         }
     }
 }

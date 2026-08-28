@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- vigil for iPhone. Xcode merges the generated keys (bundle name,
+	     version, scene manifest) over this file: only what the generator
+	     cannot express lives here. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.adriangalilea.vigil</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>vigil</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Same-LAN discovery: macOS Remote Login advertises _ssh._tcp over
+	     Bonjour; the phone browses it to find Macs on any network it shares
+	     with them (hotel wifi, the phone's own hotspot). -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_ssh._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>vigil finds your Macs on the local network (Bonjour) and connects to them over ssh.</string>
+</dict>
+</plist>

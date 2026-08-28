@@ -116,7 +116,8 @@ extension Ghostty {
         func zoom(_ direction: Int) {
             guard let surface = self.surface else { return }
             let action = direction > 0 ? "increase_font_size:1" : direction < 0 ? "decrease_font_size:1" : "reset_font_size"
-            _ = action.withCString { ghostty_surface_binding_action(surface, $0, UInt(action.utf8.count)) }
+            let ok = action.withCString { ghostty_surface_binding_action(surface, $0, UInt(action.utf8.count)) }
+            FileHandle.standardError.write(Data("vigil: zoom \(action) -> \(ok)\n".utf8))
         }
         private static let runway: CGFloat = 100_000
 
@@ -218,25 +219,51 @@ extension Ghostty {
         /// the bottom of the grid when it is taller than the frame.
         var renderScale: CGFloat = 1 { didSet { setNeedsLayout() } }
         var anchorBottom = false { didSet { setNeedsLayout() } }
-        /// The grid size the render layer is laid out at (points, unscaled).
-        var renderSize: CGSize? { didSet { setNeedsLayout() } }
+        /// The grid the render layer is laid out at, in CELLS: the owner's
+        /// grid, so the size reported to the core is exact pixels from its
+        /// own cell metrics and the daemon never sees a different grid
+        /// (points → cells rounding sent 114 for 118; a 1×1 placeholder
+        /// while the metrics were unknown resized three of the Mac's ptys
+        /// to 1×1, 2026-08-28). nil = the view's own frame.
+        var renderGrid: (rows: Int, cols: Int)? { didSet { setNeedsLayout() } }
+        /// The render grid in points, from the live cell size.
+        var renderSize: CGSize? {
+            guard let g = renderGrid else { return nil }
+            let cell = liveCell
+            guard cell.width > 0 else { return nil }
+            return CGSize(width: CGFloat(g.cols) * cell.width, height: CGFloat(g.rows) * cell.height)
+        }
 
         /// The thumbnail layout a preview row gave this view, kept while a
         /// pane screen borrows the surface full-size, restored on return
         /// (the row re-draws BEFORE the hand-back; without this the
         /// returned surface showed the empty top-left of a full grid: the
         /// gray thumbnails, 2026-08-28).
-        var thumbnail: (size: CGSize, scale: CGFloat)?
+        var thumbnail: (grid: (rows: Int, cols: Int), scale: CGFloat)?
         func applyThumbnail() {
             guard let t = thumbnail else { return }
-            renderSize = t.size
+            renderGrid = t.grid
             renderScale = t.scale
             anchorBottom = true
         }
 
+        /// Vigil: the cell size in POINTS, synchronously from the core
+        /// (`ghostty_surface_size`; the published `cellSize` only arrives
+        /// after a first real size, and a fit layout must know the cell
+        /// BEFORE reporting any size, or the phone resizes the Mac's pty:
+        /// a guessed cell size did, 95x126).
+        var liveCell: CGSize {
+            guard let surface = self.surface else { return .zero }
+            let s = ghostty_surface_size(surface)
+            guard s.cell_width_px > 0, s.cell_height_px > 0 else { return .zero }
+            return CGSize(width: CGFloat(s.cell_width_px) / appliedScale, height: CGFloat(s.cell_height_px) / appliedScale)
+        }
+        /// The content scale the core currently has (the surface config's
+        /// screen scale at birth, then whatever sizeDidChange applied).
+        private var appliedScale: CGFloat = UIScreen.main.scale
+
         override func sizeDidChange(_ size: CGSize) {
             guard let surface = self.surface else { return }
-            let size = renderSize ?? size
 
             // Ghostty wants to know the actual framebuffer size... It is very important
             // here that we use "size" and NOT the view frame. If we're in the middle of
@@ -249,15 +276,36 @@ extension Ghostty {
             // A thumbnail renders at 2× (it is shown scaled down; the
             // screen's 3× on a full grid was 2.25× the pixels for nothing).
             let screen = window?.screen.scale ?? UIScreen.main.scale
-            let scale = renderSize != nil ? min(2, screen) : screen
+            let scale = renderGrid != nil ? min(2, screen) : screen
             contentScaleFactor = scale
             for sub in layer.sublayers ?? [] { sub.contentsScale = scale }
             ghostty_surface_set_content_scale(surface, scale, scale)
-            ghostty_surface_set_size(
-                surface,
-                UInt32(size.width * scale),
-                UInt32(size.height * scale)
-            )
+            appliedScale = scale
+            let px: (w: UInt32, h: UInt32)
+            if let g = renderGrid {
+                // Exact pixels from the core's cell metrics AT THIS SCALE
+                // (set just above): the grid the core derives is g, no
+                // rounding. Unknown metrics = report nothing.
+                let s = ghostty_surface_size(surface)
+                guard s.cell_width_px > 0, s.cell_height_px > 0 else {
+                    FileHandle.standardError.write(Data("vigil: size held, no cell metrics yet\n".utf8))
+                    return
+                }
+                px = (UInt32(g.cols) * s.cell_width_px, UInt32(g.rows) * s.cell_height_px)
+            } else {
+                px = (UInt32(size.width * scale), UInt32(size.height * scale))
+            }
+            ghostty_surface_set_size(surface, px.w, px.h)
+            var s = ghostty_surface_size(surface)
+            if let g = renderGrid, Int(s.rows) != g.rows || Int(s.columns) != g.cols {
+                // The core reserves its window padding: add the cells it
+                // lost and set again, so the derived grid is exactly g.
+                let w = px.w + UInt32(max(0, g.cols - Int(s.columns))) * s.cell_width_px
+                let h = px.h + UInt32(max(0, g.rows - Int(s.rows))) * s.cell_height_px
+                ghostty_surface_set_size(surface, w, h)
+                s = ghostty_surface_size(surface)
+            }
+            FileHandle.standardError.write(Data("vigil: size \(px.w)x\(px.h)px scale \(scale) \(renderGrid.map { "fit \($0.rows)x\($0.cols)" } ?? "own") -> core \(s.rows)x\(s.columns)\n".utf8))
         }
 
         // MARK: UIView
@@ -280,7 +328,17 @@ extension Ghostty {
             super.layoutSubviews()
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            let logical = renderSize ?? bounds.size
+            // Fit: the layer is the grid in points at the applied scale.
+            let logical: CGSize = {
+                if let g = renderGrid, let surface = self.surface {
+                    let s = ghostty_surface_size(surface)
+                    if s.cell_width_px > 0 {
+                        return CGSize(width: CGFloat(g.cols) * CGFloat(s.cell_width_px) / appliedScale,
+                                      height: CGFloat(g.rows) * CGFloat(s.cell_height_px) / appliedScale)
+                    }
+                }
+                return bounds.size
+            }()
             for sub in layer.sublayers ?? [] where sub !== scroller?.layer {
                 sub.anchorPoint = .zero
                 sub.bounds = CGRect(origin: .zero, size: logical)
