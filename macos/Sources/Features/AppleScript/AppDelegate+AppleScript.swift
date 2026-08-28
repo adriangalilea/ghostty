@@ -206,6 +206,35 @@ extension NSApplication {
         return ScriptWindow(primaryController: controller)
     }
 
+    /// Handler for the vigil `new session` AppleScript command (the session
+    /// API behind `bin/vigil new`). Selector name from `sdef`:
+    /// `handleNewSessionScriptCommand:`. Returns the `session` record.
+    @objc(handleNewSessionScriptCommand:)
+    func handleNewSessionScriptCommand(_ command: NSScriptCommand) -> NSDictionary? {
+        guard validateScript(command: command) else { return nil }
+        let args = command.evaluatedArguments ?? [:]
+        func text(_ key: String, _ param: String) throws -> String? {
+            guard let raw = args[key] else { return nil }
+            guard let s = raw as? String else {
+                throw RecordParseError.invalidType(parameter: param, expected: "text")
+            }
+            return s.isEmpty ? nil : s
+        }
+        do {
+            let label = try text("label", "label")
+            let cwd = try text("workingDirectory", "initial working directory")
+            let program = try text("command", "command")
+            let openWindow = (args["openWindow"] as? NSNumber)?.boolValue
+            let name = VigilSessionManager.shared.apiNewSession(
+                label: label, cwd: cwd, command: program, openWindow: openWindow)
+            return ["name": name, "label": label ?? name] as NSDictionary
+        } catch {
+            command.scriptErrorNumber = errAECoercionFail
+            command.scriptErrorString = error.localizedDescription
+            return nil
+        }
+    }
+
     /// Handler for the `quit` AppleScript command.
     ///
     /// Required selector name from the command in `sdef`:

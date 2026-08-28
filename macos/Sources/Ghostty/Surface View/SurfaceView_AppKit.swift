@@ -223,6 +223,11 @@ extension Ghostty {
         /// any. Session capture preserves it so resurrection reattaches.
         private(set) var vigilAttachId: String?
 
+        /// Vigil: the program this surface's daemon was born to run (a
+        /// session API birth); nil = the login shell. Captured with the
+        /// pane so a cold remount after the daemon died spawns it again.
+        private(set) var vigilCommand: String?
+
         /// Vigil: a mirror is a second client on a pane whose HOME view
         /// sits in a session window (the summon panel). Never the pane's
         /// live view, never an owner: every ownership and liveness lookup
@@ -248,6 +253,7 @@ extension Ghostty {
 
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             self.vigilAttachId = baseConfig?.vigilAttach
+            self.vigilCommand = baseConfig?.vigilAttach != nil ? baseConfig?.command : nil
             self.vigilMirror = baseConfig?.vigilMirror ?? false
             self.markedText = NSMutableAttributedString()
 

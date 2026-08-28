@@ -250,14 +250,20 @@ class VigilSessionManager {
         /// with the pane on a drag.
         var label: String?
         var emoji: String?
+        /// The program the pane's daemon runs as its child (session API
+        /// birth, `vigil new -- claude`); nil = the login shell. Part of
+        /// the soul: a cold mount after the daemon died spawns it again,
+        /// never types it.
+        var command: String?
 
         init(id: String, cwd: String, title: String? = nil,
-             label: String? = nil, emoji: String? = nil) {
+             label: String? = nil, emoji: String? = nil, command: String? = nil) {
             self.id = id
             self.cwd = cwd
             self.title = title
             self.label = label
             self.emoji = emoji
+            self.command = command
         }
     }
 
@@ -856,7 +862,8 @@ class VigilSessionManager {
             cwd: view.pwd ?? previous?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
             title: capturedTitle(of: view) ?? previous?.title,
             label: previous?.label,
-            emoji: previous?.emoji)
+            emoji: previous?.emoji,
+            command: view.vigilCommand ?? previous?.command)
     }
 
     /// A live tree as registry panes (DFS leaf order) + split shape.
@@ -1857,13 +1864,33 @@ class VigilSessionManager {
     /// identity plus one cold daemon-backed pane, asleep. The daemon spawns
     /// and the shell/claude lives in it (not any window's pty) the moment a
     /// viewport materializes the pane.
-    private func mintSession(cwd: String) -> String {
+    private func mintSession(cwd: String, command: String? = nil) -> String {
         let name = newSessionId()
         var session = Session(name: name, label: name, cwd: cwd, state: .asleep)
-        session.tabs = [Tab(panes: [Pane(id: "vigil-\(name)-0", cwd: cwd)], layout: nil)]
+        session.tabs = [Tab(panes: [Pane(id: "vigil-\(name)-0", cwd: cwd, command: command)], layout: nil)]
         session.paneSeq = 1 // index 0 consumed at birth
         sessions[name] = session
-        vlog("born(mint): '\(name)' cwd=\(cwd)")
+        vlog("born(mint): '\(name)' cwd=\(cwd)\(command.map { " command=\($0)" } ?? "")")
+        return name
+    }
+
+    /// The session API (`vigil new`, AppleScript `new session`): a
+    /// registry birth with a label and, optionally, the program the pane's
+    /// daemon runs as its child. A script never hijacks the viewport under
+    /// Adrian's hands and never litters windows: by default (`openWindow`
+    /// nil) the session stays cold and simply APPEARS in every sidebar,
+    /// the row is the cue; a window is opened only when no viewport is
+    /// visible at all (nothing could show the cue) or on explicit request
+    /// (`true`), and never on `false`. Returns the minted id.
+    @discardableResult
+    func apiNewSession(label: String?, cwd: String?, command: String?, openWindow: Bool?) -> String {
+        let cwd = cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let name = mintSession(cwd: cwd, command: command)
+        if let label, !label.isEmpty { rename(name: name, label: label, emoji: nil) }
+        let anyViewport = TerminalController.all.contains { $0.window?.isVisible == true }
+        let wantsWindow = openWindow ?? !anyViewport
+        vlog("born(api): '\(name)' label=\(label ?? "-") window=\(wantsWindow) (asked=\(openWindow.map(String.init) ?? "auto") viewport=\(anyViewport))")
+        if wantsWindow { open(name: name) } else { persist() }
         return name
     }
 
@@ -2364,6 +2391,7 @@ class VigilSessionManager {
         config.workingDirectory = pane.cwd
         config.environmentVariables["VIGIL_SESSION"] = name
         config.vigilAttach = pane.id
+        config.command = pane.command
         return config
     }
 
@@ -4204,9 +4232,12 @@ class VigilSessionManager {
         return text.components(separatedBy: "\n").filter { !$0.isEmpty }
     }
 
-    /// argv column of a tree/died file, skipping line 1 (the pane's shell).
+    /// argv column of a tree/died file. Line 1 is the daemon's child: a
+    /// shell for an ordinary pane, the PROGRAM for a session-API pane
+    /// (`/bin/sh -lc cmd` execs in place). Never skipped by position;
+    /// `processLabel` nils shells by name.
     private func paneCommands(_ pane: String, _ ext: String) -> [String] {
-        paneFileLines(pane, ext).dropFirst().map {
+        paneFileLines(pane, ext).map {
             $0.split(separator: "\t", maxSplits: 1).last.map(String.init) ?? ""
         }
     }
@@ -4241,7 +4272,7 @@ class VigilSessionManager {
         let pidLines = paneFileLines(pane, "pid")
         guard pidLines.count >= 3,
               let fg = Int(pidLines[2].trimmingCharacters(in: .whitespaces)) else { return nil }
-        for line in paneFileLines(pane, "tree").dropFirst() {
+        for line in paneFileLines(pane, "tree") {
             let parts = line.split(separator: "\t", maxSplits: 1)
             guard parts.count == 2, Int(parts[0]) == fg else { continue }
             return Self.processLabel(String(parts[1]))
@@ -5002,18 +5033,21 @@ class VigilSessionManager {
         }
     }
 
-    /// Where you ARE, derived from the key window: session, mounted tab
-    /// row, focused pane. Its own channel, read on every key-window and
-    /// focus change without the snapshot's throttle: the active chain must
-    /// repaint the instant a tab is clicked, never a tick later.
+    /// Where you ARE in one window: its session, mounted tab row, focused
+    /// pane. PER WINDOW: a sidebar asks for its own host, never the key
+    /// window (every bar painted the key window's chain, so focusing a
+    /// pane in one window relit the same rows in every other, Adrian
+    /// 2026-08-28). Its own channel, read on every key-window and focus
+    /// change without the snapshot's throttle: the chain must repaint the
+    /// instant a tab is clicked, never a tick later.
     struct ActiveChain: Equatable {
         let session: String
         let tab: String?
         let pane: String?
     }
 
-    func activeChain() -> ActiveChain? {
-        guard let front = (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController as? TerminalController,
+    func activeChain(in host: TerminalController? = nil) -> ActiveChain? {
+        guard let front = host ?? (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController as? TerminalController,
               let name = sessionName(of: front), let session = sessions[name] else { return nil }
         let ids = Set(front.surfaceTree.compactMap(\.vigilAttachId)
             + (dockMap.object(forKey: front)?.views.compactMap(\.vigilAttachId) ?? []))
@@ -5056,10 +5090,12 @@ class VigilSessionManager {
         func paneRow(_ pane: Pane, view: Ghostty.SurfaceView?, isDock: Bool) -> SidebarPane {
             let program = paneProgram(pane.id)
             let liveTitle = view.flatMap { liveTabTitle($0.title) }
-            // The name YOU gave it, else what runs there, else what the
-            // program calls itself, else where it lives.
+            // The name YOU gave it, else what runs there, else what it was
+            // born to run (a cold session-API pane), else what the program
+            // calls itself, else where it lives.
             let title = pane.label
                 ?? program
+                ?? pane.command.flatMap(Self.processLabel)
                 ?? liveTitle
                 ?? pane.title
                 ?? URL(fileURLWithPath: pane.cwd).lastPathComponent

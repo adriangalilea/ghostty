@@ -198,7 +198,7 @@ final class VigilSidebarModel: ObservableObject {
     @Published private(set) var focus: VigilSessionManager.ActiveChain?
 
     func refreshFocus() {
-        let fresh = VigilSessionManager.shared.activeChain()
+        let fresh = VigilSessionManager.shared.activeChain(in: hostController)
         if fresh != focus { focus = fresh }
     }
 

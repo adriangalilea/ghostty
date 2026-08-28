@@ -27,6 +27,7 @@ const Allocator = std.mem.Allocator;
 const posix = std.posix;
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
+const configpkg = @import("../config.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
@@ -41,6 +42,12 @@ cwd: ?[]const u8,
 
 /// VIGIL_SESSION value for the daemon's environment on create.
 session: ?[]const u8,
+
+/// The program the daemon runs as its child on create (a session API
+/// birth: `vigil new -- claude`). null = the daemon's login shell. Never
+/// typed into a shell: it IS the child, recorded in the daemon's spec, so
+/// it survives detach, quit and reboot like the shell does.
+command: ?configpkg.Command,
 
 alloc: Allocator,
 
@@ -66,6 +73,7 @@ pub const Config = struct {
     id: []const u8,
     cwd: ?[]const u8 = null,
     session: ?[]const u8 = null,
+    command: ?configpkg.Command = null,
 };
 
 pub fn init(alloc: Allocator, cfg: Config) !Attach {
@@ -74,6 +82,7 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .id = try alloc.dupe(u8, cfg.id),
         .cwd = if (cfg.cwd) |v| try alloc.dupe(u8, v) else null,
         .session = if (cfg.session) |v| try alloc.dupe(u8, v) else null,
+        .command = if (cfg.command) |v| try v.clone(alloc) else null,
     };
 }
 
@@ -81,6 +90,7 @@ pub fn deinit(self: *Attach) void {
     self.alloc.free(self.id);
     if (self.cwd) |v| self.alloc.free(v);
     if (self.session) |v| self.alloc.free(v);
+    if (self.command) |v| v.deinit(self.alloc);
     if (self.cached_tty) |v| self.alloc.free(v);
     self.write_buf.deinit(self.alloc);
 }
@@ -111,9 +121,12 @@ fn connectSock(self: *Attach) !posix.fd_t {
     return fd;
 }
 
-/// Spawn `vigild new <id>` to bring the daemon up. The daemon's command
-/// defaults to $SHELL inside vigild; env carries VIGIL_SESSION so claude
-/// hooks feed the attention queue from birth.
+/// Spawn `vigild new <id> [-c cmd | -- argv]` to bring the daemon up. No
+/// command = the daemon's login shell; a command is the daemon's CHILD
+/// (`<login shell> -lc` for a shell string, verbatim for `direct:` argv),
+/// so the spec records it and `vigild restore` respawns it after a reboot.
+/// Env carries VIGIL_SESSION so claude hooks feed the attention queue
+/// from birth.
 fn spawnDaemon(self: *Attach) !void {
     var env = try internal_os.getEnvMap(self.alloc);
     defer env.deinit();
@@ -127,7 +140,20 @@ fn spawnDaemon(self: *Attach) !void {
     const bin = try std.fmt.allocPrint(self.alloc, "{s}/.local/bin/vigild", .{home});
     defer self.alloc.free(bin);
 
-    var child = std.process.Child.init(&.{ bin, "new", self.id }, self.alloc);
+    var argv: std.ArrayListUnmanaged([]const u8) = .{};
+    defer argv.deinit(self.alloc);
+    try argv.appendSlice(self.alloc, &.{ bin, "new", self.id });
+    if (self.command) |cmd| switch (cmd) {
+        // The daemon picks the login shell for a shell string (it owns
+        // shell identity; /bin/sh -l never sees a fish login's PATH).
+        .shell => |v| try argv.appendSlice(self.alloc, &.{ "-c", v }),
+        .direct => |v| {
+            try argv.append(self.alloc, "--");
+            for (v) |arg| try argv.append(self.alloc, arg);
+        },
+    };
+
+    var child = std.process.Child.init(argv.items, self.alloc);
     child.env_map = &env;
     child.cwd = self.cwd;
     child.stdin_behavior = .Ignore;

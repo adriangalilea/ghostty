@@ -25,6 +25,9 @@
       <responds-to command="new surface configuration">
         <cocoa method="handleNewSurfaceConfigurationScriptCommand:"/>
       </responds-to>
+      <responds-to command="new session">
+        <cocoa method="handleNewSessionScriptCommand:"/>
+      </responds-to>
       <responds-to command="quit">
         <cocoa method="handleQuitScriptCommand:"/>
       </responds-to>
@@ -171,6 +174,27 @@
         <cocoa key="configuration"/>
       </parameter>
       <result type="window" description="The newly created window."/>
+    </command>
+
+    <record-type name="session" code="GSsn" description="A vigil session identity: the opaque id and its human label.">
+      <property name="name" code="GSsN" type="text" description="The session id (random adjective-noun, the identity)."/>
+      <property name="label" code="GSsL" type="text" description="The human label."/>
+    </record-type>
+
+    <command name="new session" code="GhstNSes" description="Create a vigil session: a daemon-backed pane that survives window close, quit and reboot. The command, if any, is the daemon's child, never typed.">
+      <parameter name="label" code="GSlb" type="text" optional="yes" description="Human label (the id stays the identity).">
+        <cocoa key="label"/>
+      </parameter>
+      <parameter name="initial working directory" code="GSwd" type="text" optional="yes" description="Working directory of the pane; defaults to home.">
+        <cocoa key="workingDirectory"/>
+      </parameter>
+      <parameter name="command" code="GScm" type="text" optional="yes" description="Program to run as the pane's process instead of the login shell.">
+        <cocoa key="command"/>
+      </parameter>
+      <parameter name="open window" code="GSow" type="boolean" optional="yes" description="true opens a new window on it; false never does; omitted = only when no window is visible at all (the session otherwise just appears in the sidebar).">
+        <cocoa key="openWindow"/>
+      </parameter>
+      <result type="session" description="The minted session."/>
     </command>
 
     <command name="new tab" code="GhstNTab" description="Create a new Ghostty tab.">
