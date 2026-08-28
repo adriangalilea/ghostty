@@ -188,27 +188,35 @@ struct PanePreview: View {
     @State private var denied = false
 
     /// 8pt monospace cell, the pane screen's font: the preview is laid out
-    /// in the same metrics and then scaled.
+    /// in the same metrics, scaled to the row's width, and clipped to a
+    /// short window anchored at the BOTTOM of the grid: a terminal's
+    /// action is at the bottom.
     private let cell = CGSize(width: 4.8, height: 10.0)
+    private let height: CGFloat = 150
     private var fullSize: CGSize { CGSize(width: CGFloat(cols) * cell.width, height: CGFloat(rows) * cell.height) }
 
     var body: some View {
         GeometryReader { geo in
-            let scale = min(geo.size.width / fullSize.width, 1)
-            ZStack(alignment: .topLeading) {
+            // Readable, never shrunk below 0.8: a wide grid shows its
+            // bottom-LEFT window (content is left-aligned), clipped, rather
+            // than the whole grid at half size (unreadable, 2026-08-28).
+            let scale = min(1, max(0.8, geo.size.width / fullSize.width))
+            ZStack(alignment: .bottomLeading) {
                 Color(ghostty.config.backgroundColor)
                 if let surfaceView {
                     Ghostty.SurfaceWrapper(surfaceView: surfaceView)
                         .frame(width: fullSize.width, height: fullSize.height)
-                        .scaleEffect(scale, anchor: .topLeading)
+                        .scaleEffect(scale, anchor: .bottomLeading)
+                        .frame(width: fullSize.width * scale, height: fullSize.height * scale, alignment: .bottomLeading)
                         .allowsHitTesting(false)
                 } else if denied {
                     Text("preview limit").font(.caption2).foregroundStyle(.tertiary).padding(6)
                 }
             }
-            .frame(width: geo.size.width, height: fullSize.height * scale)
+            .frame(width: geo.size.width, height: height, alignment: .bottomLeading)
+            .clipped()
         }
-        .aspectRatio(fullSize.width / fullSize.height, contentMode: .fit)
+        .frame(height: height)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.08)))
         .task { await attach() }
@@ -217,7 +225,7 @@ struct PanePreview: View {
 
     private func attach() async {
         guard surfaceView == nil, let app = ghostty.app else { return }
-        guard model.claimPreview(ref.pane) else { denied = true; return }
+        guard model.previewAllowed(ref.pane) else { denied = true; return }
         do {
             let fd = try await model.attach(ref.host, pane: ref.pane, preview: true)
             var config = Ghostty.SurfaceConfiguration()
@@ -225,9 +233,10 @@ struct PanePreview: View {
             config.vigilFd = fd
             config.vigilMirror = true
             config.fontSize = 8
-            surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
+            let view = Ghostty.SurfaceView(app, baseConfig: config)
+            surfaceView = view
+            model.registerPreview(ref.pane, view: view)
         } catch {
-            model.releasePreview(ref.pane)
             model.log("preview: \(ref.pane) failed: \(error.localizedDescription)")
         }
     }

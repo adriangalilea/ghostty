@@ -333,19 +333,33 @@ final class VigilPhone: ObservableObject {
     // MARK: Previews (each is a full surface + ssh channel: bounded)
 
     static let previewCap = 6
-    private var previews = Set<String>()
+    /// Live preview surfaces, weakly: the count is what EXISTS, never what
+    /// was claimed (a row torn down without onDisappear leaked claims and
+    /// starved the first row, 2026-08-28).
+    private var previews = NSMapTable<NSString, AnyObject>(keyOptions: .copyIn, valueOptions: .weakMemory)
 
-    func claimPreview(_ pane: String) -> Bool {
-        if previews.contains(pane) { return true }
-        guard previews.count < Self.previewCap else {
+    private var livePreviews: Int {
+        var n = 0
+        for key in previews.keyEnumerator() {
+            if let v = previews.object(forKey: key as? NSString) as? Ghostty.SurfaceView, v.surface != nil { n += 1 }
+        }
+        return n
+    }
+
+    func previewAllowed(_ pane: String) -> Bool {
+        if previews.object(forKey: pane as NSString) != nil { return true }
+        guard livePreviews < Self.previewCap else {
             log("preview: cap \(Self.previewCap) reached, \(pane) not shown")
             return false
         }
-        previews.insert(pane)
         return true
     }
 
+    func registerPreview(_ pane: String, view: Ghostty.SurfaceView) {
+        previews.setObject(view, forKey: pane as NSString)
+    }
+
     func releasePreview(_ pane: String) {
-        previews.remove(pane)
+        previews.removeObject(forKey: pane as NSString)
     }
 }
