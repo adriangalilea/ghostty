@@ -8,9 +8,11 @@
         // Zig libs
 
         .libxev = .{
-            // mitchellh/libxev
-            .url = "https://deps.files.ghostty.org/libxev-34fa50878aec6e5fa8f532867001ab3c36fae23e.tar.gz",
-            .hash = "libxev-0.0.0-86vtc4IcEwCqEYxEYoN_3KXmc6A9VLcm22aVImfvecYs",
+            // mitchellh/libxev 34fa508 + adriangalilea/libxev branch ios-machport:
+            // mach-port wakeups registered on every Darwin target (iOS never
+            // woke a single Async: blank renderer, deaf io thread, join hang).
+            .url = "https://github.com/adriangalilea/libxev/archive/b902626a4583f1a91ac822054977a9d702b5a18d.tar.gz",
+            .hash = "libxev-0.0.0-86vtc1YdEwD34nnFkoBHIyopMAwj9tmrnpAlAdY0Bp6F",
             .lazy = true,
         },
         .vaxis = .{

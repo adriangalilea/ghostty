@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import NIOSSH
+import OSLog
 import Security
 
 /// The phone's model: the Macs it knows (ssh endpoints), one ed25519 key
@@ -12,6 +13,7 @@ import Security
 @MainActor
 final class VigilPhone: ObservableObject {
     static let shared = VigilPhone()
+    private static let logger = Logger(subsystem: "com.adriangalilea.vigil", category: "phone")
 
     struct Host: Codable, Identifiable, Hashable {
         var id = UUID()
@@ -95,8 +97,13 @@ final class VigilPhone: ObservableObject {
         }
     }
 
+    /// Every receipt goes three ways: the in-app list, os_log (Console /
+    /// `log stream`), and stderr (`devicectl … launch --console` over the
+    /// cable). Nothing happens in this app without a line here.
     func log(_ line: String) {
         let stamp = Date().formatted(date: .omitted, time: .standard)
+        Self.logger.notice("\(line, privacy: .public)")
+        FileHandle.standardError.write(Data("vigil: \(line)\n".utf8))
         trace.append("\(stamp) \(line)")
         if trace.count > 400 { trace.removeFirst(trace.count - 400) }
     }
@@ -135,9 +142,10 @@ final class VigilPhone: ObservableObject {
     /// Host keys are trusted on first use, per hostname, remembered by
     /// their serialized bytes. A changed key is REFUSED with a receipt;
     /// forget it from the host's settings to re-trust.
-    private func trust(_ host: Host, _ hostKey: NIOSSHPublicKey) -> Bool {
-        let fingerprint = String(describing: hostKey)
-        let store = "vigil.hostkey.\(host.hostname)"
+    /// Stored as the OpenSSH public-key line, per hostname (v2: the v1
+    /// store held a reflection string and is ignored).
+    private func trust(_ host: Host, _ fingerprint: String) -> Bool {
+        let store = "vigil.hostkey2.\(host.hostname)"
         if let known = UserDefaults.standard.string(forKey: store) {
             if known == fingerprint { return true }
             Task { @MainActor in self.log("ssh: HOST KEY CHANGED for \(host.hostname), refused") }
@@ -149,15 +157,30 @@ final class VigilPhone: ObservableObject {
     }
 
     func forgetHostKey(_ host: Host) {
-        UserDefaults.standard.removeObject(forKey: "vigil.hostkey.\(host.hostname)")
+        UserDefaults.standard.removeObject(forKey: "vigil.hostkey2.\(host.hostname)")
+        log("ssh: forgot host key for \(host.hostname)")
+        connections[host.id]?.close()
+        connections[host.id] = nil
+        errors[host.id] = nil
     }
 
+    /// The live connection to a Mac, made on demand. Liveness is the
+    /// connection's own published `state` (never a Channel read); a
+    /// connection that closed is dropped here on its own report.
     func connection(for host: Host) async throws -> VigilSSH {
-        if let live = connections[host.id], live.isConnected, live.endpoint == host.endpoint { return live }
+        if let live = connections[host.id], live.state == .connected, live.endpoint == host.endpoint { return live }
         connections[host.id]?.close()
-        let ssh = VigilSSH(endpoint: host.endpoint, key: key) { [weak self] hostKey in
+        connections[host.id] = nil
+        let ssh = VigilSSH(endpoint: host.endpoint, key: key) { [weak self] line in
             guard let self else { return false }
-            return self.trust(host, hostKey)
+            return self.trust(host, line)
+        }
+        ssh.onStateChange = { [weak self] state in
+            guard let self else { return }
+            if case .closed(let why) = state, self.connections[host.id] === ssh {
+                self.connections[host.id] = nil
+                self.errors[host.id] = why
+            }
         }
         try await ssh.connect()
         connections[host.id] = ssh
@@ -170,13 +193,19 @@ final class VigilPhone: ObservableObject {
         for host in hosts { Task { await refresh(host) } }
     }
 
+    private var refreshing = Set<UUID>()
+
     func refresh(_ host: Host) async {
+        guard !refreshing.contains(host.id) else { return }
+        refreshing.insert(host.id)
+        defer { refreshing.remove(host.id) }
         do {
             let ssh = try await connection(for: host)
             let data = try await ssh.exec("vigild dir")
             let dir = try JSONDecoder().decode(Directory.self, from: data)
             directories[host.id] = dir
             errors[host.id] = nil
+            log("dir: \(host.name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
         } catch {
             errors[host.id] = error.localizedDescription
             log("dir: \(host.name): \(error.localizedDescription)")

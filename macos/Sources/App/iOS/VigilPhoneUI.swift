@@ -42,6 +42,10 @@ struct HostsView: View {
                             }
                         }
                     }
+                    .contextMenu {
+                        Button("Forget host key") { model.forgetHostKey(host) }
+                        Button("Refresh") { Task { await model.refresh(host) } }
+                    }
                 }
                 .onDelete { model.hosts.remove(atOffsets: $0) }
             }
@@ -78,7 +82,7 @@ struct AddHostView: View {
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Name (m5)", text: $name)
+                TextField("Name", text: $name)
                 TextField("Host or IP", text: $hostname).textInputAutocapitalization(.never).autocorrectionDisabled()
                 TextField("Port", text: $port).keyboardType(.numberPad)
                 TextField("User", text: $user).textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -126,6 +130,7 @@ struct TreeView: View {
         List {
             if let err = model.errors[host.id] {
                 Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    .font(.caption)
             }
             ForEach(rows) { row in
                 if row.kind == .pane, let pane = row.paneId, row.alive {
@@ -203,7 +208,8 @@ struct PaneScreen: View {
                     ProgressView("attaching…")
                 }
             }
-            KeyStrip(ctrl: $ctrl) { keys in surfaceView?.sendKeys(keys) }
+            KeyStrip(ctrl: $ctrl, send: { keys in surfaceView?.sendKeys(keys) },
+                     hideKeyboard: { _ = surfaceView?.resignFirstResponder() })
         }
         .navigationTitle(ref.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -238,10 +244,16 @@ struct PaneScreen: View {
 struct KeyStrip: View {
     @Binding var ctrl: Bool
     let send: (String) -> Void
+    let hideKeyboard: () -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
+                Button { hideKeyboard() } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(Color.secondary.opacity(0.2), in: Capsule())
+                }
                 key("esc", "\u{1b}")
                 key("tab", "\t")
                 Button { ctrl.toggle() } label: {

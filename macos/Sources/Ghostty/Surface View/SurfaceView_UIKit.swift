@@ -34,6 +34,7 @@ extension Ghostty {
                 return
             }
             self._surface = surface
+            installScrollGesture()
         }
 
         required init?(coder: NSCoder) {
@@ -93,6 +94,35 @@ extension Ghostty {
             if !isFirstResponder { _ = becomeFirstResponder() }
         }
 
+        /// Touch scrolling: a one-finger pan is the wheel. Deltas are
+        /// points, sent as precise scroll units the way a trackpad does on
+        /// the Mac (2x, upstream's feel), so scrollback and TUI mouse
+        /// wheel both work. Installed by `installScrollGesture`.
+        private var lastPan: CGPoint = .zero
+        func installScrollGesture() {
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            pan.maximumNumberOfTouches = 1
+            addGestureRecognizer(pan)
+        }
+
+        @objc private func handlePan(_ g: UIPanGestureRecognizer) {
+            guard let surface = self.surface else { return }
+            switch g.state {
+            case .began:
+                lastPan = .zero
+            case .changed, .ended:
+                let t = g.translation(in: self)
+                let dx = Double(t.x - lastPan.x) * 2
+                let dy = Double(t.y - lastPan.y) * 2
+                lastPan = t
+                // mods bit 0 = precision (Ghostty.Input.ScrollMods' layout;
+                // that file is macOS-only).
+                ghostty_surface_mouse_scroll(surface, dx, dy, ghostty_input_scroll_mods_t(1))
+            default:
+                break
+            }
+        }
+
         /// Hardware keyboard: control combos and navigation keys become
         /// their bytes; everything else is the key's characters.
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
@@ -146,7 +176,13 @@ extension Ghostty {
             // here that we use "size" and NOT the view frame. If we're in the middle of
             // an animation (i.e. a fullscreen animation), the frame will not yet be updated.
             // The size represents our final size we're going for.
-            let scale = self.contentScaleFactor
+            // ONE scale for view, surface and the render sublayer: the
+            // screen's. `contentScaleFactor` is 1 until the view joins a
+            // window, and a size reported then rendered 1× into a 3× layer
+            // (small and soft, 2026-08-28).
+            let scale = window?.screen.scale ?? UIScreen.main.scale
+            contentScaleFactor = scale
+            for sub in layer.sublayers ?? [] { sub.contentsScale = scale }
             ghostty_surface_set_content_scale(surface, scale, scale)
             ghostty_surface_set_size(
                 surface,
@@ -162,7 +198,22 @@ extension Ghostty {
         }
 
         override func didMoveToWindow() {
-            sizeDidChange(frame.size)
+            sizeDidChange(bounds.size)
+        }
+
+        /// libghostty renders into an IOSurfaceLayer it ADDS AS A SUBLAYER
+        /// of this view's layer (iOS views cannot swap their layer). A
+        /// sublayer has no frame until someone gives it one; without this,
+        /// the renderer's `surfaceSize` read 0×0 bounds and drew nothing
+        /// (the blank phone, 2026-08-28). Every layout pass sizes it to the
+        /// view and reports the size to the surface.
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for sub in layer.sublayers ?? [] { sub.frame = bounds }
+            CATransaction.commit()
+            sizeDidChange(bounds.size)
         }
     }
 }
