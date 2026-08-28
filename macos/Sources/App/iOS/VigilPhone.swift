@@ -428,8 +428,14 @@ final class VigilPhone: ObservableObject {
     /// 3s freeze, and re-dialing them all on return was the slow way back).
     var presentingPane = false
 
+    /// Bumped on every hand-back: a UIView has ONE superview, so the pane
+    /// screen's container took the view out of the row's; the row re-hosts
+    /// it when this changes (gray thumbnails on return, 2026-08-28).
+    @Published private(set) var returnTick = 0
+
     /// The pane screen hands the borrowed surface back to its row.
     func returnPreview(_ pane: String, view: Ghostty.SurfaceView) {
+        returnTick += 1
         adopted.remove(ObjectIdentifier(view))
         view.isUserInteractionEnabled = false
         view.applyThumbnail()

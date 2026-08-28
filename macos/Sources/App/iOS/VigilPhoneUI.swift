@@ -217,6 +217,7 @@ struct PanePreview: View {
     @EnvironmentObject private var model: VigilPhone
     @State private var surfaceView: Ghostty.SurfaceView?
     @State private var denied = false
+    @State private var generation = 0
 
     /// 8pt monospace cell, the pane screen's font: the preview is laid out
     /// in the same metrics, scaled to the row's width, and clipped to a
@@ -237,10 +238,17 @@ struct PanePreview: View {
                 if let surfaceView {
                     // The view IS the thumbnail's size; the grid is rendered
                     // inside it at `renderSize`, scaled and bottom-anchored.
+                    // `.id(generation)` re-hosts the UIView after a pane
+                    // screen borrowed it (one superview per UIView).
                     Ghostty.SurfaceWrapper(surfaceView: surfaceView)
+                        .id(generation)
                         .frame(width: geo.size.width, height: height)
                         .onAppear { configure(surfaceView, scale: scale) }
                         .onChange(of: scale) { _, s in configure(surfaceView, scale: s) }
+                        .onChange(of: model.returnTick) { _, _ in
+                            if surfaceView.superview == nil { generation += 1 }
+                            configure(surfaceView, scale: scale)
+                        }
                 } else if denied {
                     Text("preview limit").font(.caption2).foregroundStyle(.tertiary).padding(6)
                 }
@@ -262,7 +270,10 @@ struct PanePreview: View {
 
     private func attach() async {
         if let v = surfaceView {
-            model.log("preview: \(ref.pane) appear, surface \(v.surface == nil ? "DEAD" : "alive")")
+            // Receipt only when something is off: a dead surface or one
+            // not hosted (then re-host it).
+            if v.surface == nil { model.log("preview: \(ref.pane) appeared with a DEAD surface") }
+            if v.superview == nil { generation += 1 }
             return
         }
         guard let app = ghostty.app else { return }
@@ -409,7 +420,6 @@ struct PaneScreen: View {
     /// pane reflows (a TUI repaint, seconds across a VPN) and the Mac
     /// follows the phone while it is open.
     @State private var ownSize = false
-    @State private var adoptedView: Ghostty.SurfaceView?
 
     init(ref: PaneRef) {
         self.ref = ref
@@ -532,7 +542,6 @@ struct PaneScreen: View {
             view.renderSize = nil
             view.renderScale = 1
             view.anchorBottom = false
-            adoptedView = view
             surfaceView = view
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = view.becomeFirstResponder() }
             return
