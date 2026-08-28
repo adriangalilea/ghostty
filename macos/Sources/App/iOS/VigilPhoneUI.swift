@@ -173,6 +173,31 @@ struct TreeNodeView: View {
     }
 }
 
+/// A surface laid out at the OWNER's grid (8pt metrics) and scaled to fit
+/// the width: the Mac's screen on the phone, no reflow, no repaint. Taller
+/// than the screen scrolls natively (the surface's own scroll view sits
+/// inside, so a drag inside scrolls the terminal; the outer scroll moves
+/// the viewport when the terminal is at its edge).
+struct FittedSurface: View {
+    @ObservedObject var surfaceView: Ghostty.SurfaceView
+    let grid: (rows: Int, cols: Int)
+    private let cell = CGSize(width: 4.8, height: 10.0)
+
+    var body: some View {
+        GeometryReader { geo in
+            let full = CGSize(width: CGFloat(grid.cols) * cell.width, height: CGFloat(grid.rows) * cell.height)
+            let scale = min(1, geo.size.width / full.width)
+            ScrollView(.vertical, showsIndicators: false) {
+                Ghostty.SurfaceWrapper(surfaceView: surfaceView)
+                    .frame(width: full.width, height: full.height)
+                    .scaleEffect(scale, anchor: .topLeading)
+                    .frame(width: full.width * scale, height: full.height * scale, alignment: .topLeading)
+            }
+            .defaultScrollAnchor(.bottom)
+        }
+    }
+}
+
 /// A LIVE thumbnail of a pane: a second client on its daemon (a mirror,
 /// owning nothing), rendered by a real Ghostty surface laid out at the
 /// OWNER's grid and scaled down to the row, so it is the Mac's screen in
@@ -349,6 +374,11 @@ struct PaneScreen: View {
     @State private var current: PaneRef
     @State private var error: String?
     @State private var ctrl = false
+    /// FIT (default): the Mac's grid, scaled to the phone: instant, no
+    /// repaint, the Mac's layout untouched. OWN: the phone's grid; the
+    /// pane reflows (a TUI repaint, seconds across a VPN) and the Mac
+    /// follows the phone while it is open.
+    @State private var ownSize = false
 
     init(ref: PaneRef) {
         self.ref = ref
@@ -363,10 +393,14 @@ struct PaneScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ZStack {
+            ZStack(alignment: .topLeading) {
                 Color(ghostty.config.backgroundColor)
                 if let surfaceView {
-                    Ghostty.SurfaceWrapper(surfaceView: surfaceView)
+                    if ownSize || grid == nil {
+                        Ghostty.SurfaceWrapper(surfaceView: surfaceView)
+                    } else {
+                        FittedSurface(surfaceView: surfaceView, grid: grid!)
+                    }
                 } else if let error {
                     Text(error).foregroundStyle(.orange).padding()
                 } else {
@@ -399,6 +433,11 @@ struct PaneScreen: View {
                 .glassEffect(.regular, in: Capsule())
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                if grid != nil {
+                    Button { ownSize.toggle() } label: {
+                        Image(systemName: ownSize ? "rectangle.compress.vertical" : "arrow.up.left.and.arrow.down.right")
+                    }
+                }
                 Button { surfaceView?.zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
                 Button { surfaceView?.zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
                 Menu {
@@ -421,6 +460,12 @@ struct PaneScreen: View {
             surfaceView?.vigilDetach()
             surfaceView = nil
         }
+    }
+
+    /// The owner's grid for the current pane, if the Mac published one.
+    private var grid: (rows: Int, cols: Int)? {
+        guard let n = node, n.rows > 0, n.cols > 0 else { return nil }
+        return (n.rows, n.cols)
     }
 
     /// Every live pane on this pane's Mac, labelled by its session.
