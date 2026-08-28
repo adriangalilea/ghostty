@@ -2259,10 +2259,15 @@ keybind: Keybinds = .{},
 /// running, the previous window state will not be restored because Ghostty only
 /// saves state on exit if this is enabled.
 ///
-/// The default value is `default`.
+/// The default value is `never`: vigil owns resurrection (sessions come
+/// back from their daemons, exactly as they were). macOS window restoration
+/// is a rival resurrector that recreates last run's windows as bare
+/// skeletons next to the real ones, and a launch by macOS itself (login
+/// relaunch, dock, `open`) carries no config arguments, so this must hold
+/// as a default, never as a launch flag.
 ///
 /// This is currently only supported on macOS. This has no effect on Linux.
-@"window-save-state": WindowSaveState = .default,
+@"window-save-state": WindowSaveState = .never,
 
 /// Resize the window in discrete increments of the focused surface's cell size.
 /// If this is disabled, surfaces are resized in pixel increments. Currently
@@ -6994,6 +6999,62 @@ pub const Keybinds = struct {
                 alloc,
                 .{ .key = .{ .unicode = 'n' }, .mods = .{ .super = true, .shift = true } },
                 .{ .new_window = {} },
+            );
+
+            // vigil session keys are DEFAULTS, never launch-time config: a
+            // launch by macOS (login relaunch, dock, `open`) carries no
+            // arguments, and the share kit ships no config file. Global
+            // ones work with the app in service mode (no windows) and need
+            // the Accessibility grant; surface-scoped ones only fire with
+            // a ghostty surface focused, so they hijack nothing elsewhere.
+            // Chords: float is cmd+shift+a (cmd+shift+f is end_search,
+            // cmd+opt+f a macOS dead key); cycle sits on `;` (the home-row
+            // key after l; cmd+shift+l is lore's shipped summon).
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = 'j' }, .mods = .{ .super = true, .shift = true } },
+                .{ .vigil_next = {} },
+                .{ .global = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = 'k' }, .mods = .{ .super = true, .shift = true } },
+                .{ .vigil_overview = {} },
+                .{ .global = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = ';' }, .mods = .{ .super = true, .shift = true } },
+                .{ .vigil_cycle = {} },
+                .{ .global = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .unicode = 'h' }, .mods = .{ .super = true, .shift = true } },
+                .{ .vigil_next_floating = {} },
+                .{ .global = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .backquote }, .mods = .{ .alt = true } },
+                .{ .toggle_quick_terminal = {} },
+                .{ .global = true },
+            );
+            try self.set.putFlags(
+                alloc,
+                .{ .key = .{ .physical = .backspace }, .mods = .{ .super = true, .shift = true } },
+                .{ .vigil_kill = {} },
+                .{ .global = true },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = 'a' }, .mods = .{ .super = true, .shift = true } },
+                .{ .vigil_float = {} },
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = 'u' }, .mods = .{ .super = true, .shift = true } },
+                .{ .vigil_detach_window = {} },
             );
             try self.set.put(
                 alloc,

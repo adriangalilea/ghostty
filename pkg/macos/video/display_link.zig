@@ -1,21 +1,23 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const Allocator = std.mem.Allocator;
 const c = @import("c.zig").c;
 
 pub const DisplayLink = opaque {
     pub const Error = error{
         InvalidOperation,
+        /// CoreVideo refused to create a link: there is no active display
+        /// (a login relaunch in dark wake, a headless session).
+        NoActiveDisplay,
     };
 
-    pub fn createWithActiveCGDisplays() Allocator.Error!*DisplayLink {
+    pub fn createWithActiveCGDisplays() Error!*DisplayLink {
         var result: ?*DisplayLink = null;
         if (c.CVDisplayLinkCreateWithActiveCGDisplays(
             @ptrCast(&result),
         ) != c.kCVReturnSuccess)
-            return error.OutOfMemory;
+            return error.NoActiveDisplay;
 
-        return result orelse error.OutOfMemory;
+        return result orelse error.NoActiveDisplay;
     }
 
     pub fn release(self: *DisplayLink) void {

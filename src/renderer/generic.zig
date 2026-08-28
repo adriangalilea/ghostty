@@ -199,6 +199,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// don't support a display link.
         display_link: ?DisplayLink = null,
 
+        /// The render thread's wakeup the display link drives, known
+        /// from loopEnter on. Kept so a link created after the loop
+        /// started (a display appearing) wires to the same wakeup.
+        draw_now: ?*xev.Async = null,
+
         /// Health of the most recently completed frame.
         health: std.atomic.Value(Health) = .{ .raw = .healthy },
 
@@ -689,9 +694,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             };
 
+            // A display link exists exactly when a display does. Born
+            // without one (a login relaunch in dark wake, a headless
+            // session) the surface renders timer-driven and the link is
+            // created the moment a display is assigned (setMacOSDisplayID).
             const display_link: ?DisplayLink = switch (builtin.os.tag) {
                 .macos => if (options.config.vsync)
-                    try macos.video.DisplayLink.createWithActiveCGDisplays()
+                    macos.video.DisplayLink.createWithActiveCGDisplays() catch |err| link: {
+                        log.warn("no display link at init, timer-driven until a display appears err={}", .{err});
+                        break :link null;
+                    }
                 else
                     null,
                 else => null,
@@ -906,13 +918,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // This is when we know our "self" pointer is stable so we can
             // setup the display link. To setup the display link we set our
             // callback and we can start it immediately.
+            self.draw_now = &thr.draw_now;
             const display_link = self.display_link orelse return;
+            try self.wireDisplayLink(display_link);
+            display_link.start() catch {};
+        }
+
+        /// Point a display link at the render thread's wakeup. Only
+        /// meaningful once the loop has been entered (draw_now known).
+        fn wireDisplayLink(self: *Self, display_link: DisplayLink) !void {
+            const draw_now = self.draw_now orelse return;
             try display_link.setOutputCallback(
                 xev.Async,
                 &displayLinkCallback,
-                &thr.draw_now,
+                draw_now,
             );
-            display_link.start() catch {};
         }
 
         /// Called by renderer.Thread when it exits the main loop.
@@ -1001,6 +1021,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Called when we get an updated display ID for our display link.
         pub fn setMacOSDisplayID(self: *Self, id: u32) !void {
             if (comptime DisplayLink == void) return;
+            if (self.display_link == null and self.config.vsync) {
+                // Born without a display; one exists now.
+                const created = macos.video.DisplayLink.createWithActiveCGDisplays() catch |err| {
+                    log.warn("display assigned but no display link err={}", .{err});
+                    return;
+                };
+                self.display_link = created;
+                try self.wireDisplayLink(created);
+                if (self.focused) created.start() catch {};
+                log.info("display link created on display assignment id={}", .{id});
+            }
             const display_link = self.display_link orelse return;
             log.info("updating display link display id={}", .{id});
             display_link.setCurrentCGDisplay(id) catch |err| {
