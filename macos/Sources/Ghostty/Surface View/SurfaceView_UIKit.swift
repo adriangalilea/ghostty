@@ -106,7 +106,6 @@ extension Ghostty {
         /// after every hand-off so the runway never ends.
         private var scroller: UIScrollView?
         private var lastOffset: CGPoint = .zero
-        private var scrollReceipts = 0
 
         /// Zoom = ghostty's own font-size actions, the Mac's ⌘+/⌘−.
         func zoom(_ direction: Int) {
@@ -150,10 +149,6 @@ extension Ghostty {
             // mods bit 0 = precision (Ghostty.Input.ScrollMods' layout;
             // that file is macOS-only).
             ghostty_surface_mouse_scroll(surface, 0, Double(dy * scale), ghostty_input_scroll_mods_t(1))
-            scrollReceipts += 1
-            if scrollReceipts % 20 == 1 {
-                FileHandle.standardError.write(Data("vigil: scroll dy=\(dy) px=\(dy * scale) offset=\(sv.contentOffset.y) frame=\(sv.frame)\n".utf8))
-            }
         }
 
         fileprivate func scrollerSettled(_ sv: UIScrollView) {
