@@ -34,6 +34,11 @@ extension Ghostty {
                 return
             }
             self._surface = surface
+            // Born UNFOCUSED: focus follows first responder (tap). A surface
+            // defaults to focused, and seven preview surfaces each blinking
+            // a cursor and rendering at user-interactive QoS ran the phone
+            // hot (2026-08-28).
+            ghostty_surface_set_focus(surface, false)
             installScrollGesture()
         }
 
@@ -204,8 +209,34 @@ extension Ghostty {
             }
         }
 
+        /// Vigil: render the terminal at `size / renderScale` and show it
+        /// scaled by `renderScale` INSIDE this view's frame (a thumbnail of
+        /// the owner's grid). The frame stays the thumbnail's real size, so
+        /// the view never overlaps its neighbours (a SwiftUI scaleEffect
+        /// only shrank the pixels; the full-size UIKit frame underneath ate
+        /// taps on the rows around it, 2026-08-28). `anchorBottom` shows
+        /// the bottom of the grid when it is taller than the frame.
+        var renderScale: CGFloat = 1 { didSet { setNeedsLayout() } }
+        var anchorBottom = false { didSet { setNeedsLayout() } }
+        /// The grid size the render layer is laid out at (points, unscaled).
+        var renderSize: CGSize? { didSet { setNeedsLayout() } }
+
+        /// The thumbnail layout a preview row gave this view, kept while a
+        /// pane screen borrows the surface full-size, restored on return
+        /// (the row re-draws BEFORE the hand-back; without this the
+        /// returned surface showed the empty top-left of a full grid: the
+        /// gray thumbnails, 2026-08-28).
+        var thumbnail: (size: CGSize, scale: CGFloat)?
+        func applyThumbnail() {
+            guard let t = thumbnail else { return }
+            renderSize = t.size
+            renderScale = t.scale
+            anchorBottom = true
+        }
+
         override func sizeDidChange(_ size: CGSize) {
             guard let surface = self.surface else { return }
+            let size = renderSize ?? size
 
             // Ghostty wants to know the actual framebuffer size... It is very important
             // here that we use "size" and NOT the view frame. If we're in the middle of
@@ -215,7 +246,10 @@ extension Ghostty {
             // screen's. `contentScaleFactor` is 1 until the view joins a
             // window, and a size reported then rendered 1× into a 3× layer
             // (small and soft, 2026-08-28).
-            let scale = window?.screen.scale ?? UIScreen.main.scale
+            // A thumbnail renders at 2× (it is shown scaled down; the
+            // screen's 3× on a full grid was 2.25× the pixels for nothing).
+            let screen = window?.screen.scale ?? UIScreen.main.scale
+            let scale = renderSize != nil ? min(2, screen) : screen
             contentScaleFactor = scale
             for sub in layer.sublayers ?? [] { sub.contentsScale = scale }
             ghostty_surface_set_content_scale(surface, scale, scale)
@@ -246,7 +280,15 @@ extension Ghostty {
             super.layoutSubviews()
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            for sub in layer.sublayers ?? [] where sub !== scroller?.layer { sub.frame = bounds }
+            let logical = renderSize ?? bounds.size
+            for sub in layer.sublayers ?? [] where sub !== scroller?.layer {
+                sub.anchorPoint = .zero
+                sub.bounds = CGRect(origin: .zero, size: logical)
+                sub.setAffineTransform(CGAffineTransform(scaleX: renderScale, y: renderScale))
+                let shownHeight = logical.height * renderScale
+                let y = anchorBottom ? bounds.height - shownHeight : 0
+                sub.position = CGPoint(x: 0, y: y)
+            }
             CATransaction.commit()
             scroller?.contentSize = CGSize(width: bounds.width, height: Self.runway * 2)
             sizeDidChange(bounds.size)

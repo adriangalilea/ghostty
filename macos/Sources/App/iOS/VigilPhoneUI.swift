@@ -79,6 +79,7 @@ struct TreeNodeView: View {
                         .padding(.bottom, 4)
                 }
                 .buttonStyle(.plain)
+                .simultaneousGesture(TapGesture().onEnded { model.log("tap: preview \(node.title) (\(ref.pane))") })
             }
             if foldable && !folded {
                 ForEach(node.children) { child in
@@ -130,7 +131,9 @@ struct TreeNodeView: View {
         .contentShape(Rectangle())
 
         if let ref = node.pane {
-            NavigationLink(value: ref) { content }.buttonStyle(.plain)
+            NavigationLink(value: ref) { content.frame(maxWidth: .infinity, alignment: .leading) }
+                .buttonStyle(.plain)
+                .simultaneousGesture(TapGesture().onEnded { model.log("tap: row \(node.title) (\(ref.pane))") })
         } else {
             content.onTapGesture { if foldable { toggle() } }
         }
@@ -189,9 +192,12 @@ struct FittedSurface: View {
             let scale = min(1, geo.size.width / full.width)
             ScrollView(.vertical, showsIndicators: false) {
                 Ghostty.SurfaceWrapper(surfaceView: surfaceView)
-                    .frame(width: full.width, height: full.height)
-                    .scaleEffect(scale, anchor: .topLeading)
-                    .frame(width: full.width * scale, height: full.height * scale, alignment: .topLeading)
+                    .frame(width: full.width * scale, height: full.height * scale)
+                    .onAppear {
+                        surfaceView.renderSize = full
+                        surfaceView.renderScale = scale
+                        surfaceView.anchorBottom = false
+                    }
             }
             .defaultScrollAnchor(.bottom)
         }
@@ -229,11 +235,12 @@ struct PanePreview: View {
             ZStack(alignment: .bottomLeading) {
                 Color(ghostty.config.backgroundColor)
                 if let surfaceView {
+                    // The view IS the thumbnail's size; the grid is rendered
+                    // inside it at `renderSize`, scaled and bottom-anchored.
                     Ghostty.SurfaceWrapper(surfaceView: surfaceView)
-                        .frame(width: fullSize.width, height: fullSize.height)
-                        .scaleEffect(scale, anchor: .bottomLeading)
-                        .frame(width: fullSize.width * scale, height: fullSize.height * scale, alignment: .bottomLeading)
-                        .allowsHitTesting(false)
+                        .frame(width: geo.size.width, height: height)
+                        .onAppear { configure(surfaceView, scale: scale) }
+                        .onChange(of: scale) { _, s in configure(surfaceView, scale: s) }
                 } else if denied {
                     Text("preview limit").font(.caption2).foregroundStyle(.tertiary).padding(6)
                 }
@@ -248,8 +255,17 @@ struct PanePreview: View {
         .onDisappear { end() }
     }
 
+    private func configure(_ view: Ghostty.SurfaceView, scale: CGFloat) {
+        view.thumbnail = (fullSize, scale)
+        view.applyThumbnail()
+    }
+
     private func attach() async {
-        guard surfaceView == nil, let app = ghostty.app else { return }
+        if let v = surfaceView {
+            model.log("preview: \(ref.pane) appear, surface \(v.surface == nil ? "DEAD" : "alive")")
+            return
+        }
+        guard let app = ghostty.app else { return }
         guard model.previewAllowed(ref.pane) else { denied = true; return }
         do {
             let fd = try await model.attach(ref.host, pane: ref.pane, preview: true)
@@ -259,6 +275,12 @@ struct PanePreview: View {
             config.vigilMirror = true
             config.fontSize = 8
             let view = Ghostty.SurfaceView(app, baseConfig: config)
+            // A preview is a picture: its UIKit view keeps its full,
+            // unscaled frame under the scaleEffect (scale is visual only),
+            // reaching over neighbouring rows, and its scroll view ate the
+            // taps meant for them (nine taps to open a row, 2026-08-28).
+            // UIKit hit-testing is the only switch that reaches it.
+            view.isUserInteractionEnabled = false
             surfaceView = view
             model.registerPreview(ref.pane, view: view)
         } catch {
@@ -267,10 +289,11 @@ struct PanePreview: View {
     }
 
     private func end() {
+        // A pane screen on top: every preview stays alive (the opened one
+        // is borrowed and comes back). Only a real scroll-out ends one.
+        if model.presentingPane { return }
         guard let view = surfaceView else { return }
         surfaceView = nil
-        // Adopted by the pane screen: it is theirs now, alive.
-        if model.wasAdopted(view) { return }
         view.vigilDetach()
         model.releasePreview(ref.pane)
     }
@@ -348,14 +371,21 @@ struct SettingsView: View {
                 } header: { Text("This phone's key") } footer: {
                     Text("Append it to ~/.ssh/authorized_keys on each Mac. vigild must be on the Mac's PATH for ssh.")
                 }
-                Section("Receipts") {
-                    ForEach(Array(model.trace.suffix(60).reversed().enumerated()), id: \.offset) { _, line in
-                        Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary)
-                    }
-                }
+                ReceiptsSection(receipts: model.receipts)
             }
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+}
+
+struct ReceiptsSection: View {
+    @ObservedObject var receipts: VigilReceipts
+    var body: some View {
+        Section("Receipts") {
+            ForEach(Array(receipts.lines.suffix(60).reversed().enumerated()), id: \.offset) { _, line in
+                Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -379,6 +409,7 @@ struct PaneScreen: View {
     /// pane reflows (a TUI repaint, seconds across a VPN) and the Mac
     /// follows the phone while it is open.
     @State private var ownSize = false
+    @State private var adoptedView: Ghostty.SurfaceView?
 
     init(ref: PaneRef) {
         self.ref = ref
@@ -455,10 +486,16 @@ struct PaneScreen: View {
                 } label: { Image(systemName: "rectangle.stack") }
             }
         }
-        .task { await attach(current) }
+        .task { model.presentingPane = true; model.log("pane: screen \(current.pane)"); await attach(current) }
         .onDisappear {
-            surfaceView?.vigilDetach()
+            model.presentingPane = false
+            guard let view = surfaceView else { return }
             surfaceView = nil
+            if model.wasAdopted(view) {
+                model.returnPreview(current.pane, view: view)
+            } else {
+                view.vigilDetach()
+            }
         }
     }
 
@@ -491,6 +528,11 @@ struct PaneScreen: View {
     private func attach(_ ref: PaneRef) async {
         guard let app = ghostty.app else { error = "ghostty not ready"; return }
         if let view = model.adoptPreview(ref.pane) {
+            view.isUserInteractionEnabled = true
+            view.renderSize = nil
+            view.renderScale = 1
+            view.anchorBottom = false
+            adoptedView = view
             surfaceView = view
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = view.becomeFirstResponder() }
             return

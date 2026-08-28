@@ -4,6 +4,16 @@ import NIOSSH
 import OSLog
 import Security
 
+/// Receipts, observed by the settings sheet ALONE.
+@MainActor
+final class VigilReceipts: ObservableObject {
+    @Published private(set) var lines: [String] = []
+    func append(_ line: String) {
+        lines.append(line)
+        if lines.count > 400 { lines.removeFirst(lines.count - 400) }
+    }
+}
+
 /// A pane on a Mac, the navigation value the tree hands to the pane screen.
 struct PaneRef: Hashable {
     let host: VigilPhone.Host
@@ -72,11 +82,20 @@ final class VigilPhone: ObservableObject {
     }
 
     @Published var hosts: [Host] {
-        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(hosts), forKey: "vigil.hosts") }
+        didSet {
+            UserDefaults.standard.set(try? JSONEncoder().encode(hosts), forKey: "vigil.hosts")
+            rebuildTree()
+        }
     }
-    @Published private(set) var directories: [UUID: Directory] = [:]
-    @Published private(set) var errors: [UUID: String] = [:]
-    @Published private(set) var trace: [String] = []
+    /// Directories and errors publish; the TREE is derived once per change
+    /// (never in a body), and receipts live in their own object so a log
+    /// line can never re-render the tree (every receipt re-rendered every
+    /// row and taps died mid-update, 2026-08-28).
+    private(set) var directories: [UUID: Directory] = [:] { didSet { rebuildTree() } }
+    private(set) var errors: [UUID: String] = [:] { didSet { rebuildTree() } }
+    @Published private(set) var nodes: [Node] = []
+    let receipts = VigilReceipts()
+    var trace: [String] { receipts.lines }
     let key: Curve25519.Signing.PrivateKey
     private var connections: [UUID: VigilSSH] = [:]
     private var timer: Timer?
@@ -102,8 +121,7 @@ final class VigilPhone: ObservableObject {
         let stamp = Date().formatted(date: .omitted, time: .standard)
         Self.logger.notice("\(line, privacy: .public)")
         FileHandle.standardError.write(Data("vigil: \(line)\n".utf8))
-        trace.append("\(stamp) \(line)")
-        if trace.count > 400 { trace.removeFirst(trace.count - 400) }
+        receipts.append("\(stamp) \(line)")
     }
 
     var publicKeyLine: String { key.openSSHPublicLine }
@@ -265,7 +283,14 @@ final class VigilPhone: ObservableObject {
         didSet { UserDefaults.standard.set(Array(collapsed), forKey: "vigil.collapsed") }
     }
 
-    func tree() -> [Node] {
+    func tree() -> [Node] { nodes }
+
+    private func rebuildTree() {
+        let fresh = deriveTree()
+        if fresh != nodes { nodes = fresh }
+    }
+
+    private func deriveTree() -> [Node] {
         hosts.map { host in
             let dir = directories[host.id]
             var node = Node(id: "host:\(host.id.uuidString)", kind: .host,
@@ -396,5 +421,20 @@ final class VigilPhone: ObservableObject {
 
     func wasAdopted(_ view: Ghostty.SurfaceView) -> Bool {
         adopted.remove(ObjectIdentifier(view)) != nil
+    }
+
+    /// The pane screen is up: previews KEEP their surfaces (a synchronous
+    /// surface free per preview on the main thread during the push was a
+    /// 3s freeze, and re-dialing them all on return was the slow way back).
+    var presentingPane = false
+
+    /// The pane screen hands the borrowed surface back to its row.
+    func returnPreview(_ pane: String, view: Ghostty.SurfaceView) {
+        adopted.remove(ObjectIdentifier(view))
+        view.isUserInteractionEnabled = false
+        view.applyThumbnail()
+        _ = view.resignFirstResponder()
+        previews.setObject(view, forKey: pane as NSString)
+        log("attach: \(pane) returned to its preview")
     }
 }
