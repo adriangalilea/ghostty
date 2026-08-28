@@ -4426,7 +4426,9 @@ class VigilSessionManager {
         // ears are already open. Idempotent, never prompts for the grant,
         // cools down on its own if no ask follows.
         if !blocked.isEmpty, VigilAsk.voiceEnabled {
+            VigilWatchdog.breadcrumb("ask gate: prewarm")
             MicTap.shared.prewarm()
+            VigilWatchdog.breadcrumb("ask gate: pump")
         }
         // Age gate, the belt behind PermissionRequest's suspenders: the
         // hooks mark blocked only when a prompt will exist, so ghost asks
@@ -4677,6 +4679,16 @@ class VigilSessionManager {
         // the traces; consumers (dictation, the pump's prewarm, the ask's
         // VoiceSource) subscribe, they never re-point receipts.
         MicTap.shared.sink = VoiceLogSink()
+        // No voice processor on a Bluetooth output: it builds an aggregate
+        // over mic + output and forces the earbuds into SCO for the warm
+        // window (a system-wide route flip per ask, a 1.2s stream timeout
+        // on every start, and the 2026-08-28 crash when the flap ran
+        // long). In-ear narration is inaudible to the Mac's mic, so the
+        // half-duplex fallback is echo-free there by construction - the
+        // same fact `selfNarrating()` already relies on.
+        MicTap.shared.voiceProcessingPolicy = { !AudioRoute.outputIsBluetooth }
+        VigilWatchdog.trace = { Self.vlogSync($0) }
+        VigilWatchdog.arm()
         // The voice engine pays its cold costs (Kokoro's ~5s CoreML load)
         // once per process; a long-lived app pays it HERE at startup,
         // never inside the human's first ask.
@@ -5330,12 +5342,18 @@ class VigilSessionManager {
     /// session transition is recorded so an impossible state is caught the
     /// moment it appears instead of being guessed at from a screenshot.
     /// Dev builds only: a public (Release) build writes nothing to disk.
-    func vlog(_ msg: String) {
+    func vlog(_ msg: String) { Self.vlogSync(msg) }
+
+    /// The append itself, callable from ANY thread with no hop: the
+    /// watchdog's stall line and the uncaught-exception handler's last
+    /// words must land while the process is still alive, and a main-actor
+    /// hop from a dying or stalled main never runs.
+    nonisolated static func vlogSync(_ msg: String) {
         #if DEBUG
         // LOCAL wall-clock time: the reader is a human cross-referencing
         // "what did I just hear" against the log; Date()'s UTC description
         // cost a 2h mental offset on every receipt read.
-        let stamp = Self.vlogStamp.string(from: Date())
+        let stamp = vlogStamp.string(from: Date())
         let line = "\(stamp) \(msg)\n"
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/wake/vigil.log")
