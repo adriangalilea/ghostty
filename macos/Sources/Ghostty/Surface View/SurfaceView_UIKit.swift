@@ -433,8 +433,6 @@ extension Ghostty {
 
         // MARK: Facts from the core
 
-        override func focusDidChange(_ focused: Bool) {}
-
         /// The core's cell metrics changed (font set, font size changed):
         /// every fit layout depends on them.
         func cellMetricsDidChange(px: CGSize) {
