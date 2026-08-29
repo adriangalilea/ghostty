@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import GhosttyKit
 import Network
 import NIOSSH
 import OSLog
@@ -20,6 +21,10 @@ struct PaneRef: Hashable {
     let host: VigilPhone.Host
     let pane: String
     let title: String
+
+    /// Identity is the Mac and the pane; the title is display.
+    static func == (a: PaneRef, b: PaneRef) -> Bool { a.host.id == b.host.id && a.pane == b.pane }
+    func hash(into h: inout Hasher) { h.combine(host.id); h.combine(pane) }
 }
 
 /// The phone's model: the Macs it knows (ssh endpoints), one ed25519 key
@@ -110,6 +115,7 @@ final class VigilPhone: ObservableObject {
         }
         key = Self.loadOrMintKey()
         VigilSSH.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
+        Ghostty.SurfaceView.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshAll() }
         }
@@ -293,7 +299,9 @@ final class VigilPhone: ObservableObject {
 
     private func rebuildTree() {
         let fresh = deriveTree()
-        if fresh != nodes { nodes = fresh }
+        guard fresh != nodes else { return }
+        nodes = fresh
+        indexTree()
     }
 
     private func deriveTree() -> [Node] {
@@ -437,75 +445,122 @@ final class VigilPhone: ObservableObject {
         fatalError("unreachable")
     }
 
-    // MARK: Previews (each is a full surface + ssh channel: bounded)
+    // MARK: Surfaces: the model owns every live stream
 
-    static let previewCap = 6
-    /// Live preview surfaces, weakly: the count is what EXISTS, never what
-    /// was claimed (a row torn down without onDisappear leaked claims and
-    /// starved the first row, 2026-08-28).
-    private var previews = NSMapTable<NSString, AnyObject>(keyOptions: .copyIn, valueOptions: .weakMemory)
+    /// One surface per pane, owned HERE (never by a view's @State): a
+    /// surface is a stream to a daemon, an identity the screens borrow.
+    /// A row's preview and the pane screen show the SAME surface; hosting
+    /// (which container holds the UIView right now) is the representable's
+    /// business (`SurfaceHost`), lifetime is this table's.
+    private(set) var surfaces: [String: Ghostty.SurfaceView] = [:]
+    /// Panes whose row is on screen (a row scrolled out leaves; the
+    /// surface outlives the row only while the pane screen shows it).
+    private var rowsOnScreen = Set<String>()
+    /// The pane the screen shows, ONE fact: rows read it to know their
+    /// view is borrowed, the occlusion policy reads it to idle the rest.
+    @Published private(set) var presenting: PaneRef?
 
-    private var livePreviews: Int {
-        var n = 0
-        for key in previews.keyEnumerator() {
-            if let v = previews.object(forKey: key as? NSString) as? Ghostty.SurfaceView, v.surface != nil { n += 1 }
+    /// Every live surface is a full Metal renderer plus an ssh channel.
+    static let surfaceCap = 6
+
+    /// The surface for a pane, dialing one if none exists. `nil` when the
+    /// cap is reached (rows show a placeholder; the screen always gets
+    /// one: it evicts an idle row's surface).
+    func surface(for ref: PaneRef, app: ghostty_app_t, screen: Bool) async throws -> Ghostty.SurfaceView? {
+        if let existing = surfaces[ref.pane], existing.surface != nil { return existing }
+        if surfaces.count >= Self.surfaceCap {
+            guard screen, let victim = surfaces.keys.first(where: { $0 != ref.pane && $0 != presenting?.pane }) else {
+                log("surface: cap \(Self.surfaceCap) reached, \(ref.pane) not shown")
+                return nil
+            }
+            log("surface: cap reached, evicting \(victim) for the screen")
+            endSurface(victim)
         }
-        return n
-    }
-
-    func previewAllowed(_ pane: String) -> Bool {
-        if previews.object(forKey: pane as NSString) != nil { return true }
-        guard livePreviews < Self.previewCap else {
-            log("preview: cap \(Self.previewCap) reached, \(pane) not shown")
-            return false
-        }
-        return true
-    }
-
-    func registerPreview(_ pane: String, view: Ghostty.SurfaceView) {
-        previews.setObject(view, forKey: pane as NSString)
-    }
-
-    func releasePreview(_ pane: String) {
-        previews.removeObject(forKey: pane as NSString)
-    }
-
-    /// The pane screen ADOPTS the row's live preview surface instead of
-    /// dialing a second stream and waiting for a replay across the VPN:
-    /// the thumbnail becomes the screen, instantly (it only resizes and
-    /// claims the pty on focus). The preview row must then not end it.
-    private var adopted = Set<ObjectIdentifier>()
-
-    func adoptPreview(_ pane: String) -> Ghostty.SurfaceView? {
-        guard let view = previews.object(forKey: pane as NSString) as? Ghostty.SurfaceView, view.surface != nil else { return nil }
-        previews.removeObject(forKey: pane as NSString)
-        adopted.insert(ObjectIdentifier(view))
-        log("attach: \(pane) adopted the preview surface")
+        let fd = try await attach(ref.host, pane: ref.pane, preview: !screen)
+        var config = Ghostty.SurfaceConfiguration()
+        config.vigilAttach = ref.pane
+        config.vigilFd = fd
+        config.vigilMirror = true
+        // The phone never owns the pty by focus: only an own-size screen
+        // claims, explicitly (a fit viewport mirrors the owner's grid).
+        config.vigilExplicitClaim = true
+        // A phone reads at 8pt (the Mac's 13 minus five loupe taps).
+        config.fontSize = 8
+        let view = Ghostty.SurfaceView(app, baseConfig: config)
+        surfaces[ref.pane] = view
         return view
     }
 
-    func wasAdopted(_ view: Ghostty.SurfaceView) -> Bool {
-        adopted.remove(ObjectIdentifier(view)) != nil
+    func endSurface(_ pane: String) {
+        guard let view = surfaces.removeValue(forKey: pane) else { return }
+        view.detach()
+        log("surface: \(pane) ended (\(surfaces.count) live)")
     }
 
-    /// The pane screen is up: previews KEEP their surfaces (a synchronous
-    /// surface free per preview on the main thread during the push was a
-    /// 3s freeze, and re-dialing them all on return was the slow way back).
-    var presentingPane = false
+    /// A row with a preview came on screen / left it.
+    func rowAppeared(_ ref: PaneRef) { rowsOnScreen.insert(ref.pane) }
+    func rowDisappeared(_ ref: PaneRef) {
+        rowsOnScreen.remove(ref.pane)
+        // A row leaves under a pushed screen too (the nav stack hides the
+        // list): the surface stays while presented, and ends when its row
+        // is gone once the screen returns (`present(nil)` sweeps).
+        if presenting == nil { endSurface(ref.pane) }
+    }
 
-    /// Bumped on every hand-back: a UIView has ONE superview, so the pane
-    /// screen's container took the view out of the row's; the row re-hosts
-    /// it when this changes (gray thumbnails on return, 2026-08-28).
-    @Published private(set) var returnTick = 0
+    /// The pane screen is showing `ref` (nil = the tree). Occlusion
+    /// follows: only the presented surface renders while a screen is up;
+    /// with the tree up, every row's surface renders.
+    func present(_ ref: PaneRef?) {
+        guard presenting != ref else { return }
+        presenting = ref
+        log("present: \(ref?.pane ?? "tree")")
+        for (pane, view) in surfaces {
+            view.visible = ref == nil || pane == ref?.pane
+        }
+        // Back on the tree: rows re-appear within a frame (the stack's
+        // pop fires their onAppear after this); a surface no row claims
+        // by then ends. Deferred, never at the pop itself, so a return
+        // never re-dials what the rows still show.
+        if ref == nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, self.presenting == nil else { return }
+                for pane in self.surfaces.keys where !self.rowsOnScreen.contains(pane) { self.endSurface(pane) }
+            }
+        }
+    }
 
-    /// The pane screen hands the borrowed surface back to its row.
-    func returnPreview(_ pane: String, view: Ghostty.SurfaceView) {
-        returnTick += 1
-        adopted.remove(ObjectIdentifier(view))
-        view.isUserInteractionEnabled = false
-        view.applyThumbnail()
-        _ = view.resignFirstResponder()
-        previews.setObject(view, forKey: pane as NSString)
-        log("attach: \(pane) returned to its preview")
+    // MARK: Index (derived with the tree, never walked in a body)
+
+    private(set) var paneNodes: [PaneRef: Node] = [:]
+    private(set) var sessionTitles: [PaneRef: String] = [:]
+
+    func node(for ref: PaneRef) -> Node? { paneNodes[ref] }
+    func sessionTitle(for ref: PaneRef) -> String { sessionTitles[ref] ?? "" }
+    struct LivePane: Identifiable {
+        let ref: PaneRef
+        let session: String
+        var id: PaneRef { ref }
+    }
+    /// Every live pane on a Mac, labelled by its session.
+    func livePanes(on host: Host) -> [LivePane] {
+        paneNodes.keys.filter { $0.host.id == host.id }
+            .sorted { ($0.pane) < ($1.pane) }
+            .map { LivePane(ref: $0, session: sessionTitles[$0] ?? "") }
+    }
+
+    private func indexTree() {
+        var panes: [PaneRef: Node] = [:]
+        var titles: [PaneRef: String] = [:]
+        for host in nodes {
+            for session in host.children {
+                for leaf in session.leaves {
+                    guard let ref = leaf.pane else { continue }
+                    panes[ref] = leaf
+                    titles[ref] = session.title
+                }
+            }
+        }
+        paneNodes = panes
+        sessionTitles = titles
     }
 }

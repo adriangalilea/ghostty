@@ -1184,6 +1184,14 @@ command: ?Command = null,
 /// channel). -1 = none. Set per-surface through the embedding API only.
 @"vigil-fd": i32 = -1,
 
+/// Vigil: ownership policy for the daemon's pty size. `false` (default):
+/// the surface claims the size whenever it gains focus, presence beats
+/// attention applied to the grid. `true`: focus never claims; the
+/// embedder claims and yields explicitly (`ghostty_surface_vigil_claim`),
+/// for viewports that mirror another client's grid (the phone in fit
+/// mode). Set per-surface through the embedding API only.
+@"vigil-explicit-claim": bool = false,
+
 /// This is the same as "command", but only applies to the first terminal
 /// surface created when Ghostty starts. Subsequent terminal surfaces will use
 /// the `command` configuration.

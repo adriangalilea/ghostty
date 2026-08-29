@@ -472,6 +472,10 @@ pub const Surface = struct {
 
         /// Vigil: a pre-connected stream to the daemon (-1 = none).
         vigil_fd: c_int = -1,
+
+        /// Vigil: focus never claims the pty size; only
+        /// ghostty_surface_vigil_claim does.
+        vigil_explicit_claim: bool = false,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -599,6 +603,7 @@ pub const Surface = struct {
             }
         }
         if (opts.vigil_fd >= 0) config.@"vigil-fd" = opts.vigil_fd;
+        config.@"vigil-explicit-claim" = opts.vigil_explicit_claim;
 
         // Initialize our surface right away. We're given a view that is
         // ready to use.
@@ -1721,6 +1726,26 @@ pub const CAPI = struct {
     /// to the pty and the renderer.
     export fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
         surface.updateSize(w, h);
+    }
+
+    /// Vigil: the framebuffer pixels for exactly rows×cols at the
+    /// surface's current cell metrics, content scale and padding.
+    export fn ghostty_surface_size_for_grid(surface: *Surface, rows: u16, cols: u16) SurfaceSize {
+        const px = surface.core_surface.pixelsForGrid(rows, cols);
+        return .{
+            .columns = cols,
+            .rows = rows,
+            .width_px = px.width,
+            .height_px = px.height,
+            .cell_width_px = surface.core_surface.size.cell.width,
+            .cell_height_px = surface.core_surface.size.cell.height,
+        };
+    }
+
+    /// Vigil: claim (true) or yield (false) the attached daemon's pty
+    /// size for this surface.
+    export fn ghostty_surface_vigil_claim(surface: *Surface, claim: bool) void {
+        surface.core_surface.vigilClaim(claim);
     }
 
     /// Return the size information a surface has.

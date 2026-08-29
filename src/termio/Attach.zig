@@ -59,6 +59,10 @@ host: ?[]const u8,
 /// backend only speaks frames on whatever fd it is given.
 given_fd: ?posix.fd_t,
 
+/// Ownership policy: false = focus claims the pty size (a Mac surface,
+/// presence beats attention); true = only `vigilClaim` does.
+explicit_claim: bool,
+
 alloc: Allocator,
 
 /// Read side: the socket, or the ssh child's stdout; -1 until threadEnter.
@@ -94,6 +98,7 @@ pub const Config = struct {
     /// A pre-connected stream (the embedder's transport); overrides both
     /// the local socket and ssh.
     fd: ?posix.fd_t = null,
+    explicit_claim: bool = false,
 };
 
 pub fn init(alloc: Allocator, cfg: Config) !Attach {
@@ -105,6 +110,7 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .command = if (cfg.command) |v| try v.clone(alloc) else null,
         .host = if (cfg.host) |v| if (v.len > 0) try alloc.dupe(u8, v) else null else null,
         .given_fd = cfg.fd,
+        .explicit_claim = cfg.explicit_claim,
     };
 }
 
@@ -180,7 +186,9 @@ fn sever(self: *Attach) void {
 /// Hello: who this client is, for the daemon's receipts.
 fn sendHello(self: *Attach, kind: []const u8) void {
     var buf: [64]u8 = undefined;
-    const hello = std.fmt.bufPrint(&buf, "{s} ghostty:{d}", .{ kind, std.c.getpid() }) catch return;
+    // "mirror" tells the daemon this client never adopts the size unowned:
+    // it renders whatever grid the owner has and claims only explicitly.
+    const hello = std.fmt.bufPrint(&buf, "{s} ghostty:{d}{s}", .{ kind, std.c.getpid(), if (self.explicit_claim) " mirror" else "" }) catch return;
     self.enqueueFrame('h', hello);
 }
 
@@ -339,15 +347,25 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
 /// The ownership chokepoint: the focused surface is the one being looked
 /// at, so it claims the pty size ('o'). Presence beats attention, applied
 /// to the grid: a mirror, a remote viewport or a silently materialized
-/// tab records its size and gets it applied only when focused.
+/// tab records its size and gets it applied only when focused. A
+/// viewport whose focus is not a sizing fact (`explicit_claim`: the phone
+/// mirroring the Mac's grid) never claims here; it claims and yields
+/// through `vigilClaim` alone.
 pub fn focusGained(
     self: *Attach,
     td: *termio.Termio.ThreadData,
     focused: bool,
 ) !void {
     _ = td;
-    if (!focused or self.write_fd < 0) return;
+    if (!focused or self.explicit_claim or self.write_fd < 0) return;
     self.enqueueFrame('o', "");
+}
+
+/// Explicit ownership: 'o' claims the pty size for this client, 'y'
+/// yields it (the daemon hands the size to the first sized survivor).
+pub fn vigilClaim(self: *Attach, claim: bool) void {
+    if (self.write_fd < 0) return;
+    self.enqueueFrame(if (claim) 'o' else 'y', "");
 }
 
 /// Runs ONLY on the writer thread. Blocking on POLLOUT here is the whole

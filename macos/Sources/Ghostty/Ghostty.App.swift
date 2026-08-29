@@ -269,8 +269,50 @@ extension Ghostty {
         #if os(iOS)
         // MARK: Ghostty Callbacks (iOS)
 
-        static func wakeup(_ userdata: UnsafeMutableRawPointer?) {}
-        static func action(_ app: ghostty_app_t, target: ghostty_target_s, action: ghostty_action_s) -> Bool { return false }
+        /// The core's mailbox drains on the app tick (surface messages such
+        /// as a child exit ride it); a wakeup that ticks nothing leaves
+        /// every such message queued forever.
+        static func wakeup(_ userdata: UnsafeMutableRawPointer?) {
+            let state = Unmanaged<App>.fromOpaque(userdata!).takeUnretainedValue()
+            DispatchQueue.main.async { state.appTick() }
+        }
+
+        /// The subset of core actions a phone viewport consumes: the ones
+        /// that are FACTS about a surface (cell metrics, title, pwd,
+        /// renderer health, child exit). Everything else is window
+        /// management the phone has none of, refused explicitly.
+        static func action(_ app: ghostty_app_t, target: ghostty_target_s, action: ghostty_action_s) -> Bool {
+            guard target.tag == GHOSTTY_TARGET_SURFACE,
+                  let surface = target.target.surface,
+                  let ud = ghostty_surface_userdata(surface) else { return false }
+            let view = Unmanaged<SurfaceView>.fromOpaque(ud).takeUnretainedValue()
+            switch action.tag {
+            case GHOSTTY_ACTION_CELL_SIZE:
+                let v = action.action.cell_size
+                DispatchQueue.main.async { view.cellMetricsDidChange(px: CGSize(width: Double(v.width), height: Double(v.height))) }
+            case GHOSTTY_ACTION_SET_TITLE:
+                guard let title = String(cString: action.action.set_title.title!, encoding: .utf8) else { return false }
+                DispatchQueue.main.async { view.title = title }
+            case GHOSTTY_ACTION_PWD:
+                guard let pwd = String(cString: action.action.pwd.pwd!, encoding: .utf8) else { return false }
+                DispatchQueue.main.async { view.pwd = pwd }
+            case GHOSTTY_ACTION_RENDERER_HEALTH:
+                let healthy = action.action.renderer_health == GHOSTTY_RENDERER_HEALTH_HEALTHY
+                DispatchQueue.main.async { view.healthy = healthy }
+            case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
+                let v = action.action.child_exited
+                DispatchQueue.main.async { view.streamDidEnd(exitCode: Int(v.exit_code), runtimeMs: Int(v.timetime_ms)) }
+            case GHOSTTY_ACTION_MOUSE_SHAPE, GHOSTTY_ACTION_MOUSE_VISIBILITY, GHOSTTY_ACTION_MOUSE_OVER_LINK,
+                 GHOSTTY_ACTION_RING_BELL, GHOSTTY_ACTION_SIZE_LIMIT, GHOSTTY_ACTION_INITIAL_SIZE,
+                 GHOSTTY_ACTION_PROGRESS_REPORT, GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_CONFIG_CHANGE,
+                 GHOSTTY_ACTION_SELECTION_CHANGED, GHOSTTY_ACTION_SCROLLBAR:
+                return false
+            default:
+                Ghostty.logger.notice("phone: action refused \(action.tag.rawValue, privacy: .public)")
+                return false
+            }
+            return true
+        }
         static func readClipboard(
             _ userdata: UnsafeMutableRawPointer?,
             location: ghostty_clipboard_e,

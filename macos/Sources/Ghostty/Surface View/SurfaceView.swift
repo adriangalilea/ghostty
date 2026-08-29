@@ -619,7 +619,10 @@ extension Ghostty {
         }
 
         func updateOSView(_ view: SurfaceView, context: Context) {
-            view.sizeDidChange(size)
+            // iOS: the view's own layout pass is the ONE authority that
+            // reports a size to the core (SurfaceView_UIKit.layoutSubviews);
+            // a GeometryReader size is a second, animating opinion.
+            view.setNeedsLayout()
         }
         #endif
     }
@@ -664,6 +667,11 @@ extension Ghostty {
         /// Vigil: an already-connected stream to the daemon, owned by the
         /// app's transport (iOS: a socketpair end pumped to ssh); -1 = none.
         var vigilFd: Int32 = -1
+
+        /// Vigil: focus never claims the daemon's pty size; the app claims
+        /// and yields explicitly (`SurfaceView.claimSize`). A viewport
+        /// that mirrors another client's grid.
+        var vigilExplicitClaim: Bool = false
 
         /// Wait after the command
         var waitAfterCommand: Bool = false
@@ -729,6 +737,7 @@ extension Ghostty {
             // Set context
             config.context = context
             config.vigil_fd = vigilFd
+            config.vigil_explicit_claim = vigilExplicitClaim
 
             // Use withCString to ensure strings remain valid for the duration of the closure
             return try workingDirectory.withCString { cWorkingDir in

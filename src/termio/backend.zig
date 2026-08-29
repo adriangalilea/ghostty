@@ -72,6 +72,15 @@ pub const Backend = union(Kind) {
         }
     }
 
+    /// Vigil: claim or yield the daemon's pty size. Exec has no daemon
+    /// and nothing to claim.
+    pub fn vigilClaim(self: *Backend, claim: bool) !void {
+        switch (self.*) {
+            .exec => {},
+            .attach => |*attach| attach.vigilClaim(claim),
+        }
+    }
+
     pub fn resize(
         self: *Backend,
         grid_size: renderer.GridSize,

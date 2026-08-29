@@ -486,6 +486,10 @@ typedef struct {
   // embedder pumps to its own transport: ssh on iOS, anything later); -1 =
   // none. The surface reads and writes frames on it and closes it.
   int vigil_fd;
+  // Vigil: focus never claims the daemon's pty size; only
+  // ghostty_surface_vigil_claim does (a viewport mirroring another
+  // client's grid).
+  bool vigil_explicit_claim;
 } ghostty_surface_config_s;
 
 typedef struct {
@@ -1133,6 +1137,10 @@ GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
+GHOSTTY_API ghostty_surface_size_s ghostty_surface_size_for_grid(ghostty_surface_t,
+                                                                 uint16_t,
+                                                                 uint16_t);
+GHOSTTY_API void ghostty_surface_vigil_claim(ghostty_surface_t, bool);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_color_scheme(ghostty_surface_t,

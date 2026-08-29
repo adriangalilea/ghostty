@@ -73,6 +73,11 @@ pub const Message = union(enum) {
     /// The surface gained or lost focus.
     focused: bool,
 
+    /// Vigil: this viewport claims (true) or yields (false) the daemon's
+    /// pty size. An explicit act of the embedder, for viewports whose
+    /// focus is not a sizing fact (a phone mirroring the Mac's grid).
+    vigil_claim: bool,
+
     /// Write where the data fits in the union.
     write_small: WriteReq.Small,
 

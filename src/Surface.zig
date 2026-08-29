@@ -658,6 +658,7 @@ pub fn init(
                     .command = command,
                     .host = config.@"vigil-host",
                     .fd = if (config.@"vigil-fd" >= 0) @intCast(config.@"vigil-fd") else null,
+                    .explicit_claim = config.@"vigil-explicit-claim",
                 }) };
             };
 
@@ -864,6 +865,30 @@ inline fn surfaceMailbox(self: *Surface) Mailbox {
     return .{
         .surface = self,
         .app = .{ .rt_app = self.rt_app, .mailbox = &self.app.mailbox },
+    };
+}
+
+/// Vigil: claim (true) or yield (false) the attached daemon's pty size.
+/// The embedder's explicit act; see `termio.Attach.vigilClaim`.
+pub fn vigilClaim(self: *Surface, claim: bool) void {
+    self.queueIo(.{ .vigil_claim = claim }, .unlocked);
+}
+
+/// Vigil: the framebuffer pixels that make this surface derive exactly
+/// `rows`×`cols` at its current cell metrics and content scale: the
+/// grid's cells plus the explicit window padding (balanced padding is
+/// computed from the remainder, which is zero by construction). A
+/// viewport that must render another client's grid asks the core instead
+/// of reverse-engineering padding from the outside.
+pub fn pixelsForGrid(self: *Surface, rows: u16, cols: u16) rendererpkg.ScreenSize {
+    const content_scale = self.rt_surface.getContentScale() catch apprt.ContentScale{ .x = 1, .y = 1 };
+    const padding = self.config.scaledPadding(
+        content_scale.x * font.face.default_dpi,
+        content_scale.y * font.face.default_dpi,
+    );
+    return .{
+        .width = @as(u32, cols) * self.size.cell.width + padding.left + padding.right,
+        .height = @as(u32, rows) * self.size.cell.height + padding.top + padding.bottom,
     };
 }
 

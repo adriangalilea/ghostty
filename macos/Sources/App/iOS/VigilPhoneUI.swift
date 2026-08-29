@@ -3,8 +3,25 @@ import GhosttyKit
 
 /// The phone's screens: ONE home tree (Macs → sessions → tabs → panes,
 /// collapsible, the sidebar's rollup dots on every folded row) and a pane,
-/// full screen, with a key strip the software keyboard lacks. The pane IS
-/// a Ghostty surface (Metal, the Mac's renderer) attached through ssh.
+/// full screen. The pane IS a Ghostty surface (Metal, the Mac's renderer)
+/// attached through ssh; the model owns every surface, the screens borrow.
+///
+/// Patterns, named once here and referenced below:
+///  - HOSTING: a representable's container `addSubview`s the model's
+///    UIView in `updateUIView` and removes it in `dismantleUIView`. A
+///    UIView has one superview, so the screen that updates last holds it;
+///    the row re-hosts on its next update (it reads `model.presenting`).
+///  - LAYOUT AUTHORITY: the container's bounds decide the presentation
+///    (fit factor); the surface view's own layout pass reports pixels to
+///    the core. SwiftUI hands out frames, nothing else.
+///  - KEYBOARD AS A FACT: `KeyboardState` reads iOS's keyboard frame
+///    notifications; the terminal area is the window minus that inset.
+///    Focus never moves with the keyboard.
+///  - ACCESSORY: the key strip is the keyboard's `inputAccessoryView`; it
+///    comes and goes with the keyboard by construction.
+///  - PICTURE ZOOM: a fit viewport is a UIScrollView zooming its content
+///    (pinch, two-finger pan, the loupe sets `zoomScale`); one finger
+///    stays the terminal's own scroll.
 struct VigilPhoneRoot: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @StateObject private var model = VigilPhone.shared
@@ -81,7 +98,7 @@ struct TreeNodeView: View {
             row
             if let ref = node.pane, node.rows > 0, node.cols > 0 {
                 NavigationLink(value: ref) {
-                    PanePreview(ref: ref, rows: node.rows, cols: node.cols)
+                    PanePreview(ref: ref, grid: .init(rows: node.rows, cols: node.cols))
                         .padding(.leading, CGFloat(depth) * 18 + 24)
                         .padding(.trailing, 8)
                         .padding(.bottom, 4)
@@ -184,142 +201,6 @@ struct TreeNodeView: View {
     }
 }
 
-/// A surface laid out at the OWNER's grid (8pt metrics) and scaled to fit
-/// the width: the Mac's screen on the phone, no reflow, no repaint. Taller
-/// than the screen scrolls natively (the surface's own scroll view sits
-/// inside, so a drag inside scrolls the terminal; the outer scroll moves
-/// the viewport when the terminal is at its edge).
-struct FittedSurface: View {
-    @ObservedObject var surfaceView: Ghostty.SurfaceView
-    let full: CGSize
-    let scale: CGFloat
-
-    var body: some View {
-        GeometryReader { geo in
-            ScrollView(full.width * scale > geo.size.width ? [.vertical, .horizontal] : .vertical, showsIndicators: false) {
-                // The view's render layout was set before it got here
-                // (PaneScreen.layout); this only sizes the frame it fills.
-                Ghostty.SurfaceWrapper(surfaceView: surfaceView)
-                    .frame(width: full.width * scale, height: full.height * scale)
-            }
-            .defaultScrollAnchor(.bottom)
-        }
-    }
-}
-
-/// A LIVE thumbnail of a pane: a second client on its daemon (a mirror,
-/// owning nothing), rendered by a real Ghostty surface laid out at the
-/// OWNER's grid and scaled down to the row, so it is the Mac's screen in
-/// miniature, updating as it streams. Born when the row scrolls in, ended
-/// when it scrolls out; at most `VigilPhone.previewCap` alive at once.
-struct PanePreview: View {
-    let ref: PaneRef
-    let rows: Int
-    let cols: Int
-    @EnvironmentObject private var ghostty: Ghostty.App
-    @EnvironmentObject private var model: VigilPhone
-    @State private var surfaceView: Ghostty.SurfaceView?
-    @State private var denied = false
-    @State private var generation = 0
-
-    /// The owner's grid at the surface's REAL cell size (ghostty publishes
-    /// it once the font is set; until then the render size is held at a
-    /// dot so no frame is ever reported), scaled to the row's width, and
-    /// clipped to a short window anchored at the BOTTOM of the grid: a
-    /// terminal's action is at the bottom.
-    private let height: CGFloat = 150
-    private func fullSize(_ view: Ghostty.SurfaceView) -> CGSize? {
-        let cell = view.liveCell
-        guard cell.width > 0, cell.height > 0 else { return nil }
-        return CGSize(width: CGFloat(cols) * cell.width, height: CGFloat(rows) * cell.height)
-    }
-
-    var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .bottomLeading) {
-                Color(ghostty.config.backgroundColor)
-                if let surfaceView {
-                    // The view IS the thumbnail's size; the grid is rendered
-                    // inside it at `renderSize`, scaled and bottom-anchored.
-                    // `.id(generation)` re-hosts the UIView after a pane
-                    // screen borrowed it (one superview per UIView).
-                    Ghostty.SurfaceWrapper(surfaceView: surfaceView)
-                        .id(generation)
-                        .frame(width: geo.size.width, height: height)
-                        .onAppear { configure(surfaceView, width: geo.size.width) }
-                        .onChange(of: geo.size.width) { _, w in configure(surfaceView, width: w) }
-                        .onChange(of: surfaceView.cellSize) { _, _ in configure(surfaceView, width: geo.size.width) }
-                        .onChange(of: model.returnTick) { _, _ in
-                            if surfaceView.superview == nil { generation += 1 }
-                            configure(surfaceView, width: geo.size.width)
-                        }
-                } else if denied {
-                    Text("preview limit").font(.caption2).foregroundStyle(.tertiary).padding(6)
-                }
-            }
-            .frame(width: geo.size.width, height: height, alignment: .bottomLeading)
-            .clipped()
-        }
-        .frame(height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.08)))
-        .task { await attach() }
-        .onDisappear { end() }
-    }
-
-    /// Readable, never shrunk below 0.8: a wide grid shows its bottom-LEFT
-    /// window (content is left-aligned), clipped, rather than the whole
-    /// grid at half size (unreadable, 2026-08-28).
-    private func configure(_ view: Ghostty.SurfaceView, width: CGFloat) {
-        // Unknown metrics yet: the grid is still set (the view reports
-        // nothing until the core has metrics), the scale is provisional.
-        let scale = fullSize(view).map { min(1, max(0.8, width / $0.width)) } ?? 1
-        view.thumbnail = ((rows, cols), scale)
-        view.applyThumbnail()
-    }
-
-    private func attach() async {
-        if let v = surfaceView {
-            // Receipt only when something is off: a dead surface or one
-            // not hosted (then re-host it).
-            if v.surface == nil { model.log("preview: \(ref.pane) appeared with a DEAD surface") }
-            if v.superview == nil { generation += 1 }
-            return
-        }
-        guard let app = ghostty.app else { return }
-        guard model.previewAllowed(ref.pane) else { denied = true; return }
-        do {
-            let fd = try await model.attach(ref.host, pane: ref.pane, preview: true)
-            var config = Ghostty.SurfaceConfiguration()
-            config.vigilAttach = ref.pane
-            config.vigilFd = fd
-            config.vigilMirror = true
-            config.fontSize = 8
-            let view = Ghostty.SurfaceView(app, baseConfig: config)
-            // A preview is a picture: its UIKit view keeps its full,
-            // unscaled frame under the scaleEffect (scale is visual only),
-            // reaching over neighbouring rows, and its scroll view ate the
-            // taps meant for them (nine taps to open a row, 2026-08-28).
-            // UIKit hit-testing is the only switch that reaches it.
-            view.isUserInteractionEnabled = false
-            surfaceView = view
-            model.registerPreview(ref.pane, view: view)
-        } catch {
-            model.log("preview: \(ref.pane) failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func end() {
-        // A pane screen on top: every preview stays alive (the opened one
-        // is borrowed and comes back). Only a real scroll-out ends one.
-        if model.presentingPane { return }
-        guard let view = surfaceView else { return }
-        surfaceView = nil
-        view.vigilDetach()
-        model.releasePreview(ref.pane)
-    }
-}
-
 enum StateColor {
     static func of(_ state: String?, alive: Bool) -> Color {
         guard alive else { return .gray.opacity(0.3) }
@@ -328,6 +209,457 @@ enum StateColor {
         case "working": return .yellow
         case "done": return .teal
         default: return .gray
+        }
+    }
+}
+
+// MARK: - Hosting (pattern: HOSTING + LAYOUT AUTHORITY)
+
+/// The container a surface view lives in while a screen shows it. Its
+/// layout pass decides the presentation from ITS bounds (the fit factor
+/// is a function of the space given), then the surface's own layout
+/// reports pixels to the core.
+final class SurfaceHostView: UIView {
+    var presentation: ((Ghostty.SurfaceView, CGSize) -> Ghostty.SurfaceView.Presentation)?
+    let purpose: String
+    init(purpose: String) {
+        self.purpose = purpose
+        super.init(frame: .zero)
+        clipsToBounds = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    var hosted: Ghostty.SurfaceView? { subviews.first as? Ghostty.SurfaceView }
+
+    func host(_ view: Ghostty.SurfaceView) {
+        guard view.superview !== self else { return }
+        addSubview(view)
+        view.frame = bounds
+        Ghostty.SurfaceView.trace("surface \(view.paneId): hosted by \(purpose)")
+    }
+
+    func unhost() {
+        guard let view = hosted else { return }
+        view.removeFromSuperview()
+        Ghostty.SurfaceView.trace("surface \(view.paneId): left \(purpose)")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let view = hosted else { return }
+        view.frame = bounds
+        if let presentation { view.present(presentation(view, bounds.size)) }
+    }
+}
+
+/// A surface in a SwiftUI frame: a thumbnail row or an own-size screen.
+struct SurfaceHost: UIViewRepresentable {
+    let view: Ghostty.SurfaceView
+    let purpose: String
+    let interactive: Bool
+    let visible: Bool
+    let presentation: (Ghostty.SurfaceView, CGSize) -> Ghostty.SurfaceView.Presentation
+
+    func makeUIView(context: Context) -> SurfaceHostView { SurfaceHostView(purpose: purpose) }
+
+    func updateUIView(_ container: SurfaceHostView, context: Context) {
+        container.host(view)
+        container.presentation = presentation
+        view.isUserInteractionEnabled = interactive
+        view.visible = visible
+        container.setNeedsLayout()
+    }
+
+    static func dismantleUIView(_ container: SurfaceHostView, coordinator: ()) {
+        container.unhost()
+    }
+}
+
+/// A surface's natural picture size for a grid at a content scale
+/// (before any fit): the core's pixels, in points.
+private func naturalSize(_ view: Ghostty.SurfaceView, grid: Ghostty.SurfaceView.Grid, contentScale: CGFloat) -> CGSize? {
+    view.present(.init(grid: grid, contentScale: contentScale, scale: 1))
+    return view.presentedSize
+}
+
+// MARK: - Preview row
+
+/// A LIVE thumbnail of a pane: the same surface the pane screen shows,
+/// laid out at the OWNER's grid and scaled into the row, bottom-anchored
+/// (a terminal's action is at the bottom). Rendered at 2× (shown scaled
+/// down; the screen's 3× on a full grid was 2.25× the pixels for nothing).
+struct PanePreview: View {
+    let ref: PaneRef
+    let grid: Ghostty.SurfaceView.Grid
+    @EnvironmentObject private var ghostty: Ghostty.App
+    @EnvironmentObject private var model: VigilPhone
+    @State private var surfaceView: Ghostty.SurfaceView?
+    @State private var denied = false
+
+    private let height: CGFloat = 150
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            Color(ghostty.config.backgroundColor)
+            if let surfaceView {
+                SurfaceHost(view: surfaceView, purpose: "row \(ref.pane)", interactive: false,
+                            visible: model.presenting == nil) { view, bounds in
+                    // Readable, never shrunk below 0.8: a wide grid shows its
+                    // bottom-left window, clipped, rather than the whole grid
+                    // at half size (unreadable).
+                    let natural = naturalSize(view, grid: grid, contentScale: 2)
+                    let scale = natural.map { min(1, max(0.8, bounds.width / $0.width)) } ?? 1
+                    return .init(grid: grid, contentScale: 2, scale: scale, anchorBottom: true)
+                }
+            } else if denied {
+                Text("preview limit").font(.caption2).foregroundStyle(.tertiary).padding(6)
+            }
+        }
+        .frame(height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.08)))
+        .task { await load() }
+        .onAppear { model.rowAppeared(ref) }
+        .onDisappear { model.rowDisappeared(ref) }
+    }
+
+    private func load() async {
+        guard let app = ghostty.app else { return }
+        do {
+            guard let view = try await model.surface(for: ref, app: app, screen: false) else { denied = true; return }
+            surfaceView = view
+        } catch {
+            model.log("preview: \(ref.pane) failed: \(error.localizedDescription)")
+        }
+    }
+}
+
+// MARK: - Keyboard (pattern: KEYBOARD AS A FACT)
+
+/// The software keyboard's overlap with the window, from iOS's own
+/// notifications. The ONLY source of "is the keyboard up, how tall".
+@MainActor
+final class KeyboardState: ObservableObject {
+    static let shared = KeyboardState()
+    @Published private(set) var inset: CGFloat = 0
+
+    private init() {
+        let center = NotificationCenter.default
+        center.addObserver(forName: UIResponder.keyboardWillChangeFrameNotification, object: nil, queue: .main) { [weak self] n in
+            MainActor.assumeIsolated { self?.frameChanged(n) }
+        }
+        center.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.set(0, "hide") }
+        }
+    }
+
+    private func frameChanged(_ n: Notification) {
+        guard let end = (n.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue,
+              let window = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first
+        else { return }
+        let local = window.convert(end, from: nil)
+        set(max(0, window.bounds.maxY - local.minY), "frame \(Int(end.height))pt")
+    }
+
+    private func set(_ value: CGFloat, _ why: String) {
+        guard value != inset else { return }
+        inset = value
+        Ghostty.SurfaceView.trace("keyboard: inset \(Int(value))pt (\(why))")
+    }
+}
+
+/// esc / tab / ctrl / arrows / ⌃C / paste: the keys a software keyboard
+/// hides. Rides the keyboard as its accessory (pattern: ACCESSORY).
+struct KeyStrip: View {
+    @ObservedObject var surface: Ghostty.SurfaceView
+    @State private var ctrl = false
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                Button { surface.keyboardWanted = false } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(Color.secondary.opacity(0.2), in: Capsule())
+                }
+                key("esc", "\u{1b}")
+                key("tab", "\t")
+                Button {
+                    ctrl.toggle()
+                    surface.stickyControl = ctrl
+                } label: {
+                    Text("ctrl").font(.caption.monospaced())
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(ctrl ? Color.accentColor : Color.secondary.opacity(0.2), in: Capsule())
+                }
+                key("^C", "\u{03}")
+                key("^D", "\u{04}")
+                key("^Z", "\u{1a}")
+                key("←", "\u{1b}[D"); key("↓", "\u{1b}[B"); key("↑", "\u{1b}[A"); key("→", "\u{1b}[C")
+                key("⏎", "\r")
+                key("/", "/"); key("-", "-"); key("|", "|"); key("~", "~")
+                Button {
+                    if let s = UIPasteboard.general.string { surface.sendKeys(s) }
+                } label: { Image(systemName: "doc.on.clipboard").padding(.horizontal, 10).padding(.vertical, 6) }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+        }
+        .background(.ultraThinMaterial)
+        .onChange(of: surface.keyboardWanted) { _, up in if !up { ctrl = false; surface.stickyControl = false } }
+    }
+
+    private func key(_ label: String, _ keys: String) -> some View {
+        Button {
+            surface.sendKeys(keys)
+            if ctrl { ctrl = false; surface.stickyControl = false }
+        } label: {
+            Text(label).font(.caption.monospaced())
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color.secondary.opacity(0.2), in: Capsule())
+        }
+    }
+}
+
+/// The strip as a UIKit accessory view (one per surface on screen).
+private func makeAccessory(for surface: Ghostty.SurfaceView) -> UIView {
+    let host = UIHostingController(rootView: KeyStrip(surface: surface))
+    host.view.backgroundColor = .clear
+    host.safeAreaRegions = []
+    host.view.frame = CGRect(x: 0, y: 0, width: 320, height: 44)
+    host.view.autoresizingMask = .flexibleWidth
+    return host.view
+}
+
+// MARK: - Fit viewport (pattern: PICTURE ZOOM)
+
+/// The Mac's grid as a picture: fitted to the space, pinch-zoomable,
+/// two-finger pannable, the loupe driving `zoom`. One finger is the
+/// terminal's (its own scroll engine sits inside).
+struct FitCanvas: UIViewRepresentable {
+    let view: Ghostty.SurfaceView
+    let grid: Ghostty.SurfaceView.Grid
+    @Binding var zoom: CGFloat
+
+    final class ZoomView: UIScrollView {
+        let content = SurfaceHostView(purpose: "fit screen")
+        var natural: CGSize = .zero
+    }
+
+    func makeUIView(context: Context) -> ZoomView {
+        let sv = ZoomView()
+        sv.minimumZoomScale = 1
+        sv.maximumZoomScale = 4
+        sv.bouncesZoom = true
+        sv.showsVerticalScrollIndicator = false
+        sv.showsHorizontalScrollIndicator = false
+        sv.contentInsetAdjustmentBehavior = .never
+        sv.delaysContentTouches = false
+        sv.panGestureRecognizer.minimumNumberOfTouches = 2
+        sv.delegate = context.coordinator
+        sv.addSubview(sv.content)
+        return sv
+    }
+
+    func updateUIView(_ sv: ZoomView, context: Context) {
+        sv.content.host(view)
+        view.isUserInteractionEnabled = true
+        view.visible = true
+        // The fit factor is a function of the space: the whole grid visible.
+        let contentScale = sv.window?.screen.scale ?? sv.traitCollection.displayScale
+        guard let natural = naturalSize(view, grid: grid, contentScale: contentScale), natural.width > 0,
+              sv.bounds.width > 0, sv.bounds.height > 0 else {
+            DispatchQueue.main.async { sv.setNeedsLayout() }
+            return
+        }
+        let fit = min(sv.bounds.width / natural.width, sv.bounds.height / natural.height, 1)
+        let presented = CGSize(width: natural.width * fit, height: natural.height * fit)
+        sv.content.presentation = { _, _ in .init(grid: grid, contentScale: contentScale, scale: fit) }
+        if sv.content.frame.size != presented {
+            sv.content.frame = CGRect(origin: .zero, size: presented)
+            sv.contentSize = presented
+            context.coordinator.center(sv)
+            Ghostty.SurfaceView.trace("surface \(view.paneId): fit x\(String(format: "%.2f", fit)) -> \(Int(presented.width))x\(Int(presented.height))pt in \(Int(sv.bounds.width))x\(Int(sv.bounds.height))")
+        }
+        if abs(sv.zoomScale - zoom) > 0.01 { sv.setZoomScale(zoom, animated: true) }
+    }
+
+    static func dismantleUIView(_ sv: ZoomView, coordinator: Coordinator) {
+        sv.content.unhost()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        var parent: FitCanvas
+        init(_ parent: FitCanvas) { self.parent = parent }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? { (scrollView as? ZoomView)?.content }
+
+        /// Keep the picture centered while it is smaller than the viewport.
+        func center(_ sv: UIScrollView) {
+            let w = sv.contentSize.width * sv.zoomScale, h = sv.contentSize.height * sv.zoomScale
+            let dx = max(0, (sv.bounds.width - w) / 2), dy = max(0, (sv.bounds.height - h) / 2)
+            sv.contentInset = UIEdgeInsets(top: dy, left: dx, bottom: dy, right: dx)
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) { center(scrollView) }
+
+        func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+            Ghostty.SurfaceView.trace("fit: zoom x\(String(format: "%.2f", scale))")
+            DispatchQueue.main.async { self.parent.zoom = scale }
+        }
+    }
+}
+
+// MARK: - Pane screen
+
+/// One pane, full screen. FIT (default): the Mac's grid as a picture,
+/// no reflow, the Mac untouched, the phone never owns the pty. OWN: the
+/// phone's grid; the surface claims the pty, the pane reflows, the Mac
+/// follows while it is open, yielded on leave.
+struct PaneScreen: View {
+    let ref: PaneRef
+    @EnvironmentObject private var ghostty: Ghostty.App
+    @EnvironmentObject private var model: VigilPhone
+    @ObservedObject private var keyboard = KeyboardState.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var surfaceView: Ghostty.SurfaceView?
+    @State private var current: PaneRef
+    @State private var error: String?
+    @State private var ownSize = false
+    @State private var fitZoom: CGFloat = 1
+
+    init(ref: PaneRef) {
+        self.ref = ref
+        _current = State(initialValue: ref)
+    }
+
+    private var node: VigilPhone.Node? { model.node(for: current) }
+    /// The owner's grid for the current pane, if the Mac published one.
+    private var grid: Ghostty.SurfaceView.Grid? {
+        guard let n = node, n.rows > 0, n.cols > 0 else { return nil }
+        return .init(rows: n.rows, cols: n.cols)
+    }
+    private var fits: Bool { !ownSize && grid != nil }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                Color(ghostty.config.backgroundColor)
+                if let surfaceView {
+                    if let grid, fits {
+                        FitCanvas(view: surfaceView, grid: grid, zoom: $fitZoom)
+                    } else {
+                        SurfaceHost(view: surfaceView, purpose: "own screen", interactive: true, visible: true) { _, _ in .own }
+                    }
+                } else if let error {
+                    Text(error).foregroundStyle(.orange).padding()
+                } else {
+                    ProgressView("attaching…")
+                }
+            }
+            // The terminal area is the window minus the keyboard, applied
+            // as a fact (no SwiftUI keyboard avoidance, no animation race).
+            .frame(width: geo.size.width, height: max(0, geo.size.height - keyboard.inset), alignment: .topLeading)
+        }
+        .ignoresSafeArea(.container, edges: [.top, .bottom])
+        .ignoresSafeArea(.keyboard)
+        .navigationBarBackButtonHidden(true)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { dismiss() } label: { Image(systemName: "chevron.left") }
+            }
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text(current.title).font(.headline)
+                    HStack(spacing: 4) {
+                        Circle().fill(StateColor.of(node?.state, alive: node?.alive ?? true)).frame(width: 6, height: 6)
+                        Text("\(current.host.name) · \(model.sessionTitle(for: current))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 6)
+                .glassEffect(.regular, in: Capsule())
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if let surfaceView { KeyboardButton(surface: surfaceView) }
+                if grid != nil {
+                    Button { setOwnSize(!ownSize) } label: {
+                        Image(systemName: ownSize ? "rectangle.compress.vertical" : "arrow.up.left.and.arrow.down.right")
+                    }
+                }
+                Button { zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
+                Button { zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
+                Menu {
+                    ForEach(model.livePanes(on: current.host).filter { $0.ref != current }) { other in
+                        Button { switchTo(other.ref) } label: {
+                            Label("\(other.session) \(other.ref.title)", systemImage: "terminal")
+                        }
+                    }
+                } label: { Image(systemName: "rectangle.stack") }
+            }
+        }
+        .task { await enter(current) }
+        .onDisappear { leave(); model.present(nil) }
+    }
+
+    private func enter(_ ref: PaneRef) async {
+        model.present(ref)
+        model.log("pane: screen \(ref.pane)")
+        guard let app = ghostty.app else { error = "ghostty not ready"; return }
+        do {
+            guard let view = try await model.surface(for: ref, app: app, screen: true) else { error = "no surface"; return }
+            view.accessory = makeAccessory(for: view)
+            view.attended = true
+            if ownSize || grid == nil { view.claimSize(true) }
+            surfaceView = view
+        } catch {
+            self.error = error.localizedDescription
+            model.log("attach: \(ref.pane) failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func leave() {
+        guard let view = surfaceView else { return }
+        if ownSize || grid == nil { view.claimSize(false) }
+        view.keyboardWanted = false
+        view.attended = false
+        view.accessory = nil
+        surfaceView = nil
+    }
+
+    private func switchTo(_ other: PaneRef) {
+        leave()
+        current = other
+        fitZoom = 1
+        Task { await enter(other) }
+    }
+
+    private func setOwnSize(_ own: Bool) {
+        guard own != ownSize, let view = surfaceView else { return }
+        ownSize = own
+        fitZoom = 1
+        view.claimSize(own)
+        model.log("pane: \(current.pane) \(own ? "own size (claims the pty)" : "fit (mirrors the owner)")")
+    }
+
+    private func zoom(_ direction: Int) {
+        if fits {
+            fitZoom = min(4, max(1, fitZoom * (direction > 0 ? 1.25 : 1 / 1.25)))
+        } else {
+            surfaceView?.zoom(direction)
+        }
+    }
+}
+
+/// Keyboard up/down, from the surface's own fact.
+struct KeyboardButton: View {
+    @ObservedObject var surface: Ghostty.SurfaceView
+    var body: some View {
+        Button { surface.keyboardWanted.toggle() } label: {
+            Image(systemName: surface.keyboardWanted ? "keyboard.chevron.compact.down" : "keyboard")
         }
     }
 }
@@ -450,267 +782,6 @@ struct ReceiptsSection: View {
             ForEach(Array(receipts.lines.suffix(60).reversed().enumerated()), id: \.offset) { _, line in
                 Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
-        }
-    }
-}
-
-// MARK: - Pane
-
-/// One pane, full screen: the surface attaches on appear (an fd from the
-/// ssh bridge), claims the pty size when it takes focus, and lets go on
-/// disappear. The key strip supplies what a phone keyboard lacks.
-struct PaneScreen: View {
-    let ref: PaneRef
-    @EnvironmentObject private var ghostty: Ghostty.App
-    @EnvironmentObject private var model: VigilPhone
-    @Environment(\.dismiss) private var dismiss
-    @State private var surfaceView: Ghostty.SurfaceView?
-    @State private var current: PaneRef
-    @State private var error: String?
-    @State private var ctrl = false
-    /// FIT (default): the Mac's grid, scaled to the phone: instant, no
-    /// repaint, the Mac's layout untouched. OWN: the phone's grid; the
-    /// pane reflows (a TUI repaint, seconds across a VPN) and the Mac
-    /// follows the phone while it is open.
-    @State private var ownSize = false
-    /// FIT zoom is a PICTURE zoom (render scale), never a font change: a
-    /// font change alters the cell size, the grid derived from the fixed
-    /// render size changes with it, and the phone, as owner, resized the
-    /// Mac's real pty (41x51 → 27x32 → 66x70 in the daemon log, 2026-08-28).
-    @State private var fitZoom: CGFloat = 1
-
-    init(ref: PaneRef) {
-        self.ref = ref
-        _current = State(initialValue: ref)
-    }
-
-    /// The pane's live row (state) from the last directory read.
-    private var node: VigilPhone.Node? {
-        model.tree().flatMap { $0.children }.flatMap { $0.children + $0.children.flatMap(\.children) }
-            .first { $0.pane == current }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                Color(ghostty.config.backgroundColor)
-                if let surfaceView {
-                    if ownSize || grid == nil {
-                        Ghostty.SurfaceWrapper(surfaceView: surfaceView)
-                    } else {
-                        FittedSurface(surfaceView: surfaceView, full: fullSize(surfaceView) ?? UIScreen.main.bounds.size, scale: fitScale(surfaceView))
-                            .onChange(of: surfaceView.cellSize) { _, _ in layout(surfaceView) }
-                    }
-                } else if let error {
-                    Text(error).foregroundStyle(.orange).padding()
-                } else {
-                    ProgressView("attaching…")
-                }
-            }
-            KeyStrip(ctrl: $ctrl, send: { keys in surfaceView?.sendKeys(keys) },
-                     hideKeyboard: { _ = surfaceView?.resignFirstResponder() })
-        }
-        // The terminal runs edge to edge; the bar floats over it as glass
-        // (iOS 26 renders toolbar items as Liquid Glass once the bar's own
-        // background is gone), Telegram's shape: back · name capsule · menu.
-        .ignoresSafeArea(.container, edges: [.top, .bottom])
-        .navigationBarBackButtonHidden(true)
-        .toolbarBackground(.hidden, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button { dismiss() } label: { Image(systemName: "chevron.left") }
-            }
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 1) {
-                    Text(current.title).font(.headline)
-                    HStack(spacing: 4) {
-                        Circle().fill(StateColor.of(node?.state, alive: node?.alive ?? true)).frame(width: 6, height: 6)
-                        Text("\(current.host.name) · \(sessionName)")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 14).padding(.vertical, 6)
-                .glassEffect(.regular, in: Capsule())
-            }
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                if grid != nil {
-                    Button {
-                        ownSize.toggle()
-                        if let v = surfaceView { layout(v) }
-                    } label: {
-                        Image(systemName: ownSize ? "rectangle.compress.vertical" : "arrow.up.left.and.arrow.down.right")
-                    }
-                }
-                Button { zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
-                Button { zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
-                Menu {
-                    ForEach(livePanes.filter { $0.pane != current }, id: \.id) { other in
-                        Button {
-                            // Swap the viewport in place: same screen, new pane.
-                            surfaceView?.vigilDetach()
-                            surfaceView = nil
-                            current = other.pane!
-                            Task { await attach(current) }
-                        } label: {
-                            Label("\(other.subtitle ?? "") \(other.title)", systemImage: "terminal")
-                        }
-                    }
-                } label: { Image(systemName: "rectangle.stack") }
-            }
-        }
-        .task { model.presentingPane = true; model.log("pane: screen \(current.pane)"); await attach(current) }
-        .onDisappear {
-            model.presentingPane = false
-            guard let view = surfaceView else { return }
-            surfaceView = nil
-            if model.wasAdopted(view) {
-                model.returnPreview(current.pane, view: view)
-            } else {
-                view.vigilDetach()
-            }
-        }
-    }
-
-    /// The owner's grid for the current pane, if the Mac published one.
-    private var grid: (rows: Int, cols: Int)? {
-        guard let n = node, n.rows > 0, n.cols > 0 else { return nil }
-        return (n.rows, n.cols)
-    }
-
-    /// Every live pane on this pane's Mac, labelled by its session.
-    private var livePanes: [VigilPhone.Node] {
-        guard let host = model.tree().first(where: { $0.children.contains { s in s.leafStates.count >= 0 && s.id.hasPrefix(current.host.id.uuidString) } }) else { return [] }
-        var out: [VigilPhone.Node] = []
-        for s in host.children {
-            func walk(_ n: VigilPhone.Node) {
-                if let _ = n.pane { var m = n; m.subtitle = s.title; out.append(m) }
-                n.children.forEach(walk)
-            }
-            s.children.forEach(walk)
-        }
-        return out
-    }
-
-    private var sessionName: String {
-        model.tree().flatMap(\.children).first { s in
-            s.children.contains { $0.pane == current || $0.children.contains { $0.pane == current } }
-        }?.title ?? ""
-    }
-
-    private func attach(_ ref: PaneRef) async {
-        guard let app = ghostty.app else { error = "ghostty not ready"; return }
-        if let view = model.adoptPreview(ref.pane) {
-            view.isUserInteractionEnabled = true
-            layout(view)
-            surfaceView = view
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = view.becomeFirstResponder() }
-            return
-        }
-        do {
-            let fd = try await model.attach(ref.host, pane: ref.pane)
-            var config = Ghostty.SurfaceConfiguration()
-            config.vigilAttach = ref.pane
-            config.vigilFd = fd
-            config.vigilMirror = true
-            // A phone reads at 8pt (the Mac's 13 minus five loupe taps,
-            // Adrian 2026-08-28); the loupe adjusts from here.
-            config.fontSize = 8
-            let view = Ghostty.SurfaceView(app, baseConfig: config)
-            layout(view)
-            surfaceView = view
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { _ = view.becomeFirstResponder() }
-        } catch {
-            self.error = error.localizedDescription
-            model.log("attach: \(ref.pane) failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func zoom(_ direction: Int) {
-        if ownSize || grid == nil {
-            surfaceView?.zoom(direction)
-        } else {
-            fitZoom = min(3, max(0.5, fitZoom * (direction > 0 ? 1.2 : 1 / 1.2)))
-            if let v = surfaceView { layout(v) }
-        }
-    }
-
-    /// FIT: the owner's grid at the surface's REAL cell size (published by
-    /// ghostty once the font is set; a guessed 4.8×10 resized the Mac's
-    /// pty to 95x126), scaled to the width times the picture zoom.
-    private func fullSize(_ view: Ghostty.SurfaceView) -> CGSize? {
-        let cell = view.liveCell
-        guard let grid, cell.width > 0, cell.height > 0 else { return nil }
-        return CGSize(width: CGFloat(grid.cols) * cell.width, height: CGFloat(grid.rows) * cell.height)
-    }
-
-    private func fitScale(_ view: Ghostty.SurfaceView) -> CGFloat {
-        guard let full = fullSize(view) else { return 1 }
-        return min(1, UIScreen.main.bounds.width / full.width) * fitZoom
-    }
-
-    /// The view's layout is decided BEFORE it enters the view tree: a
-    /// wrapper that reports its own small frame first resizes the pty (the
-    /// phone owns it once focused) and a TUI re-lays out at a dozen
-    /// columns (2026-08-28). FIT = the owner's grid at 8pt metrics scaled
-    /// to the screen width; OWN = whatever the screen gives.
-    private func layout(_ view: Ghostty.SurfaceView) {
-        if !ownSize, let grid {
-            // The grid in CELLS: exact pixels come from the core's metrics
-            // (nothing is reported until they exist).
-            view.renderGrid = grid
-            view.renderScale = fitScale(view)
-            view.anchorBottom = false
-        } else {
-            view.renderGrid = nil
-            view.renderScale = 1
-            view.anchorBottom = false
-        }
-    }
-}
-
-/// esc / tab / ctrl / arrows / ⌃C / paste: the keys a software keyboard
-/// hides. `ctrl` is a sticky modifier for the next typed letter.
-struct KeyStrip: View {
-    @Binding var ctrl: Bool
-    let send: (String) -> Void
-    let hideKeyboard: () -> Void
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                Button { hideKeyboard() } label: {
-                    Image(systemName: "keyboard.chevron.compact.down")
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(Color.secondary.opacity(0.2), in: Capsule())
-                }
-                key("esc", "\u{1b}")
-                key("tab", "\t")
-                Button { ctrl.toggle() } label: {
-                    Text("ctrl").font(.caption.monospaced())
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(ctrl ? Color.accentColor : Color.secondary.opacity(0.2), in: Capsule())
-                }
-                key("^C", "\u{03}")
-                key("^D", "\u{04}")
-                key("^Z", "\u{1a}")
-                key("←", "\u{1b}[D"); key("↓", "\u{1b}[B"); key("↑", "\u{1b}[A"); key("→", "\u{1b}[C")
-                key("⏎", "\r")
-                key("/", "/"); key("-", "-"); key("|", "|"); key("~", "~")
-                Button {
-                    if let s = UIPasteboard.general.string { send(s) }
-                } label: { Image(systemName: "doc.on.clipboard").padding(.horizontal, 10).padding(.vertical, 6) }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-        }
-        .background(.ultraThinMaterial)
-    }
-
-    private func key(_ label: String, _ keys: String) -> some View {
-        Button { send(keys) } label: {
-            Text(label).font(.caption.monospaced())
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Color.secondary.opacity(0.2), in: Capsule())
         }
     }
 }
