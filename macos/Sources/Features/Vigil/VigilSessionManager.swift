@@ -1129,23 +1129,28 @@ class VigilSessionManager {
         }
     }
 
-    /// A surface whose pane's pty is sized by ANOTHER client (the phone
-    /// in OWN) renders that client's grid letterboxed: the pty's grid is
-    /// `<pane>.size`; a difference from the surface's own grid means it
-    /// is not the owner (the owner's size is always the applied one).
+    /// A surface whose pane's pty is OWNED by another client (the phone
+    /// in OWN) renders that client's grid letterboxed. `<pane>.size` is
+    /// "rows cols <owner hello>", the daemon's fact; this app's own
+    /// surfaces hello as `ghostty:<pid>`. (Inferring ownership from a
+    /// grid difference flipped every second once the surface framed
+    /// itself at the owner's grid, 2026-08-29.)
     private func syncOwnerGrids() {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/vigild")
+        let me = "ghostty:\(getpid())"
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
-            guard let id = view.vigilAttachId, view.vigilHost == nil, let surface = view.surface else { continue }
-            let parts = ((try? String(contentsOf: dir.appendingPathComponent("\(id).size"), encoding: .utf8)) ?? "")
-                .split(separator: " ").compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            let own = ghostty_surface_size(surface)
-            let grid: Ghostty.SurfaceView.VigilGrid? = parts.count == 2 && parts[0] > 0 && parts[1] > 0
-                && (parts[0] != Int(own.rows) || parts[1] != Int(own.columns))
-                ? .init(rows: parts[0], cols: parts[1]) : nil
+            guard let id = view.vigilAttachId, view.vigilHost == nil, view.surface != nil else { continue }
+            let line = ((try? String(contentsOf: dir.appendingPathComponent("\(id).size"), encoding: .utf8)) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let parts = line.split(separator: " ", maxSplits: 2)
+            let rows = parts.count >= 2 ? Int(parts[0]) ?? 0 : 0
+            let cols = parts.count >= 2 ? Int(parts[1]) ?? 0 : 0
+            let owner = parts.count == 3 ? String(parts[2]) : ""
+            let foreign = !owner.isEmpty && !owner.contains(me)
+            let grid: Ghostty.SurfaceView.VigilGrid? = foreign && rows > 0 && cols > 0 ? .init(rows: rows, cols: cols) : nil
             if grid != view.vigilOwnerGrid {
                 view.vigilOwnerGrid = grid
-                vlog("owner grid: \(id) \(grid.map { "\($0.rows)x\($0.cols) (another client owns the pty; letterboxed)" } ?? "own (\(own.rows)x\(own.columns))")")
+                vlog("owner grid: \(id) \(grid.map { "\($0.rows)x\($0.cols) owned by '\(owner)'; letterboxed" } ?? "own")")
             }
         }
     }

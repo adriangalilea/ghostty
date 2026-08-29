@@ -77,7 +77,8 @@ final class VigilPhone: ObservableObject {
         /// "rows cols", the owner's pty grid (a preview renders it scaled).
         var size: String?
         var grid: (rows: Int, cols: Int)? {
-            let p = (size ?? "").split(separator: " ").compactMap { Int($0) }
+            // "rows cols <owner hello>": the grid is the first two words.
+            let p = (size ?? "").split(separator: " ").prefix(2).compactMap { Int($0) }
             return p.count == 2 && p[0] > 0 && p[1] > 0 ? (p[0], p[1]) : nil
         }
     }
