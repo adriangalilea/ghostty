@@ -599,11 +599,11 @@ struct PaneScreen: View {
                 if grid != nil {
                     // MIRROR: a picture of the Mac's grid, the Mac untouched.
                     // OWN: the phone is the terminal, the pane reflows to it.
+                    // Same footprint either way: a Mac glyph (you are
+                    // looking at the Mac's screen) vs a phone glyph (the
+                    // phone is the terminal).
                     Button { setOwnSize(!ownSize) } label: {
-                        Text(ownSize ? "OWN" : "MIRROR")
-                            .font(.caption2.weight(.bold).monospaced())
-                            .padding(.horizontal, 6).padding(.vertical, 3)
-                            .background(ownSize ? Color.accentColor.opacity(0.35) : Color.secondary.opacity(0.2), in: Capsule())
+                        Image(systemName: ownSize ? "iphone" : "desktopcomputer")
                     }
                 }
                 Button { zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
