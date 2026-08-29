@@ -1151,6 +1151,16 @@ class VigilSessionManager {
             if grid != view.vigilOwnerGrid {
                 view.vigilOwnerGrid = grid
                 vlog("owner grid: \(id) \(grid.map { "\($0.rows)x\($0.cols) owned by '\(owner)'; letterboxed" } ?? "own")")
+                // The frame lands on the next runloop; then re-sync the
+                // screen from the daemon: a non-owner that reflowed bytes
+                // parsed at the old grid shows garbage otherwise.
+                if grid != nil, let surface = view.surface {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak view] in
+                        guard let view, view.surface == surface else { return }
+                        ghostty_surface_vigil_dump(surface)
+                        Self.vlogSync("letterbox: \(id) re-synced from the daemon")
+                    }
+                }
             }
             fitLetterbox(view, grid: grid)
         }

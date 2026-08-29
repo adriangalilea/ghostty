@@ -447,6 +447,7 @@ extension Ghostty {
         override class var layerClass: AnyClass { CAMetalLayer.self }
 
         private var lastReport: (w: UInt32, h: UInt32, scale: CGFloat)?
+        private var lastMirrorGrid: Grid?
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
@@ -480,6 +481,13 @@ extension Ghostty {
                 let s = ghostty_surface_size(surface)
                 let mode = presentation.grid.map { "fit \($0.rows)x\($0.cols)" } ?? "own"
                 receipt("size \(px.w)x\(px.h)px @\(scale) \(mode) x\(presentation.scale) -> core \(s.rows)x\(s.columns)")
+                // A mirror that just took a NEW owner grid holds bytes
+                // parsed at the old one, reflowed: garbage. Re-sync from
+                // the daemon (only a claimant is dumped otherwise).
+                if let g = presentation.grid, g != lastMirrorGrid {
+                    if lastMirrorGrid != nil { ghostty_surface_vigil_dump(surface); receipt("grid changed, dump requested") }
+                    lastMirrorGrid = g
+                }
             }
             let logical = CGSize(width: CGFloat(px.w) / scale, height: CGFloat(px.h) / scale)
             let mine = Set(subviews.map { ObjectIdentifier($0.layer) })
