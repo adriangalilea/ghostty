@@ -880,21 +880,29 @@ pub fn vigilClaim(self: *Surface, claim: bool) void {
 /// hashes = the same screen; a persistent difference while the daemon is
 /// quiet = a desynced viewport.
 pub fn vigilScreenHash(self: *Surface) u64 {
+    const text = self.vigilScreenText(self.alloc) catch return 0;
+    defer self.alloc.free(text);
+    return std.hash.Fnv1a_64.hash(text);
+}
+
+/// Vigil: the active area as plain text, the bytes `vigilScreenHash` is
+/// over. Caller frees.
+pub fn vigilScreenText(self: *Surface, alloc: Allocator) ![]u8 {
     self.renderer_state.mutex.lock();
     defer self.renderer_state.mutex.unlock();
     const screen = self.io.terminal.screens.active;
-    const tl = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }) orelse return 0;
+    const tl = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }) orelse return error.NoScreen;
     const br = screen.pages.pin(.{ .active = .{
         .x = if (screen.pages.cols > 0) screen.pages.cols - 1 else 0,
         .y = if (screen.pages.rows > 0) screen.pages.rows - 1 else 0,
-    } }) orelse return 0;
+    } }) orelse return error.NoScreen;
     const sel = terminal.Selection.init(tl, br, false);
-    var aw: std.Io.Writer.Allocating = .init(self.alloc);
+    var aw: std.Io.Writer.Allocating = .init(alloc);
     defer aw.deinit();
     var formatter: terminal.formatter.ScreenFormatter = .init(screen, .{ .emit = .plain, .unwrap = false, .trim = true });
     formatter.content = .{ .selection = sel };
-    formatter.format(&aw.writer) catch return 0;
-    return std.hash.Fnv1a_64.hash(aw.written());
+    try formatter.format(&aw.writer);
+    return try aw.toOwnedSlice();
 }
 
 /// Vigil: ask the daemon to re-send the screen (a resumed viewport).

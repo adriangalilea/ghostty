@@ -1198,7 +1198,14 @@ class VigilSessionManager {
                 vlog("!! screen mismatch: \(id) daemon \(daemon) view \(mine); re-syncing (\(view.vigilScreenResyncs)/2)")
                 ghostty_surface_vigil_dump(surface)
             } else if view.vigilScreenResyncs == 3 {
-                vlog("!! screen mismatch: \(id) persists after 2 re-syncs; the two sides hash different content, not a desync. Silenced for this surface.")
+                // Leave the evidence: this view's text on disk, the
+                // daemon's one command away.
+                let out = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/wake/dumps/\(id).view.txt")
+                var s = ghostty_surface_vigil_screen_text(surface)
+                if let p = s.ptr { try? String(cString: p).write(to: out, atomically: true, encoding: .utf8) }
+                ghostty_string_free(s)
+                s = .init()
+                vlog("!! screen mismatch: \(id) persists after 2 re-syncs; not a desync. Silenced. Diff: vigild screen \(id) | diff - \(out.path)")
             }
             view.vigilScreenStrikes = -3 // grace for the dump to land
         }

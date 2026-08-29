@@ -1753,6 +1753,16 @@ pub const CAPI = struct {
         return surface.core_surface.vigilScreenHash();
     }
 
+    /// Vigil: the active area's plain text (the hashed bytes). Free with
+    /// ghostty_string_free.
+    export fn ghostty_surface_vigil_screen_text(surface: *Surface) String {
+        const alloc = surface.app.core_app.alloc;
+        const text = surface.core_surface.vigilScreenText(alloc) catch return .empty;
+        defer alloc.free(text);
+        const copy = alloc.dupeZ(u8, text) catch return .empty;
+        return .fromSlice(copy);
+    }
+
     /// Vigil: re-request the screen from the daemon.
     export fn ghostty_surface_vigil_dump(surface: *Surface) void {
         surface.core_surface.vigilDump();
