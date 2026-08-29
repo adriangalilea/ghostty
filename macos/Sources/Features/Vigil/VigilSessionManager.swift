@@ -1150,6 +1150,11 @@ class VigilSessionManager {
             let grid: Ghostty.SurfaceView.VigilGrid? = foreign && rows > 0 && cols > 0 ? .init(rows: rows, cols: cols) : nil
             if grid != view.vigilOwnerGrid {
                 view.vigilOwnerGrid = grid
+                // An ownership change is a legitimate resync window: the
+                // content receipt starts over (strikes counted across a
+                // takeover silenced the pane it exists for, 2026-08-29).
+                view.vigilScreenStrikes = -3
+                view.vigilScreenResyncs = 0
                 vlog("owner grid: \(id) \(grid.map { "\($0.rows)x\($0.cols) owned by '\(owner)'; letterboxed" } ?? "own")")
                 // The frame lands on the next runloop; then re-sync the
                 // screen from the daemon: a non-owner that reflowed bytes
