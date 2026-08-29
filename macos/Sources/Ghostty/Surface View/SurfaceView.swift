@@ -77,11 +77,17 @@ extension Ghostty {
                     // OWN): render ITS grid, top-left, and tint the rest.
                     // The tint is this window accommodating that client.
                     #if canImport(AppKit)
+                    // The WHOLE owner grid, scaled to fit and centered (a
+                    // phone's 62 rows in a 51-row window must not lose its
+                    // bottom); the picture scale is a layer transform, the
+                    // core renders the grid at its real size.
                     let letterbox: CGSize? = surfaceView.vigilOwnerGrid.flatMap { surfaceView.vigilPoints(for: $0) }
-                    let surfaceSize = letterbox.map { CGSize(width: min($0.width, geo.size.width), height: min($0.height, geo.size.height)) } ?? geo.size
+                    let surfaceSize = letterbox ?? geo.size
+                    let fit: CGFloat = letterbox.map { min(1, geo.size.width / $0.width, geo.size.height / $0.height) } ?? 1
                     #else
                     let letterbox: CGSize? = nil
                     let surfaceSize = geo.size
+                    let fit: CGFloat = 1
                     #endif
                     #if canImport(AppKit)
                     if letterbox != nil {
@@ -93,7 +99,9 @@ extension Ghostty {
                     }
                     #endif
                     SurfaceRepresentable(view: surfaceView, size: surfaceSize)
-                        .frame(width: surfaceSize.width, height: surfaceSize.height, alignment: .topLeading)
+                        .frame(width: surfaceSize.width, height: surfaceSize.height)
+                        .scaleEffect(fit)
+                        .frame(width: geo.size.width, height: geo.size.height, alignment: letterbox == nil ? .topLeading : .center)
                         .focused($surfaceFocus)
                         .focusedValue(\.ghosttySurfacePwd, surfaceView.pwd)
                         .focusedValue(\.ghosttySurfaceView, surfaceView)
