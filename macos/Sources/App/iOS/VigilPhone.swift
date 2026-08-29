@@ -487,9 +487,19 @@ final class VigilPhone: ObservableObject {
         // A phone reads at 8pt (the Mac's 13 minus five loupe taps).
         config.fontSize = 8
         let view = Ghostty.SurfaceView(app, baseConfig: config)
+        view.onStreamEnd = { [weak self, weak view] in
+            guard let self, let view, self.surfaces[ref.pane] === view else { return }
+            self.log("surface: \(ref.pane) stream died, dropping it; the screen re-dials")
+            self.endSurface(ref.pane)
+            self.streamGeneration += 1
+        }
         surfaces[ref.pane] = view
         return view
     }
+
+    /// Bumped when a live stream dies (the ssh connection dropped on a
+    /// network change): every screen holding a dead surface re-dials.
+    @Published private(set) var streamGeneration = 0
 
     func endSurface(_ pane: String) {
         guard let view = surfaces.removeValue(forKey: pane) else { return }

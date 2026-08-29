@@ -415,9 +415,14 @@ extension Ghostty {
             setNeedsLayout()
         }
 
+        /// The owner's hook: a dead stream is the transport's fact, the
+        /// app decides (re-dial, drop).
+        var onStreamEnd: (() -> Void)?
+
         func streamDidEnd(exitCode: Int, runtimeMs: Int) {
             ended = (exitCode, runtimeMs)
             receipt("stream ended exit \(exitCode) after \(runtimeMs)ms")
+            onStreamEnd?()
         }
 
         // MARK: Layout: the ONE authority

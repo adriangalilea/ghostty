@@ -319,6 +319,11 @@ struct PanePreview: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.08)))
         .task { await load() }
+        .onChange(of: model.streamGeneration) { _, _ in
+            guard surfaceView?.surface == nil else { return }
+            surfaceView = nil
+            Task { await load() }
+        }
         .onAppear { model.rowAppeared(ref) }
         .onDisappear { model.rowDisappeared(ref) }
     }
@@ -592,8 +597,13 @@ struct PaneScreen: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if let surfaceView { KeyboardButton(surface: surfaceView) }
                 if grid != nil {
+                    // MIRROR: a picture of the Mac's grid, the Mac untouched.
+                    // OWN: the phone is the terminal, the pane reflows to it.
                     Button { setOwnSize(!ownSize) } label: {
-                        Image(systemName: ownSize ? "rectangle.compress.vertical" : "arrow.up.left.and.arrow.down.right")
+                        Text(ownSize ? "OWN" : "MIRROR")
+                            .font(.caption2.weight(.bold).monospaced())
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(ownSize ? Color.accentColor.opacity(0.35) : Color.secondary.opacity(0.2), in: Capsule())
                     }
                 }
                 Button { zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
@@ -608,6 +618,13 @@ struct PaneScreen: View {
             }
         }
         .task { await enter(current) }
+        .onChange(of: model.streamGeneration) { _, _ in
+            guard surfaceView?.surface == nil else { return }
+            model.log("pane: \(current.pane) stream died on screen, re-dialing")
+            leave()
+            error = nil
+            Task { await enter(current) }
+        }
         .onDisappear { leave(); model.present(nil) }
     }
 
