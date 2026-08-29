@@ -73,7 +73,27 @@ extension Ghostty {
                     let pubResign = center.publisher(for: NSWindow.didResignKeyNotification)
                     #endif
 
-                    SurfaceRepresentable(view: surfaceView, size: geo.size)
+                    // Vigil: another client owns the pty (the phone in
+                    // OWN): render ITS grid, top-left, and tint the rest.
+                    // The tint is this window accommodating that client.
+                    #if canImport(AppKit)
+                    let letterbox: CGSize? = surfaceView.vigilOwnerGrid.flatMap { surfaceView.vigilPoints(for: $0) }
+                    let surfaceSize = letterbox.map { CGSize(width: min($0.width, geo.size.width), height: min($0.height, geo.size.height)) } ?? geo.size
+                    #else
+                    let letterbox: CGSize? = nil
+                    let surfaceSize = geo.size
+                    #endif
+                    #if canImport(AppKit)
+                    if letterbox != nil {
+                        // The transparency checker: this window is
+                        // accommodating another client's grid.
+                        Image(nsImage: Ghostty.SurfaceView.vigilChecker)
+                            .resizable(resizingMode: .tile)
+                            .ignoresSafeArea()
+                    }
+                    #endif
+                    SurfaceRepresentable(view: surfaceView, size: surfaceSize)
+                        .frame(width: surfaceSize.width, height: surfaceSize.height, alignment: .topLeading)
                         .focused($surfaceFocus)
                         .focusedValue(\.ghosttySurfacePwd, surfaceView.pwd)
                         .focusedValue(\.ghosttySurfaceView, surfaceView)

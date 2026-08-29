@@ -1129,8 +1129,30 @@ class VigilSessionManager {
         }
     }
 
+    /// A surface whose pane's pty is sized by ANOTHER client (the phone
+    /// in OWN) renders that client's grid letterboxed: the pty's grid is
+    /// `<pane>.size`; a difference from the surface's own grid means it
+    /// is not the owner (the owner's size is always the applied one).
+    private func syncOwnerGrids() {
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/vigild")
+        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
+            guard let id = view.vigilAttachId, view.vigilHost == nil, let surface = view.surface else { continue }
+            let parts = ((try? String(contentsOf: dir.appendingPathComponent("\(id).size"), encoding: .utf8)) ?? "")
+                .split(separator: " ").compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let own = ghostty_surface_size(surface)
+            let grid: Ghostty.SurfaceView.VigilGrid? = parts.count == 2 && parts[0] > 0 && parts[1] > 0
+                && (parts[0] != Int(own.rows) || parts[1] != Int(own.columns))
+                ? .init(rows: parts[0], cols: parts[1]) : nil
+            if grid != view.vigilOwnerGrid {
+                view.vigilOwnerGrid = grid
+                vlog("owner grid: \(id) \(grid.map { "\($0.rows)x\($0.cols) (another client owns the pty; letterboxed)" } ?? "own (\(own.rows)x\(own.columns))")")
+            }
+        }
+    }
+
     private func drainEvents() {
         ackVisiblePanes() // the 1s presence pulse rides the events tick
+        syncOwnerGrids()
         guard let handle = try? FileHandle(forReadingFrom: eventsURL) else { return }
         defer { try? handle.close() }
         let size = handle.seekToEndOfFile()

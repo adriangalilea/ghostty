@@ -223,6 +223,9 @@ extension Ghostty {
         /// any. Session capture preserves it so resurrection reattaches.
         private(set) var vigilAttachId: String?
 
+        /// Vigil: the ssh alias whose Mac owns the daemon; nil = local.
+        private(set) var vigilHost: String?
+
         /// Vigil: the program this surface's daemon was born to run (a
         /// session API birth); nil = the login shell. Captured with the
         /// pane so a cold remount after the daemon died spawns it again.
@@ -233,6 +236,42 @@ extension Ghostty {
         /// live view, never an owner: every ownership and liveness lookup
         /// skips it.
         private(set) var vigilMirror = false
+
+        /// Vigil: the pty's grid when ANOTHER client owns the size (the
+        /// phone in OWN). nil = this surface's own grid is the pty's. Set
+        /// on the presence tick from `<pane>.size`; the wrapper then
+        /// renders the owner's grid letterboxed in a tint, so what
+        /// accommodates what is visible. Points for that grid come from
+        /// the core (`vigilPoints`).
+        @Published var vigilOwnerGrid: VigilGrid?
+        struct VigilGrid: Equatable {
+            let rows: Int
+            let cols: Int
+        }
+
+        /// The transparency checker (Photoshop's, Figma's) behind a
+        /// letterboxed surface: "nothing here", read at a glance.
+        static let vigilChecker: NSImage = {
+            let side: CGFloat = 16
+            let img = NSImage(size: NSSize(width: side, height: side))
+            img.lockFocus()
+            NSColor(red: 0.10, green: 0.10, blue: 0.14, alpha: 1).setFill()
+            NSRect(x: 0, y: 0, width: side, height: side).fill()
+            NSColor(red: 0.17, green: 0.17, blue: 0.22, alpha: 1).setFill()
+            NSRect(x: 0, y: 0, width: side / 2, height: side / 2).fill()
+            NSRect(x: side / 2, y: side / 2, width: side / 2, height: side / 2).fill()
+            img.unlockFocus()
+            return img
+        }()
+
+        /// The frame, in points, that makes this surface derive exactly
+        /// `grid` (cells + explicit padding, from the core).
+        func vigilPoints(for grid: VigilGrid) -> CGSize? {
+            guard let surface, let scale = window?.backingScaleFactor else { return nil }
+            let s = ghostty_surface_size_for_grid(surface, UInt16(grid.rows), UInt16(grid.cols))
+            guard s.cell_width_px > 0 else { return nil }
+            return CGSize(width: CGFloat(s.width_px) / scale, height: CGFloat(s.height_px) / scale)
+        }
 
         /// Vigil: end the core surface NOW, whoever still holds the view.
         /// Frees it synchronously (the io thread exits, the daemon sees
@@ -253,6 +292,7 @@ extension Ghostty {
 
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             self.vigilAttachId = baseConfig?.vigilAttach
+            self.vigilHost = (baseConfig?.vigilHost).flatMap { $0.isEmpty ? nil : $0 }
             self.vigilCommand = baseConfig?.vigilAttach != nil ? baseConfig?.command : nil
             self.vigilMirror = baseConfig?.vigilMirror ?? false
             self.markedText = NSMutableAttributedString()

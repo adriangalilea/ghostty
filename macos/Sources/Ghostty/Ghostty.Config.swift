@@ -81,6 +81,11 @@ extension Ghostty {
             }
 
             ghostty_config_load_recursive_files(cfg)
+#else
+            // Vigil for iPhone: the Mac's theme, written into the sandbox.
+            if let path = VigilTheme.configPath() {
+                ghostty_config_load_file(cfg, path)
+            }
 #endif
 
             // TODO: we'd probably do some config loading here... for now we'd

@@ -297,6 +297,7 @@
 				App/iOS/VigilSSH.swift,
 				App/iOS/VigilPhone.swift,
 				App/iOS/VigilPhoneUI.swift,
+				App/iOS/VigilTheme.swift,
 				"Features/Custom App Icon/DockTilePlugin.swift",
 				"Ghostty/Surface View/SurfaceView_UIKit.swift",
 			);
