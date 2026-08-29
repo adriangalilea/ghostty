@@ -116,10 +116,19 @@ final class VigilPhone: ObservableObject {
         key = Self.loadOrMintKey()
         VigilSSH.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
         Ghostty.SurfaceView.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshAll() }
+        // The directory is polled every 15s on the tree and every 3s while
+        // a pane is on screen: a MIRROR draws the grid `dir` last reported,
+        // and a Mac window settling its size stepped the pty a dozen
+        // times while the phone lagged 15s behind each (2026-08-29).
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.ticks += 1
+                if self.presenting != nil || self.ticks % 5 == 0 { self.refreshAll() }
+            }
         }
     }
+    private var ticks = 0
 
     /// Every receipt goes three ways: the in-app list, os_log (Console /
     /// `log stream`), and stderr (`devicectl … launch --console` over the
