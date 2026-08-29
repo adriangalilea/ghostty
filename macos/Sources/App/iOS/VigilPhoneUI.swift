@@ -441,9 +441,36 @@ struct FitCanvas: UIViewRepresentable {
     let grid: Ghostty.SurfaceView.Grid
     @Binding var zoom: CGFloat
 
+    /// The fit is computed in ITS layout pass (the bounds are a fact
+    /// there; in `updateUIView` they are 0 on the first pass and nothing
+    /// re-runs it, the blank fit screen of 2026-08-29).
     final class ZoomView: UIScrollView {
         let content = SurfaceHostView(purpose: "fit screen")
-        var natural: CGSize = .zero
+        var grid: Ghostty.SurfaceView.Grid?
+        private var fitted: (bounds: CGSize, natural: CGSize)?
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard let grid, let view = content.hosted, bounds.width > 0, bounds.height > 0 else { return }
+            let contentScale = window?.screen.scale ?? traitCollection.displayScale
+            guard let natural = naturalSize(view, grid: grid, contentScale: contentScale), natural.width > 0 else { return }
+            if let f = fitted, f.bounds == bounds.size, f.natural == natural { return }
+            fitted = (bounds.size, natural)
+            let fit = min(bounds.width / natural.width, bounds.height / natural.height, 1)
+            let presented = CGSize(width: natural.width * fit, height: natural.height * fit)
+            content.presentation = { _, _ in .init(grid: grid, contentScale: contentScale, scale: fit) }
+            content.frame = CGRect(origin: .zero, size: presented)
+            contentSize = presented
+            center()
+            Ghostty.SurfaceView.trace("surface \(view.paneId): fit x\(String(format: "%.2f", fit)) -> \(Int(presented.width))x\(Int(presented.height))pt in \(Int(bounds.width))x\(Int(bounds.height))")
+        }
+
+        /// Keep the picture centered while it is smaller than the viewport.
+        func center() {
+            let w = contentSize.width * zoomScale, h = contentSize.height * zoomScale
+            let dx = max(0, (bounds.width - w) / 2), dy = max(0, (bounds.height - h) / 2)
+            contentInset = UIEdgeInsets(top: dy, left: dx, bottom: dy, right: dx)
+        }
     }
 
     func makeUIView(context: Context) -> ZoomView {
@@ -465,22 +492,8 @@ struct FitCanvas: UIViewRepresentable {
         sv.content.host(view)
         view.isUserInteractionEnabled = true
         view.visible = true
-        // The fit factor is a function of the space: the whole grid visible.
-        let contentScale = sv.window?.screen.scale ?? sv.traitCollection.displayScale
-        guard let natural = naturalSize(view, grid: grid, contentScale: contentScale), natural.width > 0,
-              sv.bounds.width > 0, sv.bounds.height > 0 else {
-            DispatchQueue.main.async { sv.setNeedsLayout() }
-            return
-        }
-        let fit = min(sv.bounds.width / natural.width, sv.bounds.height / natural.height, 1)
-        let presented = CGSize(width: natural.width * fit, height: natural.height * fit)
-        sv.content.presentation = { _, _ in .init(grid: grid, contentScale: contentScale, scale: fit) }
-        if sv.content.frame.size != presented {
-            sv.content.frame = CGRect(origin: .zero, size: presented)
-            sv.contentSize = presented
-            context.coordinator.center(sv)
-            Ghostty.SurfaceView.trace("surface \(view.paneId): fit x\(String(format: "%.2f", fit)) -> \(Int(presented.width))x\(Int(presented.height))pt in \(Int(sv.bounds.width))x\(Int(sv.bounds.height))")
-        }
+        sv.grid = grid
+        sv.setNeedsLayout()
         if abs(sv.zoomScale - zoom) > 0.01 { sv.setZoomScale(zoom, animated: true) }
     }
 
@@ -496,14 +509,7 @@ struct FitCanvas: UIViewRepresentable {
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { (scrollView as? ZoomView)?.content }
 
-        /// Keep the picture centered while it is smaller than the viewport.
-        func center(_ sv: UIScrollView) {
-            let w = sv.contentSize.width * sv.zoomScale, h = sv.contentSize.height * sv.zoomScale
-            let dx = max(0, (sv.bounds.width - w) / 2), dy = max(0, (sv.bounds.height - h) / 2)
-            sv.contentInset = UIEdgeInsets(top: dy, left: dx, bottom: dy, right: dx)
-        }
-
-        func scrollViewDidZoom(_ scrollView: UIScrollView) { center(scrollView) }
+        func scrollViewDidZoom(_ scrollView: UIScrollView) { (scrollView as? ZoomView)?.center() }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             Ghostty.SurfaceView.trace("fit: zoom x\(String(format: "%.2f", scale))")
