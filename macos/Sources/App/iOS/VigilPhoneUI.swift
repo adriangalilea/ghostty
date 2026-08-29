@@ -484,6 +484,9 @@ struct FitCanvas: UIViewRepresentable {
 
     func makeUIView(context: Context) -> ZoomView {
         let sv = ZoomView()
+        // The margin around the Mac's picture is TINTED: what you see
+        // inside is the Mac's grid, the tint is the phone accommodating it.
+        sv.backgroundColor = UIColor(red: 0.16, green: 0.12, blue: 0.22, alpha: 1)
         sv.minimumZoomScale = 1
         sv.maximumZoomScale = 4
         sv.bouncesZoom = true

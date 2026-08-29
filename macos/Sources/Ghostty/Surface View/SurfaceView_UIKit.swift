@@ -394,9 +394,16 @@ extension Ghostty {
 
         fileprivate func scrollerMoved(_ sv: UIScrollView) {
             guard let surface else { return }
+            // Only the finger (or its momentum) is a scroll: a programmatic
+            // offset (the re-center, a frame change, a content-size reset)
+            // also fires didScroll, and a runway-sized delta sent the
+            // terminal to the top on its own (2026-08-29).
+            guard sv.isDragging || sv.isDecelerating else { lastOffset = sv.contentOffset; return }
             let dy = lastOffset.y - sv.contentOffset.y
             lastOffset = sv.contentOffset
             guard dy != 0 else { return }
+            scrollReceipts += 1
+            if scrollReceipts % 20 == 1 { receipt("scroll dy \(Int(dy))pt (finger)") }
             // The core resolves scroll against the pointer: the finger is
             // the pointer, placed before every delta.
             let p = sv.panGestureRecognizer.location(in: self)
@@ -405,10 +412,12 @@ extension Ghostty {
             ghostty_surface_mouse_scroll(surface, 0, Double(dy * appliedScale), ghostty_input_scroll_mods_t(1))
         }
 
+        private var scrollReceipts = 0
+
         fileprivate func scrollerSettled(_ sv: UIScrollView) {
             let center = CGPoint(x: 0, y: Self.runway)
-            sv.contentOffset = center
             lastOffset = center
+            sv.contentOffset = center
         }
 
         // MARK: Facts from the core
