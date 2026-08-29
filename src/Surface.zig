@@ -874,6 +874,11 @@ pub fn vigilClaim(self: *Surface, claim: bool) void {
     self.queueIo(.{ .vigil_claim = claim }, .unlocked);
 }
 
+/// Vigil: ask the daemon to re-send the screen (a resumed viewport).
+pub fn vigilDump(self: *Surface) void {
+    self.queueIo(.{ .vigil_dump = {} }, .unlocked);
+}
+
 /// Vigil: the framebuffer pixels that make this surface derive exactly
 /// `rows`×`cols` at its current cell metrics and content scale: the
 /// grid's cells plus the explicit window padding (balanced padding is

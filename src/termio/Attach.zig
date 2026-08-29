@@ -368,6 +368,12 @@ pub fn vigilClaim(self: *Attach, claim: bool) void {
     self.enqueueFrame(if (claim) 'o' else 'y', "");
 }
 
+/// 'q': the daemon re-sends the exact screen over a clear.
+pub fn vigilDump(self: *Attach) void {
+    if (self.write_fd < 0) return;
+    self.enqueueFrame('q', "");
+}
+
 /// Runs ONLY on the writer thread. Blocking on POLLOUT here is the whole
 /// design: this thread exists to absorb the stall the io thread must
 /// never feel. Returns false when the stream was severed.

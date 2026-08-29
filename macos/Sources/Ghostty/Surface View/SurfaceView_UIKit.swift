@@ -194,6 +194,14 @@ extension Ghostty {
             receipt(claim ? "claimed the pty size" : "yielded the pty size")
         }
 
+        /// Re-request the screen (the app was suspended and missed the
+        /// stream).
+        func refreshFromDaemon() {
+            guard let surface else { return }
+            ghostty_surface_vigil_dump(surface)
+            receipt("dump requested")
+        }
+
         // MARK: Keyboard
 
         /// The software keyboard is up. Raised by a tap, dropped by the

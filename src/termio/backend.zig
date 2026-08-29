@@ -81,6 +81,13 @@ pub const Backend = union(Kind) {
         }
     }
 
+    pub fn vigilDump(self: *Backend) !void {
+        switch (self.*) {
+            .exec => {},
+            .attach => |*attach| attach.vigilDump(),
+        }
+    }
+
     pub fn resize(
         self: *Backend,
         grid_size: renderer.GridSize,

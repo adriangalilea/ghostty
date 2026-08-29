@@ -535,6 +535,7 @@ struct PaneScreen: View {
     @EnvironmentObject private var model: VigilPhone
     @ObservedObject private var keyboard = KeyboardState.shared
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var phase
     @State private var surfaceView: Ghostty.SurfaceView?
     @State private var current: PaneRef
     @State private var error: String?
@@ -626,6 +627,23 @@ struct PaneScreen: View {
             Task { await enter(current) }
         }
         .onDisappear { leave(); model.present(nil) }
+        // Phase is a fact, ownership follows it: a backgrounded or locked
+        // phone yields the pty (the Mac takes over as survivor); coming
+        // back re-claims in OWN and re-requests the screen it missed.
+        .onChange(of: phase) { _, now in
+            guard let view = surfaceView else { return }
+            switch now {
+            case .background, .inactive:
+                model.log("pane: \(current.pane) phase \(now), yielding")
+                view.keyboardWanted = false
+                if ownSize || grid == nil { view.claimSize(false) }
+            case .active:
+                model.log("pane: \(current.pane) active again")
+                if ownSize || grid == nil { view.claimSize(true) }
+                view.refreshFromDaemon()
+            @unknown default: break
+            }
+        }
     }
 
     private func enter(_ ref: PaneRef) async {

@@ -1748,6 +1748,11 @@ pub const CAPI = struct {
         surface.core_surface.vigilClaim(claim);
     }
 
+    /// Vigil: re-request the screen from the daemon.
+    export fn ghostty_surface_vigil_dump(surface: *Surface) void {
+        surface.core_surface.vigilDump();
+    }
+
     /// Return the size information a surface has.
     export fn ghostty_surface_size(surface: *Surface) SurfaceSize {
         const grid_size = surface.core_surface.size.grid();

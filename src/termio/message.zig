@@ -78,6 +78,10 @@ pub const Message = union(enum) {
     /// focus is not a sizing fact (a phone mirroring the Mac's grid).
     vigil_claim: bool,
 
+    /// Vigil: ask the daemon for a fresh dump of the screen (a viewport
+    /// that was suspended and missed the stream).
+    vigil_dump: void,
+
     /// Write where the data fits in the union.
     write_small: WriteReq.Small,
 

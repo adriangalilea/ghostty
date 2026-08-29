@@ -334,6 +334,7 @@ fn drainMailbox(
             .linefeed_mode => |v| self.flags.linefeed_mode = v,
             .focused => |v| try io.focusGained(data, v),
             .vigil_claim => |v| try io.backend.vigilClaim(v),
+            .vigil_dump => try io.backend.vigilDump(),
             .write_small => |v| try io.queueWrite(
                 data,
                 v.data[0..v.len],
