@@ -263,10 +263,14 @@ struct SurfaceHost: UIViewRepresentable {
     func makeUIView(context: Context) -> SurfaceHostView { SurfaceHostView(purpose: purpose) }
 
     func updateUIView(_ container: SurfaceHostView, context: Context) {
+        // A host that is not the presenter keeps its hands off: a tree
+        // refresh re-ran a row's update while the pane screen showed the
+        // view and the row stole it back (the gray OWN screen, 2026-08-29).
+        guard visible else { return }
         container.host(view)
         container.presentation = presentation
         view.isUserInteractionEnabled = interactive
-        view.visible = visible
+        view.visible = true
         container.setNeedsLayout()
     }
 
