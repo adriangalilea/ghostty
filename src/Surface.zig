@@ -874,6 +874,29 @@ pub fn vigilClaim(self: *Surface, claim: bool) void {
     self.queueIo(.{ .vigil_claim = claim }, .unlocked);
 }
 
+/// Vigil: the content receipt, FNV-1a over the viewport's plain text
+/// (the same formatter and options vigild hashes its own viewport with:
+/// a viewport selection, trailing whitespace trimmed, no unwrap). Equal
+/// hashes = the same screen; a persistent difference while the daemon is
+/// quiet = a desynced viewport.
+pub fn vigilScreenHash(self: *Surface) u64 {
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+    const screen = self.io.terminal.screens.active;
+    const tl = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }) orelse return 0;
+    const br = screen.pages.pin(.{ .active = .{
+        .x = if (screen.pages.cols > 0) screen.pages.cols - 1 else 0,
+        .y = if (screen.pages.rows > 0) screen.pages.rows - 1 else 0,
+    } }) orelse return 0;
+    const sel = terminal.Selection.init(tl, br, false);
+    var aw: std.Io.Writer.Allocating = .init(self.alloc);
+    defer aw.deinit();
+    var formatter: terminal.formatter.ScreenFormatter = .init(screen, .{ .emit = .plain, .unwrap = false, .trim = true });
+    formatter.content = .{ .selection = sel };
+    formatter.format(&aw.writer) catch return 0;
+    return std.hash.Fnv1a_64.hash(aw.written());
+}
+
 /// Vigil: ask the daemon to re-send the screen (a resumed viewport).
 pub fn vigilDump(self: *Surface) void {
     self.queueIo(.{ .vigil_dump = {} }, .unlocked);

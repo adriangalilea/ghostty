@@ -247,6 +247,12 @@ extension Ghostty {
         /// Font-size steps below the config size taken to fit a
         /// letterboxed grid (0 = the config size).
         var vigilFontStep = 0
+        /// Content receipt state: the daemon's last hash, strikes while it
+        /// stayed the same and ours differed, and whether sync was proven.
+        var vigilScreenSeen: String = ""
+        var vigilScreenStrikes = 0
+        var vigilScreenProven = false
+        var vigilScreenResyncs = 0
         struct VigilGrid: Equatable {
             let rows: Int
             let cols: Int

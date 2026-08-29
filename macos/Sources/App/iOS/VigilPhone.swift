@@ -74,8 +74,10 @@ final class VigilPhone: ObservableObject {
         var alive: Bool
         var state: String?
         var tree: [String]?
-        /// "rows cols", the owner's pty grid (a preview renders it scaled).
+        /// "rows cols <owner>", the owner's pty grid (a preview renders it scaled).
         var size: String?
+        /// FNV-1a (hex) of the daemon's viewport text: the content receipt.
+        var screen: String?
         var grid: (rows: Int, cols: Int)? {
             // "rows cols <owner hello>": the grid is the first two words.
             let p = (size ?? "").split(separator: " ").prefix(2).compactMap { Int($0) }
@@ -98,7 +100,38 @@ final class VigilPhone: ObservableObject {
     /// (never in a body), and receipts live in their own object so a log
     /// line can never re-render the tree (every receipt re-rendered every
     /// row and taps died mid-update, 2026-08-28).
-    private(set) var directories: [UUID: Directory] = [:] { didSet { rebuildTree() } }
+    private(set) var directories: [UUID: Directory] = [:] { didSet { rebuildTree(); checkScreens() } }
+
+    /// The content receipt (the Mac's `checkScreen`, same rule): every
+    /// live surface hashes its viewport like the daemon does; a difference
+    /// while the daemon's hash held still across two directory reads is a
+    /// desync: logged, then re-synced with a dump.
+    private func checkScreens() {
+        for (pane, view) in surfaces {
+            guard let truth = directories.values.first(where: { $0.panes[pane] != nil })?.panes[pane],
+                  let daemon = truth.screen, !daemon.isEmpty else { continue }
+            let mine = view.screenHash
+            let stable = daemon == view.screenSeen
+            view.screenSeen = daemon
+            if mine == daemon {
+                view.screenStrikes = 0
+                if !view.screenProven { view.screenProven = true; log("screen: \(pane) in sync (\(mine))") }
+                continue
+            }
+            guard stable else { continue }
+            view.screenStrikes += 1
+            if view.screenStrikes == 2 {
+                view.screenResyncs += 1
+                if view.screenResyncs <= 2 {
+                    log("!! screen mismatch: \(pane) daemon \(daemon) view \(mine); re-syncing (\(view.screenResyncs)/2)")
+                    view.refreshFromDaemon()
+                } else if view.screenResyncs == 3 {
+                    log("!! screen mismatch: \(pane) persists after 2 re-syncs; silenced")
+                }
+                view.screenStrikes = -3
+            }
+        }
+    }
     private(set) var errors: [UUID: String] = [:] { didSet { rebuildTree() } }
     @Published private(set) var nodes: [Node] = []
     let receipts = VigilReceipts()

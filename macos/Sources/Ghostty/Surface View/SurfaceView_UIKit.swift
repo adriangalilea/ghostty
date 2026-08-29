@@ -194,6 +194,17 @@ extension Ghostty {
             receipt(claim ? "claimed the pty size" : "yielded the pty size")
         }
 
+        /// The content receipt: FNV-1a of the viewport's plain text, hex,
+        /// comparable to the daemon's `screen` in `vigild dir`.
+        var screenHash: String {
+            guard let surface else { return "" }
+            return String(ghostty_surface_vigil_screen_hash(surface), radix: 16)
+        }
+        var screenSeen = ""
+        var screenStrikes = 0
+        var screenProven = false
+        var screenResyncs = 0
+
         /// Re-request the screen (the app was suspended and missed the
         /// stream).
         func refreshFromDaemon() {

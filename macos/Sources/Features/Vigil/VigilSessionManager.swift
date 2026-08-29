@@ -1163,6 +1163,39 @@ class VigilSessionManager {
                 }
             }
             fitLetterbox(view, grid: grid)
+            checkScreen(view, id: id, dir: dir)
+        }
+    }
+
+    /// The content receipt: the daemon publishes the FNV-1a of its
+    /// viewport's plain text (`<pane>.screen`); this surface hashes its
+    /// own the same way. A difference counts only while the daemon's hash
+    /// held still across two ticks (a spinning TUI is not a desync); two
+    /// strikes log `!! screen mismatch` and re-sync from the daemon. The
+    /// first agreement per surface logs once, proving the mechanism.
+    private func checkScreen(_ view: Ghostty.SurfaceView, id: String, dir: URL) {
+        guard let surface = view.surface,
+              let daemon = try? String(contentsOf: dir.appendingPathComponent("\(id).screen"), encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines), !daemon.isEmpty else { return }
+        let mine = String(ghostty_surface_vigil_screen_hash(surface), radix: 16)
+        let stable = daemon == view.vigilScreenSeen
+        view.vigilScreenSeen = daemon
+        if mine == daemon {
+            view.vigilScreenStrikes = 0
+            if !view.vigilScreenProven { view.vigilScreenProven = true; vlog("screen: \(id) in sync (\(mine))") }
+            return
+        }
+        guard stable else { return }
+        view.vigilScreenStrikes += 1
+        if view.vigilScreenStrikes == 2 {
+            view.vigilScreenResyncs += 1
+            if view.vigilScreenResyncs <= 2 {
+                vlog("!! screen mismatch: \(id) daemon \(daemon) view \(mine); re-syncing (\(view.vigilScreenResyncs)/2)")
+                ghostty_surface_vigil_dump(surface)
+            } else if view.vigilScreenResyncs == 3 {
+                vlog("!! screen mismatch: \(id) persists after 2 re-syncs; the two sides hash different content, not a desync. Silenced for this surface.")
+            }
+            view.vigilScreenStrikes = -3 // grace for the dump to land
         }
     }
 
