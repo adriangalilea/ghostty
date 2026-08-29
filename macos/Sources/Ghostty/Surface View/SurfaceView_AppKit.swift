@@ -244,6 +244,9 @@ extension Ghostty {
         /// accommodates what is visible. Points for that grid come from
         /// the core (`vigilPoints`).
         @Published var vigilOwnerGrid: VigilGrid?
+        /// Font-size steps below the config size taken to fit a
+        /// letterboxed grid (0 = the config size).
+        var vigilFontStep = 0
         struct VigilGrid: Equatable {
             let rows: Int
             let cols: Int

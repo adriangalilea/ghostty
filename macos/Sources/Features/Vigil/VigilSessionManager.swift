@@ -1152,6 +1152,36 @@ class VigilSessionManager {
                 view.vigilOwnerGrid = grid
                 vlog("owner grid: \(id) \(grid.map { "\($0.rows)x\($0.cols) owned by '\(owner)'; letterboxed" } ?? "own")")
             }
+            fitLetterbox(view, grid: grid)
+        }
+    }
+
+    /// The letterboxed grid must be WHOLLY visible: a render-side scale
+    /// (ghostty's own font-size steps), never a layer transform (a
+    /// scaleEffect on the Metal layer flashed at frame rate). One step
+    /// per tick: shrink while the grid overflows the view, grow back
+    /// while the next step still fits, reset when this surface owns.
+    private func fitLetterbox(_ view: Ghostty.SurfaceView, grid: Ghostty.SurfaceView.VigilGrid?) {
+        guard let surface = view.surface else { return }
+        func act(_ a: String) { _ = a.withCString { ghostty_surface_binding_action(surface, $0, UInt(a.utf8.count)) } }
+        guard let grid else {
+            if view.vigilFontStep != 0 { act("reset_font_size"); view.vigilFontStep = 0; vlog("letterbox: \(view.vigilAttachId ?? "?") font reset") }
+            return
+        }
+        guard let pts = view.vigilPoints(for: grid) else { return }
+        let b = view.bounds.size
+        if pts.width > b.width || pts.height > b.height {
+            guard view.vigilFontStep > -8 else { return }
+            act("decrease_font_size:1"); view.vigilFontStep -= 1
+            vlog("letterbox: \(view.vigilAttachId ?? "?") \(Int(pts.width))x\(Int(pts.height)) > \(Int(b.width))x\(Int(b.height)), font -1 (step \(view.vigilFontStep))")
+        } else if view.vigilFontStep < 0 {
+            // Would one step up still fit? Cells scale ~linearly in points.
+            let base: CGFloat = 13, cur = base + CGFloat(view.vigilFontStep)
+            let f = (cur + 1) / cur
+            if pts.width * f <= b.width && pts.height * f <= b.height {
+                act("increase_font_size:1"); view.vigilFontStep += 1
+                vlog("letterbox: \(view.vigilAttachId ?? "?") font +1 (step \(view.vigilFontStep))")
+            }
         }
     }
 

@@ -98,7 +98,7 @@ extension Ghostty {
                     #endif
                     SurfaceRepresentable(view: surfaceView, size: surfaceSize)
                         .frame(width: surfaceSize.width, height: surfaceSize.height)
-                        .frame(width: geo.size.width, height: geo.size.height, alignment: letterbox == nil ? .topLeading : .center)
+                        .frame(width: geo.size.width, height: geo.size.height, alignment: letterbox == nil ? .topLeading : .bottom)
                         .clipped()
                         .focused($surfaceFocus)
                         .focusedValue(\.ghosttySurfacePwd, surfaceView.pwd)
