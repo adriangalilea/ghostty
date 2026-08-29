@@ -217,7 +217,7 @@ final class VigilRemote: ObservableObject {
                         index: index,
                         panes: panes,
                         anchor: anchor,
-                        cold: true,
+                        captured: true,
                         emoji: tab.emoji,
                         named: tab.label?.isEmpty == false || tab.emoji?.isEmpty == false))
                 }

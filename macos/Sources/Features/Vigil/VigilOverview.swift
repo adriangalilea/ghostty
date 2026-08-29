@@ -4,8 +4,8 @@ import UniformTypeIdentifiers
 
 /// The sessions overview: a switcher panel with thumbnails of every session,
 /// driven like any tab switcher (arrows to move, enter to open, esc to close,
-/// click works too). Thumbnails are live for embedded sessions, captured at
-/// detach for detached ones, absent for asleep (their card shows state only).
+/// click works too). Thumbnails are live for windowed sessions, frozen at
+/// detach for background ones (absent when none was ever taken).
 /// Borderless panels refuse key status by default; the switcher needs it so
 /// arrows/enter work end to end, shortcut in, shortcut out.
 final class VigilOverviewPanel: NSPanel {
@@ -51,7 +51,7 @@ class VigilOverview: NSObject {
                     name: session.name,
                     label: session.label,
                     emoji: session.emoji,
-                    state: session.state,
+                    place: manager.place(session.name),
                     attention: session.attention,
                     thumbnail: session.thumbnail,
                     pinned: manager.sessionPinned(session.name),
@@ -70,7 +70,7 @@ class VigilOverview: NSObject {
                 name: "stray-\(UInt(bitPattern: ObjectIdentifier(controller).hashValue))",
                 label: label,
                 emoji: nil,
-                state: .embedded,
+                place: .windowed,
                 attention: .none,
                 thumbnail: VigilSessionManager.windowSnapshot(controller),
                 pinned: manager.isPinned(controller),
@@ -84,7 +84,7 @@ class VigilOverview: NSObject {
             name: "vigil-create-tile",
             label: "new session",
             emoji: nil,
-            state: .asleep,
+            place: .background,
             attention: .none,
             thumbnail: nil,
             pinned: false,
@@ -326,9 +326,9 @@ class VigilOverview: NSObject {
 
     private func openAndHide(_ entry: OverviewEntry) {
         hide()
-        // Embedded already has a window: just focus it. Detached/asleep needs
-        // open() to re-embed or resurrect. State decides, not the class.
-        if case .embedded = entry.state, let controller = entry.controller {
+        // Windowed already has a window: just focus it. Background needs
+        // open() to re-embed or resurrect. Place decides, not the class.
+        if entry.place == .windowed, let controller = entry.controller {
             VigilSessionManager.shared.vlog("overview: focus '\(entry.name)'")
             controller.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -393,7 +393,7 @@ class VigilOverview: NSObject {
     }
 
     /// Pin/unpin the selected window on top. A session stores the intent
-    /// (works detached/asleep too); a stray window is pure window level.
+    /// (works for background sessions too); a stray window is pure window level.
     private func togglePinSelected() {
         guard let entry = model.selected, entry.isWindow else { return }
         let manager = VigilSessionManager.shared
@@ -415,7 +415,7 @@ class VigilOverview: NSObject {
         refit()
     }
 
-    /// Recover a burial from the tray (back to a live/detached session).
+    /// Recover a burial from the tray (back to a living session).
     private func recoverBurial(_ burial: VigilSessionManager.Burial) {
         VigilSessionManager.shared.exhume(burial.name)
         model.entries = buildEntries()
@@ -432,7 +432,7 @@ class VigilOverview: NSObject {
     }
 
     /// Backspace kills for real, whatever the card is: window + processes for
-    /// live ones, tree release for detached, registry drop for asleep. The
+    /// live ones, tree release for held runtimes, registry drop always. The
     /// confirmation shows the thumbnail and the exact consequence, so you
     /// never kill blind.
     private func removeSelected() {
@@ -446,11 +446,10 @@ class VigilOverview: NSObject {
         let busy = manager.busyPrograms(of: entry.name)
         let dying = busy.isEmpty ? "Nothing is running in it." : "\(busy.joined(separator: ", ")) still running; it dies."
         var info: String
-        switch entry.state {
-        case .embedded: info = "The window closes. \(dying)"
+        switch entry.place {
+        case .windowed: info = "The window closes. \(dying)"
         case .floating: info = "Floating in the quick terminal; this is the kill. \(dying)"
-        case .detached: info = "Detached but alive; this is the kill. \(dying)"
-        case .asleep: info = "Only the registry entry and its frozen state are dropped."
+        case .background: info = "Running in the background; this is the kill. \(dying)"
         }
         if let session = manager.sessions[entry.name] {
             info = "cwd: \(session.cwd)\ntabs: \(max(session.tabs.count, 1)) panes: \(max(session.paneCount, 1))\n" + info
@@ -526,7 +525,8 @@ struct OverviewEntry: Identifiable {
     let label: String
     /// The session's emoji face; display ornament, never identity.
     let emoji: String?
-    let state: VigilSessionManager.State
+    /// Where the session is displayed (derived by the manager at build).
+    let place: VigilSessionManager.Place
     let attention: VigilSessionManager.Attention
     let thumbnail: NSImage?
     /// Pinned on top (Antinote-style); only meaningful for live windows.
@@ -544,7 +544,7 @@ struct OverviewEntry: Identifiable {
         return false
     }
 
-    /// The live controller behind this card, if any (embedded window: the
+    /// The live controller behind this card, if any (windowed session: the
     /// session's selected tab).
     let controller: TerminalController?
     /// What the session is RUNNING right now (daemon tree files), compact.
@@ -552,30 +552,8 @@ struct OverviewEntry: Identifiable {
     /// What died with a reboot and nobody re-armed (tombstones on disk).
     let died: [String]
 
-    /// Words, not glyphs: the overview must be readable with zero vocabulary.
-    /// State-dependent verbs live in the kill CONFIRMATION, never in the
-    /// hint bar: the bar is constant so the layout never shifts under the
-    /// moving selection.
-    var stateWord: String {
-        switch state {
-        case .embedded: return "live"
-        case .floating: return "floating"
-        case .detached: return "detached"
-        case .asleep: return "asleep"
-        }
-    }
-
-    var stateColor: Color {
-        switch state {
-        case .embedded: return .green
-        case .floating: return .cyan
-        case .detached: return .orange
-        case .asleep: return .secondary
-        }
-    }
-
-    /// State-honest verb for the kill confirmation: every state kills
-    /// (daemons die at reap; an asleep session has only sleeping ones).
+    /// Every kill is a kill: daemons die at reap, wherever the session
+    /// was displayed.
     var removeVerb: String { "kill" }
 
 }
@@ -754,7 +732,7 @@ struct OverviewView: View {
 
     /// Quick Look-style peek: the selected session near-fullscreen. For a
     /// LIVE window the image re-captures a few times a second so the peek
-    /// tracks the terminal in near real time (a detached/asleep session has
+    /// tracks the terminal in near real time (a background session has
     /// no live window, so it stays its frozen snapshot). Arrows still move
     /// the selection, so triage happens without leaving the peek.
     private func peek(_ entry: OverviewEntry) -> some View {

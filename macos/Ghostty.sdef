@@ -181,7 +181,7 @@
       <property name="label" code="GSsL" type="text" description="The human label."/>
     </record-type>
 
-    <command name="new session" code="GhstNSes" description="Create a vigil session: a daemon-backed pane that survives window close, quit and reboot. The command, if any, is the daemon's child, never typed.">
+    <command name="new session" code="GhstNSes" description="Create a vigil session: it exists AND runs from this moment — its daemon-backed pane spawns at birth and survives window close, quit and reboot. The command, if any, is the pane's process, never typed.">
       <parameter name="label" code="GSlb" type="text" optional="yes" description="Human label (the id stays the identity).">
         <cocoa key="label"/>
       </parameter>
@@ -191,7 +191,7 @@
       <parameter name="command" code="GScm" type="text" optional="yes" description="Program to run as the pane's process instead of the login shell.">
         <cocoa key="command"/>
       </parameter>
-      <parameter name="open window" code="GSow" type="boolean" optional="yes" description="true opens a new window on it; false never does; omitted = only when no window is visible at all (the session otherwise just appears in the sidebar).">
+      <parameter name="open window" code="GSow" type="boolean" optional="yes" description="true opens a new window on it; default false — the session appears in every sidebar and its processes run regardless.">
         <cocoa key="openWindow"/>
       </parameter>
       <result type="session" description="The minted session."/>

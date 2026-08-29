@@ -136,7 +136,7 @@ final class VigilSummon {
     }
 
     /// One chime per (pane, block): every mid-turn blocker DINGS, visible
-    /// or hidden, embedded or not — noise is the contract; presence only
+    /// or hidden, windowed or not — noise is the contract; presence only
     /// decides whether anything moves (Adrian 2026-08-23: prompts passing
     /// in silence, "it did not even make a noise").
     private var chimed: [String: Date] = [:]

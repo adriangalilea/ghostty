@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The left bar: the session tree. Every session (live, detached, asleep)
+/// The left bar: the session tree. Every session, wherever displayed,
 /// → its tabs → their panes (splits AND dock tenants), each pane wearing
 /// its program (argv truth from its daemon's tree file) and its continuous
 /// AgentState; collapsed nodes roll state up (max by blocked > working >
@@ -545,7 +545,7 @@ final class VigilSidebarModel: ObservableObject {
             return DropProposal(operation: .move)
         case .pane:
             // A tab-bearing row targets that tab; a session row targets
-            // the session (lands as its own cold tab).
+            // the session (lands as its own captured tab).
             if let anchor = row?.tabAnchor {
                 dropTarget = "tab-\(anchor)"
             } else {

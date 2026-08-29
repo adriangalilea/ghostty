@@ -133,12 +133,12 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
 
         for session in manager.sessions.values.sorted(by: { $0.label < $1.label }) {
+            let place = manager.place(session.name)
             let verb: String
-            switch session.state {
-            case .embedded: verb = "Focus"
+            switch place {
+            case .windowed: verb = "Focus"
             case .floating: verb = "Focus (in the Quick Terminal)"
-            case .detached: verb = "Open (re-embed, still running)"
-            case .asleep: verb = "Open (resurrect)"
+            case .background: verb = "Open (still running)"
             }
 
             // A parent item with a submenu never fires its own action on click,
@@ -147,10 +147,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             // the emoji face rides the title, never the icon slot.
             let title = [session.emoji, session.label].compactMap { $0 }.joined(separator: " ")
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.image = Self.stateImage(session.state, session.attention)
+            item.image = Self.stateImage(place, session.attention)
             let submenu = NSMenu()
             submenu.addItem(sessionItem(verb, #selector(openSession(_:)), session.name, "macwindow"))
-            if case .embedded = session.state {
+            if place == .windowed {
                 submenu.addItem(sessionItem("Detach (keep running)", #selector(detachSession(_:)), session.name, "rectangle.portrait.and.arrow.right"))
             }
             submenu.addItem(sessionItem("Rename…", #selector(renameSession(_:)), session.name, "pencil"))
@@ -187,20 +187,20 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         return item
     }
 
-    /// One SF Symbol per session row: SHAPE is the lifecycle state, COLOUR is
-    /// attention (red = needs input, green = turn done, none = template so the
-    /// menu tints it). A coloured symbol must be non-template for the palette
-    /// colour to survive; a monochrome one stays template to adapt to the menu.
+    /// One SF Symbol per session row: SHAPE is where the session is
+    /// displayed, COLOUR is attention (red = needs input, green = turn
+    /// done, none = template so the menu tints it). A coloured symbol
+    /// must be non-template for the palette colour to survive; a
+    /// monochrome one stays template to adapt to the menu.
     private static func stateImage(
-        _ state: VigilSessionManager.State,
+        _ place: VigilSessionManager.Place,
         _ attention: VigilSessionManager.Attention
     ) -> NSImage? {
         let symbol: String
-        switch state {
-        case .embedded: symbol = "macwindow"
+        switch place {
+        case .windowed: symbol = "macwindow"
         case .floating: symbol = "macwindow.on.rectangle"
-        case .detached: symbol = "pause.circle"
-        case .asleep: symbol = "moon.zzz"
+        case .background: symbol = "rectangle.dashed"
         }
         let colour: NSColor?
         switch attention {

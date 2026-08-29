@@ -145,7 +145,7 @@ struct TreeNodeView: View {
             }
             Spacer(minLength: 4)
             if node.kind == .pane && !node.alive {
-                Text("cold").font(.caption2).foregroundStyle(.tertiary)
+                Text("not running").font(.caption2).foregroundStyle(.tertiary)
             }
             cluster
         }

@@ -382,10 +382,10 @@ struct VigilSidebarView: View {
             ) {
                 Text("·").font(.system(size: 13))
             }
-            .opacity(row.stateTag == "live" ? 1 : 0.85)
+            .opacity(row.stateTag == "windowed" ? 1 : 0.85)
             Spacer(minLength: 4)
             followKeycap(id)
-            // No "asleep/detached" tag: every session is ALIVE by
+            // No lifecycle tag on the row: every session is ALIVE by
             // construction (daemons carry it); the only honest distinction
             // is displayed-or-not, and the front tint + filled tab icons
             // already say that. Full state stays in the tooltip.
@@ -460,13 +460,13 @@ struct VigilSidebarView: View {
             }
             // Same silhouette either way (no layout flash on swap): the
             // FILLED variant marks the tab the window displays right now,
-            // the outline is a tab resting cold (daemons running). A
+            // the outline is a tab resting in its capture (daemons running). A
             // custom face takes the column over the glyph.
             VigilNameCell(
                 emoji: tab.emoji,
                 title: tab.title,
-                font: .system(size: 11, weight: tab.cold ? .regular : .medium),
-                color: tab.cold ? .secondary : .primary,
+                font: .system(size: 11, weight: tab.captured ? .regular : .medium),
+                color: tab.captured ? .secondary : .primary,
                 onRename: tab.anchor.map { anchor in
                     { label in
                         VigilSessionManager.shared.setCustomIdentity(
@@ -483,9 +483,9 @@ struct VigilSidebarView: View {
                     }
                 }
             ) {
-                Image(systemName: tab.cold ? "rectangle.on.rectangle" : "rectangle.inset.filled.on.rectangle")
+                Image(systemName: tab.captured ? "rectangle.on.rectangle" : "rectangle.inset.filled.on.rectangle")
                     .font(.system(size: 9))
-                    .foregroundColor(tab.cold ? .secondary : .primary.opacity(0.8))
+                    .foregroundColor(tab.captured ? .secondary : .primary.opacity(0.8))
             }
             if tab.panes.count > 1 {
                 Text("\(tab.panes.count)")
@@ -555,7 +555,7 @@ struct VigilSidebarView: View {
                     name: session, anchor: tab.anchor, in: model.hostController)
             }
         }
-        .help(tab.cold
+        .help(tab.captured
             ? "Cold tab: its processes run in their daemons; click to swap it into this window."
             : tab.title)
         .opacity(hintFade(tab.id)
