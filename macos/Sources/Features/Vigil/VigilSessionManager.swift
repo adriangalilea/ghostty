@@ -101,9 +101,14 @@ class VigilSessionManager {
     /// mid-work; ask is a turn-end question, conversational, it can wait.
     /// The summon follows mid-turn blockers only. A flavorless blocked
     /// (pre-flavor state file) is treated as ask: never summoned,
-    /// self-corrects on the pane's next event.
+    /// self-corrects on the pane's next event. `consent` is written by
+    /// the DAEMON alone (its pre-session dialog fallback, PROTOCOL layer
+    /// 1): mid-turn — it summons, chimes and lights the eye like any
+    /// blocker — but the ask gate refuses it by construction (a consent
+    /// surface is answered by Adrian at the pane the summon brings him
+    /// to, never narrated, never typed by nod or voice).
     enum BlockFlavor: String {
-        case permission, question, ask
+        case permission, question, ask, consent
         var midTurn: Bool { self != .ask }
     }
 
