@@ -404,11 +404,13 @@ struct KeyStrip: View {
                 key("^C", "\u{03}")
                 key("^D", "\u{04}")
                 key("^Z", "\u{1a}")
-                key("←", "\u{1b}[D"); key("↓", "\u{1b}[B"); key("↑", "\u{1b}[A"); key("→", "\u{1b}[C")
-                // The keyboard's own return submits ("\r", typed()); the
-                // strip's slot is the key the software keyboard CANNOT
-                // express: shift+enter (CSI-u), claude's line break.
-                key("⇧⏎", "\u{1b}[13;2u")
+                // No arrow keys (the floating ArrowStick owns them) and no
+                // enter of any kind: the keyboard's return submits, a
+                // hardware shift+return line-breaks (CSI-u), and the
+                // software keyboard's line break is claude's own \ +
+                // return — iOS never reports the on-screen shift, so a
+                // combo key here would be a lie (Adrian: no dedicated keys
+                // for what a keyboard already has).
                 key("/", "/"); key("-", "-"); key("|", "|"); key("~", "~")
                 Button {
                     surface.pasteClipboard()
@@ -540,6 +542,159 @@ struct FitCanvas: UIViewRepresentable {
 /// no reflow, the Mac untouched, the phone never owns the pty. OWN: the
 /// phone's grid; the surface claims the pty, the pane reflows, the Mac
 /// follows while it is open, yielded on leave.
+/// Floating 4-way arrow stick (pattern: THUMBSTICK, the arcade virtual
+/// stick): drag off center = that arrow, held = game-style repeat
+/// (0.30s, then 0.11s), a direction change retargets instantly with its
+/// own tick. Hold STILL to pick the whole stick up (haptic, it grows),
+/// drag it anywhere, release to pin — the spot persists as fractions of
+/// the terminal area, so the keyboard rising keeps it on screen.
+/// Replaces the strip's arrow row: arrows deserve a thumb, not four tap
+/// targets.
+struct ArrowStick: View {
+    let surface: Ghostty.SurfaceView
+    let area: CGSize
+    @AppStorage("vigil.stick.fx") private var fx = 0.86
+    @AppStorage("vigil.stick.fy") private var fy = 0.62
+    @StateObject private var engine = Engine()
+
+    private var home: CGPoint {
+        CGPoint(x: min(max(44, area.width * fx), area.width - 44),
+                y: min(max(60, area.height * fy), area.height - 44))
+    }
+
+    var body: some View {
+        ZStack {
+            Circle().fill(.ultraThinMaterial)
+            ForEach(Direction.allCases, id: \.self) { d in
+                Image(systemName: d.chevron)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(engine.active == d ? Color.accentColor : Color.secondary)
+                    .offset(d.edge(24))
+            }
+            Circle().fill(Color.secondary.opacity(engine.mode == .idle ? 0.25 : 0.5))
+                .frame(width: 26, height: 26)
+                .offset(x: engine.deflection.width, y: engine.deflection.height)
+        }
+        .frame(width: 68, height: 68)
+        .scaleEffect(engine.mode == .moving ? 1.15 : 1)
+        .shadow(radius: engine.mode == .moving ? 10 : 2)
+        .opacity(engine.mode == .idle ? 0.55 : 0.95)
+        .position(engine.mode == .moving ? engine.movingCenter : home)
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: engine.mode)
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { engine.changed($0, surface: surface, home: home) }
+                .onEnded { _ in
+                    if engine.mode == .moving, area.width > 0, area.height > 0 {
+                        fx = min(max(engine.movingCenter.x / area.width, 0.08), 0.94)
+                        fy = min(max(engine.movingCenter.y / area.height, 0.10), 0.94)
+                    }
+                    engine.ended()
+                }
+        )
+    }
+
+    enum Direction: CaseIterable {
+        case up, down, left, right
+        var bytes: String {
+            switch self {
+            case .up: "\u{1b}[A"
+            case .down: "\u{1b}[B"
+            case .right: "\u{1b}[C"
+            case .left: "\u{1b}[D"
+            }
+        }
+        var chevron: String {
+            switch self {
+            case .up: "chevron.up"
+            case .down: "chevron.down"
+            case .left: "chevron.left"
+            case .right: "chevron.right"
+            }
+        }
+        func edge(_ r: CGFloat) -> CGSize {
+            switch self {
+            case .up: CGSize(width: 0, height: -r)
+            case .down: CGSize(width: 0, height: r)
+            case .left: CGSize(width: -r, height: 0)
+            case .right: CGSize(width: r, height: 0)
+            }
+        }
+    }
+
+    final class Engine: ObservableObject {
+        enum Mode { case idle, stick, moving }
+        @Published var mode: Mode = .idle
+        @Published var active: Direction?
+        @Published var deflection: CGSize = .zero
+        @Published var movingCenter: CGPoint = .zero
+        private var holdWork: DispatchWorkItem?
+        private var timer: Timer?
+        private weak var surface: Ghostty.SurfaceView?
+
+        func changed(_ v: DragGesture.Value, surface: Ghostty.SurfaceView, home: CGPoint) {
+            self.surface = surface
+            let t = v.translation
+            switch mode {
+            case .idle:
+                if holdWork == nil {
+                    let work = DispatchWorkItem { [weak self] in
+                        guard let self, self.mode == .idle else { return }
+                        self.mode = .moving
+                        self.movingCenter = home
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    }
+                    holdWork = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+                }
+                if hypot(t.width, t.height) > 14 {
+                    holdWork?.cancel()
+                    mode = .stick
+                    retarget(t)
+                }
+            case .stick:
+                retarget(t)
+            case .moving:
+                movingCenter = CGPoint(x: home.x + t.width, y: home.y + t.height)
+            }
+        }
+
+        func ended() {
+            holdWork?.cancel()
+            holdWork = nil
+            timer?.invalidate()
+            timer = nil
+            active = nil
+            deflection = .zero
+            mode = .idle
+        }
+
+        private func retarget(_ t: CGSize) {
+            deflection = CGSize(width: max(-24, min(24, t.width)),
+                                height: max(-24, min(24, t.height)))
+            let d: Direction = abs(t.width) > abs(t.height)
+                ? (t.width > 0 ? .right : .left)
+                : (t.height > 0 ? .down : .up)
+            guard d != active else { return }
+            active = d
+            fire(d)
+            timer?.invalidate()
+            timer = Timer.scheduledTimer(withTimeInterval: 0.30, repeats: false) { [weak self] _ in
+                guard let self else { return }
+                self.timer = Timer.scheduledTimer(withTimeInterval: 0.11, repeats: true) { [weak self] _ in
+                    guard let self, let d = self.active else { return }
+                    self.fire(d)
+                }
+            }
+        }
+
+        private func fire(_ d: Direction) {
+            surface?.sendKeys(d.bytes)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.6)
+        }
+    }
+}
+
 struct PaneScreen: View {
     let ref: PaneRef
     @EnvironmentObject private var ghostty: Ghostty.App
@@ -580,6 +735,11 @@ struct PaneScreen: View {
                     Text(error).foregroundStyle(.orange).padding()
                 } else {
                     ProgressView("attaching…")
+                }
+                if let surfaceView {
+                    ArrowStick(
+                        surface: surfaceView,
+                        area: CGSize(width: geo.size.width, height: max(0, geo.size.height - keyboard.inset)))
                 }
             }
             // The terminal area is the window minus the keyboard, applied
