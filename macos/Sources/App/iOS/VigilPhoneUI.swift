@@ -408,7 +408,7 @@ struct KeyStrip: View {
                 key("⏎", "\r")
                 key("/", "/"); key("-", "-"); key("|", "|"); key("~", "~")
                 Button {
-                    if let s = UIPasteboard.general.string { surface.sendKeys(s) }
+                    surface.pasteClipboard()
                 } label: { Image(systemName: "doc.on.clipboard").padding(.horizontal, 10).padding(.vertical, 6) }
             }
             .padding(.horizontal, 8)

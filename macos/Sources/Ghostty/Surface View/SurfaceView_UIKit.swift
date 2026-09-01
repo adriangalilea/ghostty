@@ -306,8 +306,12 @@ extension Ghostty {
         /// The strip's ctrl is a sticky modifier for the next typed letter.
         var stickyControl = false
 
-        /// Text from the software keyboard.
+        /// Text from the software keyboard. Its return key delivers "\n";
+        /// the terminal's Enter is "\r" (the hardware path already maps
+        /// it) — without this the on-screen return did nothing in every
+        /// TUI. Dictation can carry embedded newlines: same mapping.
         func typed(_ text: String) {
+            let text = text.replacingOccurrences(of: "\n", with: "\r")
             if stickyControl, let ch = text.lowercased().unicodeScalars.first, ch.value >= 0x61, ch.value <= 0x7a, text.count == 1 {
                 stickyControl = false
                 sendKeys(String(UnicodeScalar(ch.value - 0x60)!))
@@ -316,14 +320,93 @@ extension Ghostty {
             sendKeys(text)
         }
 
+        /// Clipboard into the terminal, newlines as CRs (a multi-line
+        /// paste must not half-execute line by line as bare \n bytes).
+        func pasteClipboard() {
+            guard let s = UIPasteboard.general.string, !s.isEmpty else { return }
+            sendKeys(s.replacingOccurrences(of: "\n", with: "\r"))
+            receipt("paste \(s.count) chars")
+        }
+
         /// A tap places the pointer and wants the keyboard; a scroll
-        /// never does (real estate is the whole game on a phone).
+        /// never does (real estate is the whole game on a phone). A tap
+        /// while a selection stands clears it first (a plain click, the
+        /// desktop gesture).
         @objc private func handleTap(_ g: UITapGestureRecognizer) {
             guard let surface else { return }
             let p = g.location(in: self)
             ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
+            if ghostty_surface_has_selection(surface) {
+                _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE)
+                _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE)
+            }
             receipt("tap at \(Int(p.x)),\(Int(p.y))")
             keyboardWanted = true
+        }
+
+        // MARK: Selection (long-press drag = mouse selection; the core owns it)
+
+        private var editMenu: UIEditMenuInteraction?
+
+        fileprivate func installSelectionGesture(on sv: UIScrollView) {
+            let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+            lp.minimumPressDuration = 0.35
+            sv.addGestureRecognizer(lp)
+            let menu = UIEditMenuInteraction(delegate: self)
+            addInteraction(menu)
+            editMenu = menu
+        }
+
+        /// Long-press drag IS mouse selection: press at the point, drag
+        /// extends, release keeps it and offers Copy/Paste. When the
+        /// program captures the mouse (claude does), SHIFT rides the
+        /// events — ghostty's own capture bypass — so a long-press means
+        /// selection there too, never a click into the program.
+        @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
+            guard let surface else { return }
+            let p = g.location(in: self)
+            let mods = ghostty_surface_mouse_captured(surface) ? GHOSTTY_MODS_SHIFT : GHOSTTY_MODS_NONE
+            switch g.state {
+            case .began:
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                ghostty_surface_mouse_pos(surface, p.x, p.y, mods)
+                _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
+            case .changed:
+                ghostty_surface_mouse_pos(surface, p.x, p.y, mods)
+            case .ended, .cancelled:
+                _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
+                let sel = ghostty_surface_has_selection(surface)
+                receipt("long-press select -> selection=\(sel)")
+                if sel {
+                    editMenu?.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: p))
+                }
+            default: break
+            }
+        }
+
+        var selectionText: String? {
+            guard let surface, ghostty_surface_has_selection(surface) else { return nil }
+            var t = ghostty_text_s()
+            guard ghostty_surface_read_selection(surface, &t), t.text != nil else { return nil }
+            defer { ghostty_surface_free_text(surface, &t) }
+            return String(data: Data(bytes: t.text, count: Int(t.text_len)), encoding: .utf8)
+        }
+
+        /// Standard edit actions: the edit menu's suggested rows AND
+        /// hardware ⌘C/⌘V ride these (pressesBegan lets ⌘ combos fall
+        /// through to the responder chain).
+        override func copy(_ sender: Any?) {
+            guard let s = selectionText else { return }
+            UIPasteboard.general.string = s
+            receipt("copied \(s.count) chars")
+        }
+
+        override func paste(_ sender: Any?) { pasteClipboard() }
+
+        override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+            if action == #selector(copy(_:)) { return surface.map { ghostty_surface_has_selection($0) } ?? false }
+            if action == #selector(paste(_:)) { return UIPasteboard.general.hasStrings }
+            return super.canPerformAction(action, withSender: sender)
         }
 
         /// Hardware keyboard (reaches here from the proxy through the
@@ -401,6 +484,7 @@ extension Ghostty {
             addSubview(sv)
             scroller = sv
             sv.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap(_:))))
+            installSelectionGesture(on: sv)
         }
 
         fileprivate func scrollerMoved(_ sv: UIScrollView) {
@@ -515,6 +599,19 @@ extension Ghostty {
         }
 
         override func sizeDidChange(_ size: CGSize) { setNeedsLayout() }
+    }
+}
+
+extension Ghostty.SurfaceView: UIEditMenuInteractionDelegate {
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction,
+        menuFor configuration: UIEditMenuConfiguration,
+        suggestedActions: [UIMenuElement]
+    ) -> UIMenu? {
+        // The suggested rows are exactly the standard edit actions this
+        // responder answers for (copy while a selection stands, paste
+        // while the clipboard has text).
+        UIMenu(children: suggestedActions)
     }
 }
 
