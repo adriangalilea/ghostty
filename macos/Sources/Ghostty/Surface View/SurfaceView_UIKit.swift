@@ -328,17 +328,34 @@ extension Ghostty {
             receipt("paste \(s.count) chars")
         }
 
+        /// A view point in the TERMINAL's logical space. The render is the
+        /// grid at `presentation.scale`, anchored bottom when taller than
+        /// the frame — a fit/desktop tap was off by exactly this transform
+        /// ("points too much ahead", 2026-09-01), and the keyboard inset
+        /// shrinking the frame made it worse. Own-size is the identity.
+        private func terminalPoint(_ p: CGPoint) -> CGPoint {
+            guard presentation.grid != nil, let surface else { return p }
+            let s = ghostty_surface_size(surface)
+            let shown = CGFloat(s.height_px) / appliedScale * presentation.scale
+            let originY = presentation.anchorBottom ? bounds.height - shown : 0
+            return CGPoint(x: p.x / presentation.scale,
+                           y: (p.y - originY) / presentation.scale)
+        }
+
         /// A tap places the pointer and wants the keyboard; a scroll
         /// never does (real estate is the whole game on a phone). A tap
-        /// while a selection stands clears it first (a plain click, the
-        /// desktop gesture).
+        /// while a selection stands only DISMISSES it (the keyboard does
+        /// not ride the same gesture — first tap clears, the next one
+        /// types).
         @objc private func handleTap(_ g: UITapGestureRecognizer) {
             guard let surface else { return }
-            let p = g.location(in: self)
+            let p = terminalPoint(g.location(in: self))
             ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
             if ghostty_surface_has_selection(surface) {
                 _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE)
                 _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE)
+                receipt("tap cleared selection")
+                return
             }
             receipt("tap at \(Int(p.x)),\(Int(p.y))")
             keyboardWanted = true
@@ -364,7 +381,8 @@ extension Ghostty {
         /// selection there too, never a click into the program.
         @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
             guard let surface else { return }
-            let p = g.location(in: self)
+            let vp = g.location(in: self)
+            let p = terminalPoint(vp)
             let mods = ghostty_surface_mouse_captured(surface) ? GHOSTTY_MODS_SHIFT : GHOSTTY_MODS_NONE
             switch g.state {
             case .began:
@@ -378,7 +396,9 @@ extension Ghostty {
                 let sel = ghostty_surface_has_selection(surface)
                 receipt("long-press select -> selection=\(sel)")
                 if sel {
-                    editMenu?.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: p))
+                    // The menu anchors in VIEW space; the selection used
+                    // terminal space.
+                    editMenu?.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: vp))
                 }
             default: break
             }
@@ -430,7 +450,11 @@ extension Ghostty {
             switch key.keyCode {
             case .keyboardEscape: return "\u{1b}"
             case .keyboardTab: return "\t"
-            case .keyboardReturnOrEnter: return "\r"
+            case .keyboardReturnOrEnter:
+                // shift+enter = the CSI-u encoding (what ghostty sends
+                // under the keyboard protocol claude negotiates): a line
+                // break, not a submit.
+                return mods.contains(.shift) ? "\u{1b}[13;2u" : "\r"
             case .keyboardDeleteOrBackspace: return "\u{7f}"
             case .keyboardUpArrow: return "\u{1b}[A"
             case .keyboardDownArrow: return "\u{1b}[B"
@@ -500,11 +524,12 @@ extension Ghostty {
             scrollReceipts += 1
             if scrollReceipts % 20 == 1 { receipt("scroll dy \(Int(dy))pt (finger)") }
             // The core resolves scroll against the pointer: the finger is
-            // the pointer, placed before every delta.
-            let p = sv.panGestureRecognizer.location(in: self)
+            // the pointer, placed before every delta — in TERMINAL space
+            // (a fit view's finger travels presentation.scale × the grid).
+            let p = terminalPoint(sv.panGestureRecognizer.location(in: self))
             ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
             // mods bit 0 = precision (Ghostty.Input.ScrollMods' layout).
-            ghostty_surface_mouse_scroll(surface, 0, Double(dy * appliedScale), ghostty_input_scroll_mods_t(1))
+            ghostty_surface_mouse_scroll(surface, 0, Double(dy * appliedScale / presentation.scale), ghostty_input_scroll_mods_t(1))
         }
 
         private var scrollReceipts = 0

@@ -405,7 +405,10 @@ struct KeyStrip: View {
                 key("^D", "\u{04}")
                 key("^Z", "\u{1a}")
                 key("←", "\u{1b}[D"); key("↓", "\u{1b}[B"); key("↑", "\u{1b}[A"); key("→", "\u{1b}[C")
-                key("⏎", "\r")
+                // The keyboard's own return submits ("\r", typed()); the
+                // strip's slot is the key the software keyboard CANNOT
+                // express: shift+enter (CSI-u), claude's line break.
+                key("⇧⏎", "\u{1b}[13;2u")
                 key("/", "/"); key("-", "-"); key("|", "|"); key("~", "~")
                 Button {
                     surface.pasteClipboard()
