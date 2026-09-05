@@ -3022,6 +3022,7 @@ class VigilSessionManager {
         guard controller.window != nil else { open(name: targetName); return }
         vlog("shapeshift: window of '\(sessionName(of: controller) ?? "stray")' -> '\(targetName)'")
 
+        let t0 = Date()
         releaseOccupant(of: controller)
 
         // No manual acknowledge (see open): the mounted panes are stamped
@@ -3034,6 +3035,11 @@ class VigilSessionManager {
             NSApp.activate(ignoringOtherApps: true)
         }
         persist()
+        // The click's latency receipt: "not snappy" must be a number in
+        // the log, never a feeling (2026-09-06).
+        vlog(String(
+            format: "shapeshift: '%@' mounted in %.0fms", targetName,
+            Date().timeIntervalSince(t0) * 1000))
     }
 
     /// The current occupant leaves the window WITHOUT the window closing:
@@ -3139,7 +3145,14 @@ class VigilSessionManager {
             setOcclusion(true, [chosen])
             focusLeftmost(controller)
             let rest = held.enumerated().filter { $0.offset != chosenIndex }
-            if !rest.isEmpty {
+            if !rest.isEmpty, !nativeTabs {
+                // Sidebar mode: sibling tabs stay COLD. The registry
+                // already holds their captures (vacate stashed them),
+                // their daemons run on, the sidebar lists them, a row
+                // click mounts them into this viewport; the held views
+                // are let go below (held = []). No window is created.
+                vlog("mount: '\(name)' keeps \(rest.count) sibling tab(s) cold (vigil.tabs=sidebar)")
+            } else if !rest.isEmpty {
                 // This window is PRESENTED (it is the live viewport), so
                 // the rest attach in ONE next tick - no stagger, no
                 // trickle. The 0.3s beat exists only for freshly created
@@ -3196,7 +3209,9 @@ class VigilSessionManager {
             // (newTab's placement is config-dependent; capture order
             // decides here), focus returning to the anchored one once.
             let rest = usable.filter { $0.offset != chosen.offset }
-            if !rest.isEmpty, let parent = controller.window {
+            // Sidebar mode: the un-anchored tabs simply stay asleep in
+            // the registry; each materializes on its first row click.
+            if !rest.isEmpty, nativeTabs, let parent = controller.window {
                 regroupsInFlight += 1
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
@@ -3238,6 +3253,11 @@ class VigilSessionManager {
     /// materializing a tick behind).
     func shapeshiftTab(name: String, anchor: String, in controller: TerminalController) {
         guard sessionName(of: controller) == name, let session = sessions[name] else { return }
+        let t0 = Date()
+        defer {
+            let ms = Date().timeIntervalSince(t0) * 1000
+            if ms > 25 { vlog(String(format: "shapeshiftTab: '%@' in %.0fms", anchor, ms)) }
+        }
         let live = liveAttachIds(of: name)
         guard let target = session.tabs.first(where: { tabPaneIds($0).contains(anchor) }),
               !target.panes.isEmpty else {
@@ -6201,11 +6221,40 @@ class VigilSessionManager {
         }
     }
 
+    /// Tab presentation. "sidebar" (the DEFAULT since 2026-09-06, Adrian:
+    /// "i dont use tabs at the top"): the sidebar IS the tab UI — a mount
+    /// places only the anchored tab, sibling tabs stay captured (cold,
+    /// daemons running; a sidebar row click mounts them), no native tab
+    /// bar, so a session switch is ONE tree swap with zero window churn
+    /// (the old regroup destroyed and created a window per sibling tab on
+    /// every click). "native" restores ghostty's regular tab windows and
+    /// the forced bar: `defaults write com.mitchellh.ghostty.debug
+    /// vigil.tabs native`.
+    var nativeTabs: Bool {
+        UserDefaults.standard.string(forKey: "vigil.tabs") == "native"
+    }
+
+    /// Sidebar mode's counterpart to enforceTabBar: no bar, equally
+    /// uniform height. Only a single-window group hides (AppKit pins the
+    /// bar visible on real multi-tab groups; those collapse to one window
+    /// as their sessions re-mount in sidebar mode).
+    private func retireTabBar(_ window: NSWindow) {
+        window.tabbingMode = .automatic
+        guard let group = window.tabGroup, group.isTabBarVisible,
+              group.windows.count == 1 else { return }
+        window.toggleTabBar(nil)
+    }
+
     /// Idempotent: every session window carries the titlebar mark (face
     /// chip, pin, dock toggle) and its tab bar. One sync walks all windows;
     /// called from persist(), the chokepoint every state change already
     /// flows through (plus any window becoming key, for fresh windows).
     private func syncWindowMarks() {
+        let t0 = Date()
+        defer {
+            let ms = Date().timeIntervalSince(t0) * 1000
+            if ms > 25 { vlog(String(format: "syncWindowMarks took %.0fms", ms)) }
+        }
         for controller in TerminalController.all {
             guard let window = controller.window else { continue }
             // Real terminal windows only (skip corpses without a tree).
@@ -6215,11 +6264,10 @@ class VigilSessionManager {
             let existing = window.titlebarAccessoryViewControllers.enumerated()
                 .first { $0.element is VigilTitlebarAccessory }
 
-            // The tab bar is ALWAYS visible (Adrian 2026-08-03): a lone
-            // tab shows as one tab + the native plus, so tabbed and
-            // tabless windows share one height and switching sessions
-            // never shifts the layout vertically.
-            enforceTabBar(window)
+            // native mode: the bar is ALWAYS visible (one height
+            // everywhere, Adrian 2026-08-03). sidebar mode: no bar at
+            // all — equally uniform, and the sidebar carries the tabs.
+            if nativeTabs { enforceTabBar(window) } else { retireTabBar(window) }
 
             let name = sessionName(of: controller)
 

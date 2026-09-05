@@ -253,7 +253,12 @@ final class VigilSidebarModel: ObservableObject {
             if Date().timeIntervalSince(dragStarted) > 3 { draggingItem = nil }
             else { return }
         }
+        let snapT0 = Date()
         let fresh = VigilSessionManager.shared.sidebarSnapshot()
+        let snapMs = Date().timeIntervalSince(snapT0) * 1000
+        if snapMs > 25 {
+            VigilSessionManager.shared.vlog(String(format: "sidebar: snapshot took %.0fms", snapMs))
+        }
         if fresh != rows { rows = fresh }
         let freshBurials = VigilSessionManager.shared.sidebarBurials()
         if freshBurials != burials { burials = freshBurials }
