@@ -19,7 +19,11 @@ struct VigilSidebarView: View {
 
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
-    private let ticker = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    /// The burial tray's per-second countdown; subscribed only while the
+    /// tray is on screen (autoconnect follows the subscriber). The old
+    /// whole-tree 2s ticker is GONE: tree changes arrive event-driven
+    /// (stateDidChange, fed by the state-dir and vigild-dir watchers).
+    private let burialCountdown = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private enum Grid {
         static let chevron: CGFloat = 18
@@ -79,7 +83,6 @@ struct VigilSidebarView: View {
                         .frame(minHeight: geo.size.height, alignment: .top)
                         .coordinateSpace(name: "vigilTree")
                         .contentShape(Rectangle())
-                        .onPreferenceChange(VigilHitRowsKey.self) { model.hitRows = $0 }
                         .onContinuousHover(coordinateSpace: .named("vigilTree")) { phase in
                             switch phase {
                             case .active(let p): hovered = model.row(at: p)?.id
@@ -108,7 +111,6 @@ struct VigilSidebarView: View {
             }
             footer
         }
-        .onReceive(ticker) { _ in model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.stateDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.focusDidChange)
@@ -117,13 +119,22 @@ struct VigilSidebarView: View {
             .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true) }
     }
 
-    /// A row's report into the shared geometry map.
+    /// A row's report into the shared geometry map: a DIRECT write on
+    /// layout change, never a PreferenceKey. The preference reduce ran
+    /// across the whole tree inside every SwiftUI render pass and was the
+    /// bulk of the 500-750ms main-thread stalls (199 of 518 on 2026-09-05
+    /// sat in updatePreferences); a plain callback into non-observed model
+    /// storage costs the render graph nothing. onDisappear is the prune:
+    /// a collapsed or removed row withdraws its frame, so a ghost row can
+    /// never swallow a click.
     private func reportHit(id: String, kind: VigilHitRow.Kind) -> some View {
-        GeometryReader { g in
-            Color.clear.preference(
-                key: VigilHitRowsKey.self,
-                value: [VigilHitRow(id: id, kind: kind, frame: g.frame(in: .named("vigilTree")))])
-        }
+        Color.clear
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named("vigilTree"))
+            } action: { frame in
+                model.reportHit(VigilHitRow(id: id, kind: kind, frame: frame))
+            }
+            .onDisappear { model.dropHit(id) }
     }
 
     /// The row standing in for "where keystrokes land": the focused pane,
@@ -267,6 +278,7 @@ struct VigilSidebarView: View {
         .overlay(alignment: .top) {
             Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1)
         }
+        .onReceive(burialCountdown) { _ in model.refreshBurials() }
     }
 
     private func burialRow(_ burial: VigilSessionManager.SidebarBurial) -> some View {

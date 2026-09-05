@@ -268,6 +268,14 @@ final class VigilSidebarModel: ObservableObject {
     /// The sticky bottom tray: killed sessions living out their grace.
     @Published private(set) var burials: [VigilSessionManager.SidebarBurial] = []
 
+    /// The tray's per-second countdown, and nothing else: re-derive the
+    /// burial rows without paying a tree snapshot (the 2s whole-tree
+    /// ticker that used to carry this is gone).
+    func refreshBurials() {
+        let fresh = VigilSessionManager.shared.sidebarBurials()
+        if fresh != burials { burials = fresh }
+    }
+
     /// Keyboard entry (⌘⇧B lands here): something must be selected. A
     /// dead or missing cursor snaps to where you ARE (the active session),
     /// so navigation always starts from the room you're standing in.
@@ -406,20 +414,25 @@ final class VigilSidebarModel: ObservableObject {
 
     // MARK: The geometry map (one source of truth for hover, click, drop)
 
-    /// Row frames in the "vigilTree" space, reported by the view on every
-    /// layout. All pointer questions resolve here: hover highlight, click
-    /// dispatch and drop targeting share this ONE lookup, so they cannot
-    /// disagree with each other or with the pixels.
-    var hitRows: [VigilHitRow] = []
+    /// Row frames in the "vigilTree" space, written DIRECTLY by each row's
+    /// onGeometryChange (no preference reduce — see the view's reportHit).
+    /// Deliberately not @Published: geometry answers pointer questions, it
+    /// must never re-render the tree. All pointer questions resolve here:
+    /// hover highlight, click dispatch and drop targeting share this ONE
+    /// lookup, so they cannot disagree with each other or with the pixels.
+    private var hitRows: [String: VigilHitRow] = [:]
+
+    func reportHit(_ row: VigilHitRow) { hitRows[row.id] = row }
+    func dropHit(_ id: String) { hitRows[id] = nil }
 
     func row(at point: CGPoint) -> VigilHitRow? {
-        hitRows.first { $0.frame.contains(point) }
+        hitRows.values.first { $0.frame.contains(point) }
     }
 
     /// True when the point is below every row: the tail, where a dragged
     /// session lands LAST.
     private func isPastEnd(_ point: CGPoint) -> Bool {
-        guard let maxY = hitRows.map(\.frame.maxY).max() else { return false }
+        guard let maxY = hitRows.values.map(\.frame.maxY).max() else { return false }
         return point.y > maxY
     }
 
@@ -736,13 +749,6 @@ struct VigilHitRow: Equatable {
         case .tab(_, let anchor): return anchor
         case .pane(_, let tabAnchor, _): return tabAnchor
         }
-    }
-}
-
-struct VigilHitRowsKey: PreferenceKey {
-    static let defaultValue: [VigilHitRow] = []
-    static func reduce(value: inout [VigilHitRow], nextValue: () -> [VigilHitRow]) {
-        value.append(contentsOf: nextValue())
     }
 }
 

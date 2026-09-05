@@ -4494,10 +4494,21 @@ class VigilSessionManager {
         return base
     }
 
+    /// One snapshot = one disk read per pane file: paneRow asks for the
+    /// same tree/pid file up to five times (program, foreground,
+    /// watchers), and at 66 hook sessions the repeat reads were ~10% of
+    /// idle main-thread time (sampled 2026-09-05). While `sidebarSnapshot`
+    /// is measuring, the first read serves the rest; nil = live reads.
+    private var paneFileCache: [String: [String]]?
+
     private func paneFileLines(_ pane: String, _ ext: String) -> [String] {
-        let url = vigildStateDir.appendingPathComponent("\(pane).\(ext)")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        return text.components(separatedBy: "\n").filter { !$0.isEmpty }
+        let key = "\(pane).\(ext)"
+        if let cached = paneFileCache?[key] { return cached }
+        let url = vigildStateDir.appendingPathComponent(key)
+        let lines = (try? String(contentsOf: url, encoding: .utf8))
+            .map { $0.components(separatedBy: "\n").filter { !$0.isEmpty } } ?? []
+        paneFileCache?[key] = lines
+        return lines
     }
 
     /// argv column of a tree/died file. Line 1 is the daemon's child: a
@@ -4645,6 +4656,8 @@ class VigilSessionManager {
     /// waiting for the sidebar's 2s ticker. (Whatever latency remains on a
     /// permission prompt latency is whatever its adapter/source reports.)
     private var stateDirWatcher: DispatchSourceFileSystemObject?
+    /// The twin watcher on vigild's own state dir (tree/pid renames).
+    private var vigildDirWatcher: DispatchSourceFileSystemObject?
 
     // MARK: Nod gate (permission prompts answered by head, one at a time)
 
@@ -5012,6 +5025,22 @@ class VigilSessionManager {
         source.setCancelHandler { close(fd) }
         source.resume()
         stateDirWatcher = source
+        // The daemon side of event-driven: vigild RENAMES tree/pid files
+        // into its state dir on every process-tree or deep-foreground
+        // change, so the sidebar's program column repaints from THIS
+        // watcher. It replaced the sidebar's 2s poll (2026-09-06); the
+        // refresh throttle (~4/s) absorbs a busy fleet's event rate.
+        let vfd = Darwin.open(vigildStateDir.path, O_EVTONLY)
+        if vfd >= 0 {
+            let vsource = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: vfd, eventMask: .write, queue: .main)
+            vsource.setEventHandler {
+                NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+            }
+            vsource.setCancelHandler { close(vfd) }
+            vsource.resume()
+            vigildDirWatcher = vsource
+        }
     }
 
     /// The pane's continuous program state as its adapter last wrote it.
@@ -5377,6 +5406,8 @@ class VigilSessionManager {
     /// AgentState. A tab materializing its splits one tick apart renders
     /// every registered row from the first paint: nothing flashes.
     func sidebarSnapshot() -> [SidebarSessionRow] {
+        paneFileCache = [:]
+        defer { paneFileCache = nil }
         let leases = watchLeases()
 
         func paneRow(_ pane: Pane, view: Ghostty.SurfaceView?, isDock: Bool) -> SidebarPane {
