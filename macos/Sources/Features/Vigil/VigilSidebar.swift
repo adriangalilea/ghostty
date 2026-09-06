@@ -221,7 +221,6 @@ final class VigilSidebarModel: ObservableObject {
     /// throttle for human-rate triggers (a key-window or focus change):
     /// the tree must repaint with the click, never a tick later.
     func refresh(immediate: Bool = false) {
-        refreshFocus()
         // Storm tripwire on RATE, not lifetime count: the cumulative
         // version screamed !! every ~17 min of NORMAL use, training the
         // marker to be ignored. The real storm was hundreds of calls/s.
@@ -246,6 +245,11 @@ final class VigilSidebarModel: ObservableObject {
             return
         }
         lastRefresh = now
+        // Focus re-derives under the same gate: the INSTANT focus channel
+        // is refresh(immediate:) from focusDidChange/didBecomeKey; the
+        // throttled path must not re-walk windows 20×/s under a rename
+        // storm (2026-09-06).
+        refreshFocus()
         // A live drag owns the row order; a snapshot would clobber the
         // preview. Staleness guard: a drag cancelled OUTSIDE the bar (no
         // delegate fires) un-dims and reverts within a tick or two.

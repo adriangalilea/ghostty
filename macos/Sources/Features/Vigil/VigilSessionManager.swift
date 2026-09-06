@@ -2276,6 +2276,10 @@ class VigilSessionManager {
     /// closes the window, a replaced one never does). Membership ends
     /// before any tree empties, so the close cascade sees session-less
     /// controllers. Freezes the session's thumbnail and cwd on the way.
+    /// When each session's overview thumbnail was last captured (transient;
+    /// the capture itself is persisted via persistThumb).
+    private var thumbStamp: [String: Date] = [:]
+
     private func vacate(_ name: String, keeping viewport: TerminalController?) -> [TabRuntime] {
         let ms = members(of: name)
         let focusController = viewport
@@ -2284,13 +2288,19 @@ class VigilSessionManager {
         if let focusController {
             if let pwd = focusController.focusedSurface?.pwd { sessions[name]!.cwd = pwd }
             // Freeze the visual: the overview shows what the workspace
-            // looked like at the moment it was released. The selected tab's
-            // WHOLE window content: a workspace is its splits.
-            let thumb = Self.windowSnapshot(focusController)
-                ?? (focusController.focusedSurface ?? focusController.surfaceTree.root?.leftmostLeaf())?.asImage
-            if let thumb {
-                sessions[name]!.thumbnail = thumb
-                persistThumb(name: name, image: thumb)
+            // looked like at the moment it was released. Rate-limited to
+            // one capture per 30s per session: windowSnapshot is a render
+            // capture worth ~a couple hundred ms and it sat inside EVERY
+            // sidebar session click (the constant ~295ms, 2026-09-06);
+            // the overview's face is ornament, bounded staleness is fine.
+            if Date().timeIntervalSince(thumbStamp[name] ?? .distantPast) > 30 {
+                let thumb = Self.windowSnapshot(focusController)
+                    ?? (focusController.focusedSurface ?? focusController.surfaceTree.root?.leftmostLeaf())?.asImage
+                if let thumb {
+                    sessions[name]!.thumbnail = thumb
+                    persistThumb(name: name, image: thumb)
+                    thumbStamp[name] = Date()
+                }
             }
         }
         var pool = ms.filter { !$0.surfaceTree.isEmpty }
@@ -3024,10 +3034,12 @@ class VigilSessionManager {
 
         let t0 = Date()
         releaseOccupant(of: controller)
+        let tRelease = Date()
 
         // No manual acknowledge (see open): the mounted panes are stamped
         // seen by the focus sync that follows the mount.
         mount(targetName, into: controller, ghostty: ghostty, anchor: anchor)
+        let tMount = Date()
         // No focus theatre: the user is already IN this window; only pull
         // it forward when it is not key (menu/intent entry points).
         if controller.window?.isKeyWindow != true {
@@ -3035,11 +3047,15 @@ class VigilSessionManager {
             NSApp.activate(ignoringOtherApps: true)
         }
         persist()
-        // The click's latency receipt: "not snappy" must be a number in
-        // the log, never a feeling (2026-09-06).
+        // The click's latency receipt, staged: "not snappy" must be a
+        // number with a culprit in the log, never a feeling (2026-09-06).
+        let now = Date()
         vlog(String(
-            format: "shapeshift: '%@' mounted in %.0fms", targetName,
-            Date().timeIntervalSince(t0) * 1000))
+            format: "shapeshift: '%@' mounted in %.0fms (release %.0f, mount %.0f, persist %.0f)",
+            targetName, now.timeIntervalSince(t0) * 1000,
+            tRelease.timeIntervalSince(t0) * 1000,
+            tMount.timeIntervalSince(tRelease) * 1000,
+            now.timeIntervalSince(tMount) * 1000))
     }
 
     /// The current occupant leaves the window WITHOUT the window closing:
@@ -4678,6 +4694,7 @@ class VigilSessionManager {
     private var stateDirWatcher: DispatchSourceFileSystemObject?
     /// The twin watcher on vigild's own state dir (tree/pid renames).
     private var vigildDirWatcher: DispatchSourceFileSystemObject?
+    private var vigildDirPulse: DispatchWorkItem?
 
     // MARK: Nod gate (permission prompts answered by head, one at a time)
 
@@ -5054,8 +5071,18 @@ class VigilSessionManager {
         if vfd >= 0 {
             let vsource = DispatchSource.makeFileSystemObjectSource(
                 fileDescriptor: vfd, eventMask: .write, queue: .main)
-            vsource.setEventHandler {
-                NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+            // Coalesced to one pulse per 300ms: vigild renames screen-hash
+            // and size files several times a second across a busy fleet,
+            // and the raw event rate re-lit the sidebar storm tripwire
+            // the hour this watcher shipped (2026-09-06).
+            vsource.setEventHandler { [weak self] in
+                guard let self, self.vigildDirPulse == nil else { return }
+                let pulse = DispatchWorkItem { [weak self] in
+                    self?.vigildDirPulse = nil
+                    NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+                }
+                self.vigildDirPulse = pulse
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: pulse)
             }
             vsource.setCancelHandler { close(vfd) }
             vsource.resume()
