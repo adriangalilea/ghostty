@@ -2294,8 +2294,13 @@ class VigilSessionManager {
             // sidebar session click (the constant ~295ms, 2026-09-06);
             // the overview's face is ornament, bounded staleness is fine.
             if Date().timeIntervalSince(thumbStamp[name] ?? .distantPast) > 30 {
-                let thumb = Self.windowSnapshot(focusController)
-                    ?? (focusController.focusedSurface ?? focusController.surfaceTree.root?.leftmostLeaf())?.asImage
+                // The focused surface's asImage (its Metal layer's own
+                // contents), never a windowSnapshot: cacheDisplay is a
+                // ~280ms main-thread re-render and this is the CLICK
+                // path. The card shows the pane you were in; the whole-
+                // window walk stays with the overview's explicit look.
+                let thumb =
+                    (focusController.focusedSurface ?? focusController.surfaceTree.root?.leftmostLeaf())?.asImage
                 if let thumb {
                     sessions[name]!.thumbnail = thumb
                     persistThumb(name: name, image: thumb)
@@ -2538,6 +2543,14 @@ class VigilSessionManager {
     }
 
     /// The full window content composited (every split), not a single pane.
+    /// A full window capture is a ~280ms MAIN-THREAD re-render
+    /// (cacheDisplay walks the hierarchy, Metal readback included — the
+    /// constant click tax the staged shapeshift receipts convicted
+    /// 2026-09-06), and the cheap alternatives are gone: the window-server
+    /// copy (CGWindowListCreateImage) is unavailable in the macOS 26 SDK
+    /// and ScreenCaptureKit costs a Screen Recording grant. So this runs
+    /// ONLY where the human is deliberately looking (the overview);
+    /// the click path (vacate) captures the focused surface's asImage.
     static func windowSnapshot(_ controller: TerminalController) -> NSImage? {
         guard let view = controller.window?.contentView else { return nil }
         guard view.bounds.width > 0, view.bounds.height > 0 else { return nil }
@@ -2636,9 +2649,12 @@ class VigilSessionManager {
         materializeDockCapture(controller, first.dock, configFor: configFor)
         // A FRESH window needs one presentation beat (a tab attached to
         // an unpresented window is born invisible); after it, the rest
-        // attach together - one wait, no per-tab trickle.
+        // attach together - one wait, no per-tab trickle. Sidebar mode:
+        // the rest simply stay asleep in the registry (this was the
+        // "tabs on top at first open" leak once mount was gated —
+        // launch restore resurrects through HERE, not mount).
         let rest = Array(usable.dropFirst())
-        if !rest.isEmpty, let parent = controller.window {
+        if !rest.isEmpty, nativeTabs, let parent = controller.window {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 guard let self else { return }
                 for tab in rest {
