@@ -431,11 +431,29 @@ final class VigilSidebarModel: ObservableObject {
     /// lookup, so they cannot disagree with each other or with the pixels.
     private var hitRows: [String: VigilHitRow] = [:]
 
-    func reportHit(_ row: VigilHitRow) { hitRows[row.id] = row }
-    func dropHit(_ id: String) { hitRows[id] = nil }
+    func reportHit(_ row: VigilHitRow) {
+        var stamped = row
+        stamped.reportedAt = Date()
+        hitRows[row.id] = stamped
+    }
+
+    /// SwiftUI does not order a dying twin's onDisappear against the
+    /// incoming same-id view's first geometry report, so an unconditional
+    /// drop could deregister a LIVE row forever (review, 2026-09-06):
+    /// defer one tick and keep any row re-reported since.
+    func dropHit(_ id: String) {
+        let at = Date()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let row = self.hitRows[id], row.reportedAt <= at else { return }
+            self.hitRows[id] = nil
+        }
+    }
 
     func row(at point: CGPoint) -> VigilHitRow? {
-        hitRows.values.first { $0.frame.contains(point) }
+        // Deterministic under transient overlap (drag-reorder animation):
+        // topmost-leftmost wins, never dictionary order.
+        hitRows.values.filter { $0.frame.contains(point) }
+            .min { ($0.frame.minY, $0.frame.minX) < ($1.frame.minY, $1.frame.minX) }
     }
 
     /// True when the point is below every row: the tail, where a dragged
@@ -740,6 +758,9 @@ struct VigilHitRow: Equatable {
     let id: String
     let kind: Kind
     var frame: CGRect = .zero
+    /// When the row last reported (stamped by reportHit); orders a
+    /// deferred dropHit against a same-id re-report.
+    var reportedAt: Date = .distantPast
 
     /// The session this row belongs to, whatever its depth: territory
     /// decides drop targets.

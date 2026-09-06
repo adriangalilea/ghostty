@@ -25,6 +25,14 @@ struct VigilSidebarView: View {
     /// (stateDidChange, fed by the state-dir and vigild-dir watchers).
     private let burialCountdown = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    /// The stale-healer, 10s: facts derived from LIVE TERMINAL TITLES
+    /// have no filesystem event at all — claude's ✳ idle corrective after
+    /// an esc-interrupt, OSC-only row titles, a rewritten lease note —
+    /// and deleting the 2s ticker left them unbounded-stale on a quiet
+    /// machine (review, 2026-09-06). 10s of a cached snapshot is noise;
+    /// an eternal yellow dot is a lie.
+    private let staleHealer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
+
     private enum Grid {
         static let chevron: CGFloat = 18
         static let icon: CGFloat = 20
@@ -111,6 +119,7 @@ struct VigilSidebarView: View {
             }
             footer
         }
+        .onReceive(staleHealer) { _ in model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.stateDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.focusDidChange)

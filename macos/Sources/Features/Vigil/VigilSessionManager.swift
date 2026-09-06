@@ -1654,7 +1654,13 @@ class VigilSessionManager {
                 vlog("float: windowed '\(name)' has no pane to mirror - refused")
                 return
             }
-            if liveView(attachId: target) == nil {
+            // WINDOWED view or bust: a leaked windowless view (the
+            // sidebar-mode runtime drop makes cold-tab-with-leaked-view a
+            // steady state) used to satisfy the nil check, skip the
+            // materialize, and then fail the windowed guard below —
+            // a summon refusable FOREVER for that pane (review,
+            // 2026-09-06). materializeCapturedTab adopts the leak.
+            if liveView(attachId: target)?.window == nil {
                 // A captured tab (registered, daemon alive, no view)
                 // becomes a silent native tab of its home window first, so
                 // the mirror always has a home to match. The home window
@@ -1981,7 +1987,14 @@ class VigilSessionManager {
             resurrectConfig(name: name, pane: $0)
         }
         let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
-        let view = Ghostty.SurfaceView(app, baseConfig: configFor(tab.panes[firstPane]))
+        let first = tab.panes[firstPane]
+        if adoptable(first.id) == nil, let existing = liveView(attachId: first.id), placed(existing) {
+            vlog("!! materialize: '\(first.id)' is already displayed elsewhere - ABORTED (never mint a twin)")
+            return
+        }
+        // Adopt-or-mint (2026-08-24 rule): a view leaked by a sidebar-mode
+        // runtime drop is REUSED, never twinned onto its daemon's socket.
+        let view = adoptable(first.id) ?? Ghostty.SurfaceView(app, baseConfig: configFor(first))
         let controller = TerminalController.vigilNewTab(ghostty, parent: host, tree: SplitTree(view: view))
         registerMember(controller, name: name)
         materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
@@ -2018,8 +2031,11 @@ class VigilSessionManager {
         let tab = sessions[name]!.tabs[tabIndex]
         guard !tab.panes.isEmpty else { return }
         let firstIndex = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
-        let anchor = Ghostty.SurfaceView(
-            app, baseConfig: resurrectConfig(name: name, pane: tab.panes[firstIndex]))
+        let anchorPane = tab.panes[firstIndex]
+        // Adopt-or-mint, like every other cold materialization (review,
+        // 2026-09-06): the float must never twin a leaked view's socket.
+        let anchor = adoptable(anchorPane.id)
+            ?? Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: name, pane: anchorPane))
 
         if let current = floatingName {
             reclaim(current, from: quick, restoreStash: false)
@@ -2037,8 +2053,9 @@ class VigilSessionManager {
         var floatedDock: VigilDockRuntime?
         if let capture = tab.dock, !capture.panes.isEmpty {
             floatedDock = VigilDockRuntime(
-                views: capture.panes.map {
-                    Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: name, pane: $0))
+                views: capture.panes.map { pane in
+                    adoptable(pane.id)
+                        ?? Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: name, pane: pane))
                 },
                 active: min(capture.active, capture.panes.count - 1),
                 width: CGFloat(capture.width),
@@ -2331,7 +2348,17 @@ class VigilSessionManager {
             held.append(TabRuntime(tree: member.surfaceTree, dock: dockMap.object(forKey: member)))
         }
         for stray in pool {
-            vlog("!! vacate: '\(name)' member tree \(stray.surfaceTree.compactMap(\.vigilAttachId)) missing from its registry (appended)")
+            vlog("!! vacate: '\(name)' member tree \(stray.surfaceTree.compactMap(\.vigilAttachId)) missing from its registry (appended + registered)")
+            // Register the stray's capture too: sidebar mode DROPS held
+            // runtimes at the next mount, and a pane no registry lists is
+            // a daemon collectOrphans kills at the next launch — the old
+            // screaming-but-recoverable state became a silent death
+            // (review, 2026-09-06).
+            let (strayPanes, strayLayout) = capture(stray.surfaceTree, carrying: [])
+            if !strayPanes.isEmpty {
+                let tab = Tab(panes: strayPanes, layout: strayLayout)
+                sessions[name]!.tabs.append(tab)
+            }
             held.append(TabRuntime(tree: stray.surfaceTree, dock: dockMap.object(forKey: stray)))
         }
         for runtime in held {
@@ -2697,8 +2724,11 @@ class VigilSessionManager {
     ) {
         guard let capture, !capture.panes.isEmpty,
               let app = ghosttyApp?.app else { return }
-        let views = capture.panes.map {
-            Ghostty.SurfaceView(app, baseConfig: configFor($0))
+        let views = capture.panes.map { pane in
+            // Adopt-or-mint per tenant: a dropped dock runtime can leak
+            // its views as live socket clients (2026-08-24 class), and a
+            // second mint interleaves the replay into garbage.
+            adoptable(pane.id) ?? Ghostty.SurfaceView(app, baseConfig: configFor(pane))
         }
         let runtime = VigilDockRuntime(
             views: views,
@@ -5083,14 +5113,22 @@ class VigilSessionManager {
         // change, so the sidebar's program column repaints from THIS
         // watcher. It replaced the sidebar's 2s poll (2026-09-06); the
         // refresh throttle (~4/s) absorbs a busy fleet's event rate.
+        try? FileManager.default.createDirectory(
+            at: vigildStateDir, withIntermediateDirectories: true)
         let vfd = Darwin.open(vigildStateDir.path, O_EVTONLY)
+        if vfd < 0 {
+            vlog("!! vigild dir watcher failed to open \(vigildStateDir.path) - program column repaints only via side-channels")
+        }
         if vfd >= 0 {
             let vsource = DispatchSource.makeFileSystemObjectSource(
                 fileDescriptor: vfd, eventMask: .write, queue: .main)
-            // Coalesced to one pulse per 300ms: vigild renames screen-hash
-            // and size files several times a second across a busy fleet,
-            // and the raw event rate re-lit the sidebar storm tripwire
-            // the hour this watcher shipped (2026-09-06).
+            // Coalesced to one pulse per 300ms: pid/tree tmp+rename pairs
+            // land twice per fg/tree change across the fleet, plus
+            // screen.txt unlink/create cycles (screen-hash and size files
+            // write IN-PLACE and are invisible to this kqueue, by the
+            // dir-watch lesson), and the raw event rate re-lit the
+            // sidebar storm tripwire the hour this watcher shipped
+            // (2026-09-06).
             vsource.setEventHandler { [weak self] in
                 guard let self, self.vigildDirPulse == nil else { return }
                 let pulse = DispatchWorkItem { [weak self] in
@@ -6274,8 +6312,14 @@ class VigilSessionManager {
     /// the forced bar: `defaults write com.mitchellh.ghostty.debug
     /// vigil.tabs native`.
     var nativeTabs: Bool {
-        UserDefaults.standard.string(forKey: "vigil.tabs") == "native"
+        let raw = UserDefaults.standard.string(forKey: "vigil.tabs")
+        if let raw, raw != "native", raw != "sidebar", !Self.tabsModeWarned {
+            Self.tabsModeWarned = true
+            vlog("!! vigil.tabs '\(raw)' is neither native nor sidebar - reading as sidebar")
+        }
+        return raw == "native"
     }
+    private static var tabsModeWarned = false
 
     /// Sidebar mode's counterpart to enforceTabBar: no bar, equally
     /// uniform height. Only a single-window group hides (AppKit pins the
@@ -6283,8 +6327,16 @@ class VigilSessionManager {
     /// as their sessions re-mount in sidebar mode).
     private func retireTabBar(_ window: NSWindow) {
         window.tabbingMode = .automatic
-        guard let group = window.tabGroup, group.isTabBarVisible,
-              group.windows.count == 1 else { return }
+        // The scars enforceTabBar earned apply here too (2026-08-05):
+        // never toggle mid-regroup, and decide from the ACCESSORY (the
+        // staged install's truth), never the group flag alone, which lags
+        // it — a toggle in that gap is how stacked corpse bars are born,
+        // and sidebar mode never runs the healer (review, 2026-09-06).
+        guard regroupsInFlight == 0,
+              let group = window.tabGroup, group.windows.count == 1,
+              let tw = window as? TerminalWindow else { return }
+        let bars = tw.titlebarAccessoryViewControllers.filter { tw.isTabBar($0) }
+        guard bars.count == 1, group.isTabBarVisible else { return }
         window.toggleTabBar(nil)
     }
 
