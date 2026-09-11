@@ -4,8 +4,29 @@ import AskKit
 import AuthzUI
 import AuthzClient
 import AuthzProtocol
+import Face
 import SwiftUI
 import VigilHarness
+
+/// The settings window: authz.space's enrollment surface, then vigil's own
+/// diagnostics. Debug capture is a developer choice and lives here, never
+/// in the daily footer; secret-bearing requests stay excluded regardless.
+private struct VigilAuthorizationSettings: View {
+    @AppStorage(VigilAsk.debugCaptureKey) private var debugCapture = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            EnrollmentView()
+            Divider()
+            Form {
+                Text("Diagnostics").font(.headline)
+                Toggle("Record authorization debug captures", isOn: $debugCapture)
+                    .help("Capture audio, motion and ordinary dictated answers for local debugging. Requests marked secret are excluded. Applies to the next input session.")
+            }
+            .padding()
+        }
+    }
+}
 
 /// Vigil supplies presence and provider handoff. authz.space owns requests,
 /// device pickup and receipts; swift-senses owns only this device's input race.
@@ -200,12 +221,27 @@ final class VigilHarnessCoordinator: ObservableObject {
         Hush.release("authz-endpoint")
         VigilSessionManager.shared.vlog("authz endpoint: stopped")
     }
+    /// The plate's two live facts. Health is alpha (enrolled and answering,
+    /// or the reason it is not); level is hue, the one axis BRAND.md reserves
+    /// it for: the in-flight request's urgency, worn while it stands.
+    var plateHealth: AskPanelHealth {
+        guard isEnabled else { return .off("gate off: prompts stay on the terminal") }
+        guard inbox != nil else { return .off("service unreachable") }
+        return .ready
+    }
+    var plateTint: Color? {
+        switch current?.request.urgency {
+        case .critical: AskLevelRamp.critical
+        case .timeSensitive: AskLevelRamp.high
+        default: nil
+        }
+    }
     func showEnrollment() {
         if let enrollmentPanel { enrollmentPanel.makeKeyAndOrderFront(nil); return }
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 440),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         panel.title = "Authorization settings"; panel.isReleasedWhenClosed = false
-        panel.contentView = NSHostingView(rootView: EnrollmentView()); panel.center(); panel.makeKeyAndOrderFront(nil)
+        panel.contentView = NSHostingView(rootView: VigilAuthorizationSettings()); panel.center(); panel.makeKeyAndOrderFront(nil)
         enrollmentPanel = panel
     }
     private func dictate(_ snapshot: RequestSnapshot, finished: @escaping (String) -> Void) {

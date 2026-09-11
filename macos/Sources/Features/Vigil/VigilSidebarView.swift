@@ -16,7 +16,6 @@ struct VigilSidebarView: View {
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
     @AppStorage(VigilVoice.localeKey) private var voiceLocale = "auto"
-    @AppStorage(VigilAsk.debugCaptureKey) private var debugCapture = false
 
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
@@ -229,35 +228,53 @@ struct VigilSidebarView: View {
                 .fixedSize()
             }
             .help("off: asks stay in the queue (keycap, badge, ⌘⇧J). summon: a permission prompt or question mid-turn pulls the quick terminal in on the asking pane; answering advances in place. window: this window shapeshifts to any unseen ask.")
-            // The ask suite's rows, embedded (the MicButton contract): the
-            // suite owns the switches and the keys, vigil only says which
-            // rows this hardware can honor.
-            AskToggles(
-                hush: true,
-                nod: VigilAsk.nodAvailable,
-                voice: VigilAsk.voiceAvailable)
-            Button("Authorization devices…") { VigilHarnessCoordinator.shared.showEnrollment() }
-            Toggle("Record authorization debug captures", isOn: $debugCapture)
-                .help("Capture audio, motion and ordinary dictated answers for local debugging. Requests marked secret are excluded. Applies to the next input session.")
-            if VigilVoice.available {
-                HStack(spacing: 5) {
-                    MicButton(
-                        talk: VigilVoice.talk,
-                        spectrum: { VigilVoice.spectrum.frame().bands },
-                        voiceActive: { VigilVoice.spectrum.frame().voiceActive },
-                        hint: VigilVoice.hotkeyHint,
-                        size: 22)
-                    Spacer()
-                }
-                .contextMenu {
-                    Picker("Language", selection: $voiceLocale) {
-                        Text("Auto (es+en, arbitrated)").tag("auto")
-                        Text("Español").tag("es-ES")
-                        Text("English").tag("en-US")
+            // Everything below `follow` is ask's, and reads as one product:
+            // the plate is Face's (mark, wordmark, health, level), the rows
+            // are the suite's switches (the MicButton contract: the suite
+            // owns the controls and the keys, vigil only says which rows
+            // this hardware can honor), the rail is this Mac's dictation.
+            AskPanel(
+                health: VigilHarnessCoordinator.shared.plateHealth,
+                tint: VigilHarnessCoordinator.shared.plateTint,
+                settings: { VigilHarnessCoordinator.shared.showEnrollment() },
+                rows: {
+                    AskToggles(
+                        hush: true,
+                        nod: VigilAsk.nodAvailable,
+                        voice: VigilAsk.voiceAvailable)
+                },
+                rail: {
+                    if VigilVoice.available {
+                        HStack(spacing: 5) {
+                            MicButton(
+                                talk: VigilVoice.talk,
+                                spectrum: { VigilVoice.spectrum.frame().bands },
+                                voiceActive: { VigilVoice.spectrum.frame().voiceActive },
+                                hint: VigilVoice.hotkeyHint,
+                                size: 22)
+                            Spacer()
+                            Menu {
+                                Picker("Language", selection: $voiceLocale) {
+                                    Text("Auto (es+en, arbitrated)").tag("auto")
+                                    Text("Español").tag("es-ES")
+                                    Text("English").tag("en-US")
+                                }
+                            } label: {
+                                Text(voiceLocale == "auto" ? "auto" : voiceLocale)
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("Dictation language")
+                        }
+                        .help("Dictate into the focused pane: hold to talk, tap to lock on (tap again to stop), or \(VigilVoice.hotkeyHint) from anywhere. Speech lands in the input line - no Enter, you submit.")
+                    } else {
+                        Text("no microphone")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
                     }
-                }
-                .help("Dictate into the focused pane: hold to talk, tap to lock on (tap again to stop), or \(VigilVoice.hotkeyHint) from anywhere. Speech lands in the input line - no Enter, you submit. Right-click to pick the language.")
-            }
+                })
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 6)
