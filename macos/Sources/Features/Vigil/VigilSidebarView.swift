@@ -840,6 +840,8 @@ struct VigilSidebarView: View {
         switch state {
         case .blocked: return Color.orange.opacity(0.10)
         case .working: return Color.yellow.opacity(0.06)
+        case .interrupting: return Color.yellow.opacity(0.06)
+        case .unknown: return Color.gray.opacity(0.06)
         case .done: return Color.teal.opacity(0.06)
         case .idle, nil: return nil
         }
@@ -933,9 +935,14 @@ final class VigilDotNSView: NSView {
             layer.addSublayer(ringLayer(.systemTeal, in: rect))
         case .idle:
             layer.addSublayer(ringLayer(.secondaryLabelColor.withAlphaComponent(0.6), in: rect))
+        case .unknown:
+            layer.addSublayer(ringLayer(.systemGray, in: rect))
+        case .interrupting:
+            layer.addSublayer(ringLayer(.systemYellow, in: rect))
         case nil:
             break
         }
+        toolTip = state == .unknown ? "Agent state is unconfirmed" : state == .interrupting ? "Interruption requested; waiting for confirmation" : nil
     }
 
     /// Ring + translucent body (border at full colour, body ~55%): two

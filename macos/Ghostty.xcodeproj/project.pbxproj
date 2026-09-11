@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0DAA111100000000000001A3 /* VigilHarness in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000001A2 /* VigilHarness */; };
 		29C15B1D2CDC3B2900520DD4 /* bat in Resources */ = {isa = PBXBuildFile; fileRef = 29C15B1C2CDC3B2000520DD4 /* bat */; };
 		55154BE02B33911F001622DC /* ghostty in Resources */ = {isa = PBXBuildFile; fileRef = 55154BDF2B33911F001622DC /* ghostty */; };
 		552964E62B34A9B400030505 /* vim in Resources */ = {isa = PBXBuildFile; fileRef = 552964E52B34A9B400030505 /* vim */; };
@@ -268,6 +269,7 @@
 				Helpers/VibrantLayer.m,
 				Features/Vigil/VigilAsk.swift,
 				Features/Vigil/VigilAskHUD.swift,
+				Features/Vigil/VigilHarnessCoordinator.swift,
 				Features/Vigil/VigilBars.swift,
 				Features/Vigil/VigilCortex.swift,
 				Features/Vigil/VigilDictationHUD.swift,
@@ -340,6 +342,7 @@
 				A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */,
 				0DAA111100000000000000A4 /* NodKit in Frameworks */,
 				0DAA111100000000000000A5 /* NodSignal in Frameworks */,
+				0DAA111100000000000001A3 /* VigilHarness in Frameworks */,
 				0DAA111100000000000000B5 /* AskKit in Frameworks */,
 				0DAA111100000000000000E5 /* Face in Frameworks */,
 				0DAA111100000000000000B6 /* AskNod in Frameworks */,
@@ -513,6 +516,7 @@
 				A51BFC262B30F1B800E92F16 /* Sparkle */,
 				0DAA111100000000000000A2 /* NodKit */,
 				0DAA111100000000000000A3 /* NodSignal */,
+				0DAA111100000000000001A2 /* VigilHarness */,
 				0DAA111100000000000000B2 /* AskKit */,
 				0DAA111100000000000000E2 /* Face */,
 				0DAA111100000000000000B3 /* AskNod */,
@@ -589,6 +593,7 @@
 			);
 			mainGroup = A5B30528299BEAAA0047F10C;
 			packageReferences = (
+				0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */,
 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */,
 				0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */,
@@ -1492,6 +1497,7 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */ = {isa = XCLocalSwiftPackageReference; relativePath = "../../harness"; };
 		0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../../untitled/experiments/swift-senses";
@@ -1522,6 +1528,7 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		0DAA111100000000000001A2 /* VigilHarness */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */; productName = VigilHarness; };
 		0DAA11110000000000000F02 /* NIOSSH */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 0DAA11110000000000000F01 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */;

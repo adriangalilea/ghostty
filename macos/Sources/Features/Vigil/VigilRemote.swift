@@ -242,6 +242,8 @@ final class VigilRemote: ObservableObject {
         case "blocked": return .blocked
         case "done": return .done
         case "idle": return .idle
+        case "unknown": return .unknown
+        case "interrupting": return .interrupting
         default: return nil
         }
     }
