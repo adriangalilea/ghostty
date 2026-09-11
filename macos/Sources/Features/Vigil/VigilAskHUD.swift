@@ -39,7 +39,7 @@ final class VigilAskHUD {
     }
 
     private func handle(_ event: Ask.SurfaceEvent) {
-        model.handle(event)
+        guard model.handle(event) else { return }
         switch event {
         case .began:
             generation += 1

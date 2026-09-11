@@ -16,6 +16,7 @@ struct VigilSidebarView: View {
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
     @AppStorage(VigilVoice.localeKey) private var voiceLocale = "auto"
+    @AppStorage(VigilAsk.debugCaptureKey) private var debugCapture = false
 
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
@@ -235,6 +236,9 @@ struct VigilSidebarView: View {
                 hush: true,
                 nod: VigilAsk.nodAvailable,
                 voice: VigilAsk.voiceAvailable)
+            Button("Authorization devices…") { VigilHarnessCoordinator.shared.showEnrollment() }
+            Toggle("Record authorization debug captures", isOn: $debugCapture)
+                .help("Capture audio, motion and ordinary dictated answers for local debugging. Requests marked secret are excluded. Applies to the next input session.")
             if VigilVoice.available {
                 HStack(spacing: 5) {
                     MicButton(

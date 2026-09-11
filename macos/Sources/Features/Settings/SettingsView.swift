@@ -17,6 +17,7 @@ struct SettingsView: View {
                      "edit the file at $HOME/.config/ghostty/config.ghostty and restart Ghostty.")
                 .multilineTextAlignment(.leading)
                 .lineLimit(nil)
+                Button("Authorization devices…") { VigilHarnessCoordinator.shared.showEnrollment() }
             }
         }
         .padding()

@@ -4653,9 +4653,9 @@ class VigilSessionManager {
     }
 
     private func startStateDirWatcher() {
-        // Gate receipts land beside the summon's in vigil.log: route, speech
-        // start/cut/finish ms, verdict latency + confidence, send exit,
-        // post-send state. One file answers "what did the gate do".
+        // Content-free input diagnostics join request identity to AskKit
+        // timing/channel receipts here. Opt-in raw captures stay in senses;
+        // accepted decisions and provider delivery have their own ledgers.
         VigilAsk.trace = { [weak self] line in self?.vlog(line) }
         VigilAsk.watchRoute()
         VigilVoice.trace = { [weak self] line in self?.vlog(line) }

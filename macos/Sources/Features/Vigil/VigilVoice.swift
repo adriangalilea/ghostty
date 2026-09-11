@@ -113,6 +113,9 @@ enum VigilVoice {
             return
         }
         activePane = pane
+        // Recognition is shared; submission is not. Terminal dictation must
+        // not simultaneously answer the authorization prompt it interrupted.
+        VigilHarnessCoordinator.shared.pauseForTerminalDictation()
         generation += 1
         let gen = generation
         onStateChange?()
@@ -130,6 +133,10 @@ enum VigilVoice {
 
         Task {
             do {
+                while VigilAsk.inFlight {
+                    try await Task.sleep(for: .milliseconds(50))
+                    guard generation == gen, activePane == pane else { return }
+                }
                 // The grant precedes everything: an unauthorized engine
                 // "runs" delivering zeros and MicCapture.start throws.
                 // Generation-guarded teardown: a stale denial that raced a
@@ -246,7 +253,8 @@ enum VigilVoice {
     /// One finalized phrase -> raw keystrokes, trailing space so the next
     /// phrase (spoken or typed) lands a word apart. Never a newline.
     static func inject(_ text: String, into pane: String) {
-        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clean = String(text.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined())
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: VigilSessionManager.vigildBin)

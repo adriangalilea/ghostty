@@ -23,6 +23,7 @@ import GhosttyKit
 ///    (pinch, two-finger pan, the loupe sets `zoomScale`); one finger
 ///    stays the terminal's own scroll.
 struct VigilPhoneRoot: View {
+    @State private var authorization = false
     @EnvironmentObject private var ghostty: Ghostty.App
     @StateObject private var model = VigilPhone.shared
     @State private var path: [PaneRef] = []
@@ -34,11 +35,13 @@ struct VigilPhoneRoot: View {
         .environmentObject(model)
         // vigil://<host>/<session>/<pane>: an alert's landing.
         .onOpenURL { url in
+            if url.scheme == "vigil", url.host == "requests" { authorization = true; return }
             Task { @MainActor in
                 if let ref = await model.resolve(url: url) { path = [ref] }
             }
         }
         .onAppear { model.startDiscovery() }
+        .sheet(isPresented: $authorization) { VigilAuthorizationView().environmentObject(model) }
     }
 }
 
@@ -49,6 +52,7 @@ struct HomeView: View {
     @EnvironmentObject private var ghostty: Ghostty.App
     @State private var adding = false
     @State private var settings = false
+    @State private var authorization = false
 
     var body: some View {
         let tree = model.tree()
@@ -72,12 +76,14 @@ struct HomeView: View {
         .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref) }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { authorization = true } label: { Image(systemName: "checkmark.shield") }
                 Button { settings = true } label: { Image(systemName: "gearshape") }
                 Button { adding = true } label: { Image(systemName: "plus") }
             }
         }
         .sheet(isPresented: $adding) { AddHostView() }
         .sheet(isPresented: $settings) { SettingsView() }
+        .sheet(isPresented: $authorization) { VigilAuthorizationView() }
         .refreshable { model.refreshAll() }
         .onAppear { model.refreshAll() }
     }

@@ -4,28 +4,28 @@
 import AskKit
 import AskListen
 import AskNod
+import AuthzClient
+import AuthzProtocol
 import Foundation
 import Listen
 import NodKit
 import Say
 
-/// Answer a permission prompt with your head or your voice: nod or "yes"
-/// allows, shake or "no" denies - whichever channel delivers first.
-///
-/// The ASKING lives in the ask package - narration, per-channel
-/// reachability, cross-ask refractory, dead-air watchdog, the race,
-/// timeout, cancellation, receipts - one implementation for every consumer.
-/// This file is pure policy: which channels are enabled, which pane owns
-/// the live ask, the gate's ledger row, and the pump's completion contract.
-/// The human still decides; only the input device changes.
+/// Local speech/nod input for addressed authorization requests and form drafts.
+/// authz.space owns decisions and receipts; AskKit owns capture and teardown.
+/// Metadata is always instrumented. Content capture is an explicit local debug
+/// option; secret-bearing requests never enter the content recorder.
 enum VigilAsk {
-    /// EXPERIMENTAL early-answer window (`defaults write com.mitchellh.ghostty.debug
-    /// vigil.voice.eager -bool true`): the gate asks at prompt ARRIVAL
-    /// instead of the 1.2s ripeness gate, so a yes spoken at first sight of
-    /// the on-screen prompt lands on a live mic. Explicitly accepted risk:
-    /// an answer can be accepted before narration says a word - the screen
-    /// is the announcement. Off by default; vigil-only, never ask-core.
-    static let eagerKey = "vigil.voice.eager"
+    static let debugCaptureKey = "vigil.authz.debugCapture"
+    private struct InputLog: Encodable {
+        let requestID: String
+        let revision: Int
+        let epoch: String
+        let nonce: String
+        let pid: Int32
+        let capture: Bool
+        let input: AskDiagnostic
+    }
     // Channel preferences are ask-core (AskSettings, one namespace every
     // host shares); vigil only reads them.
     static var nodEnabled: Bool { AskSettings.nod }
@@ -42,11 +42,10 @@ enum VigilAsk {
         (nodEnabled && nodAvailable) || (voiceEnabled && voiceAvailable)
     }
 
-    /// Gate lines land in vigil.log beside the summon's, wired by the
-    /// session manager; the package's receipts flow through it with an
-    /// "ask " prefix, so the log reads as one voice.
+    /// Audio-route diagnostics share the session manager's timeline.
     nonisolated(unsafe) static var trace: ((String) -> Void)?
     private static var activePane: String?
+    private static var activeHandle: Ask.Handle?
     private nonisolated(unsafe) static var wired = false
 
     /// The pane whose ask is in flight, nil when idle. VigilSummon holds
@@ -68,8 +67,8 @@ enum VigilAsk {
     /// The prompt was answered by other means (keyboard, another device):
     /// kill the ask NOW. Feedback after the decision is noise about it.
     static func cancel(pane: String, reason: String = "superseded") {
-        guard activePane == pane else { return }
-        Ask.cancel(reason: reason)
+        guard activePane == pane, let activeHandle else { return }
+        Ask.cancel(activeHandle, reason: reason)
     }
 
     /// A begun ask that has not COMPLETED yet, teardown included: a
@@ -77,75 +76,27 @@ enum VigilAsk {
     /// begin guard - asking through it would land "busy".
     static var inFlight: Bool { Ask.isAsking }
 
-    /// One jsonl line per DECISION, alongside cmd-guard's ledger in spirit:
-    /// the permission state machine must know WHICH layer answered a prompt
-    /// (cmd-guard rule, auto-accept, keyboard, a head gesture, a spoken
-    /// yes/no), so every layer keeps its own truth and `wake prompts`
-    /// composes them. `layer` is the winning channel; unanswered asks carry
-    /// the channels that were offered. Blind and busy asks never reached
-    /// the human - nothing to ledger.
-    private static let ledgerURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".local/state/ask-gate/decisions.jsonl")
-
-    private static func ledger(_ receipt: AskReceipt, pane: String?, offered: String) {
-        var entry: [String: Any] = [
-            "ts": ISO8601DateFormatter().string(from: Date()),
-            "layer": receipt.source ?? offered,
-            "verdict": receipt.verdict.label,
-            "pane": pane ?? "",
-            "spoken": receipt.spoken,
-            "ask": receipt.id,
-            "latency_ms": receipt.latencyMs,
-            "narrated_ms": receipt.narratedMs,
-            "route": receipt.route,
-            // The flight (motion + audio + events of THIS ask) the row
-            // joins to: `senses flight <id>` reviews it, `senses flag`
-            // pins it as a false positive or a miss.
-            "flight": Flight.last ?? "",
-        ]
-        if let detail = receipt.verdict.event?.detail {
-            entry["detail"] = detail
-        }
-        if let confidence = receipt.confidence {
-            entry["confidence"] = (confidence * 100).rounded() / 100
-        }
-        guard let data = try? JSONSerialization.data(withJSONObject: entry) else { return }
-        let dir = ledgerURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: ledgerURL.path) {
-            FileManager.default.createFile(atPath: ledgerURL.path, contents: nil)
-        }
-        if let handle = try? FileHandle(forWritingTo: ledgerURL) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.write(Data("\n".utf8))
-            try? handle.close()
-        }
-    }
-
-    /// completion carries the answer AND the verdict label, because the
-    /// caller's episode bookkeeping keys off HOW the ask ended: an answered
-    /// prompt (allow/deny/superseded) closes its episode by EVENT, never by
-    /// the pump sampling the unblocked gap between chained prompts.
-    /// `options` makes it a choice (an AskUserQuestion's labels): the
-    /// package narrates them numbered, voice answers by ordinal, the HUD
-    /// by click or digit; nod sits a choice out (binary by nature).
+    /// Completion follows channel teardown, so the next presentation can begin
+    /// immediately. Request dictation returns a draft to the bound form.
     static func ask(
         _ spoken: String,
         options: [String]? = nil,
         textOptions: Set<Int> = [],
         multi: Bool = false,
-        pane: String? = nil,
+        request: RequestSnapshot,
         timeout: TimeInterval = 20,
+        enterText: Bool = false,
+        allowVoice: Bool = true,
+        allowNod: Bool = true,
         completion: @escaping (Answer?, String) -> Void
     ) {
+        let pane = request.request.context
+        let recording = request.request.allowsDebugCapture(enabled: UserDefaults.standard.bool(forKey: debugCaptureKey))
         var sources: [any AnswerSource] = []
-        if nodEnabled, nodAvailable { sources.append(NodSource()) }
-        if voiceEnabled, voiceAvailable {
-            // The sink is the difference between "voice said nothing" and
-            // "voice dropped your yes as echo / AEC never engaged".
+        if allowNod, nodEnabled, nodAvailable { sources.append(NodSource()) }
+        if allowVoice, voiceEnabled, voiceAvailable {
             sources.append(
-                VoiceSource(locales: VigilVoice.chosenLocales, sink: VoiceLogSink()))
+                VoiceSource(locales: VigilVoice.chosenLocales, sink: recording ? VoiceLogSink() : nil))
         }
         guard !sources.isEmpty else { return completion(nil, "unavailable") }
         guard !Ask.isAsking else { return completion(nil, "busy") }
@@ -155,23 +106,23 @@ enum VigilAsk {
             VigilAskHUD.arm()
         }
         activePane = pane
-        let offered = sources.map(\.id).joined(separator: "+")
-        // The wording is the hook's rule-derived gist (tier 1 of the
-        // composer architecture); the raw command is NOT re-shipped here -
-        // it stands in cmd-guard's ledger, and the distiller joins the two
-        // by timestamp when it mines the compose corpus.
         Flight.pane = pane
-        Ask.begin(
+        // Safe wording comes from the requester. Raw inputs stay with it.
+        activeHandle = Ask.begin(
             spoken, sources: sources, options: options, textOptions: textOptions, multi: multi,
             composition: Composition(input: spoken, tier: options == nil ? "static-gist" : "question-literal"),
-            timeout: timeout
-        ) { receipt in
-            switch receipt.verdict {
-            case .allow, .deny, .chose, .timeout, .cancelled:
-                ledger(receipt, pane: pane, offered: offered)
-            case .blind, .busy:
-                break
-            }
+            recording: recording,
+            recordDictation: recording,
+            diagnostics: { event in
+                let row = InputLog(requestID: request.id, revision: request.handle.revision,
+                    epoch: request.handle.serviceEpoch, nonce: request.handle.nonce,
+                    pid: ProcessInfo.processInfo.processIdentifier, capture: recording, input: event)
+                if let data = try? JSONEncoder().encode(row), let line = String(bytes: data, encoding: .utf8) {
+                    trace?("authz input " + line)
+                }
+            },
+            timeout: timeout,
+            completion: { receipt in
             // Ask's completion runs on the main actor in the SAME turn that
             // flips it out of flight: cleanup and the caller's completion
             // are atomic against every other main-queue event. An async
@@ -180,9 +131,11 @@ enum VigilAsk {
             // cancel a no-op.
             MainActor.assumeIsolated {
                 activePane = nil
-                completion(receipt.verdict.answer, receipt.verdict.label)
+                activeHandle = nil
+                completion(receipt.verdict.answer, receipt.source ?? "surface")
             }
-        }
+            })
+        if enterText, let activeHandle { Ask.pick(activeHandle, 0, detail: "dictate-request-draft") }
     }
 }
 #endif

@@ -1,370 +1,234 @@
+#if os(macOS)
 import AppKit
 import AskKit
+import AuthzUI
+import AuthzClient
+import AuthzProtocol
 import SwiftUI
 import VigilHarness
 
-/// AskKit owns the human-input race. The broker owns requests and delivery.
-/// No answer path in this coordinator writes to a terminal.
+/// Vigil supplies presence and provider handoff. authz.space owns requests,
+/// device pickup and receipts; swift-senses owns only this device's input race.
 @MainActor
 final class VigilHarnessCoordinator: ObservableObject {
     static let shared = VigilHarnessCoordinator()
-    @Published private(set) var requests: [Interaction] = []
-    @Published private(set) var current: Interaction?
-    @Published private(set) var error: String?
-    @Published private(set) var brokerAvailable = false
-    @Published private(set) var spokenAnswers: [String: QuestionAnswer] = [:]
     var isEnabled: Bool {
         ProcessInfo.processInfo.environment["VIGIL_HARNESS_ENABLED"] == "1" ||
             FileManager.default.fileExists(atPath: HarnessPaths.root.appendingPathComponent("enabled").path)
     }
-    private var queue = PresentationQueue()
-    private var timer: Timer?
+    private var inbox: InboxModel?
     private var panel: NSPanel?
-    private var refreshing = false
+    private var enrollmentPanel: NSPanel?
+    private let panelDelegate = AuthorizationPanelDelegate()
+    private var current: RequestSnapshot?
+    private var preparing: Task<Void, Never>?
     private var preferredPane: String?
-    private var presentedAt = Date()
-    private var brokerStarter: Process?
-    private var nextBrokerStart = Date.distantPast
+    private var visible: [String] = []
+    private var nextStart = Date.distantPast
+    private var starters: [Process] = []
+    private var hushOwner: String?
+    private var inputGeneration = 0
+    private var deferredForDictation = false
+    private var nextServiceCheck = Date.distantPast
 
     func pump(preferredPane: String?) {
-        guard isEnabled else {
-            stopObserving()
+        guard isEnabled else { stop(); return }
+        if inbox == nil { connect() }
+        let panes = inbox?.requests.map { $0.request.context }.filter { VigilSessionManager.shared.paneOnAnyScreen($0) } ?? []
+        let focused = NSApp.isActive ? preferredPane : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        if self.preferredPane != focused || panes != visible {
+            self.preferredPane = focused; visible = panes
+            Task { await inbox?.presence(focusedContext: focused, visibleContexts: panes) }
+        }
+        if deferredForDictation, !VigilVoice.isActive {
+            deferredForDictation = false
+            clear(releaseHush: false)
+        }
+        if let selected = inbox?.selected, current?.handle != selected.handle { present(selected) }
+    }
+    private func connect() {
+        guard Date() >= nextStart else { return }
+        nextStart = Date().addingTimeInterval(10)
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/authz-space")
+        do {
+            let configuration = try LocalAuthority.open(Data(contentsOf: root.appendingPathComponent("configuration.json")), as: Configuration.self, key: LocalAuthority.load())
+            let key = try DeviceIdentity.key()
+            let id = Canonical.digest(key.publicKey.rawRepresentation)
+            guard configuration.endpoints.contains(where: { $0.id == id && $0.enabled }) else { return }
+            let transport = EndpointTransport(endpointID: id, key: key,
+                underlying: SocketTransport(path: root.appendingPathComponent("service.sock").path, verifyServer: PlatformTrust.verifyService))
+            let model = InboxModel(transport: transport)
+            model.onPresentation = { [weak self] request in
+                if let request { self?.present(request) } else { self?.clear() }
+            }
+            model.onHandoff = { pane in
+                if let view = VigilSessionManager.shared.liveView(attachId: pane) { view.window?.makeKeyAndOrderFront(nil); view.window?.makeFirstResponder(view) }
+            }
+            model.onHush = { held in if held { Hush.claim("authz-endpoint") } else { Hush.release("authz-endpoint") } }
+            model.onDictate = { [weak self] snapshot, finished in self?.dictate(snapshot, finished: finished) }
+            model.onConnectionFailure = { [weak self] in self?.startServices() }
+            inbox = model; model.start(focusedContext: preferredPane)
+            startServices()
+            VigilSessionManager.shared.vlog("authz endpoint: connected; addressed event stream enabled")
+        } catch { VigilSessionManager.shared.vlog("authz endpoint: enrollment unavailable; native attention remains active") }
+    }
+    private func startServices() {
+        guard isEnabled, Date() >= nextServiceCheck else { return }
+        nextServiceCheck = Date().addingTimeInterval(10)
+        Task { [weak self] in
+            guard let self else { return }
+            let socket = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/authz-space/service.sock").path
+            let healthy = (try? await SocketTransport(path: socket, verifyServer: PlatformTrust.verifyService).call(RPC("health")))?.ok == true
+            guard self.isEnabled else { return }
+            self.launchServices(startAuthorization: !healthy)
+        }
+    }
+    private func launchServices(startAuthorization: Bool) {
+        // Installed binaries only. No development build is launched implicitly.
+        for (binary, arguments) in [("authz", ["serve"]), ("vigil-agent", ["ensure"])] {
+            if binary == "authz", !startAuthorization { continue }
+            if starters.contains(where: { $0.executableURL?.lastPathComponent == binary && $0.isRunning }) { continue }
+            let process = Process()
+            process.executableURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/" + binary)
+            process.arguments = arguments; process.environment = AgentEnvironment.scrub(ProcessInfo.processInfo.environment)
+            process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice
+            process.terminationHandler = { [weak self] process in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.starters.removeAll { $0 === process }
+                    VigilSessionManager.shared.vlog("authz service: \(binary) exited \(process.terminationStatus)")
+                    if binary == "authz", process.terminationStatus != 0 {
+                        self.stop(); self.nextStart = Date().addingTimeInterval(10)
+                    }
+                }
+            }
+            do { try process.run(); starters.append(process) } catch { VigilSessionManager.shared.vlog("authz service: installed \(binary) unavailable") }
+        }
+    }
+    private func present(_ snapshot: RequestSnapshot) {
+        guard isEnabled, current?.handle != snapshot.handle, let inbox else { return }
+        // The summon owns interruption/veto policy. Showing an independent
+        // answer panel must not sneak around it for a background pane.
+        guard canPresent(snapshot) else {
+            if current != nil { clear() }
             return
         }
-        self.preferredPane = preferredPane
-        if timer == nil {
-            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refresh() }
-            }
-        }
-        refresh()
-    }
-
-    private func refresh() {
-        guard isEnabled else { stopObserving(); return }
-        guard !refreshing else { return }
-        refreshing = true
-        Task {
-            let snapshots: [SessionSnapshot]? = await Task.detached(priority: .utility) {
-                // RPC also establishes broker liveness: stale persisted requests never arm AskKit.
-                guard let response = try? HarnessWire.call(RPCRequest("list")), response.ok else { return nil as [SessionSnapshot]? }
-                return try? response.value.decode([SessionSnapshot].self)
-            }.value
-            refreshing = false
-            guard isEnabled else { stopObserving(); return }
-            let available = snapshots != nil
-            if !available { recoverBroker() }
-            if brokerAvailable != available {
-                brokerAvailable = available
-                NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
-            }
-            requests = (snapshots ?? []).flatMap(\.pending).sorted { $0.evidence.observedAt < $1.evidence.observedAt }
-            if queue.synchronize(requests) {
-                if let current { VigilAsk.cancel(pane: current.paneID, reason: "superseded") }
-                current = nil
-            }
-            // Bound automatic presentation occupancy, even without voice hardware.
-            if let current, Date().timeIntervalSince(presentedAt) > 60, panel?.isKeyWindow != true { later(current) }
-            guard current == nil, !VigilAsk.inFlight else { return }
-            if let next = queue.next(requests, preferredPane: preferredPane) { present(next) } else if requests.isEmpty { panel?.orderOut(nil) }
-        }
-    }
-
-    private func stopObserving() {
-        timer?.invalidate(); timer = nil
-        if let current {
-            VigilAsk.cancel(pane: current.paneID, reason: "harness-disabled")
-            queue.finish(PresentationQueue.Ticket(current))
-        }
-        current = nil; requests = []; brokerAvailable = false
-        panel?.orderOut(nil)
-    }
-
-    /// Service recovery is independent of AskKit. Only an enabled, installed
-    /// deployment may start the broker; development build products are ignored.
-    private func recoverBroker() {
-        guard isEnabled, brokerStarter == nil, Date() >= nextBrokerStart else { return }
-        nextBrokerStart = Date().addingTimeInterval(10)
-        let binary = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/vigil-agent")
-        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
-            VigilSessionManager.shared.vlog("harness service: installed broker missing; native prompts retain attention")
-            return
-        }
-        let process = Process()
-        process.executableURL = binary; process.arguments = ["ensure"]
-        process.environment = AgentEnvironment.scrub(ProcessInfo.processInfo.environment)
-        process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice
-        process.terminationHandler = { process in
-            Task { @MainActor in
-                VigilHarnessCoordinator.shared.brokerStarter = nil
-                VigilSessionManager.shared.vlog("harness service: ensure exited \(process.terminationStatus)")
-            }
-        }
-        do { try process.run(); brokerStarter = process } catch {
-            VigilSessionManager.shared.vlog("harness service: ensure launch failed \(error.localizedDescription)")
-        }
-    }
-
-    func select(_ request: Interaction) {
-        guard request.phase == .pending, request.transport != .manualOnly else { return }
-        if let current {
-            VigilAsk.cancel(pane: current.paneID, reason: "preempted")
-            queue.finish(PresentationQueue.Ticket(current))
-        }
-        queue.select(request)
-        present(request)
-    }
-
-    private func present(_ request: Interaction) {
-        current = request; error = nil; spokenAnswers = [:]; presentedAt = Date()
+        clear(releaseHush: false); current = snapshot
+        let generation = inputGeneration
         if panel == nil {
-            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 760, height: 600),
-                                styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
-            panel.title = "Vigil requests"
-            panel.isReleasedWhenClosed = false
-            panel.contentView = NSHostingView(rootView: VigilHarnessInbox(coordinator: self))
-            panel.center()
-            self.panel = panel
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
+                styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
+            panel.title = "Requests"; panel.isReleasedWhenClosed = false; panel.center(); self.panel = panel
+            panelDelegate.onClose = { [weak self] in
+                guard let self, let current = self.current, let inbox = self.inbox else { return }
+                self.clear()
+                Task { await inbox.later(current) }
+            }
+            panel.delegate = panelDelegate
         }
+        panel?.contentView = NSHostingView(rootView: AuthzInbox(model: inbox))
         panel?.orderFront(nil)
-        // Plans require reading the full review surface. Voice never approves an unread plan.
-        if request.kind == .questionnaire { speakQuestion(request, index: 0) } else if request.kind == .permission,
-            request.actions.contains(where: { $0.id == "allow-once" && $0.kind == .approveOnce && $0.effects.isEmpty }),
-            request.actions.contains(where: { $0.id == "deny" && $0.kind == .reject }),
-            VigilAsk.armed, !VigilVoice.isActive, !VigilAsk.inFlight {
-            VigilAsk.ask(request.attentionSummary, pane: request.paneID) { [weak self] answer, source in
-                guard let self, self.sameRequest(request) else { return }
-                switch answer {
-                case .yes: self.submit(request, .action("allow-once", feedback: nil), source: source)
-                case .no: self.submit(request, .action("deny", feedback: nil), source: source)
-                default: break
+        preparing = Task { [weak self] in
+            guard await inbox.presented(snapshot, claim: true), let self, self.current?.handle == snapshot.handle else { return }
+            if self.hushOwner == nil { self.hushOwner = UUID().uuidString }
+            if let owner = self.hushOwner { await inbox.hush(owner: owner, acquire: true) }
+            while VigilAsk.inFlight || VigilVoice.isActive {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled, self.current?.handle == snapshot.handle else { return }
+            }
+            guard !Task.isCancelled, self.current?.handle == snapshot.handle, VigilAsk.armed else { return }
+            let request = snapshot.request
+            guard request.kind == .permission, request.requirement.minimum == .intent,
+                  request.privacy.narration, !request.containsSecrets, !request.safeGist.isEmpty,
+                  let yes = request.actions.first(where: { $0.effect == .approveOnce }),
+                  let no = request.actions.first(where: { $0.effect == .reject }) else { return }
+            let voice = yes.channels.contains(.voice) && no.channels.contains(.voice)
+            let nod = yes.channels.contains(.nod) && no.channels.contains(.nod)
+            guard voice || nod else { return }
+            VigilAsk.ask(request.safeGist, request: snapshot,
+                         allowVoice: voice, allowNod: nod) { [weak self] answer, source in
+                guard let self, self.current?.handle == snapshot.handle, self.inputGeneration == generation else { return }
+                Task { @MainActor in
+                    if answer == .yes || answer == .no {
+                        let channel: InputChannel = source == "nod" ? .nod : source == "surface" ? .surface : .voice
+                        await inbox.submit(snapshot, answer: .action(answer == .yes ? yes.id : no.id, feedback: nil), channel: channel)
+                    } else { await inbox.later(snapshot) }
+                    // Completion is after channel teardown. Next presentation
+                    // arrives from the service stream, including timeout/Later.
+                    VigilSessionManager.shared.pumpAskGate()
                 }
             }
         }
     }
-
-    private func sameRequest(_ request: Interaction) -> Bool {
-        current.map(PresentationQueue.Ticket.init) == PresentationQueue.Ticket(request)
+    private func canPresent(_ snapshot: RequestSnapshot) -> Bool {
+        guard !VigilBars.shared.controlMode else { return false }
+        if NSApp.isActive, let key = NSApp.keyWindow {
+            if key is NSPanel, key !== panel, !(key.windowController is QuickTerminalController) { return false }
+            if let controller = key.windowController as? TerminalController,
+               let pane = controller.focusedSurface?.vigilAttachId, pane != snapshot.request.context,
+               VigilSessionManager.shared.paneAgentState(pane)?.state == .blocked { return false }
+        }
+        if snapshot.request.requester == "vigil" {
+            return VigilSessionManager.shared.paneOnAnyScreen(snapshot.request.context) ||
+                VigilSummon.shared.currentAskPane == snapshot.request.context
+        }
+        return true
     }
-
-    private func speakQuestion(_ request: Interaction, index: Int) {
-        guard sameRequest(request), index < request.questions.count,
-              VigilAsk.armed, !VigilVoice.isActive, !VigilAsk.inFlight else { return }
-        let question = request.questions[index]
-        guard question.isSecret != true, question.kind == .singleChoice || question.kind == .multipleChoice else { return }
-        let choices = question.choices.map { choice in
-            choice.label + (choice.description.map { ". " + $0 } ?? "")
-        } + (question.allowOther ? ["Other answer"] : [])
-        VigilAsk.ask(question.title, options: choices,
-                     textOptions: question.allowOther ? [question.choices.count] : [],
-                     multi: question.kind == .multipleChoice, pane: request.paneID) { [weak self] answer, source in
-            guard let self, self.sameRequest(request) else { return }
-            let value: QuestionAnswer
-            switch answer {
-            case .option(let chosen) where question.choices.indices.contains(chosen):
-                value = .choices([question.choices[chosen].id], other: nil)
-            case .options(let chosen) where chosen.allSatisfy({ question.choices.indices.contains($0) }):
-                value = .choices(chosen.map { question.choices[$0].id }, other: nil)
-            case .text(let text, let option) where question.allowOther && option == question.choices.count:
-                value = .choices([], other: text)
-            default: return
-            }
-            self.spokenAnswers[question.id] = value
-            if index + 1 == request.questions.count {
-                self.submit(request, .questionnaire(self.spokenAnswers), source: source)
-            } else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.speakQuestion(request, index: index + 1) }
-            }
+    private func clear(releaseHush: Bool = true) {
+        inputGeneration += 1
+        preparing?.cancel(); preparing = nil
+        if let current { VigilAsk.cancel(pane: current.request.context, reason: "authz-presentation-closed") }
+        current = nil; panel?.orderOut(nil)
+        if releaseHush, let inbox, let owner = hushOwner {
+            hushOwner = nil
+            Task { await inbox.hush(owner: owner, acquire: false) }
         }
     }
-
-    func submit(_ request: Interaction, _ answer: InteractionAnswer, source: String = "surface") {
-        guard sameRequest(request), HarnessReducer.valid(answer, for: request) else { return }
-        let command = RespondCommand(request: request, answer: answer, source: source)
-        VigilAsk.cancel(pane: request.paneID, reason: "submitted")
-        Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                do {
-                    let challenge = try HarnessWire.call(RPCRequest("humanChallenge"))
-                    guard challenge.ok, let nonce = challenge.value.string else { return RPCResponse(false, .string("Human authorization is unavailable.")) }
-                    let signed = try HumanAuthorization.sign(RPCRequest("respond", try .from(command)), challenge: nonce, key: HumanAuthorization.loadKey())
-                    return try HarnessWire.call(signed)
-                } catch { return RPCResponse(false, .string("Human authorization is unavailable or receipt was not confirmed. Refresh before retrying.")) }
-            }.value
-            guard sameRequest(request) else { return }
-            if result.ok {
-                queue.finish(PresentationQueue.Ticket(request))
-                current = nil
-                refresh()
-            } else {
-                error = result.value.string ?? "The request changed. Refresh before answering."
-                refresh()
+    private func stop() {
+        guard inbox != nil || current != nil else { return }
+        clear(); inbox?.stop(); inbox?.onHush = nil; inbox = nil
+        Hush.release("authz-endpoint")
+        VigilSessionManager.shared.vlog("authz endpoint: stopped")
+    }
+    func showEnrollment() {
+        if let enrollmentPanel { enrollmentPanel.makeKeyAndOrderFront(nil); return }
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 440),
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        panel.title = "Authorization settings"; panel.isReleasedWhenClosed = false
+        panel.contentView = NSHostingView(rootView: EnrollmentView()); panel.center(); panel.makeKeyAndOrderFront(nil)
+        enrollmentPanel = panel
+    }
+    private func dictate(_ snapshot: RequestSnapshot, finished: @escaping (String) -> Void) {
+        guard current?.handle == snapshot.handle, !snapshot.request.containsSecrets, !VigilVoice.isActive else { return }
+        inputGeneration += 1
+        let generation = inputGeneration
+        VigilAsk.cancel(pane: snapshot.request.context, reason: "edit-request-draft")
+        preparing?.cancel()
+        preparing = Task { [weak self] in
+            while VigilAsk.inFlight {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+            }
+            guard let self, self.current?.handle == snapshot.handle, !Task.isCancelled else { return }
+            VigilAsk.ask("Dictate your answer", options: ["Answer"], textOptions: [0], request: snapshot,
+                enterText: true) { [weak self] answer, _ in
+                guard self?.current?.handle == snapshot.handle, self?.inputGeneration == generation,
+                      case .text(let text, _) = answer else { return }
+                finished(text)
             }
         }
     }
-
-    func later(_ request: Interaction) {
-        guard sameRequest(request) else { return }
-        VigilAsk.cancel(pane: request.paneID, reason: "deferred")
-        queue.finish(PresentationQueue.Ticket(request), dismissed: true)
-        current = nil
-    }
-
-    func provisionHumanApprovals() {
-        guard isEnabled else { return }
-        let ui = Bundle.main.bundleURL
-        let broker = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/vigil-agent")
-        Task {
-            let message = await Task.detached(priority: .userInitiated) {
-                do {
-                    try HumanAuthorization.provision(ui: ui, broker: broker)
-                    return "Human approval authority created. Review the pending request before submitting."
-                } catch {
-                    return "Human approval setup failed or already exists. Review the Keychain entry and installed signing identities; no existing authority was replaced."
-                }
-            }.value
-            error = message
-        }
+    func pauseForTerminalDictation() {
+        guard let current else { return }
+        inputGeneration += 1; deferredForDictation = true
+        preparing?.cancel(); preparing = nil
+        VigilAsk.cancel(pane: current.request.context, reason: "terminal-dictation")
     }
 }
 
-private struct VigilHarnessInbox: View {
-    @ObservedObject var coordinator: VigilHarnessCoordinator
-    var body: some View {
-        HStack(spacing: 0) {
-            List(coordinator.requests) { request in
-                Button { coordinator.select(request) } label: {
-                    VStack(alignment: .leading) {
-                        Text(request.title).lineLimit(2)
-                        Text(request.paneID + " · " + request.phase.rawValue).font(.caption).foregroundStyle(.secondary)
-                        if request.transport == .manualOnly { Text("Continue in terminal").font(.caption) }
-                    }
-                }.buttonStyle(.plain)
-            }.frame(width: 210)
-            Divider()
-            if let request = coordinator.current {
-                VigilHarnessRequestView(request: request, coordinator: coordinator)
-                    .id(request.instanceID + request.id + String(request.revision))
-            } else {
-                VStack(spacing: 12) {
-                    Text("Choose a pending request").foregroundStyle(.secondary)
-                    Button("Set up human approvals…") { coordinator.provisionHumanApprovals() }
-                    if let error = coordinator.error { Text(error).font(.caption) }
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }.frame(minWidth: 680, minHeight: 420)
-    }
+@MainActor
+private final class AuthorizationPanelDelegate: NSObject, NSWindowDelegate {
+    var onClose: (() -> Void)?
+    func windowWillClose(_ notification: Notification) { onClose?() }
 }
-
-private struct VigilHarnessRequestView: View {
-    let request: Interaction
-    @ObservedObject var coordinator: VigilHarnessCoordinator
-    @State private var selections: [String: Set<String>] = [:]
-    @State private var other: [String: String] = [:]
-    @State private var feedback = ""
-    private var answers: InteractionAnswer {
-        .questionnaire(Dictionary(uniqueKeysWithValues: request.questions.compactMap { question -> (String, QuestionAnswer)? in
-            // Secret/text input must retain intentional whitespace.
-            let text = other[question.id, default: ""]
-            switch question.kind {
-            case .text:
-                if text.isEmpty && !question.required { return nil }
-                return (question.id, .text(text))
-            case .number:
-                if text.isEmpty { return nil }
-                guard let number = Double(text), number.isFinite else { return (question.id, .text(text)) }
-                return (question.id, .number(number))
-            case .boolean:
-                guard text == "true" || text == "false" else { return nil }
-                return (question.id, .boolean(text == "true"))
-            case .singleChoice, .multipleChoice:
-                let ids = Array(selections[question.id, default: []]).sorted()
-                if ids.isEmpty && text.isEmpty && !question.required { return nil }
-                return (question.id, .choices(ids, other: text.isEmpty ? nil : text))
-            }
-        }))
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(request.title).font(.headline)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if let plan = request.plan { Text(plan).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                    if request.kind == .permission || request.kind == .changeReview { Text(request.input.formatted).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
-                    ForEach(request.questions) { question in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(question.title).font(.headline)
-                            if let header = question.header { Text(header).font(.caption).foregroundStyle(.secondary) }
-                            if !question.required { Text("Optional").font(.caption).foregroundStyle(.secondary) }
-                            if question.kind == .text || question.kind == .number {
-                                if question.isSecret == true {
-                                    SecureField("Answer", text: textBinding(question.id))
-                                } else {
-                                    TextField(question.kind == .number ? "Number" : "Answer", text: textBinding(question.id))
-                                }
-                            }
-                            if question.kind == .boolean {
-                                Picker("Answer", selection: textBinding(question.id)) {
-                                    Text("Choose").tag("")
-                                    Text("Yes").tag("true")
-                                    Text("No").tag("false")
-                                }
-                            }
-                            ForEach(question.choices) { choice in
-                                Toggle(isOn: Binding(get: { selections[question.id, default: []].contains(choice.id) }, set: { enabled in
-                                    if question.kind == .singleChoice { selections[question.id] = enabled ? [choice.id] : []; other[question.id] = "" } else if enabled { selections[question.id, default: []].insert(choice.id) } else { selections[question.id, default: []].remove(choice.id) }
-                                })) {
-                                    VStack(alignment: .leading) {
-                                        Text(choice.label)
-                                        if let description = choice.description { Text(description).font(.caption).foregroundStyle(.secondary) }
-                                    }
-                                }
-                            }
-                            if question.allowOther {
-                                let binding = Binding<String>(get: { other[question.id, default: ""] }, set: {
-                                    other[question.id] = $0
-                                    if question.kind == .singleChoice && !$0.isEmpty { selections[question.id] = [] }
-                                })
-                                if question.isSecret == true { SecureField("Other answer", text: binding) } else {
-                                    TextField("Other answer", text: binding)
-                                }
-                            }
-                        }
-                    }
-                    ForEach(request.actions) { action in
-                        ForEach(action.effects, id: \.self) { Text($0).font(.callout).foregroundStyle(.secondary) }
-                    }
-                    if request.providerMethod == nil && request.actions.contains(where: { $0.kind == .revise || $0.kind == .reject }) {
-                        TextField("Feedback (required for changes)", text: $feedback, axis: .vertical).lineLimit(2...5)
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if let error = coordinator.error {
-                Text(error).foregroundStyle(.red).font(.caption)
-                if error.contains("Human authorization") { Button("Set up human approvals…") { coordinator.provisionHumanApprovals() } }
-            }
-            HStack {
-                Button("Later") { coordinator.later(request) }
-                Spacer()
-                if request.kind == .questionnaire {
-                    Button("Submit answers") { coordinator.submit(request, answers) }.disabled(!HarnessReducer.valid(answers, for: request))
-                }
-                ForEach(request.actions) { action in
-                    Button(action.label) { coordinator.submit(request, .action(action.id, feedback: feedback.isEmpty ? nil : feedback)) }
-                        .disabled(action.kind == .revise && feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }.padding(16)
-            .onReceive(coordinator.$spokenAnswers) { answers in
-                for (id, value) in answers {
-                    if case .choices(let ids, let text) = value {
-                        selections[id] = Set(ids)
-                        other[id] = text ?? ""
-                    }
-                }
-            }
-    }
-    private func textBinding(_ id: String) -> Binding<String> {
-        Binding(get: { other[id, default: ""] }, set: { other[id] = $0 })
-    }
-}
+#endif
