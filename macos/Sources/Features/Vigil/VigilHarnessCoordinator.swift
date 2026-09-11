@@ -165,11 +165,11 @@ final class VigilHarnessCoordinator: ObservableObject {
             model.onHush = { held in if held { Hush.claim("authz-endpoint") } else { Hush.release("authz-endpoint") } }
             model.onDictate = { [weak self] snapshot, finished in self?.dictate(snapshot, finished: finished) }
             model.onConnectionFailure = { [weak self] in self?.startServices() }
-            model.onApplicationFailure = { [weak self] request in
-                guard let self else { return }
+            // An uncertain application is a receipt, not an interruption: it
+            // is logged and shown inside the card whenever the card is open,
+            // never by opening the card itself.
+            model.onApplicationFailure = { request in
                 VigilSessionManager.shared.vlog("authz application failed: request=\(request.id) revision=\(request.handle.revision) outcome=\(request.receipt?.application.rawValue ?? "unknown")")
-                guard self.current == nil, self.canPresent(request) else { return }
-                self.showPanel()
             }
             inbox = model; model.start(focusedContext: preferredPane)
             startServices()
@@ -295,13 +295,18 @@ final class VigilHarnessCoordinator: ObservableObject {
                 styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
             panel.title = "Requests"; panel.isReleasedWhenClosed = false
             panel.isFloatingPanel = true; panel.level = .floating
-            panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = true
+            // No window shadow: it is computed for the rectangular frame, not
+            // the glass, and paints a second frame around the pane.
+            panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = false
             panel.isMovableByWindowBackground = true
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            // Closing always hides the pane; a request on show is deferred (Later).
             panelDelegate.onClose = { [weak self] in
-                guard let self, let current = self.current, let inbox = self.inbox else { return }
+                guard let self else { return }
+                let request = self.current
                 self.clear()
-                Task { await inbox.later(current) }
+                self.panel?.orderOut(nil)
+                if let request, let inbox = self.inbox { Task { await inbox.later(request) } }
             }
             panel.delegate = panelDelegate
             let host = NSHostingView(rootView: VigilRequestsPane(inbox: inbox, tint: { [weak self] in self?.plateTint },
@@ -393,7 +398,7 @@ final class VigilHarnessCoordinator: ObservableObject {
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Authorization settings"; panel.isReleasedWhenClosed = false
         panel.isFloatingPanel = true; panel.level = .floating
-        panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = true
+        panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = false
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = NSHostingView(rootView: VigilAuthorizationSettings(close: { [weak panel] in panel?.orderOut(nil) }))
