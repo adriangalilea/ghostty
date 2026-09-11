@@ -66,6 +66,37 @@ private struct VigilAuthorizationSettings: View {
     }
 }
 
+/// The review surface's chrome: the brand header (the mark wearing the
+/// current request's level), authz.space's inbox card as content, one
+/// pane of Liquid Glass hugging it. esc or × = Later.
+private struct VigilRequestsPane: View {
+    @ObservedObject var inbox: InboxModel
+    let tint: () -> Color?
+    let close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                AskMark(size: 16, tint: tint())
+                Text("ask").font(.system(size: 12, weight: .semibold)).tracking(0.4)
+                Text("authz.space").font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Button(action: close) {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 14)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Later (esc)")
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            AuthzInbox(model: inbox)
+        }
+        .frame(width: 560)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: .inkPanel, style: .continuous))
+        .onExitCommand(perform: close)
+    }
+}
+
 /// Vigil supplies presence and provider handoff. authz.space owns requests,
 /// device pickup and receipts; swift-senses owns only this device's input race.
 @MainActor
@@ -180,7 +211,11 @@ final class VigilHarnessCoordinator: ObservableObject {
         }
         clear(releaseHush: false); current = snapshot
         let generation = inputGeneration
-        showPanel()
+        // The fast lane (narration + nod/voice/keys) carries a plain
+        // allow-once permission on its own; the review surface opens itself
+        // only for what the fast lane cannot faithfully carry, and otherwise
+        // waits behind the plate's pending badge.
+        if needsSurface(snapshot.request) { showPanel() } else { panel?.orderOut(nil) }
         preparing = Task { [weak self] in
             guard await inbox.presented(snapshot, claim: true), let self, self.current?.handle == snapshot.handle else { return }
             if self.hushOwner == nil { self.hushOwner = UUID().uuidString }
@@ -213,20 +248,48 @@ final class VigilHarnessCoordinator: ObservableObject {
             }
         }
     }
+    /// What the fast lane cannot carry: anything but a plain allow-once
+    /// permission with narration, or a permission when no spoken channel is
+    /// armed to answer it. Everything else reaches the surface on demand.
+    private func needsSurface(_ request: AskRequest) -> Bool {
+        guard request.responseMode == .interactive, request.kind == .permission,
+              request.requirement.minimum == .intent, request.privacy.narration,
+              !request.containsSecrets, !request.safeGist.isEmpty, VigilAsk.armed,
+              let yes = request.actions.first(where: { $0.effect == .approveOnce }),
+              let no = request.actions.first(where: { $0.effect == .reject }) else { return true }
+        let spoken: (Action) -> Bool = { $0.channels.contains(.voice) || $0.channels.contains(.nod) }
+        return !(spoken(yes) && spoken(no))
+    }
+    var pendingCount: Int { inbox?.requests.count ?? 0 }
+    /// The plate's badge: open the review surface for whatever is waiting.
+    func showInbox() { guard isEnabled, inbox != nil else { return }; showPanel() }
     private func showPanel() {
         guard let inbox else { return }
         if panel == nil {
-            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
-                styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
-            panel.title = "Requests"; panel.isReleasedWhenClosed = false; panel.center(); self.panel = panel
+            // Face's FloatingHUD shape: a borderless keyable panel with a clear
+            // body, the glass hugging the content as its only visible shape.
+            // Shown, not made key: keys typed at the terminal stay there; a
+            // click into the card gives it the keyboard (y / n / esc).
+            let panel = KeyablePanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 320),
+                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            panel.title = "Requests"; panel.isReleasedWhenClosed = false
+            panel.isFloatingPanel = true; panel.level = .floating
+            panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = true
+            panel.isMovableByWindowBackground = true
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             panelDelegate.onClose = { [weak self] in
                 guard let self, let current = self.current, let inbox = self.inbox else { return }
                 self.clear()
                 Task { await inbox.later(current) }
             }
             panel.delegate = panelDelegate
+            let host = NSHostingView(rootView: VigilRequestsPane(inbox: inbox, tint: { [weak self] in self?.plateTint },
+                                                                 close: { [weak self] in self?.panelDelegate.onClose?() }))
+            host.sizingOptions = .preferredContentSize
+            panel.contentView = host
+            panel.center()
+            self.panel = panel
         }
-        panel?.contentView = NSHostingView(rootView: AuthzInbox(model: inbox))
         panel?.orderFront(nil)
     }
     private func canPresent(_ snapshot: RequestSnapshot) -> Bool {
