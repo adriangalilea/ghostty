@@ -84,7 +84,10 @@ final class VigilHarnessCoordinator: ObservableObject {
         }
         panel?.orderFront(nil)
         // Plans require reading the full review surface. Voice never approves an unread plan.
-        if request.kind == .questionnaire { speakQuestion(request, index: 0) } else if request.kind == .permission, VigilAsk.armed, !VigilVoice.isActive, !VigilAsk.inFlight {
+        if request.kind == .questionnaire { speakQuestion(request, index: 0) } else if request.kind == .permission,
+            request.actions.contains(where: { $0.id == "allow-once" && $0.kind == .approveOnce && $0.effects.isEmpty }),
+            request.actions.contains(where: { $0.id == "deny" && $0.kind == .reject }),
+            VigilAsk.armed, !VigilVoice.isActive, !VigilAsk.inFlight {
             let description = request.input["description"].string ?? request.input["command"].string ?? request.input.formatted
             VigilAsk.ask(request.title + " " + description, pane: request.paneID) { [weak self] answer, source in
                 guard let self, self.sameRequest(request) else { return }
@@ -105,7 +108,7 @@ final class VigilHarnessCoordinator: ObservableObject {
         guard sameRequest(request), index < request.questions.count,
               VigilAsk.armed, !VigilVoice.isActive, !VigilAsk.inFlight else { return }
         let question = request.questions[index]
-        guard question.kind == .singleChoice || question.kind == .multipleChoice else { return }
+        guard question.isSecret != true, question.kind == .singleChoice || question.kind == .multipleChoice else { return }
         let choices = question.choices.map { choice in
             choice.label + (choice.description.map { ". " + $0 } ?? "")
         } + (question.allowOther ? ["Other answer"] : [])
@@ -191,9 +194,25 @@ private struct VigilHarnessRequestView: View {
     @State private var other: [String: String] = [:]
     @State private var feedback = ""
     private var answers: InteractionAnswer {
-        .questionnaire(Dictionary(uniqueKeysWithValues: request.questions.map { question in
-            let text = other[question.id, default: ""].trimmingCharacters(in: .whitespacesAndNewlines)
-            return (question.id, QuestionAnswer.choices(Array(selections[question.id, default: []]).sorted(), other: text.isEmpty ? nil : text))
+        .questionnaire(Dictionary(uniqueKeysWithValues: request.questions.compactMap { question -> (String, QuestionAnswer)? in
+            // Secret/text input must retain intentional whitespace.
+            let text = other[question.id, default: ""]
+            switch question.kind {
+            case .text:
+                if text.isEmpty && !question.required { return nil }
+                return (question.id, .text(text))
+            case .number:
+                if text.isEmpty { return nil }
+                guard let number = Double(text), number.isFinite else { return (question.id, .text(text)) }
+                return (question.id, .number(number))
+            case .boolean:
+                guard text == "true" || text == "false" else { return nil }
+                return (question.id, .boolean(text == "true"))
+            case .singleChoice, .multipleChoice:
+                let ids = Array(selections[question.id, default: []]).sorted()
+                if ids.isEmpty && text.isEmpty && !question.required { return nil }
+                return (question.id, .choices(ids, other: text.isEmpty ? nil : text))
+            }
         }))
     }
     var body: some View {
@@ -202,10 +221,26 @@ private struct VigilHarnessRequestView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if let plan = request.plan { Text(plan).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-                    if request.kind == .permission { Text(request.input.formatted).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
+                    if request.kind == .permission || request.kind == .changeReview { Text(request.input.formatted).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
                     ForEach(request.questions) { question in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(question.title).font(.headline)
+                            if let header = question.header { Text(header).font(.caption).foregroundStyle(.secondary) }
+                            if !question.required { Text("Optional").font(.caption).foregroundStyle(.secondary) }
+                            if question.kind == .text || question.kind == .number {
+                                if question.isSecret == true {
+                                    SecureField("Answer", text: textBinding(question.id))
+                                } else {
+                                    TextField(question.kind == .number ? "Number" : "Answer", text: textBinding(question.id))
+                                }
+                            }
+                            if question.kind == .boolean {
+                                Picker("Answer", selection: textBinding(question.id)) {
+                                    Text("Choose").tag("")
+                                    Text("Yes").tag("true")
+                                    Text("No").tag("false")
+                                }
+                            }
                             ForEach(question.choices) { choice in
                                 Toggle(isOn: Binding(get: { selections[question.id, default: []].contains(choice.id) }, set: { enabled in
                                     if question.kind == .singleChoice { selections[question.id] = enabled ? [choice.id] : []; other[question.id] = "" } else if enabled { selections[question.id, default: []].insert(choice.id) } else { selections[question.id, default: []].remove(choice.id) }
@@ -217,17 +252,20 @@ private struct VigilHarnessRequestView: View {
                                 }
                             }
                             if question.allowOther {
-                                TextField("Other answer", text: Binding(get: { other[question.id, default: ""] }, set: {
+                                let binding = Binding<String>(get: { other[question.id, default: ""] }, set: {
                                     other[question.id] = $0
                                     if question.kind == .singleChoice && !$0.isEmpty { selections[question.id] = [] }
-                                }))
+                                })
+                                if question.isSecret == true { SecureField("Other answer", text: binding) } else {
+                                    TextField("Other answer", text: binding)
+                                }
                             }
                         }
                     }
                     ForEach(request.actions) { action in
                         ForEach(action.effects, id: \.self) { Text($0).font(.callout).foregroundStyle(.secondary) }
                     }
-                    if request.actions.contains(where: { $0.kind == .revise || $0.kind == .reject }) {
+                    if request.providerMethod == nil && request.actions.contains(where: { $0.kind == .revise || $0.kind == .reject }) {
                         TextField("Feedback (required for changes)", text: $feedback, axis: .vertical).lineLimit(2...5)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
@@ -253,5 +291,8 @@ private struct VigilHarnessRequestView: View {
                     }
                 }
             }
+    }
+    private func textBinding(_ id: String) -> Binding<String> {
+        Binding(get: { other[id, default: ""] }, set: { other[id] = $0 })
     }
 }
