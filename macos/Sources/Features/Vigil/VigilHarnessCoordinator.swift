@@ -30,11 +30,10 @@ private struct VigilAuthorizationSettings: View {
                 Spacer()
             }
             .padding(.horizontal, 20)
-            .padding(.top, 38) // the traffic lights ride the glass; content starts under them
+            .padding(.top, 16)
             .padding(.bottom, 6)
             EnrollmentView()
-                .scrollContentBackground(.hidden)
-            Rectangle().fill(.inkRest).frame(height: 1).padding(.horizontal, 20)
+            Divider()
             Form {
                 Section {
                     Toggle("Record authorization debug captures", isOn: $debugCapture)
@@ -46,12 +45,8 @@ private struct VigilAuthorizationSettings: View {
                 }
             }
             .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
             .frame(maxHeight: 120)
         }
-        // One pane of Liquid Glass behind the whole window (the lore rule:
-        // glass as a background, the live form rendering over it).
-        .background { Color.clear.glassEffect(.regular, in: RoundedRectangle(cornerRadius: .inkPanel, style: .continuous)) }
     }
 }
 
@@ -265,13 +260,11 @@ final class VigilHarnessCoordinator: ObservableObject {
     }
     func showEnrollment() {
         if let enrollmentPanel { enrollmentPanel.makeKeyAndOrderFront(nil); return }
-        // A floating glass sheet: transparent chrome, the traffic lights
-        // sitting on the glass, draggable by its body.
+        // A settings window is chrome-bearing content, not a floating layer:
+        // it wears the system window, and Liquid Glass stays with the plate.
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 620),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         panel.title = "Authorization settings"; panel.isReleasedWhenClosed = false
-        panel.titlebarAppearsTransparent = true; panel.titleVisibility = .hidden
-        panel.isOpaque = false; panel.backgroundColor = .clear; panel.isMovableByWindowBackground = true
         panel.contentView = NSHostingView(rootView: VigilAuthorizationSettings()); panel.center(); panel.makeKeyAndOrderFront(nil)
         enrollmentPanel = panel
     }
