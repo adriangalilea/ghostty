@@ -4756,18 +4756,23 @@ class VigilSessionManager {
         }
         let flavor = parts.count > 1 ? BlockFlavor(rawValue: String(parts[1])) : nil
         let since = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
-        if VigilHarnessCoordinator.shared.isEnabled, !VigilHarnessCoordinator.shared.brokerAvailable,
-           state != .idle, state != .done {
-            return (.unknown, nil, since ?? .distantPast)
+        // A broker outage never erases an already observed attention flavor.
+        if state == .working, parts.count > 1 {
+            if parts[1] == "unknown" { return (.unknown, nil, since ?? .distantPast) }
+            if parts[1] == "interrupting" { return (.interrupting, nil, since ?? .distantPast) }
         }
         return (state, flavor, since ?? .distantPast)
     }
 
-    /// Seeing a completed turn clears its attention. A pending request stays blocked
-    /// until the harness resolves it; visibility cannot change execution state.
+    /// Seen-ack changes presentation only; it never resolves a broker request.
     func paneDisplayState(_ pane: String) -> AgentState? {
         guard let state = paneAgentState(pane) else { return nil }
-        if state.state == .done, let ack = lastAck[pane], ack >= state.since { return .idle }
+        if state.state == .done || state.state == .blocked,
+           let ack = lastAck[pane], ack >= state.since { return .idle }
+        // Preserve the legacy positive title corrective until native ownership
+        // is enabled. Absence of a spinner is never completion evidence.
+        if !VigilHarnessCoordinator.shared.isEnabled, state.state == .working,
+           liveView(attachId: pane)?.title.unicodeScalars.first == "✳" { return .idle }
         return state.state
     }
 

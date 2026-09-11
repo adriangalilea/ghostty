@@ -23,8 +23,14 @@ final class VigilHarnessCoordinator: ObservableObject {
     private var refreshing = false
     private var preferredPane: String?
     private var presentedAt = Date()
+    private var brokerStarter: Process?
+    private var nextBrokerStart = Date.distantPast
 
     func pump(preferredPane: String?) {
+        guard isEnabled else {
+            stopObserving()
+            return
+        }
         self.preferredPane = preferredPane
         if timer == nil {
             timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -35,6 +41,7 @@ final class VigilHarnessCoordinator: ObservableObject {
     }
 
     private func refresh() {
+        guard isEnabled else { stopObserving(); return }
         guard !refreshing else { return }
         refreshing = true
         Task {
@@ -44,7 +51,9 @@ final class VigilHarnessCoordinator: ObservableObject {
                 return try? response.value.decode([SessionSnapshot].self)
             }.value
             refreshing = false
+            guard isEnabled else { stopObserving(); return }
             let available = snapshots != nil
+            if !available { recoverBroker() }
             if brokerAvailable != available {
                 brokerAvailable = available
                 NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
@@ -58,6 +67,41 @@ final class VigilHarnessCoordinator: ObservableObject {
             if let current, Date().timeIntervalSince(presentedAt) > 60, panel?.isKeyWindow != true { later(current) }
             guard current == nil, !VigilAsk.inFlight else { return }
             if let next = queue.next(requests, preferredPane: preferredPane) { present(next) } else if requests.isEmpty { panel?.orderOut(nil) }
+        }
+    }
+
+    private func stopObserving() {
+        timer?.invalidate(); timer = nil
+        if let current {
+            VigilAsk.cancel(pane: current.paneID, reason: "harness-disabled")
+            queue.finish(PresentationQueue.Ticket(current))
+        }
+        current = nil; requests = []; brokerAvailable = false
+        panel?.orderOut(nil)
+    }
+
+    /// Service recovery is independent of AskKit. Only an enabled, installed
+    /// deployment may start the broker; development build products are ignored.
+    private func recoverBroker() {
+        guard isEnabled, brokerStarter == nil, Date() >= nextBrokerStart else { return }
+        nextBrokerStart = Date().addingTimeInterval(10)
+        let binary = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/vigil-agent")
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            VigilSessionManager.shared.vlog("harness service: installed broker missing; native prompts retain attention")
+            return
+        }
+        let process = Process()
+        process.executableURL = binary; process.arguments = ["ensure"]
+        process.environment = AgentEnvironment.scrub(ProcessInfo.processInfo.environment)
+        process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice
+        process.terminationHandler = { process in
+            Task { @MainActor in
+                VigilHarnessCoordinator.shared.brokerStarter = nil
+                VigilSessionManager.shared.vlog("harness service: ensure exited \(process.terminationStatus)")
+            }
+        }
+        do { try process.run(); brokerStarter = process } catch {
+            VigilSessionManager.shared.vlog("harness service: ensure launch failed \(error.localizedDescription)")
         }
     }
 
@@ -88,8 +132,7 @@ final class VigilHarnessCoordinator: ObservableObject {
             request.actions.contains(where: { $0.id == "allow-once" && $0.kind == .approveOnce && $0.effects.isEmpty }),
             request.actions.contains(where: { $0.id == "deny" && $0.kind == .reject }),
             VigilAsk.armed, !VigilVoice.isActive, !VigilAsk.inFlight {
-            let description = request.input["description"].string ?? request.input["command"].string ?? request.input.formatted
-            VigilAsk.ask(request.title + " " + description, pane: request.paneID) { [weak self] answer, source in
+            VigilAsk.ask(request.attentionSummary, pane: request.paneID) { [weak self] answer, source in
                 guard let self, self.sameRequest(request) else { return }
                 switch answer {
                 case .yes: self.submit(request, .action("allow-once", feedback: nil), source: source)
@@ -141,7 +184,12 @@ final class VigilHarnessCoordinator: ObservableObject {
         VigilAsk.cancel(pane: request.paneID, reason: "submitted")
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                do { return try HarnessWire.call(RPCRequest("respond", try .from(command))) } catch { return RPCResponse(false, .string("The broker could not confirm receipt. Refresh before retrying.")) }
+                do {
+                    let challenge = try HarnessWire.call(RPCRequest("humanChallenge"))
+                    guard challenge.ok, let nonce = challenge.value.string else { return RPCResponse(false, .string("Human authorization is unavailable.")) }
+                    let signed = try HumanAuthorization.sign(RPCRequest("respond", try .from(command)), challenge: nonce, key: HumanAuthorization.loadKey())
+                    return try HarnessWire.call(signed)
+                } catch { return RPCResponse(false, .string("Human authorization is unavailable or receipt was not confirmed. Refresh before retrying.")) }
             }.value
             guard sameRequest(request) else { return }
             if result.ok {
@@ -160,6 +208,23 @@ final class VigilHarnessCoordinator: ObservableObject {
         VigilAsk.cancel(pane: request.paneID, reason: "deferred")
         queue.finish(PresentationQueue.Ticket(request), dismissed: true)
         current = nil
+    }
+
+    func provisionHumanApprovals() {
+        guard isEnabled else { return }
+        let ui = Bundle.main.bundleURL
+        let broker = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/vigil-agent")
+        Task {
+            let message = await Task.detached(priority: .userInitiated) {
+                do {
+                    try HumanAuthorization.provision(ui: ui, broker: broker)
+                    return "Human approval authority created. Review the pending request before submitting."
+                } catch {
+                    return "Human approval setup failed or already exists. Review the Keychain entry and installed signing identities; no existing authority was replaced."
+                }
+            }.value
+            error = message
+        }
     }
 }
 
@@ -181,7 +246,11 @@ private struct VigilHarnessInbox: View {
                 VigilHarnessRequestView(request: request, coordinator: coordinator)
                     .id(request.instanceID + request.id + String(request.revision))
             } else {
-                Text("Choose a pending request").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 12) {
+                    Text("Choose a pending request").foregroundStyle(.secondary)
+                    Button("Set up human approvals…") { coordinator.provisionHumanApprovals() }
+                    if let error = coordinator.error { Text(error).font(.caption) }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.frame(minWidth: 680, minHeight: 420)
     }
@@ -270,7 +339,10 @@ private struct VigilHarnessRequestView: View {
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let error = coordinator.error { Text(error).foregroundStyle(.red).font(.caption) }
+            if let error = coordinator.error {
+                Text(error).foregroundStyle(.red).font(.caption)
+                if error.contains("Human authorization") { Button("Set up human approvals…") { coordinator.provisionHumanApprovals() } }
+            }
             HStack {
                 Button("Later") { coordinator.later(request) }
                 Spacer()
