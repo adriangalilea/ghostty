@@ -66,6 +66,15 @@ enum VigilAsk {
 
     /// The prompt was answered by other means (keyboard, another device):
     /// kill the ask NOW. Feedback after the decision is noise about it.
+    /// Narration without a race: the request exists and is answered elsewhere
+    /// (a manual-only surface). Says so once; never opens a channel that
+    /// could not deliver the answer anyway.
+    static func announce(_ text: String, pane: String) {
+        guard AskSettings.enabled, armed else { return }
+        trace?("ask announce \(pane): \(text)")
+        Announcer.say(text, recording: false)
+    }
+
     static func cancel(pane: String, reason: String = "superseded") {
         guard activePane == pane, let activeHandle else { return }
         Ask.cancel(activeHandle, reason: reason)

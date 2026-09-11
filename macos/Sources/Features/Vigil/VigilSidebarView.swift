@@ -237,6 +237,7 @@ struct VigilSidebarView: View {
                 health: VigilHarnessCoordinator.shared.plateHealth,
                 tint: VigilHarnessCoordinator.shared.plateTint,
                 pending: VigilHarnessCoordinator.shared.pendingCount,
+                enrolled: VigilHarnessCoordinator.shared.enrolled,
                 inbox: { VigilHarnessCoordinator.shared.showInbox() },
                 settings: { VigilHarnessCoordinator.shared.showEnrollment() },
                 rows: {

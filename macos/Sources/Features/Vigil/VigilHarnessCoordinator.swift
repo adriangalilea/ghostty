@@ -129,6 +129,7 @@ final class VigilHarnessCoordinator: ObservableObject {
     private var nextServiceCheck = Date.distantPast
 
     func pump(preferredPane: String?) {
+        if !isEnabled { activateIfEnrolled() }
         guard isEnabled else { stop(); return }
         if inbox == nil { connect() }
         let panes = inbox?.requests.map { $0.request.context }.filter { VigilSessionManager.shared.paneOnAnyScreen($0) } ?? []
@@ -240,6 +241,12 @@ final class VigilHarnessCoordinator: ObservableObject {
             }
             guard !Task.isCancelled, self.current?.handle == snapshot.handle, VigilAsk.armed else { return }
             let request = snapshot.request
+            // Never solicit an answer nowhere can deliver: a manual-only
+            // request is announced, not raced.
+            guard request.responseMode == .interactive else {
+                VigilAsk.announce(request.safeGist.isEmpty ? "Answer this one in the terminal" : request.safeGist + ". Answer it in the terminal", pane: request.context)
+                return
+            }
             guard request.kind == .permission, request.requirement.minimum == .intent,
                   request.privacy.narration, !request.containsSecrets, !request.safeGist.isEmpty,
                   let yes = request.actions.first(where: { $0.effect == .approveOnce }),
@@ -339,7 +346,33 @@ final class VigilHarnessCoordinator: ObservableObject {
     /// The plate's two live facts. Health is alpha (enrolled and answering,
     /// or the reason it is not); level is hue, the one axis BRAND.md reserves
     /// it for: the in-flight request's urgency, worn while it stands.
+    /// Enrollment is the one click; the gate follows it. A kit installs every
+    /// component, so the only thing between "enrolled" and "answering" was a
+    /// file a stranger would never know to create. Created once, here, with
+    /// a receipt; services start through the usual recovery.
+    private func activateIfEnrolled() {
+        guard enrolled, !isEnabled,
+              FileManager.default.isExecutableFile(atPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/vigil-agent").path)
+        else { return }
+        let root = HarnessPaths.root
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try Data().write(to: root.appendingPathComponent("enabled"), options: .atomic)
+            VigilSessionManager.shared.vlog("authz: enrolled on this Mac; harness gate created, services start on recovery")
+        } catch {
+            VigilSessionManager.shared.vlog("authz: enrolled but the gate could not be created: \(error.localizedDescription)")
+        }
+    }
+    /// This Mac has the service installed and a sealed enrollment on disk:
+    /// the plate shows its controls only then. Enrollment is the human's one
+    /// click in the settings pane (the gear); everything else is derived.
+    var enrolled: Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return FileManager.default.isExecutableFile(atPath: home.appendingPathComponent(".local/bin/authz").path)
+            && FileManager.default.fileExists(atPath: home.appendingPathComponent(".local/state/authz-space/configuration.json").path)
+    }
     var plateHealth: AskPanelHealth {
+        guard enrolled else { return .off("not set up: open the gear and enroll this Mac") }
         guard isEnabled else { return .off("gate off: prompts stay on the terminal") }
         guard inbox != nil else { return .off("service unreachable") }
         return .ready
