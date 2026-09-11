@@ -67,6 +67,12 @@ final class VigilHarnessCoordinator: ObservableObject {
             model.onHush = { held in if held { Hush.claim("authz-endpoint") } else { Hush.release("authz-endpoint") } }
             model.onDictate = { [weak self] snapshot, finished in self?.dictate(snapshot, finished: finished) }
             model.onConnectionFailure = { [weak self] in self?.startServices() }
+            model.onApplicationFailure = { [weak self] request in
+                guard let self else { return }
+                VigilSessionManager.shared.vlog("authz application failed: request=\(request.id) revision=\(request.handle.revision) outcome=\(request.receipt?.application.rawValue ?? "unknown")")
+                guard self.current == nil, self.canPresent(request) else { return }
+                self.showPanel()
+            }
             inbox = model; model.start(focusedContext: preferredPane)
             startServices()
             VigilSessionManager.shared.vlog("authz endpoint: connected; addressed event stream enabled")
@@ -115,19 +121,7 @@ final class VigilHarnessCoordinator: ObservableObject {
         }
         clear(releaseHush: false); current = snapshot
         let generation = inputGeneration
-        if panel == nil {
-            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
-                styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
-            panel.title = "Requests"; panel.isReleasedWhenClosed = false; panel.center(); self.panel = panel
-            panelDelegate.onClose = { [weak self] in
-                guard let self, let current = self.current, let inbox = self.inbox else { return }
-                self.clear()
-                Task { await inbox.later(current) }
-            }
-            panel.delegate = panelDelegate
-        }
-        panel?.contentView = NSHostingView(rootView: AuthzInbox(model: inbox))
-        panel?.orderFront(nil)
+        showPanel()
         preparing = Task { [weak self] in
             guard await inbox.presented(snapshot, claim: true), let self, self.current?.handle == snapshot.handle else { return }
             if self.hushOwner == nil { self.hushOwner = UUID().uuidString }
@@ -152,13 +146,29 @@ final class VigilHarnessCoordinator: ObservableObject {
                     if answer == .yes || answer == .no {
                         let channel: InputChannel = source == "nod" ? .nod : source == "surface" ? .surface : .voice
                         await inbox.submit(snapshot, answer: .action(answer == .yes ? yes.id : no.id, feedback: nil), channel: channel)
-                    } else { await inbox.later(snapshot) }
+                    } else { await inbox.retry(snapshot) }
                     // Completion is after channel teardown. Next presentation
                     // arrives from the service stream, including timeout/Later.
                     VigilSessionManager.shared.pumpAskGate()
                 }
             }
         }
+    }
+    private func showPanel() {
+        guard let inbox else { return }
+        if panel == nil {
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
+                styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
+            panel.title = "Requests"; panel.isReleasedWhenClosed = false; panel.center(); self.panel = panel
+            panelDelegate.onClose = { [weak self] in
+                guard let self, let current = self.current, let inbox = self.inbox else { return }
+                self.clear()
+                Task { await inbox.later(current) }
+            }
+            panel.delegate = panelDelegate
+        }
+        panel?.contentView = NSHostingView(rootView: AuthzInbox(model: inbox))
+        panel?.orderFront(nil)
     }
     private func canPresent(_ snapshot: RequestSnapshot) -> Bool {
         guard !VigilBars.shared.controlMode else { return false }
