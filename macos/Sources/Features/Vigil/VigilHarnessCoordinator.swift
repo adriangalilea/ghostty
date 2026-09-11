@@ -102,6 +102,13 @@ private struct VigilRequestsPane: View {
 @MainActor
 final class VigilHarnessCoordinator: ObservableObject {
     static let shared = VigilHarnessCoordinator()
+    private init() {
+        // The plate's master switch lives in the suite's defaults; a flip
+        // re-pumps so an ask waiting behind "off" presents the moment it is on.
+        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in VigilSessionManager.shared.pumpAskGate() }
+        }
+    }
     var isEnabled: Bool {
         ProcessInfo.processInfo.environment["VIGIL_HARNESS_ENABLED"] == "1" ||
             FileManager.default.fileExists(atPath: HarnessPaths.root.appendingPathComponent("enabled").path)
@@ -206,6 +213,13 @@ final class VigilHarnessCoordinator: ObservableObject {
         // The summon owns interruption/veto policy. Showing an independent
         // answer panel must not sneak around it for a background pane.
         guard canPresent(snapshot) else {
+            if current != nil { clear() }
+            return
+        }
+        // ask off: this Mac never asks. The request stays offered (another
+        // device may claim it), the terminal prompt stands, the plate's
+        // badge is the only door. Flipping the switch back re-pumps.
+        guard AskSettings.enabled else {
             if current != nil { clear() }
             return
         }

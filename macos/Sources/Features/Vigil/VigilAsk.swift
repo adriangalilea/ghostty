@@ -39,7 +39,7 @@ enum VigilAsk {
 
     /// The pump's entry guard: at least one enabled channel could work.
     static var armed: Bool {
-        (nodEnabled && nodAvailable) || (voiceEnabled && voiceAvailable)
+        AskSettings.enabled && ((nodEnabled && nodAvailable) || (voiceEnabled && voiceAvailable))
     }
 
     /// Audio-route diagnostics share the session manager's timeline.
