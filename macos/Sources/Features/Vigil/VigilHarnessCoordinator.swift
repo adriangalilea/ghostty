@@ -5,6 +5,7 @@ import AuthzUI
 import AuthzClient
 import AuthzProtocol
 import Face
+import Ink
 import SwiftUI
 import VigilHarness
 
@@ -16,15 +17,41 @@ private struct VigilAuthorizationSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            EnrollmentView()
-            Divider()
-            Form {
-                Text("Diagnostics").font(.headline)
-                Toggle("Record authorization debug captures", isOn: $debugCapture)
-                    .help("Capture audio, motion and ordinary dictated answers for local debugging. Requests marked secret are excluded. Applies to the next input session.")
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                AskMark(size: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("authz.space")
+                        .font(.system(size: 15, weight: .semibold))
+                        .tracking(0.3)
+                    Text("Who may ask, who may answer, and how a request reaches you.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
             }
-            .padding()
+            .padding(.horizontal, 20)
+            .padding(.top, 38) // the traffic lights ride the glass; content starts under them
+            .padding(.bottom, 6)
+            EnrollmentView()
+                .scrollContentBackground(.hidden)
+            Rectangle().fill(.inkRest).frame(height: 1).padding(.horizontal, 20)
+            Form {
+                Section {
+                    Toggle("Record authorization debug captures", isOn: $debugCapture)
+                        .help("Capture audio, motion and ordinary dictated answers for local debugging. Requests marked secret are excluded. Applies to the next input session.")
+                } header: {
+                    Text("Diagnostics")
+                } footer: {
+                    Text("Off by default. Secret-bearing requests are never captured, toggle or not.")
+                }
+            }
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+            .frame(maxHeight: 120)
         }
+        // One pane of Liquid Glass behind the whole window (the lore rule:
+        // glass as a background, the live form rendering over it).
+        .background { Color.clear.glassEffect(.regular, in: RoundedRectangle(cornerRadius: .inkPanel, style: .continuous)) }
     }
 }
 
@@ -238,9 +265,13 @@ final class VigilHarnessCoordinator: ObservableObject {
     }
     func showEnrollment() {
         if let enrollmentPanel { enrollmentPanel.makeKeyAndOrderFront(nil); return }
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
-            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        // A floating glass sheet: transparent chrome, the traffic lights
+        // sitting on the glass, draggable by its body.
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 620),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         panel.title = "Authorization settings"; panel.isReleasedWhenClosed = false
+        panel.titlebarAppearsTransparent = true; panel.titleVisibility = .hidden
+        panel.isOpaque = false; panel.backgroundColor = .clear; panel.isMovableByWindowBackground = true
         panel.contentView = NSHostingView(rootView: VigilAuthorizationSettings()); panel.center(); panel.makeKeyAndOrderFront(nil)
         enrollmentPanel = panel
     }
