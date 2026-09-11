@@ -13,6 +13,7 @@ import VigilHarness
 /// diagnostics. Debug capture is a developer choice and lives here, never
 /// in the daily footer; secret-bearing requests stay excluded regardless.
 private struct VigilAuthorizationSettings: View {
+    let close: () -> Void
     @AppStorage(VigilAsk.debugCaptureKey) private var debugCapture = false
 
     var body: some View {
@@ -28,12 +29,20 @@ private struct VigilAuthorizationSettings: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button(action: close) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close (esc)")
             }
             .padding(.horizontal, 20)
-            .padding(.top, 16)
-            .padding(.bottom, 6)
+            .padding(.top, 18)
+            .padding(.bottom, 4)
             EnrollmentView()
-            Divider()
+                .scrollContentBackground(.hidden)
+            Rectangle().fill(.inkRest).frame(height: 1).padding(.horizontal, 20)
             Form {
                 Section {
                     Toggle("Record authorization debug captures", isOn: $debugCapture)
@@ -45,8 +54,15 @@ private struct VigilAuthorizationSettings: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(maxHeight: 120)
+            .scrollContentBackground(.hidden)
+            .frame(height: 118)
         }
+        .frame(width: 640, height: 600)
+        // The pane IS the glass: a borderless panel with nothing but this
+        // shape (Face's FloatingHUD pattern), so the material hugs the
+        // content and no window chrome doubles it.
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: .inkPanel, style: .continuous))
+        .onExitCommand(perform: close)
     }
 }
 
@@ -260,12 +276,18 @@ final class VigilHarnessCoordinator: ObservableObject {
     }
     func showEnrollment() {
         if let enrollmentPanel { enrollmentPanel.makeKeyAndOrderFront(nil); return }
-        // A settings window is chrome-bearing content, not a floating layer:
-        // it wears the system window, and Liquid Glass stays with the plate.
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 620),
-            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        // A floating glass pane, Face's FloatingHUD shape: a borderless
+        // keyable panel with a clear body, so the only visible thing is the
+        // glass hugging the content. Dragged by its body, closed by × or esc.
+        let panel = KeyablePanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 600),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Authorization settings"; panel.isReleasedWhenClosed = false
-        panel.contentView = NSHostingView(rootView: VigilAuthorizationSettings()); panel.center(); panel.makeKeyAndOrderFront(nil)
+        panel.isFloatingPanel = true; panel.level = .floating
+        panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = true
+        panel.isMovableByWindowBackground = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.contentView = NSHostingView(rootView: VigilAuthorizationSettings(close: { [weak panel] in panel?.orderOut(nil) }))
+        panel.center(); panel.makeKeyAndOrderFront(nil)
         enrollmentPanel = panel
     }
     private func dictate(_ snapshot: RequestSnapshot, finished: @escaping (String) -> Void) {
