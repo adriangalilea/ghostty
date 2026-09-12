@@ -250,7 +250,12 @@ final class VigilHarnessCoordinator: ObservableObject {
             guard request.kind == .permission, request.requirement.minimum == .intent,
                   request.privacy.narration, !request.containsSecrets, !request.safeGist.isEmpty,
                   let yes = request.actions.first(where: { $0.effect == .approveOnce }),
-                  let no = request.actions.first(where: { $0.effect == .reject }) else { return }
+                  // No is a refusal, whatever the provider calls it: Codex
+                  // offers accept and cancel with no decline, and a spoken no
+                  // must still stop the command (cancel is the stricter of the
+                  // two, so nothing runs either way).
+                  let no = request.actions.first(where: { $0.effect == .reject })
+                    ?? request.actions.first(where: { $0.effect == .cancel }) else { return }
             let voice = yes.channels.contains(.voice) && no.channels.contains(.voice)
             let nod = yes.channels.contains(.nod) && no.channels.contains(.nod)
             guard voice || nod else { return }
@@ -277,7 +282,8 @@ final class VigilHarnessCoordinator: ObservableObject {
               request.requirement.minimum == .intent, request.privacy.narration,
               !request.containsSecrets, !request.safeGist.isEmpty, VigilAsk.armed,
               let yes = request.actions.first(where: { $0.effect == .approveOnce }),
-              let no = request.actions.first(where: { $0.effect == .reject }) else { return true }
+              let no = request.actions.first(where: { $0.effect == .reject })
+                ?? request.actions.first(where: { $0.effect == .cancel }) else { return true }
         let spoken: (Action) -> Bool = { $0.channels.contains(.voice) || $0.channels.contains(.nod) }
         return !(spoken(yes) && spoken(no))
     }
@@ -319,17 +325,22 @@ final class VigilHarnessCoordinator: ObservableObject {
         panel?.orderFront(nil)
     }
     private func canPresent(_ snapshot: RequestSnapshot) -> Bool {
-        guard !VigilBars.shared.controlMode else { return false }
+        let refuse: (String) -> Bool = { why in
+            VigilSessionManager.shared.vlog("authz present refused: \(snapshot.request.context) \(why)")
+            return false
+        }
+        guard !VigilBars.shared.controlMode else { return refuse("control mode") }
         if NSApp.isActive, let key = NSApp.keyWindow {
             if key is NSPanel, key !== panel, !(key.windowController is QuickTerminalController) { return false }
             if let controller = key.windowController as? TerminalController,
                let pane = controller.focusedSurface?.vigilAttachId, pane != snapshot.request.context,
                VigilSessionManager.shared.paneAgentState(pane)?.state == .blocked { return false }
         }
-        if snapshot.request.requester == "vigil" {
-            return VigilSessionManager.shared.paneOnAnyScreen(snapshot.request.context) ||
-                VigilSummon.shared.currentAskPane == snapshot.request.context
-        }
+        // Where the pane is does not decide whether you are TOLD: an ask you
+        // cannot see is the one the spoken channel exists for. Presence decides
+        // what MOVES (the summon's glass), never what speaks; requiring the
+        // pane on screen meant every prompt in a session you were not looking
+        // at stayed silent, which is the whole point of the gate.
         return true
     }
     private func clear(releaseHush: Bool = true) {
