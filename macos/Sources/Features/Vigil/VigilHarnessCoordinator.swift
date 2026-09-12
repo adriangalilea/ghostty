@@ -47,6 +47,10 @@ private struct VigilAuthorizationSettings: View {
                 Section {
                     Toggle("Record authorization debug captures", isOn: $debugCapture)
                         .help("Capture audio, motion and ordinary dictated answers for local debugging. Requests marked secret are excluded. Applies to the next input session.")
+                    LabeledContent("Prompt preview") {
+                        Button("Preview an ask") { VigilAsk.demo() }
+                            .help("Fires a demo prompt through your armed channels - narration, evidence block, yes/no. Nothing real behind it, nothing recorded.")
+                    }
                 } header: {
                     Text("Diagnostics")
                 } footer: {
@@ -55,7 +59,7 @@ private struct VigilAuthorizationSettings: View {
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
-            .frame(height: 118)
+            .frame(height: 150)
         }
         .frame(width: 640, height: 600)
         // The pane IS the glass: a borderless panel with nothing but this

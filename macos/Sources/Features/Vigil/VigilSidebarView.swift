@@ -240,7 +240,6 @@ struct VigilSidebarView: View {
                 enrolled: VigilHarnessCoordinator.shared.enrolled,
                 inbox: { VigilHarnessCoordinator.shared.showInbox() },
                 settings: { VigilHarnessCoordinator.shared.showEnrollment() },
-                demo: { VigilAsk.demo() },
                 rows: {
                     AskToggles(
                         hush: true,
