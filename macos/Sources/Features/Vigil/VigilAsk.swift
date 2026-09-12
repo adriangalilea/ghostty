@@ -89,6 +89,7 @@ enum VigilAsk {
     /// immediately. Request dictation returns a draft to the bound form.
     static func ask(
         _ spoken: String,
+        detail: Ask.Detail? = nil,
         options: [String]? = nil,
         textOptions: Set<Int> = [],
         multi: Bool = false,
@@ -118,7 +119,8 @@ enum VigilAsk {
         Flight.pane = pane
         // Safe wording comes from the requester. Raw inputs stay with it.
         activeHandle = Ask.begin(
-            spoken, sources: sources, options: options, textOptions: textOptions, multi: multi,
+            spoken, detail: detail, sources: sources, options: options,
+            textOptions: textOptions, multi: multi,
             composition: Composition(input: spoken, tier: options == nil ? "static-gist" : "question-literal"),
             recording: recording,
             recordDictation: recording,

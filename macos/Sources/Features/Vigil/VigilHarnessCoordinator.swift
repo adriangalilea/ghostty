@@ -259,7 +259,11 @@ final class VigilHarnessCoordinator: ObservableObject {
             let voice = yes.channels.contains(.voice) && no.channels.contains(.voice)
             let nod = yes.channels.contains(.nod) && no.channels.contains(.nod)
             guard voice || nod else { return }
-            VigilAsk.ask(request.safeGist, request: snapshot,
+            // The evidence under the question: what a yes approves, colored
+            // like the inbox colors it. Secrets never reach the fast lane
+            // (needsSurface), so a detail here is already showable.
+            let detail = request.detail.map { Ask.Detail(text: $0, format: request.detailFormat) }
+            VigilAsk.ask(request.safeGist, detail: detail, request: snapshot,
                          allowVoice: voice, allowNod: nod) { [weak self] answer, source in
                 guard let self, self.current?.handle == snapshot.handle, self.inputGeneration == generation else { return }
                 Task { @MainActor in
