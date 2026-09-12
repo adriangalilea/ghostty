@@ -148,5 +148,23 @@ enum VigilAsk {
             })
         if enterText, let activeHandle { Ask.pick(activeHandle, 0, detail: "dictate-request-draft") }
     }
+
+    /// The plate's preview button: `Ask.demo` through the same channels a
+    /// real permission would race. Repeatable, records nothing, answers to
+    /// the log alone.
+    static func demo() {
+        var sources: [any AnswerSource] = []
+        if nodEnabled, nodAvailable { sources.append(NodSource()) }
+        if voiceEnabled, voiceAvailable {
+            sources.append(VoiceSource(locales: VigilVoice.chosenLocales, sink: nil))
+        }
+        guard !sources.isEmpty, !Ask.isAsking else { return }
+        if !wired {
+            wired = true
+            Ask.trace = { line in trace?("ask \(line)") }
+            VigilAskHUD.arm()
+        }
+        Ask.demo(sources: sources)
+    }
 }
 #endif
