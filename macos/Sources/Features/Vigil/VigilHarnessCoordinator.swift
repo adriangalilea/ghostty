@@ -6,6 +6,7 @@ import AuthzClient
 import AuthzProtocol
 import Face
 import Ink
+import Say
 import SwiftUI
 import VigilHarness
 
@@ -44,6 +45,16 @@ private struct VigilAuthorizationSettings: View {
                 .scrollContentBackground(.hidden)
             Rectangle().fill(.inkRest).frame(height: 1).padding(.horizontal, 20)
             Form {
+                Section("Voice") {
+                    VoiceEngineRow(.init(
+                        name: "Kokoro",
+                        detail: "Natural English narration, local, ~99 MB. Until installed, the system voice reads your prompts.",
+                        installed: { KokoroBackend.downloaded },
+                        download: { progress in
+                            try KokoroBackend.download(progress: progress)
+                            KokoroBackend.warm()
+                        }))
+                }
                 Section {
                     Toggle("Record authorization debug captures", isOn: $debugCapture)
                         .help("Capture audio, motion and ordinary dictated answers for local debugging. Requests marked secret are excluded. Applies to the next input session.")
@@ -59,7 +70,7 @@ private struct VigilAuthorizationSettings: View {
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
-            .frame(height: 150)
+            .frame(height: 226)
         }
         .frame(width: 640, height: 600)
         // The pane IS the glass: a borderless panel with nothing but this
