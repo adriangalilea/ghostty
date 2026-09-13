@@ -98,7 +98,7 @@ enum VigilAsk {
         enterText: Bool = false,
         allowVoice: Bool = true,
         allowNod: Bool = true,
-        completion: @escaping (Answer?, String) -> Void
+        completion: @escaping (Answer?, String, String) -> Void
     ) {
         let pane = request.request.context
         let recording = request.request.allowsDebugCapture(enabled: UserDefaults.standard.bool(forKey: debugCaptureKey))
@@ -108,8 +108,8 @@ enum VigilAsk {
             sources.append(
                 VoiceSource(locales: VigilVoice.chosenLocales, sink: recording ? VoiceLogSink() : nil))
         }
-        guard !sources.isEmpty else { return completion(nil, "unavailable") }
-        guard !Ask.isAsking else { return completion(nil, "busy") }
+        guard !sources.isEmpty else { return completion(nil, "unavailable", "unavailable") }
+        guard !Ask.isAsking else { return completion(nil, "busy", "busy") }
         if !wired {
             wired = true
             Ask.trace = { line in trace?("ask \(line)") }
@@ -143,7 +143,7 @@ enum VigilAsk {
             MainActor.assumeIsolated {
                 activePane = nil
                 activeHandle = nil
-                completion(receipt.verdict.answer, receipt.source ?? "surface")
+                completion(receipt.verdict.answer, receipt.source ?? "surface", receipt.verdict.label)
             }
             })
         if enterText, let activeHandle { Ask.pick(activeHandle, 0, detail: "dictate-request-draft") }

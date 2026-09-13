@@ -268,12 +268,17 @@ final class VigilHarnessCoordinator: ObservableObject {
             // (needsSurface), so a detail here is already showable.
             let detail = request.detail.map { Ask.Detail(text: $0, format: request.detailFormat) }
             VigilAsk.ask(request.safeGist, detail: detail, request: snapshot,
-                         allowVoice: voice, allowNod: nod) { [weak self] answer, source in
+                         allowVoice: voice, allowNod: nod) { [weak self] answer, source, reason in
                 guard let self, self.current?.handle == snapshot.handle, self.inputGeneration == generation else { return }
                 Task { @MainActor in
                     if answer == .yes || answer == .no {
                         let channel: InputChannel = source == "nod" ? .nod : source == "surface" ? .surface : .voice
                         await inbox.submit(snapshot, answer: .action(answer == .yes ? yes.id : no.id, feedback: nil), channel: channel)
+                    } else if reason.contains("esc") {
+                        // A human dismissal is Later, never the auto-retry
+                        // lane: an esc'd ask re-presenting 11s later taught
+                        // the difference (2026-09-13). It waits in the inbox.
+                        await inbox.later(snapshot)
                     } else { await inbox.retry(snapshot) }
                     // Completion is after channel teardown. Next presentation
                     // arrives from the service stream, including timeout/Later.
@@ -437,7 +442,7 @@ final class VigilHarnessCoordinator: ObservableObject {
             }
             guard let self, self.current?.handle == snapshot.handle, !Task.isCancelled else { return }
             VigilAsk.ask("Dictate your answer", options: ["Answer"], textOptions: [0], request: snapshot,
-                enterText: true) { [weak self] answer, _ in
+                enterText: true) { [weak self] answer, _, _ in
                 guard self?.current?.handle == snapshot.handle, self?.inputGeneration == generation,
                       case .text(let text, _) = answer else { return }
                 finished(text)

@@ -446,9 +446,14 @@ class AppDelegate: NSObject,
     /// This is called when the application is already open and someone double-clicks the icon
     /// or clicks the dock icon.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // If we have visible windows then we allow macOS to do its default behavior
-        // of focusing one of them.
-        guard !flag else { return true }
+        // NEVER trust AppKit's flag: it counts EVERY visible window,
+        // including vigil's borderless glass panels (the ask HUD, dictation
+        // captions, the Requests panel, the quick terminal). With the fleet
+        // in the background and any panel up, the old early-return let
+        // macOS "focus" a transparent panel - a dock click that visibly did
+        // nothing, for weeks, worked around by bouncing through another app
+        // (Adrian 2026-09-13). Only LIVE terminal windows count, decided
+        // below; panels never satisfy a dock click.
 
         // Only bail if a LIVE window exists (visible or miniaturized). Detached
         // sessions leave corpse controllers in TerminalController.all (empty
@@ -456,11 +461,20 @@ class AppDelegate: NSObject,
         // in the background, clicking the dock icon must open a window, not
         // nothing. A miniaturized live window returns true so AppKit
         // deminiaturizes it instead.
-        let hasLiveWindow = TerminalController.all.contains {
-            guard let window = $0.window else { return false }
-            return (window.isVisible || window.isMiniaturized) && !$0.surfaceTree.isEmpty
+        let liveWindows = TerminalController.all.compactMap { controller -> NSWindow? in
+            guard let window = controller.window, !controller.surfaceTree.isEmpty,
+                  window.isVisible || window.isMiniaturized else { return nil }
+            return window
         }
-        guard !hasLiveWindow else { return true }
+        if let live = liveWindows.first {
+            // Land the click on a REAL window ourselves: while the ask HUD
+            // borrows key status, AppKit's default would hand key straight
+            // back to the transparent panel.
+            if !(NSApp.keyWindow.map { liveWindows.contains($0) } ?? false) {
+                live.makeKeyAndOrderFront(nil)
+            }
+            return true
+        }
 
         // If the application isn't active yet then we don't want to process
         // this because we're not ready. This happens sometimes in Xcode runs
