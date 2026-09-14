@@ -522,15 +522,21 @@ final class VigilPhone: ObservableObject {
     /// view is borrowed, the occlusion policy reads it to idle the rest.
     @Published private(set) var presenting: PaneRef?
 
-    /// Every live surface is a full Metal renderer plus an ssh channel.
+    /// Every live surface is a full Metal renderer plus an ssh channel,
+    /// and sshd grants 10 channels per connection (MaxSessions): the cap
+    /// keeps every Mac's previews, the directory exec and the screen under
+    /// it. A dial in flight holds its slot, or every row of a fresh tree
+    /// passes the check at zero and dials at once.
     static let surfaceCap = 6
+    private var dialing = Set<String>()
 
     /// The surface for a pane, dialing one if none exists. `nil` when the
     /// cap is reached (rows show a placeholder; the screen always gets
     /// one: it evicts an idle row's surface).
     func surface(for ref: PaneRef, app: ghostty_app_t, screen: Bool) async throws -> Ghostty.SurfaceView? {
         if let existing = surfaces[ref.pane], existing.surface != nil { return existing }
-        if surfaces.count >= Self.surfaceCap {
+        guard !dialing.contains(ref.pane) else { return nil }
+        if surfaces.count + dialing.count >= Self.surfaceCap {
             guard screen, let victim = surfaces.keys.first(where: { $0 != ref.pane && $0 != presenting?.pane }) else {
                 log("surface: cap \(Self.surfaceCap) reached, \(ref.pane) not shown")
                 return nil
@@ -538,6 +544,8 @@ final class VigilPhone: ObservableObject {
             log("surface: cap reached, evicting \(victim) for the screen")
             endSurface(victim)
         }
+        dialing.insert(ref.pane)
+        defer { dialing.remove(ref.pane) }
         let fd = try await attach(ref.host, pane: ref.pane, preview: !screen)
         var config = Ghostty.SurfaceConfiguration()
         config.vigilAttach = ref.pane

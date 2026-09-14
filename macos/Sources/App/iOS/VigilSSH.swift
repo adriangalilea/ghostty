@@ -106,13 +106,23 @@ final class VigilSSH {
                     watch,
                 ])
             }
+        let ch: Channel
         do {
-            let ch = try await bootstrap.connect(host: endpoint.host, port: endpoint.port).get()
-            Self.trace?("ssh: \(endpoint) tcp up in \(Self.ms(since: t0))ms, authenticating")
-            let authTimer = loop.scheduleTask(in: .seconds(10)) {
-                ready.fail(Failure.timeout("auth"))
-                ch.close(promise: nil)
-            }
+            ch = try await bootstrap.connect(host: endpoint.host, port: endpoint.port).get()
+        } catch {
+            // No channel ever went active, so the watch never completes
+            // `ready`: fail it here or NIO traps on the leaked promise (a
+            // sleeping Mac refuses TCP on every 15s poll).
+            ready.fail(error)
+            setState(.closed(error.receipt), why: "tcp failed after \(Self.ms(since: t0))ms")
+            throw error
+        }
+        Self.trace?("ssh: \(endpoint) tcp up in \(Self.ms(since: t0))ms, authenticating")
+        let authTimer = loop.scheduleTask(in: .seconds(10)) {
+            ready.fail(Failure.timeout("auth"))
+            ch.close(promise: nil)
+        }
+        do {
             try await ready.futureResult.get()
             authTimer.cancel()
             let handler = try await ch.eventLoop.submit {
@@ -122,6 +132,8 @@ final class VigilSSH {
             ssh = handler
             setState(.connected, why: "authenticated in \(Self.ms(since: t0))ms")
         } catch {
+            authTimer.cancel()
+            loop.execute { ch.close(promise: nil) }
             setState(.closed(error.receipt), why: "connect failed after \(Self.ms(since: t0))ms")
             throw error
         }
