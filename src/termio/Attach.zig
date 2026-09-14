@@ -63,6 +63,10 @@ given_fd: ?posix.fd_t,
 /// presence beats attention); true = only `vigilClaim` does.
 explicit_claim: bool,
 
+/// Per-connection identity. A pid alone aliases different views in one app
+/// and can also collide between Macs. Published in the daemon's owner hello.
+client_id: u64,
+
 alloc: Allocator,
 
 /// Read side: the socket, or the ssh child's stdout; -1 until threadEnter.
@@ -110,7 +114,8 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .command = if (cfg.command) |v| try v.clone(alloc) else null,
         .host = if (cfg.host) |v| if (v.len > 0) try alloc.dupe(u8, v) else null else null,
         .given_fd = cfg.fd,
-        .explicit_claim = cfg.explicit_claim,
+        .explicit_claim = cfg.explicit_claim or (if (cfg.host) |host| host.len > 0 else false),
+        .client_id = std.crypto.random.int(u64),
     };
 }
 
@@ -188,7 +193,7 @@ fn sendHello(self: *Attach, kind: []const u8) void {
     var buf: [64]u8 = undefined;
     // "mirror" tells the daemon this client never adopts the size unowned:
     // it renders whatever grid the owner has and claims only explicitly.
-    const hello = std.fmt.bufPrint(&buf, "{s} ghostty:{d}{s}", .{ kind, std.c.getpid(), if (self.explicit_claim) " mirror" else "" }) catch return;
+    const hello = std.fmt.bufPrint(&buf, "{s} ghostty:{d}/{x}{s}", .{ kind, std.c.getpid(), self.client_id, if (self.explicit_claim) " mirror" else "" }) catch return;
     self.enqueueFrame('h', hello);
 }
 
@@ -365,7 +370,41 @@ pub fn focusGained(
 /// yields it (the daemon hands the size to the first sized survivor).
 pub fn vigilClaim(self: *Attach, claim: bool) void {
     if (self.write_fd < 0) return;
-    self.enqueueFrame(if (claim) 'o' else 'y', "");
+    self.enqueueFrame(if (claim) 'o' else 'y', if (claim) "intent" else "");
+}
+
+test "Vigil remote focus cannot claim; only input intent can" {
+    var attach = try Attach.init(std.testing.allocator, .{ .id = "test", .host = "m4" });
+    defer attach.deinit();
+    attach.write_fd = 1; // Inspect the queue; no writer is started.
+    var td: termio.Termio.ThreadData = undefined;
+    try attach.focusGained(&td, true);
+    try std.testing.expectEqual(@as(usize, 0), attach.write_buf.items.len);
+    attach.vigilClaim(true);
+    attach.vigilClaim(false);
+    try std.testing.expectEqualSlices(u8, "o\x06\x00intenty\x00\x00", attach.write_buf.items);
+}
+
+test "Vigil phone focus cannot claim and hello identifies a mirror" {
+    var attach = try Attach.init(std.testing.allocator, .{ .id = "test", .fd = 1, .explicit_claim = true });
+    defer attach.deinit();
+    attach.write_fd = 1;
+    var td: termio.Termio.ThreadData = undefined;
+    try attach.focusGained(&td, true);
+    try std.testing.expectEqual(@as(usize, 0), attach.write_buf.items.len);
+    attach.sendHello("app");
+    try std.testing.expect(std.mem.endsWith(u8, attach.write_buf.items, " mirror"));
+    try std.testing.expect(std.mem.indexOfScalar(u8, attach.write_buf.items, '/') != null);
+}
+
+test "Vigil local focus remains an implicit claim" {
+    var attach = try Attach.init(std.testing.allocator, .{ .id = "test" });
+    defer attach.deinit();
+    attach.write_fd = 1;
+    var td: termio.Termio.ThreadData = undefined;
+    try attach.focusGained(&td, false);
+    try attach.focusGained(&td, true);
+    try std.testing.expectEqualSlices(u8, "o\x00\x00", attach.write_buf.items);
 }
 
 /// 'q': the daemon re-sends the exact screen over a clear.

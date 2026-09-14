@@ -130,6 +130,13 @@ extension Ghostty {
                             focusInstant: surfaceView.focusInstant)
 
                     }
+
+                    #if canImport(AppKit)
+                    Color.clear
+                        .allowsHitTesting(false)
+                        .onAppear { surfaceView.vigilSetViewportSize(geo.size) }
+                        .onChange(of: geo.size) { _, size in surfaceView.vigilSetViewportSize(size) }
+                    #endif
                 }
                 .ghosttySurfaceView(surfaceView)
 
@@ -232,8 +239,35 @@ extension Ghostty {
                 //
                 // This is disabled except on macOS because it uses AppKit drag/drop APIs.
                 SurfaceGrabHandle(surfaceView: surfaceView)
+                if surfaceView.vigilSizeLost {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Button {
+                                surfaceView.vigilControlSize(true, reason: "take size button")
+                            } label: {
+                                Label("Take size",
+                                      systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                            .buttonStyle(.borderless)
+                            .focusable(false)
+                            .font(.caption)
+                            .padding(7)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .help("Another viewport took the terminal size. Take it back for this pane.")
+                        }
+                        Spacer()
+                    }
+                    .padding(6)
+                }
                 #endif
             }
+            #if canImport(AppKit)
+            .onDisappear { surfaceView.vigilControlSize(false, reason: "viewport disappeared") }
+            .onReceive(center.publisher(for: NSApplication.willResignActiveNotification)) { _ in
+                surfaceView.vigilLeaveActiveApp()
+            }
+            #endif
         }
     }
 

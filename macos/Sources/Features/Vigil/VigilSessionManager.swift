@@ -1204,7 +1204,6 @@ class VigilSessionManager {
     /// itself at the owner's grid, 2026-08-29.)
     private func syncOwnerGrids() {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/vigild")
-        let me = "ghostty:\(getpid())"
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
             guard let id = view.vigilAttachId, view.surface != nil else { continue }
             // A remote pane's size fact rides the host's directory (the file
@@ -1220,9 +1219,16 @@ class VigilSessionManager {
             let parts = line.split(separator: " ", maxSplits: 2)
             let rows = parts.count >= 2 ? Int(parts[0]) ?? 0 : 0
             let cols = parts.count >= 2 ? Int(parts[1]) ?? 0 : 0
+            // Missing/in-flight directory data is not an ownership change.
+            guard rows > 0, cols > 0 else { continue }
             let owner = parts.count == 3 ? String(parts[2]) : ""
-            let foreign = !owner.isEmpty && !owner.contains(me)
-            let grid: Ghostty.SurfaceView.VigilGrid? = foreign && rows > 0 && cols > 0 ? .init(rows: rows, cols: cols) : nil
+            view.vigilUpdateSizeOwner(owner)
+            let mine = view.vigilOwnsSize(owner: owner)
+            // A remote viewport starts as a mirror even if nobody owns the
+            // pty. An explicit gesture selects its own layout immediately;
+            // directory delivery may still describe the previous owner.
+            let mirror = !view.vigilWantsSize && (view.vigilHost != nil || !owner.isEmpty && !mine)
+            let grid: Ghostty.SurfaceView.VigilGrid? = mirror && rows > 0 && cols > 0 ? .init(rows: rows, cols: cols) : nil
             if grid != view.vigilOwnerGrid {
                 view.vigilOwnerGrid = grid
                 // An ownership change is a legitimate resync window: the
@@ -1305,7 +1311,7 @@ class VigilSessionManager {
             return
         }
         guard let pts = view.vigilPoints(for: grid) else { return }
-        let b = view.bounds.size
+        let b = view.vigilViewportSize == .zero ? view.bounds.size : view.vigilViewportSize
         if pts.width > b.width || pts.height > b.height {
             guard view.vigilFontStep > -8 else { return }
             act("decrease_font_size:1"); view.vigilFontStep -= 1
@@ -1925,6 +1931,7 @@ class VigilSessionManager {
             config.vigilAttach = pane.id
             config.vigilHost = alias
             config.vigilMirror = true
+            config.vigilExplicitClaim = true
             return config
         }
         let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)

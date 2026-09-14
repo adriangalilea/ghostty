@@ -1748,6 +1748,10 @@ pub const CAPI = struct {
         surface.core_surface.vigilClaim(claim);
     }
 
+    export fn ghostty_surface_vigil_client_id(surface: *Surface) u64 {
+        return surface.core_surface.vigilClientId();
+    }
+
     /// Vigil: FNV-1a of the viewport's plain text (the content receipt).
     export fn ghostty_surface_vigil_screen_hash(surface: *Surface) u64 {
         return surface.core_surface.vigilScreenHash();

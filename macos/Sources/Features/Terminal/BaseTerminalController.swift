@@ -37,7 +37,12 @@ class BaseTerminalController: NSWindowController,
 
     /// The currently focused surface.
     var focusedSurface: Ghostty.SurfaceView? {
-        didSet { syncFocusToSurfaceTree() }
+        didSet {
+            if oldValue !== focusedSurface {
+                oldValue?.vigilControlSize(false, reason: "focused pane changed")
+            }
+            syncFocusToSurfaceTree()
+        }
     }
 
     /// The tree of splits within this terminal window.
@@ -310,7 +315,7 @@ class BaseTerminalController: NSWindowController,
             let focused: Bool = (window?.isKeyWindow ?? false) &&
                 surfaceView == focusedSurface &&
                 surfaceView.isFirstResponder
-            surfaceView.focusDidChange(focused)
+            surfaceView.vigilFocusDidChange(focused, reason: "window/tree focus sync")
         }
         NotificationCenter.default.post(name: VigilSessionManager.focusDidChange, object: nil)
     }
@@ -1300,6 +1305,7 @@ class BaseTerminalController: NSWindowController,
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        for view in surfaceTree { view.vigilControlSize(false, reason: "window resigned key") }
         // Becoming/losing key means we have to notify our surface(s) that we have focus
         // so things like cursors blink, pty events are sent, etc.
         self.syncFocusToSurfaceTree()

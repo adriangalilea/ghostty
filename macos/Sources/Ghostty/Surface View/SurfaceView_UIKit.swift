@@ -57,6 +57,8 @@ extension Ghostty {
             proxy.owner = self
             addSubview(proxy)
             installScrollGesture()
+            NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive),
+                                                   name: UIApplication.willResignActiveNotification, object: nil)
             receipt("born (explicit claim \(surface_cfg.vigilExplicitClaim))")
         }
 
@@ -65,6 +67,7 @@ extension Ghostty {
         }
 
         deinit {
+            NotificationCenter.default.removeObserver(self)
             guard let surface = _surface else { return }
             ghostty_surface_free(surface)
         }
@@ -73,6 +76,7 @@ extension Ghostty {
         /// hands the pty size on if this client owned it), whoever still
         /// holds the view.
         func detach() {
+            claimSize(false)
             keyboardWanted = false
             if isFirstResponder { _ = resignFirstResponder() }
             guard let surface = _surface else { return }
@@ -107,7 +111,12 @@ extension Ghostty {
             didSet { if presentation != oldValue { setNeedsLayout() } }
         }
 
-        func present(_ p: Presentation) { presentation = p }
+        func present(_ p: Presentation) {
+            // A stale fit host can finish an update during a takeover. Once
+            // claimed, only own layout can resize until an explicit yield.
+            guard !sizeClaimed || p.grid == nil else { return }
+            presentation = p
+        }
 
         /// The content scale the presentation asks for, resolved.
         private var wantedScale: CGFloat {
@@ -170,6 +179,7 @@ extension Ghostty {
         /// The terminal has the user's attention: cursor, focus events.
         var attended = false {
             didSet {
+                if !attended { claimSize(false) }
                 guard attended != oldValue, let surface else { return }
                 ghostty_surface_set_focus(surface, attended)
                 receipt("attended \(attended)")
@@ -188,10 +198,51 @@ extension Ghostty {
 
         /// Claim (true) or yield (false) the daemon's pty size. Only an
         /// own-size viewport claims; a fit viewport mirrors the owner.
-        func claimSize(_ claim: Bool) {
-            guard let surface else { return }
-            ghostty_surface_vigil_claim(surface, claim)
-            receipt(claim ? "claimed the pty size" : "yielded the pty size")
+        private(set) var sizeClaimed = false
+        private(set) var sizeClaimRequested = false
+        private var sizeAcknowledged = false
+
+        @discardableResult
+        func claimSize(_ claim: Bool) -> Bool {
+            guard let surface else { return false }
+            if claim {
+                guard attended, UIApplication.shared.applicationState == .active,
+                      window?.windowScene?.activationState == .foregroundActive else {
+                    receipt("claim refused: viewport not attended in an active scene")
+                    return false
+                }
+                sizeClaimRequested = true
+                // The new own-size host will lay out before sending o. A
+                // request must not claim the old fit/preview framebuffer.
+                setNeedsLayout()
+                return true
+            }
+            sizeClaimRequested = false
+            sizeAcknowledged = false
+            guard sizeClaimed else { return false }
+            ghostty_surface_vigil_claim(surface, false)
+            sizeClaimed = false
+            receipt("yielded the pty size")
+            return false
+        }
+
+        func updateSizeOwner(_ owner: String) {
+            guard sizeClaimed, let surface else { return }
+            let token = "ghostty:\(getpid())/\(String(ghostty_surface_vigil_client_id(surface), radix: 16))"
+            if owner.split(separator: " ").contains(Substring(token)) {
+                sizeAcknowledged = true
+            } else if sizeAcknowledged {
+                receipt("another viewport took size; returning to mirror")
+                claimSize(false)
+            }
+        }
+
+        @objc private func appWillResignActive() {
+            // This also covers an async attach finishing after the screen's
+            // phase callback. Coming back active never restores a claim.
+            claimSize(false)
+            attended = false
+            keyboardWanted = false
         }
 
         /// The content receipt: FNV-1a of the viewport's plain text, hex,
@@ -606,6 +657,14 @@ extension Ghostty {
                     if lastMirrorGrid != nil { ghostty_surface_vigil_dump(surface); receipt("grid changed, dump requested") }
                     lastMirrorGrid = g
                 }
+            }
+            if sizeClaimRequested, !sizeClaimed, presentation.grid == nil,
+               attended, UIApplication.shared.applicationState == .active,
+               window?.windowScene?.activationState == .foregroundActive {
+                ghostty_surface_vigil_claim(surface, true)
+                sizeClaimed = true
+                sizeAcknowledged = false
+                receipt("claimed the pty size after own layout")
             }
             let logical = CGSize(width: CGFloat(px.w) / scale, height: CGFloat(px.h) / scale)
             let mine = Set(subviews.map { ObjectIdentifier($0.layer) })

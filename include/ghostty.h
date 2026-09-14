@@ -1141,6 +1141,7 @@ GHOSTTY_API ghostty_surface_size_s ghostty_surface_size_for_grid(ghostty_surface
                                                                  uint16_t,
                                                                  uint16_t);
 GHOSTTY_API void ghostty_surface_vigil_claim(ghostty_surface_t, bool);
+GHOSTTY_API uint64_t ghostty_surface_vigil_client_id(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_vigil_dump(ghostty_surface_t);
 GHOSTTY_API uint64_t ghostty_surface_vigil_screen_hash(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_vigil_screen_text(ghostty_surface_t);

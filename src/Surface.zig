@@ -874,6 +874,14 @@ pub fn vigilClaim(self: *Surface, claim: bool) void {
     self.queueIo(.{ .vigil_claim = claim }, .unlocked);
 }
 
+/// Immutable identity of this attach client, shared with its hello receipt.
+pub fn vigilClientId(self: *const Surface) u64 {
+    return switch (self.io.backend) {
+        .attach => |attach| attach.client_id,
+        else => 0,
+    };
+}
+
 /// Vigil: the content receipt, FNV-1a over the viewport's plain text
 /// (the same formatter and options vigild hashes its own viewport with:
 /// a viewport selection, trailing whitespace trimmed, no unwrap). Equal

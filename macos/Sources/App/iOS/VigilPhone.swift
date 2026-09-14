@@ -319,6 +319,7 @@ final class VigilPhone: ObservableObject {
         /// The owner's grid, for the row's live preview.
         var rows: Int = 0
         var cols: Int = 0
+        var sizeOwner: String = ""
         var children: [Node] = []
 
         /// The cluster this node shows when collapsed (its own state for a
@@ -388,7 +389,8 @@ final class VigilPhone: ObservableObject {
                                 state: truth?.displayState,
                                 alive: alive,
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil,
-                                rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0)
+                                rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
+                                sizeOwner: (truth?.size ?? "").split(separator: " ", maxSplits: 2).dropFirst(2).joined(separator: " "))
                 }
                 for (ti, t) in tabs.enumerated() {
                     let all = t.panes + (t.dock?.panes ?? [])

@@ -244,6 +244,71 @@ extension Ghostty {
         /// accommodates what is visible. Points for that grid come from
         /// the core (`vigilPoints`).
         @Published var vigilOwnerGrid: VigilGrid?
+        /// Input intent takes size; focus synchronization and presentation
+        /// cannot take it back from another viewport.
+        @Published private(set) var vigilWantsSize = false
+        @Published private(set) var vigilSizeLost = false
+        private static weak var vigilPointerView: SurfaceView?
+        private var vigilSizeAcknowledged = false
+        private(set) var vigilViewportSize: CGSize = .zero
+
+        func vigilOwnsSize(owner: String) -> Bool {
+            guard let surface else { return false }
+            let token = "ghostty:\(getpid())/\(String(ghostty_surface_vigil_client_id(surface), radix: 16))"
+            return owner.split(separator: " ").contains(Substring(token))
+        }
+
+        func vigilUpdateSizeOwner(_ owner: String) {
+            guard vigilWantsSize else { return }
+            if vigilOwnsSize(owner: owner) {
+                vigilSizeAcknowledged = true
+            } else if vigilSizeAcknowledged {
+                // Another explicit client took over. Do not fight it.
+                vigilControlSize(false, reason: "another client took size")
+                vigilSizeLost = true
+            }
+        }
+
+        func vigilSetViewportSize(_ size: CGSize) {
+            guard size != vigilViewportSize else { return }
+            vigilViewportSize = size
+            if vigilWantsSize { sizeDidChange(size) }
+        }
+
+        func vigilLeaveActiveApp() {
+            Self.vigilPointerView = nil
+            vigilControlSize(false, reason: "app inactive")
+        }
+
+        func vigilControlSize(_ own: Bool, reason: String) {
+            guard vigilAttachId != nil, let surface, own != vigilWantsSize else { return }
+            if own {
+                guard NSApp.isActive, window?.isKeyWindow == true,
+                      vigilViewportSize.width > 0, vigilViewportSize.height > 0 else { return }
+                if Self.vigilPointerView !== self {
+                    Self.vigilPointerView?.vigilControlSize(false, reason: "input entered another pane")
+                    Self.vigilPointerView = self
+                }
+                vigilWantsSize = true
+                vigilSizeLost = false
+                vigilSizeAcknowledged = false
+                vigilOwnerGrid = nil
+                if vigilFontStep != 0 {
+                    _ = "reset_font_size".withCString { ghostty_surface_binding_action(surface, $0, 15) }
+                    vigilFontStep = 0
+                }
+                // Queue the real viewport's r BEFORE o. A stale letterbox
+                // layout must never become the newly claimed pty size.
+                sizeDidChange(vigilViewportSize)
+                ghostty_surface_vigil_claim(surface, true)
+            } else {
+                // y precedes any subsequent mirror/font/layout resize.
+                ghostty_surface_vigil_claim(surface, false)
+                vigilWantsSize = false
+                vigilSizeAcknowledged = false
+            }
+            VigilSessionManager.vlogSync("size control: \(vigilHost ?? "")/\(vigilAttachId ?? "?") \(own ? "claim" : "yield") (\(reason))")
+        }
         /// Font-size steps below the config size taken to fit a
         /// letterboxed grid (0 = the config size).
         var vigilFontStep = 0
@@ -293,6 +358,7 @@ extension Ghostty {
         /// a mirror whose socket outlived the panel kept the pty at the
         /// panel's size for every window that came after (2026-08-28).
         func vigilDestroySurface() {
+            vigilControlSize(false, reason: "viewport closed")
             surfaceModel = nil
         }
 
@@ -509,9 +575,16 @@ extension Ghostty {
         }
 
         override func focusDidChange(_ focused: Bool) {
+            vigilFocusDidChange(focused, reason: "focus callback")
+        }
+
+        func vigilFocusDidChange(_ focused: Bool, reason: String) {
             guard let surface = self.surface else { return }
             guard self.focused != focused else { return }
             self.focused = focused
+            if let id = vigilAttachId {
+                VigilSessionManager.vlogSync("surface focus: \(vigilHost ?? "local")/\(id) \(focused) key=\(window?.isKeyWindow == true) responder=\(isFirstResponder) letterbox=\(vigilOwnerGrid != nil) (\(reason))")
+            }
 
             // If we lost our focus then remove the mouse event suppression so
             // our mouse release event leaving the surface can properly be
@@ -560,7 +633,14 @@ extension Ghostty {
             guard let surface = self.surface else { return }
 
             // Update our core surface
-            ghostty_surface_set_size(surface, width, height)
+            if vigilWantsSize {
+                // During SwiftUI's transition out of letterboxing, old frame
+                // callbacks still arrive. The owning layout is the viewport.
+                let pixels = convertToBacking(vigilViewportSize)
+                ghostty_surface_set_size(surface, UInt32(pixels.width), UInt32(pixels.height))
+            } else {
+                ghostty_surface_set_size(surface, width, height)
+            }
 
             // Update our cached size metrics
             let size = ghostty_surface_size(surface)
@@ -745,6 +825,14 @@ extension Ghostty {
             // because there could be some other overlays on top, like search bar
             guard window.contentView?.hitTest(location) == self else { return event }
 
+            // This monitor consumes a split-focus click before mouseDown.
+            // Carry that actual input intent across AppKit's key-window update.
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window, self.window === window,
+                      window.firstResponder === self else { return }
+                self.vigilControlSize(true, reason: "pane focus click")
+            }
+
             // We always assume that we're resetting our mouse suppression
             // unless we see the specific scenario below to set it.
             suppressNextLeftMouseUp = false
@@ -893,7 +981,7 @@ extension Ghostty {
 
         override func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()
-            if result { focusDidChange(true) }
+            if result { vigilFocusDidChange(true, reason: "became first responder") }
             return result
         }
 
@@ -902,7 +990,7 @@ extension Ghostty {
 
             // We sometimes call this manually (see SplitView) as a way to force us to
             // yield our focus state.
-            if result { focusDidChange(false) }
+            if result { vigilFocusDidChange(false, reason: "resigned first responder") }
 
             return result
         }
@@ -968,6 +1056,7 @@ extension Ghostty {
 
         override func mouseDown(with event: NSEvent) {
             guard let surface = self.surface else { return }
+            vigilControlSize(true, reason: "pane click")
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
         }
@@ -1085,6 +1174,15 @@ extension Ghostty {
         }
 
         override func mouseMoved(with event: NSEvent) {
+            // Tracking-area enter/exit events also come from layout. Only a
+            // real pointer movement into a different pane expresses intent;
+            // motion within a pane cannot fight a newer claimant elsewhere.
+            if event.type == .mouseMoved, event.deltaX != 0 || event.deltaY != 0,
+               NSApp.isActive, window?.isKeyWindow == true, Self.vigilPointerView !== self {
+                Self.vigilPointerView?.vigilControlSize(false, reason: "pointer entered another pane")
+                Self.vigilPointerView = self
+                vigilControlSize(true, reason: "pointer entered pane")
+            }
             let pos = self.convert(event.locationInWindow, from: nil)
             mouseLocationInSurface = pos
 

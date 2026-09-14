@@ -725,6 +725,8 @@ struct PaneScreen: View {
     @State private var error: String?
     @State private var ownSize = false
     @State private var fitZoom: CGFloat = 1
+    @State private var screenVisible = false
+    @State private var entryGeneration = UUID()
 
     init(ref: PaneRef) {
         self.ref = ref
@@ -786,7 +788,7 @@ struct PaneScreen: View {
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if let surfaceView { KeyboardButton(surface: surfaceView) }
-                if grid != nil {
+                if surfaceView != nil {
                     // MIRROR: a picture of the Mac's grid, the Mac untouched.
                     // OWN: the phone is the terminal, the pane reflows to it.
                     // Same footprint either way: a Mac glyph (you are
@@ -807,53 +809,76 @@ struct PaneScreen: View {
                 } label: { Image(systemName: "rectangle.stack") }
             }
         }
-        .task { await enter(current) }
+        .task { screenVisible = true; await enter(current) }
+        .onChange(of: node?.sizeOwner) { _, owner in
+            guard let view = surfaceView, grid != nil else { return }
+            view.updateSizeOwner(owner ?? "")
+            if !view.sizeClaimRequested { ownSize = false }
+        }
         .onChange(of: model.streamGeneration) { _, _ in
+            guard screenVisible, phase == .active else { return }
             guard surfaceView?.surface == nil else { return }
             model.log("pane: \(current.pane) stream died on screen, re-dialing")
             leave()
             error = nil
             Task { await enter(current) }
         }
-        .onDisappear { leave(); model.present(nil) }
-        // Phase is a fact, ownership follows it: a backgrounded or locked
-        // phone yields the pty (the Mac takes over as survivor); coming
-        // back re-claims in OWN and re-requests the screen it missed.
+        .onDisappear { screenVisible = false; leave(); model.present(nil) }
+        // Leaving the active scene ends the gesture's authority. Returning
+        // refreshes the picture; only another button press can claim again.
         .onChange(of: phase) { _, now in
-            guard let view = surfaceView else { return }
             switch now {
             case .background, .inactive:
                 model.log("pane: \(current.pane) phase \(now), yielding")
-                view.keyboardWanted = false
-                if ownSize || grid == nil { view.claimSize(false) }
+                entryGeneration = UUID()
+                surfaceView?.claimSize(false)
+                surfaceView?.keyboardWanted = false
+                surfaceView?.attended = false
+                ownSize = false
             case .active:
+                guard screenVisible else { return }
                 model.log("pane: \(current.pane) active again")
-                if ownSize || grid == nil { view.claimSize(true) }
-                view.refreshFromDaemon()
+                if let view = surfaceView, view.surface != nil {
+                    view.attended = true
+                    view.refreshFromDaemon()
+                } else {
+                    Task { await enter(current) }
+                }
             @unknown default: break
             }
         }
     }
 
     private func enter(_ ref: PaneRef) async {
+        guard screenVisible, phase == .active else { return }
+        let generation = UUID()
+        entryGeneration = generation
         model.present(ref)
         model.log("pane: screen \(ref.pane)")
         guard let app = ghostty.app else { error = "ghostty not ready"; return }
         do {
             guard let view = try await model.surface(for: ref, app: app, screen: true) else { error = "no surface"; return }
+            guard !Task.isCancelled, screenVisible, phase == .active,
+                  entryGeneration == generation, current == ref else {
+                model.log("pane: \(ref.pane) attachment finished after presentation ended; no claim")
+                return
+            }
             view.accessory = makeAccessory(for: view)
             view.attended = true
-            if ownSize || grid == nil { view.claimSize(true) }
+            // A missing directory grid is not a request to own the pty.
             surfaceView = view
         } catch {
+            guard entryGeneration == generation, screenVisible else { return }
             self.error = error.receipt
             model.log("attach: \(ref.pane) failed: \(error.receipt)")
         }
     }
 
     private func leave() {
+        entryGeneration = UUID()
+        ownSize = false
         guard let view = surfaceView else { return }
-        if ownSize || grid == nil { view.claimSize(false) }
+        view.claimSize(false)
         view.keyboardWanted = false
         view.attended = false
         view.accessory = nil
@@ -868,11 +893,10 @@ struct PaneScreen: View {
     }
 
     private func setOwnSize(_ own: Bool) {
-        guard own != ownSize, let view = surfaceView else { return }
-        ownSize = own
+        guard own != ownSize, let view = surfaceView, screenVisible, phase == .active else { return }
+        ownSize = view.claimSize(own)
         fitZoom = 1
-        view.claimSize(own)
-        model.log("pane: \(current.pane) \(own ? "own size (claims the pty)" : "fit (mirrors the owner)")")
+        model.log("pane: \(current.pane) \(ownSize ? "own size (claims the pty)" : "fit (mirrors the owner)")")
     }
 
     private func zoom(_ direction: Int) {
