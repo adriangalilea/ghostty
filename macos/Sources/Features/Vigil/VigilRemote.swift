@@ -293,12 +293,20 @@ final class VigilRemote: ObservableObject {
                         return
                     }
                     let changed = self.hosts[index].raw != data
+                    // A receipt per SHAPE change (a session or pane came or
+                    // went), not per state flip: the stream delivers every
+                    // flip and a busy fleet would write the log a few times
+                    // a second.
+                    let shape = (dir.sessions.count, dir.panes.count)
+                    let before = self.hosts[index].directory.map { ($0.sessions.count, $0.panes.count) }
                     self.hosts[index].directory = dir
                     self.hosts[index].raw = data
                     self.hosts[index].error = nil
                     self.hosts[index].fetched = Date()
                     if changed {
-                        Self.trace?("remote: \(alias) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
+                        if before == nil || before! != shape {
+                            Self.trace?("remote: \(alias) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
+                        }
                         NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
                     }
                 case .failure(let error):
