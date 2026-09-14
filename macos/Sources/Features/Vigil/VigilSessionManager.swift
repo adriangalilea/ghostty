@@ -4793,10 +4793,6 @@ class VigilSessionManager {
         guard let state = paneAgentState(pane) else { return nil }
         if state.state == .done || state.state == .blocked,
            let ack = lastAck(pane), ack >= state.since { return .idle }
-        // Preserve the legacy positive title corrective until native ownership
-        // is enabled. Absence of a spinner is never completion evidence.
-        if !VigilHarnessCoordinator.shared.isEnabled, state.state == .working,
-           liveView(attachId: pane)?.title.unicodeScalars.first == "✳" { return .idle }
         return state.state
     }
 

@@ -124,34 +124,6 @@ final class VigilHarnessCoordinator: ObservableObject {
             Task { @MainActor in VigilSessionManager.shared.pumpAskGate() }
         }
     }
-    /// The gate marker, read once and then only when its directory changes
-    /// (a vnode watch): it flips once per machine lifetime, and a stat per
-    /// pane per sidebar snapshot was the price of asking the disk each time.
-    var isEnabled: Bool {
-        if let enabledCache { return enabledCache }
-        let enabled = ProcessInfo.processInfo.environment["VIGIL_HARNESS_ENABLED"] == "1" ||
-            FileManager.default.fileExists(atPath: HarnessPaths.root.appendingPathComponent("enabled").path)
-        enabledCache = enabled
-        watchGate()
-        return enabled
-    }
-    private var enabledCache: Bool?
-    private var gateWatch: DispatchSourceFileSystemObject?
-    private func watchGate() {
-        guard gateWatch == nil else { return }
-        let fd = open(HarnessPaths.root.path, O_EVTONLY)
-        guard fd >= 0 else { return } // no state directory yet: the next read looks again
-        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .rename], queue: .main)
-        source.setEventHandler { [weak self] in
-            guard let self else { return }
-            self.enabledCache = nil
-            if source.data.contains(.delete) || source.data.contains(.rename) { source.cancel(); self.gateWatch = nil }
-            Task { @MainActor in VigilSessionManager.shared.pumpAskGate() }
-        }
-        source.setCancelHandler { close(fd) }
-        source.resume()
-        gateWatch = source
-    }
     private var inbox: InboxModel?
     private var panel: NSPanel?
     private var enrollmentPanel: NSPanel?
@@ -166,10 +138,15 @@ final class VigilHarnessCoordinator: ObservableObject {
     private var inputGeneration = 0
     private var deferredForDictation = false
     private var nextServiceCheck = Date.distantPast
+    private var brokerEnsured = false
 
     func pump(preferredPane: String?) {
-        if !isEnabled { activateIfEnrolled() }
-        guard isEnabled else { stop(); return }
+        // The broker is the one writer of every pane's state: it runs on
+        // every Mac, enrolled or not. Started once here; a hook event that
+        // finds none starts it again. authz enrollment only decides whether
+        // requests can be answered away from the terminal.
+        if !brokerEnsured { brokerEnsured = true; launch("vigil-agent", ["ensure"]) }
+        guard enrolled else { stop(); return }
         if inbox == nil { connect() }
         let panes = inbox?.requests.map { $0.request.context }.filter { VigilSessionManager.shared.paneOnAnyScreen($0) } ?? []
         let focused = NSApp.isActive ? preferredPane : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -216,48 +193,46 @@ final class VigilHarnessCoordinator: ObservableObject {
         } catch { VigilSessionManager.shared.vlog("authz endpoint: enrollment unavailable; native attention remains active") }
     }
     private func startServices() {
-        guard isEnabled, Date() >= nextServiceCheck else { return }
+        guard enrolled, Date() >= nextServiceCheck else { return }
         nextServiceCheck = Date().addingTimeInterval(10)
         Task { [weak self] in
             guard let self else { return }
             let socket = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/authz-space/service.sock").path
             let healthy = (try? await SocketTransport(path: socket, verifyServer: PlatformTrust.verifyService).call(RPC("health")))?.ok == true
-            guard self.isEnabled else { return }
-            self.launchServices(startAuthorization: !healthy)
+            guard self.enrolled else { return }
+            if !healthy { self.launch("authz", ["serve"]) }
+            self.launch("vigil-agent", ["ensure"])
         }
     }
-    private func launchServices(startAuthorization: Bool) {
-        // Installed binaries only. No development build is launched implicitly.
-        for (binary, arguments) in [("authz", ["serve"]), ("vigil-agent", ["ensure"])] {
-            if binary == "authz", !startAuthorization { continue }
-            if starters.contains(where: { $0.executableURL?.lastPathComponent == binary && $0.isRunning }) { continue }
-            let process = Process()
-            process.executableURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/" + binary)
-            process.arguments = arguments; process.environment = AgentEnvironment.scrub(ProcessInfo.processInfo.environment)
-            process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice
-            process.terminationHandler = { [weak self] process in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.starters.removeAll { $0 === process }
-                    VigilSessionManager.shared.vlog("authz service: \(binary) exited \(process.terminationStatus)")
-                    if binary == "authz" {
-                        // Exit 0 is the service asking to be relaunched on a
-                        // changed configuration (it reads the file once);
-                        // non-zero is a fault. Either way the endpoint is
-                        // gone: drop it, reconnect at once for a reload,
-                        // after a breath for a fault.
-                        self.stop()
-                        let delay: TimeInterval = process.terminationStatus == 0 ? 0 : 10
-                        self.nextStart = Date().addingTimeInterval(delay)
-                        self.nextServiceCheck = Date().addingTimeInterval(delay)
-                    }
+    /// Installed binaries only. No development build is launched implicitly.
+    private func launch(_ binary: String, _ arguments: [String]) {
+        if starters.contains(where: { $0.executableURL?.lastPathComponent == binary && $0.isRunning }) { return }
+        let process = Process()
+        process.executableURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/" + binary)
+        process.arguments = arguments; process.environment = AgentEnvironment.scrub(ProcessInfo.processInfo.environment)
+        process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] process in
+            Task { @MainActor in
+                guard let self else { return }
+                self.starters.removeAll { $0 === process }
+                VigilSessionManager.shared.vlog("authz service: \(binary) exited \(process.terminationStatus)")
+                if binary == "authz" {
+                    // Exit 0 is the service asking to be relaunched on a
+                    // changed configuration (it reads the file once);
+                    // non-zero is a fault. Either way the endpoint is
+                    // gone: drop it, reconnect at once for a reload,
+                    // after a breath for a fault.
+                    self.stop()
+                    let delay: TimeInterval = process.terminationStatus == 0 ? 0 : 10
+                    self.nextStart = Date().addingTimeInterval(delay)
+                    self.nextServiceCheck = Date().addingTimeInterval(delay)
                 }
             }
-            do { try process.run(); starters.append(process) } catch { VigilSessionManager.shared.vlog("authz service: installed \(binary) unavailable") }
         }
+        do { try process.run(); starters.append(process) } catch { VigilSessionManager.shared.vlog("authz service: installed \(binary) unavailable") }
     }
     private func present(_ snapshot: RequestSnapshot) {
-        guard isEnabled, current?.handle != snapshot.handle, let inbox else { return }
+        guard current?.handle != snapshot.handle, let inbox else { return }
         // The summon owns interruption/veto policy. Showing an independent
         // answer panel must not sneak around it for a background pane.
         guard canPresent(snapshot) else {
@@ -345,7 +320,7 @@ final class VigilHarnessCoordinator: ObservableObject {
     }
     var pendingCount: Int { inbox?.requests.count ?? 0 }
     /// The plate's badge: open the review surface for whatever is waiting.
-    func showInbox() { guard isEnabled, inbox != nil else { return }; showPanel() }
+    func showInbox() { guard inbox != nil else { return }; showPanel() }
     private func showPanel() {
         guard let inbox else { return }
         if panel == nil {
@@ -418,24 +393,6 @@ final class VigilHarnessCoordinator: ObservableObject {
     /// The plate's two live facts. Health is alpha (enrolled and answering,
     /// or the reason it is not); level is hue, the one axis BRAND.md reserves
     /// it for: the in-flight request's urgency, worn while it stands.
-    /// Enrollment is the one click; the gate follows it. A kit installs every
-    /// component, so the only thing between "enrolled" and "answering" was a
-    /// file a stranger would never know to create. Created once, here, with
-    /// a receipt; services start through the usual recovery.
-    private func activateIfEnrolled() {
-        guard enrolled, !isEnabled,
-              FileManager.default.isExecutableFile(atPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/vigil-agent").path)
-        else { return }
-        let root = HarnessPaths.root
-        do {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try Data().write(to: root.appendingPathComponent("enabled"), options: .atomic)
-            enabledCache = nil
-            VigilSessionManager.shared.vlog("authz: enrolled on this Mac; harness gate created, services start on recovery")
-        } catch {
-            VigilSessionManager.shared.vlog("authz: enrolled but the gate could not be created: \(error.localizedDescription)")
-        }
-    }
     /// This Mac has the service installed and a sealed enrollment on disk:
     /// the plate shows its controls only then. Enrollment is the human's one
     /// click in the settings pane (the gear); everything else is derived.
@@ -446,7 +403,6 @@ final class VigilHarnessCoordinator: ObservableObject {
     }
     var plateHealth: AskPanelHealth {
         guard enrolled else { return .off("not set up: open the gear and enroll this Mac") }
-        guard isEnabled else { return .off("gate off: prompts stay on the terminal") }
         guard inbox != nil else { return .off("service unreachable") }
         return .ready
     }
