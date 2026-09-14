@@ -680,7 +680,7 @@ struct VigilSidebarView: View {
             state: pane.state))
         .background(reportHit(
             id: id,
-            kind: .pane(session: session, tabAnchor: tab.anchor, paneId: pane.paneId)))
+            kind: .pane(session: session, tabAnchor: tab.anchor, paneId: pane.navigationId)))
         .contentShape(Rectangle())
         .id(id)
         .onDrag {

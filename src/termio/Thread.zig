@@ -333,7 +333,18 @@ fn drainMailbox(
             .start_synchronized_output => self.startSynchronizedOutput(cb),
             .linefeed_mode => |v| self.flags.linefeed_mode = v,
             .focused => |v| try io.focusGained(data, v),
-            .vigil_claim => |v| try io.backend.vigilClaim(v),
+            .vigil_claim => |v| {
+                // Resize messages are coalesced by a timer. An ownership
+                // claim is an ordering boundary: apply the queued viewport
+                // size first, so the daemon never claims the old fit grid.
+                if (v) {
+                    if (self.coalesce_data.resize) |size| {
+                        self.coalesce_data.resize = null;
+                        try io.resize(data, size);
+                    }
+                }
+                try io.backend.vigilClaim(v);
+            },
             .vigil_dump => try io.backend.vigilDump(),
             .write_small => |v| try io.queueWrite(
                 data,

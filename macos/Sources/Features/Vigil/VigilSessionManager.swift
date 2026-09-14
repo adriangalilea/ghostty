@@ -1890,11 +1890,12 @@ class VigilSessionManager {
     /// them on the next runloop tick around the layout's first leaf, so a
     /// landing resolved at mount time could only ever find that first leaf
     /// (a click on the other pane focused the wrong one, 2026-09-14).
-    private func landAfterSplits(_ controller: TerminalController, anchor: String?, fallback: Ghostty.SurfaceView) {
+    private func landAfterSplits(_ controller: TerminalController, anchor: String?, fallback: Ghostty.SurfaceView, takeSize: Bool = false) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak controller] in
             guard let controller else { return }
             let landing = anchor.flatMap { a in controller.surfaceTree.first { $0.vigilAttachId == a } } ?? fallback
             Ghostty.moveFocus(to: landing)
+            if takeSize { landing.vigilControlSize(true, reason: "sidebar pane selected") }
         }
     }
 
@@ -1917,7 +1918,10 @@ class VigilSessionManager {
         // proxies (four re-mounts in five seconds of clicking, 2026-09-14).
         if mirroredSession(of: controller) == composite,
            let shown = controller.surfaceTree.first(where: { $0.vigilAttachId == rawAnchor ?? "" }) ?? (rawAnchor == nil ? controller.surfaceTree.first : nil) {
-            DispatchQueue.main.async { Ghostty.moveFocus(to: shown) }
+            DispatchQueue.main.async {
+                Ghostty.moveFocus(to: shown)
+                shown.vigilControlSize(true, reason: "sidebar pane selected")
+            }
             return
         }
         if mirroredSession(of: controller) != nil {
@@ -1939,7 +1943,7 @@ class VigilSessionManager {
         swapTree(controller, SplitTree(view: view))
         mirrorViewports.setObject(composite as NSString, forKey: controller)
         materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
-        landAfterSplits(controller, anchor: rawAnchor, fallback: view)
+        landAfterSplits(controller, anchor: rawAnchor, fallback: view, takeSize: rawAnchor != nil)
         vlog("remote: window -> viewport onto '\(composite)' via ssh \(alias) (\(tab.panes.count) panes)")
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
@@ -4025,6 +4029,10 @@ class VigilSessionManager {
     /// A pane row: a live surface gets direct focus; a captured one rides
     /// activateTab (its tab mounts), then takes focus.
     func activatePane(name: String, paneId: String?, in controller: TerminalController?) {
+        if VigilRemote.split(name) != nil, let controller {
+            mountRemote(controller, composite: name, anchor: paneId)
+            return
+        }
         guard let paneId else {
             activateTab(name: name, anchor: nil, in: controller)
             return
@@ -5059,6 +5067,9 @@ class VigilSessionManager {
     struct SidebarPane: Identifiable, Equatable {
         let id: String            // attach id, or a synthetic id for daemon-less panes
         let paneId: String?       // vigild daemon id when daemon-backed
+        /// Remote rows navigate by their full identity but have no local
+        /// daemon id: local rename, drag and close paths must stay separate.
+        var navigationId: String? { paneId ?? (VigilRemote.split(id) != nil ? id : nil) }
         let title: String         // display: custom label, else program, else surface title
         let program: String?      // the argv truth alone; nil = just a shell
         let state: AgentState?

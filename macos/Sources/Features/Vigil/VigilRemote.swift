@@ -81,7 +81,7 @@ final class VigilRemote: ObservableObject {
     /// never collide with local ones: `alias/name`.
     static func compositeId(_ alias: String, _ name: String) -> String { "\(alias)/\(name)" }
 
-    static func split(_ composite: String) -> (alias: String, name: String)? {
+    nonisolated static func split(_ composite: String) -> (alias: String, name: String)? {
         guard let slash = composite.firstIndex(of: "/") else { return nil }
         return (String(composite[..<slash]), String(composite[composite.index(after: slash)...]))
     }

@@ -211,7 +211,7 @@ final class VigilSidebarModel: ObservableObject {
     func isFront(_ row: VigilSessionManager.SidebarSessionRow) -> Bool { focus?.session == row.id }
     func isFront(_ tab: VigilSessionManager.SidebarTab) -> Bool { focus?.tab == tab.id }
     func isFocused(_ pane: VigilSessionManager.SidebarPane) -> Bool {
-        pane.paneId != nil && focus?.pane == pane.paneId
+        pane.navigationId != nil && focus?.pane == pane.navigationId
     }
 
     private var lastRefresh: Date = .distantPast
@@ -662,7 +662,7 @@ final class VigilSidebarModel: ObservableObject {
                 for pane in tab.panes {
                     out.append(NavItem(
                         id: "\(tab.id)#\(pane.id)",
-                        kind: .pane(name: row.id, paneId: pane.paneId)))
+                        kind: .pane(name: row.id, paneId: pane.navigationId)))
                 }
                 continue
             }
@@ -674,7 +674,7 @@ final class VigilSidebarModel: ObservableObject {
                 for pane in tab.panes {
                     out.append(NavItem(
                         id: "\(tab.id)#\(pane.id)",
-                        kind: .pane(name: row.id, paneId: pane.paneId)))
+                        kind: .pane(name: row.id, paneId: pane.navigationId)))
                 }
             }
         }

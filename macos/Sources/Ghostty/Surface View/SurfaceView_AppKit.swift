@@ -277,7 +277,6 @@ extension Ghostty {
 
         func vigilLeaveActiveApp() {
             Self.vigilPointerView = nil
-            vigilControlSize(false, reason: "app inactive")
         }
 
         func vigilControlSize(_ own: Bool, reason: String) {
@@ -286,7 +285,6 @@ extension Ghostty {
                 guard NSApp.isActive, window?.isKeyWindow == true,
                       vigilViewportSize.width > 0, vigilViewportSize.height > 0 else { return }
                 if Self.vigilPointerView !== self {
-                    Self.vigilPointerView?.vigilControlSize(false, reason: "input entered another pane")
                     Self.vigilPointerView = self
                 }
                 vigilWantsSize = true
@@ -1179,7 +1177,6 @@ extension Ghostty {
             // motion within a pane cannot fight a newer claimant elsewhere.
             if event.type == .mouseMoved, event.deltaX != 0 || event.deltaY != 0,
                NSApp.isActive, window?.isKeyWindow == true, Self.vigilPointerView !== self {
-                Self.vigilPointerView?.vigilControlSize(false, reason: "pointer entered another pane")
                 Self.vigilPointerView = self
                 vigilControlSize(true, reason: "pointer entered pane")
             }
