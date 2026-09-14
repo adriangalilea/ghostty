@@ -391,9 +391,13 @@ class AppDelegate: NSObject,
                 if VigilSessionManager.shared.restoreForegroundSessions() {
                     // The workspace is back; no virgin window.
                 } else if derivedConfig.initialWindow {
-                    undoManager.disableUndoRegistration()
-                    _ = TerminalController.newWindow(ghostty)
-                    undoManager.enableUndoRegistration()
+                    // A detached fleet still exists. Activation reopens it;
+                    // only an empty registry needs a fresh session.
+                    if !VigilSessionManager.shared.reopen() {
+                        undoManager.disableUndoRegistration()
+                        _ = TerminalController.newWindow(ghostty)
+                        undoManager.enableUndoRegistration()
+                    }
                 }
             }
         }
@@ -446,6 +450,13 @@ class AppDelegate: NSObject,
     /// This is called when the application is already open and someone double-clicks the icon
     /// or clicks the dock icon.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // newWindow defers presentation to the next runloop turn. A launch
+        // reopen arriving in between must not create a second window or
+        // interrupt the pending window's initial layout.
+        if TerminalController.all.contains(where: \.hasPendingInitialPresentation) {
+            return false
+        }
+
         // NEVER trust AppKit's flag: it counts EVERY visible window,
         // including vigil's borderless glass panels (the ask HUD, dictation
         // captions, the Requests panel, the quick terminal). With the fleet

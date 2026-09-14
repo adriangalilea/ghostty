@@ -51,6 +51,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// re-showing a tab that was already closed.
     private var pendingInitialPresentation: DispatchWorkItem?
 
+    /// A scheduled window already satisfies launch/reopen, even before AppKit shows it.
+    var hasPendingInitialPresentation: Bool { pendingInitialPresentation != nil }
+
     /// This is set to false by init if the window managed by this controller should not be restorable.
     /// For example, terminals executing custom scripts are not restorable.
     private var restorable: Bool = true
