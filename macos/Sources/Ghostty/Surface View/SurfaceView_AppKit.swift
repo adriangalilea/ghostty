@@ -250,6 +250,26 @@ extension Ghostty {
         @Published private(set) var vigilSizeLost = false
         @Published private(set) var vigilTransportState: UInt8 = 0
         @Published private(set) var vigilInputPending = false
+        private var vigilKeyEvents: UInt64 = 0
+        private var vigilKeyActions: UInt64 = 0
+        private var vigilLastKeyAt: TimeInterval?
+        private var vigilLastKeyHandled: Bool?
+
+        /// Readable through the session control socket without a menu, alert,
+        /// focus change, or recording the user's actual keystrokes.
+        func vigilInputDiagnostics() -> VigilSessionControl.InputDiagnostic? {
+            guard let pane = vigilAttachId else { return nil }
+            let status = surface.map { ghostty_surface_vigil_transport_status($0) }
+            return .init(pane: pane, host: vigilHost,
+                         clientID: surface.map { String(ghostty_surface_vigil_client_id($0), radix: 16) },
+                         readonly: readonly, keyboardFocus: window?.firstResponder === self,
+                         keyWindow: window?.isKeyWindow == true,
+                         visible: window?.isVisible == true && !isHiddenOrHasHiddenAncestor,
+                         keyEvents: vigilKeyEvents, keyActions: vigilKeyActions,
+                         lastKeyAt: vigilLastKeyAt, lastKeyHandled: vigilLastKeyHandled,
+                         transportState: status?.state, pendingBytes: status?.pending_bytes,
+                         writtenBytes: status?.written_bytes)
+        }
 
         func vigilRefreshTransportStatus() {
             guard vigilHost != nil, let surface else { return }
@@ -1328,6 +1348,10 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
+            if vigilAttachId != nil {
+                vigilKeyEvents &+= 1
+                vigilLastKeyAt = Date().timeIntervalSince1970
+            }
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return
@@ -1734,15 +1758,21 @@ extension Ghostty {
             // For text, we only encode UTF8 if we don't have a single control
             // character. Control characters are encoded by Ghostty itself.
             // Without this, `ctrl+enter` does the wrong thing.
+            let handled: Bool
             if let text, text.count > 0,
                let codepoint = text.utf8.first, codepoint >= 0x20 {
-                return text.withCString { ptr in
+                handled = text.withCString { ptr in
                     key_ev.text = ptr
                     return ghostty_surface_key(surface, key_ev)
                 }
             } else {
-                return ghostty_surface_key(surface, key_ev)
+                handled = ghostty_surface_key(surface, key_ev)
             }
+            if vigilAttachId != nil, action != GHOSTTY_ACTION_RELEASE {
+                vigilKeyActions &+= 1
+                vigilLastKeyHandled = handled
+            }
+            return handled
         }
 
         private func shouldReplayCommittedPreeditKey(_ event: NSEvent) -> Bool {

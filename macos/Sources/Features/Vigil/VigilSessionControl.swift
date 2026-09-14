@@ -18,6 +18,23 @@ enum VigilSessionControl {
         let direction: String?
     }
 
+    struct InputDiagnostic: Codable, Sendable {
+        let pane: String
+        let host: String?
+        let clientID: String?
+        let readonly: Bool
+        let keyboardFocus: Bool
+        let keyWindow: Bool
+        let visible: Bool
+        let keyEvents: UInt64
+        let keyActions: UInt64
+        let lastKeyAt: TimeInterval?
+        let lastKeyHandled: Bool?
+        let transportState: UInt8?
+        let pendingBytes: UInt64?
+        let writtenBytes: UInt64?
+    }
+
     struct Reply: Codable, Sendable {
         let id: UUID?
         let ok: Bool
@@ -26,6 +43,7 @@ enum VigilSessionControl {
         var revision: String?
         var pane: String?
         var session: String?
+        var input: [InputDiagnostic]?
 
         static func failure(_ request: Request?, _ code: String, _ message: String) -> Self {
             .init(id: request?.id, ok: false, code: code, message: message)
@@ -153,6 +171,12 @@ enum VigilSessionControl {
         guard request.version == 1 else { return .failure(request, "unsupported_version", "Session API version 1 is required.") }
         let age = Date().timeIntervalSince1970 - request.issuedAt
         guard age >= -300, age < lifetime else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
+        if request.operation == "inspect-input" {
+            let views = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
+                .filter { request.anchor.isEmpty || $0.vigilAttachId == request.anchor }
+                .compactMap { $0.vigilInputDiagnostics() }
+            return .init(id: request.id, ok: true, code: "ok", message: "Content-free input diagnostics.", input: views)
+        }
         if request.operation == "describe" { return VigilSessionManager.shared.applySessionCommand(request) }
         let receipts = directory.appendingPathComponent("session-receipts")
         let file = receipts.appendingPathComponent(request.id.uuidString + ".json")
