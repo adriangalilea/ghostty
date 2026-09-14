@@ -124,9 +124,33 @@ final class VigilHarnessCoordinator: ObservableObject {
             Task { @MainActor in VigilSessionManager.shared.pumpAskGate() }
         }
     }
+    /// The gate marker, read once and then only when its directory changes
+    /// (a vnode watch): it flips once per machine lifetime, and a stat per
+    /// pane per sidebar snapshot was the price of asking the disk each time.
     var isEnabled: Bool {
-        ProcessInfo.processInfo.environment["VIGIL_HARNESS_ENABLED"] == "1" ||
+        if let enabledCache { return enabledCache }
+        let enabled = ProcessInfo.processInfo.environment["VIGIL_HARNESS_ENABLED"] == "1" ||
             FileManager.default.fileExists(atPath: HarnessPaths.root.appendingPathComponent("enabled").path)
+        enabledCache = enabled
+        watchGate()
+        return enabled
+    }
+    private var enabledCache: Bool?
+    private var gateWatch: DispatchSourceFileSystemObject?
+    private func watchGate() {
+        guard gateWatch == nil else { return }
+        let fd = open(HarnessPaths.root.path, O_EVTONLY)
+        guard fd >= 0 else { return } // no state directory yet: the next read looks again
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .rename], queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.enabledCache = nil
+            if source.data.contains(.delete) || source.data.contains(.rename) { source.cancel(); self.gateWatch = nil }
+            Task { @MainActor in VigilSessionManager.shared.pumpAskGate() }
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        gateWatch = source
     }
     private var inbox: InboxModel?
     private var panel: NSPanel?
@@ -406,6 +430,7 @@ final class VigilHarnessCoordinator: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try Data().write(to: root.appendingPathComponent("enabled"), options: .atomic)
+            enabledCache = nil
             VigilSessionManager.shared.vlog("authz: enrolled on this Mac; harness gate created, services start on recovery")
         } catch {
             VigilSessionManager.shared.vlog("authz: enrolled but the gate could not be created: \(error.localizedDescription)")

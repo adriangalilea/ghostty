@@ -252,6 +252,9 @@ extension Ghostty {
         var vigilScreenSeen: String = ""
         var vigilScreenStrikes = 0
         var vigilScreenProven = false
+        /// The daemon hash this surface last proved equal to: while the
+        /// daemon still publishes it, there is nothing to re-hash.
+        var vigilScreenProvenHash: String = ""
         var vigilScreenResyncs = 0
         struct VigilGrid: Equatable {
             let rows: Int

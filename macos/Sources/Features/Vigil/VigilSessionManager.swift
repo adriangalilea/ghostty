@@ -157,7 +157,10 @@ class VigilSessionManager {
     /// can go stale. Written only on a seen-FLIP, never on the presence
     /// pulse.
     func lastAck(_ pane: String) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: seenURL(pane).path))?[.modificationDate] as? Date
+        if let cached = paneAckCache?[pane] { return cached }
+        let ack = (try? FileManager.default.attributesOfItem(atPath: seenURL(pane).path))?[.modificationDate] as? Date
+        paneAckCache?[pane] = ack
+        return ack
     }
 
     private func seenURL(_ pane: String) -> URL {
@@ -1215,15 +1218,20 @@ class VigilSessionManager {
         guard let surface = view.surface,
               let daemon = try? String(contentsOf: dir.appendingPathComponent("\(id).screen"), encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines), !daemon.isEmpty else { return }
-        let mine = String(ghostty_surface_vigil_screen_hash(surface), radix: 16)
         let stable = daemon == view.vigilScreenSeen
         view.vigilScreenSeen = daemon
+        // A moving daemon hash is a moving screen: no verdict is possible, so
+        // no viewport hash is computed. A hash already proven equal and still
+        // published has nothing to re-prove. An idle fleet hashes nothing.
+        guard stable else { return }
+        if view.vigilScreenStrikes == 0, view.vigilScreenProvenHash == daemon { return }
+        let mine = String(ghostty_surface_vigil_screen_hash(surface), radix: 16)
         if mine == daemon {
             view.vigilScreenStrikes = 0
+            view.vigilScreenProvenHash = daemon
             if !view.vigilScreenProven { view.vigilScreenProven = true; vlog("screen: \(id) in sync (\(mine))") }
             return
         }
-        guard stable else { return }
         view.vigilScreenStrikes += 1
         if view.vigilScreenStrikes == 2 {
             view.vigilScreenResyncs += 1
@@ -4489,6 +4497,11 @@ class VigilSessionManager {
     /// idle main-thread time (sampled 2026-09-05). While `sidebarSnapshot`
     /// is measuring, the first read serves the rest; nil = live reads.
     private var paneFileCache: [String: [String]]?
+    /// The same memo for the pane's state file and seen mark: paneRow read
+    /// and stat'd each twice per pane (display state, then watchers), and
+    /// stat'd the harness gate once per pane on top (2026-09-14).
+    private var paneStateCache: [String: (state: AgentState, flavor: BlockFlavor?, since: Date)?]?
+    private var paneAckCache: [String: Date?]?
 
     private func paneFileLines(_ pane: String, _ ext: String) -> [String] {
         let key = "\(pane).\(ext)"
@@ -4745,6 +4758,13 @@ class VigilSessionManager {
     /// First token only; trailing tokens tolerated (older files carried
     /// a "blocked input" flavor).
     func paneAgentState(_ pane: String) -> (state: AgentState, flavor: BlockFlavor?, since: Date)? {
+        if let cached = paneStateCache?[pane] { return cached }
+        let read = readPaneAgentState(pane)
+        paneStateCache?[pane] = read
+        return read
+    }
+
+    private func readPaneAgentState(_ pane: String) -> (state: AgentState, flavor: BlockFlavor?, since: Date)? {
         let url = agentStateDir.appendingPathComponent("\(pane).state")
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
@@ -5098,8 +5118,8 @@ class VigilSessionManager {
     /// AgentState. A tab materializing its splits one tick apart renders
     /// every registered row from the first paint: nothing flashes.
     func sidebarSnapshot() -> [SidebarSessionRow] {
-        paneFileCache = [:]
-        defer { paneFileCache = nil }
+        paneFileCache = [:]; paneStateCache = [:]; paneAckCache = [:]
+        defer { paneFileCache = nil; paneStateCache = nil; paneAckCache = nil }
         let leases = watchLeases()
 
         func paneRow(_ pane: Pane, view: Ghostty.SurfaceView?, isDock: Bool) -> SidebarPane {
