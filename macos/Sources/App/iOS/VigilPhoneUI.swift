@@ -344,7 +344,7 @@ struct PanePreview: View {
             guard let view = try await model.surface(for: ref, app: app, screen: false) else { denied = true; return }
             surfaceView = view
         } catch {
-            model.log("preview: \(ref.pane) failed: \(error.localizedDescription)")
+            model.log("preview: \(ref.pane) failed: \(error.receipt)")
         }
     }
 }
@@ -834,8 +834,8 @@ struct PaneScreen: View {
             if ownSize || grid == nil { view.claimSize(true) }
             surfaceView = view
         } catch {
-            self.error = error.localizedDescription
-            model.log("attach: \(ref.pane) failed: \(error.localizedDescription)")
+            self.error = error.receipt
+            model.log("attach: \(ref.pane) failed: \(error.receipt)")
         }
     }
 

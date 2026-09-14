@@ -294,8 +294,8 @@ final class VigilPhone: ObservableObject {
             errors[host.id] = nil
             log("dir: \(host.name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
         } catch {
-            errors[host.id] = error.localizedDescription
-            log("dir: \(host.name): \(error.localizedDescription)")
+            errors[host.id] = error.receipt
+            log("dir: \(host.name): \(error.receipt)")
             connections[host.id]?.close()
             connections[host.id] = nil
         }
@@ -500,7 +500,7 @@ final class VigilPhone: ObservableObject {
                 log("\(preview ? "preview" : "attach"): \(host.name) \(pane) fd \(fd)\(attempt > 1 ? " (retry)" : "")")
                 return fd
             } catch {
-                log("\(preview ? "preview" : "attach"): \(host.name) \(pane) attempt \(attempt) failed: \(error.localizedDescription)")
+                log("\(preview ? "preview" : "attach"): \(host.name) \(pane) attempt \(attempt) failed: \(error.receipt)")
                 if attempt == 2 { throw error }
             }
         }
@@ -619,7 +619,7 @@ final class VigilPhone: ObservableObject {
                 _ = try await ssh.exec("vigild seen \(ref.pane)")
                 log("seen: \(ref.pane) marked on \(ref.host.name)")
             } catch {
-                log("seen: \(ref.pane) on \(ref.host.name) FAILED: \(error.localizedDescription)")
+                log("seen: \(ref.pane) on \(ref.host.name) FAILED: \(error.receipt)")
             }
         }
     }

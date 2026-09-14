@@ -122,7 +122,7 @@ final class VigilSSH {
             ssh = handler
             setState(.connected, why: "authenticated in \(Self.ms(since: t0))ms")
         } catch {
-            setState(.closed(error.localizedDescription), why: "connect failed after \(Self.ms(since: t0))ms")
+            setState(.closed(error.receipt), why: "connect failed after \(Self.ms(since: t0))ms")
             throw error
         }
     }
@@ -449,5 +449,15 @@ extension Curve25519.Signing.PrivateKey {
         }
         let blob = str(Array("ssh-ed25519".utf8)) + str(Array(publicKey.rawRepresentation))
         return "ssh-ed25519 \(Data(blob).base64EncodedString()) vigil@iphone"
+    }
+}
+
+extension Error {
+    /// What a receipt prints for an error. `localizedDescription` of a NIO
+    /// or NIOSSH error is "The operation couldn't be completed" with no
+    /// reason; the type's own description carries the reason.
+    var receipt: String {
+        if let described = (self as? LocalizedError)?.errorDescription { return described }
+        return String(describing: self)
     }
 }
