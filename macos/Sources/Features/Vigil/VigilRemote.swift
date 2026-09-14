@@ -35,6 +35,10 @@ final class VigilRemote: ObservableObject {
         var state: String?
         var tree: [String]?
         var pid: String?
+        /// The state file's mtime and the `<pane>.seen` mtime, unix seconds:
+        /// seen >= since is the one seen-rule, the same the home Mac applies.
+        var since: Double?
+        var seen: Double?
     }
 
     struct Directory: Decodable {
@@ -272,7 +276,7 @@ final class VigilRemote: ObservableObject {
                             let argv = line.split(separator: "\t", maxSplits: 1).last.map(String.init) ?? ""
                             return VigilSessionManager.processLabel(argv)
                         }.last
-                        let state = truth?.state.flatMap { Self.agentState($0) }
+                        let state = Self.displayState(truth)
                         let title = pane.label
                             ?? program
                             ?? pane.command.flatMap(VigilSessionManager.processLabel)
@@ -314,16 +318,65 @@ final class VigilRemote: ObservableObject {
         return rows
     }
 
-    /// The state file's first token; a flavor may follow.
+    /// The state token, read exactly as the home Mac reads its own file:
+    /// first word is the state, and `working unknown` / `working
+    /// interrupting` are the harness's typed uncertainty, not work (a codex
+    /// pane painted as running for a day because only the first word was
+    /// read, 2026-09-14).
     static func agentState(_ token: String) -> VigilSessionManager.AgentState? {
-        switch token.split(separator: " ").first.map(String.init) ?? "" {
-        case "working": return .working
+        let parts = token.split(separator: " ")
+        switch parts.first.map(String.init) ?? "" {
+        case "working":
+            if parts.count > 1, parts[1] == "unknown" { return .unknown }
+            if parts.count > 1, parts[1] == "interrupting" { return .interrupting }
+            return .working
         case "blocked": return .blocked
         case "done": return .done
         case "idle": return .idle
         case "unknown": return .unknown
         case "interrupting": return .interrupting
         default: return nil
+        }
+    }
+
+    /// What the row shows: the home Mac's seen-decay applied here too.
+    /// done/blocked that has been seen (anywhere) reads idle.
+    static func displayState(_ truth: PaneTruth?) -> VigilSessionManager.AgentState? {
+        guard let truth, let token = truth.state, let state = agentState(token) else { return nil }
+        if state == .done || state == .blocked,
+           let seen = truth.seen, let since = truth.since, seen >= since { return .idle }
+        return state
+    }
+
+    private var seenInFlight = Set<String>()
+
+    /// A remote console is under the eyes here: the ack belongs to ITS Mac.
+    /// Written through `ssh <alias> vigild seen <pane>` only on a seen-FLIP
+    /// (unseen done/blocked), never on the presence pulse; the directory is
+    /// updated optimistically so the row decays with the glance, and the
+    /// next poll confirms it.
+    func seen(alias: String, pane: String) {
+        guard let index = hosts.firstIndex(where: { $0.alias == alias }),
+              let truth = hosts[index].directory?.panes[pane],
+              let token = truth.state, let state = Self.agentState(token),
+              state == .done || state == .blocked,
+              (truth.seen ?? 0) < (truth.since ?? 0) else { return }
+        let key = "\(alias)/\(pane)"
+        guard !seenInFlight.contains(key) else { return }
+        seenInFlight.insert(key)
+        hosts[index].directory?.panes[pane]?.seen = Date().timeIntervalSince1970
+        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-T", alias, "vigild", "seen", pane]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            let status: Int32 = (try? proc.run()).map { proc.waitUntilExit(); return proc.terminationStatus } ?? -1
+            Task { @MainActor [weak self] in
+                self?.seenInFlight.remove(key)
+                Self.trace?("remote: seen \(key)" + (status == 0 ? "" : " FAILED (ssh exit \(status))"))
+            }
         }
     }
 }

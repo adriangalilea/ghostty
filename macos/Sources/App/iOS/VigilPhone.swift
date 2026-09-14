@@ -78,6 +78,20 @@ final class VigilPhone: ObservableObject {
         var size: String?
         /// FNV-1a (hex) of the daemon's viewport text: the content receipt.
         var screen: String?
+        /// The state file's mtime and the `<pane>.seen` mtime, unix seconds.
+        var since: Double?
+        var seen: Double?
+        /// What a row shows, the ONE reading every viewport gives the
+        /// directory: `working unknown` is the harness's uncertainty, not
+        /// work; done/blocked already seen anywhere (seen >= since) is idle.
+        var displayState: String? {
+            guard let state else { return nil }
+            let parts = state.split(separator: " ").map(String.init)
+            guard let first = parts.first else { return nil }
+            if first == "working", parts.count > 1, parts[1] == "unknown" { return "unknown" }
+            if first == "done" || first == "blocked", let seen, let since, seen >= since { return "idle" }
+            return first
+        }
         var grid: (rows: Int, cols: Int)? {
             // "rows cols <owner hello>": the grid is the first two words.
             let p = (size ?? "").split(separator: " ").prefix(2).compactMap { Int($0) }
@@ -367,7 +381,7 @@ final class VigilPhone: ObservableObject {
                         ?? p.title ?? URL(fileURLWithPath: p.cwd).lastPathComponent
                     let alive = truth?.alive ?? false
                     return Node(id: "\(sid)/\(p.id)", kind: .pane, title: title, emoji: p.emoji,
-                                state: truth?.state?.split(separator: " ").first.map(String.init),
+                                state: truth?.displayState,
                                 alive: alive,
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0)
@@ -570,6 +584,7 @@ final class VigilPhone: ObservableObject {
         for (pane, view) in surfaces {
             view.visible = ref == nil || pane == ref?.pane
         }
+        if let ref { markSeen(ref) }
         // Back on the tree: rows re-appear within a frame (the stack's
         // pop fires their onAppear after this); a surface no row claims
         // by then ends. Deferred, never at the pop itself, so a return
@@ -578,6 +593,28 @@ final class VigilPhone: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 guard let self, self.presenting == nil else { return }
                 for pane in self.surfaces.keys where !self.rowsOnScreen.contains(pane) { self.endSurface(pane) }
+            }
+        }
+    }
+
+    /// A pane shown full screen here was seen: the fact belongs to ITS Mac
+    /// (`vigild seen`, PROTOCOL.md), written only on a seen-flip (unseen
+    /// done/blocked), the directory updated optimistically so the row
+    /// decays with the glance and the next poll confirms it.
+    private func markSeen(_ ref: PaneRef) {
+        guard let truth = directories[ref.host.id]?.panes[ref.pane],
+              let first = truth.state?.split(separator: " ").first,
+              first == "done" || first == "blocked",
+              (truth.seen ?? 0) < (truth.since ?? 0) else { return }
+        directories[ref.host.id]?.panes[ref.pane]?.seen = Date().timeIntervalSince1970
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let ssh = try await connection(for: ref.host)
+                _ = try await ssh.exec("vigild seen \(ref.pane)")
+                log("seen: \(ref.pane) marked on \(ref.host.name)")
+            } catch {
+                log("seen: \(ref.pane) on \(ref.host.name) FAILED: \(error.localizedDescription)")
             }
         }
     }

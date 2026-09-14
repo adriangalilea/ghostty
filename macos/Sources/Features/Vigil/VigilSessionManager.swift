@@ -144,32 +144,35 @@ class VigilSessionManager {
     /// session: the session-keyed ledger acked asks living in unmounted
     /// tabs of the watched session sight-unseen (dot decayed, no attention,
     /// no follow - an invisible console you could never have answered).
-    /// PERSISTED (acks.json): seen must survive an app restart, or every
-    /// already-answered pane re-lights and demands a visit. Race-free by
-    /// construction: seen = ack >= the state file's mtime, so a state that
-    /// changed while the app was down carries a newer mtime and correctly
-    /// reads unseen - time arbitrates, no flag can go stale.
-    private(set) var lastAck: [String: Date] = [:]
-
-    private var acksURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/acks.json")
+    /// HELD ON THE PANE'S OWN MAC as `state/<pane>.seen` (mtime = when),
+    /// beside the state file it is compared against (PROTOCOL.md): seen is
+    /// a fact about the console, not about a viewer, so another Mac's
+    /// sidebar or the phone writes the same file through `vigild seen`
+    /// over ssh and every viewport reads one answer - an opened mail is
+    /// opened everywhere (Adrian 2026-09-14; the per-app acks.json made
+    /// every machine demand its own visit). Survives an app restart by
+    /// being a file. Race-free by construction: seen = ack >= the state
+    /// file's mtime, so a state that changed while nobody looked carries
+    /// a newer mtime and correctly reads unseen - time arbitrates, no flag
+    /// can go stale. Written only on a seen-FLIP, never on the presence
+    /// pulse.
+    func lastAck(_ pane: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: seenURL(pane).path))?[.modificationDate] as? Date
     }
 
-    private func loadAcks() {
-        guard let data = try? Data(contentsOf: acksURL),
-              let saved = try? JSONDecoder().decode([String: Date].self, from: data) else { return }
-        // Only a pane with a state file can decay; acks for dead panes
-        // are cruft, pruned here so the ledger never grows unbounded.
-        lastAck = saved.filter { pane, _ in
-            FileManager.default.fileExists(
-                atPath: agentStateDir.appendingPathComponent("\(pane).state").path)
+    private func seenURL(_ pane: String) -> URL {
+        agentStateDir.appendingPathComponent("\(pane).seen")
+    }
+
+    /// tmp + rename: the state-dir kqueue is silent on in-place writes.
+    func markSeen(_ pane: String) {
+        let url = seenURL(pane)
+        let tmp = url.appendingPathExtension("tmp")
+        guard (try? "\(Int(Date().timeIntervalSince1970))\n".write(to: tmp, atomically: false, encoding: .utf8)) != nil,
+              Darwin.rename(tmp.path, url.path) == 0 else {
+            vlog("!! seen: cannot write \(url.lastPathComponent)")
+            return
         }
-    }
-
-    private func saveAcks() {
-        guard let data = try? JSONEncoder().encode(lastAck) else { return }
-        try? data.write(to: acksURL)
     }
 
     /// Custom identities for PANES and TABS (label + emoji, display-only
@@ -516,7 +519,6 @@ class VigilSessionManager {
     private init() {
         acquireInstanceLock()
         load()
-        loadAcks()
         collectOrphans()
         // A logout/restart/shutdown is starting. THE signal, and the only
         // reliable one: the AppleEvent probe in applicationShouldTerminate
@@ -1305,7 +1307,7 @@ class VigilSessionManager {
             // the session-level rule (nothing finer to check).
             if let pane = event.pane, !pane.isEmpty {
                 if paneVisible(pane) {
-                    lastAck[pane] = Date()
+                    markSeen(pane)
                     changed = true
                     continue
                 }
@@ -1379,16 +1381,22 @@ class VigilSessionManager {
             return
         }
         if let name { touchRecent(name) }
-        let now = Date()
         var changed = false
         for view in views {
             guard let pane = view.vigilAttachId,
                   view.window === window,
                   !view.isHiddenOrHasHiddenAncestor else { continue }
+            if let alias = view.vigilHost {
+                // A remote console under the eyes: the ack is ITS Mac's fact.
+                VigilRemote.shared.seen(alias: alias, pane: pane)
+                continue
+            }
             if let s = paneAgentState(pane),
                s.state == .blocked || s.state == .done,
-               (lastAck[pane] ?? .distantPast) < s.since { changed = true }
-            lastAck[pane] = now
+               (lastAck(pane) ?? .distantPast) < s.since {
+                markSeen(pane)
+                changed = true
+            }
         }
         if let name, let session = sessions[name],
            session.attention != .none, !blockedUnseen(name) {
@@ -1398,10 +1406,6 @@ class VigilSessionManager {
             onAttentionChange?()
         }
         if changed {
-            // Persist only on a seen-FLIP (a lit pane going seen), not on
-            // the 1s presence pulse: the flip is the fact worth surviving
-            // a restart; the pulse would be a write per second for free.
-            saveAcks()
             NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
         }
     }
@@ -1526,7 +1530,7 @@ class VigilSessionManager {
             if session.float != nil, session.name != floatingName { return false }
             return true
         }
-        .filter { (lastAck[$0.pane] ?? .distantPast) < $0.since }
+        .filter { (lastAck($0.pane) ?? .distantPast) < $0.since }
     }
 
     /// Panes whose TURN ENDED, any session: the soft-chime feed. Both
@@ -3797,7 +3801,7 @@ class VigilSessionManager {
         guard let session = sessions[name] else { return false }
         return ownedPaneIds(session).contains { pane in
             guard let s = paneAgentState(pane) else { return false }
-            return s.state == .blocked && (lastAck[pane] ?? .distantPast) < s.since
+            return s.state == .blocked && (lastAck(pane) ?? .distantPast) < s.since
         }
     }
 
@@ -3811,7 +3815,7 @@ class VigilSessionManager {
         return ownedPaneIds(session).contains { pane in
             guard let s = paneAgentState(pane),
                   s.state == .blocked || s.state == .done else { return false }
-            return (lastAck[pane] ?? .distantPast) < s.since
+            return (lastAck(pane) ?? .distantPast) < s.since
         }
     }
 
@@ -4289,6 +4293,7 @@ class VigilSessionManager {
             }
             for id in sorted where !survivors.contains(id) {
                 try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).state"))
+                try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).seen"))
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -4298,7 +4303,6 @@ class VigilSessionManager {
                     } else {
                         manager.vlog("!! kill: \(survivors) STILL ALIVE after vigild kill (status \(p.terminationStatus))")
                     }
-                    for id in sorted { manager.lastAck[id] = nil }
                 }
             }
         }
@@ -4351,8 +4355,8 @@ class VigilSessionManager {
             vlog("collect: stale resume pointer '\(id)' removed")
         }
         for entry in (try? fm.contentsOfDirectory(atPath: agentStateDir.path)) ?? []
-        where entry.hasSuffix(".state") {
-            let id = String(entry.dropLast(".state".count))
+        where entry.hasSuffix(".state") || entry.hasSuffix(".seen") {
+            let id = String(entry.prefix(upTo: entry.lastIndex(of: ".")!))
             guard !owned.contains(id),
                   !fm.fileExists(atPath: vigildStateDir.appendingPathComponent("\(id).pid").path)
             else { continue }
@@ -4768,7 +4772,7 @@ class VigilSessionManager {
     func paneDisplayState(_ pane: String) -> AgentState? {
         guard let state = paneAgentState(pane) else { return nil }
         if state.state == .done || state.state == .blocked,
-           let ack = lastAck[pane], ack >= state.since { return .idle }
+           let ack = lastAck(pane), ack >= state.since { return .idle }
         // Preserve the legacy positive title corrective until native ownership
         // is enabled. Absence of a spinner is never completion evidence.
         if !VigilHarnessCoordinator.shared.isEnabled, state.state == .working,
