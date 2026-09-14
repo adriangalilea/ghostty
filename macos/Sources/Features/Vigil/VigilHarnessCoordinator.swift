@@ -216,8 +216,16 @@ final class VigilHarnessCoordinator: ObservableObject {
                     guard let self else { return }
                     self.starters.removeAll { $0 === process }
                     VigilSessionManager.shared.vlog("authz service: \(binary) exited \(process.terminationStatus)")
-                    if binary == "authz", process.terminationStatus != 0 {
-                        self.stop(); self.nextStart = Date().addingTimeInterval(10)
+                    if binary == "authz" {
+                        // Exit 0 is the service asking to be relaunched on a
+                        // changed configuration (it reads the file once);
+                        // non-zero is a fault. Either way the endpoint is
+                        // gone: drop it, reconnect at once for a reload,
+                        // after a breath for a fault.
+                        self.stop()
+                        let delay: TimeInterval = process.terminationStatus == 0 ? 0 : 10
+                        self.nextStart = Date().addingTimeInterval(delay)
+                        self.nextServiceCheck = Date().addingTimeInterval(delay)
                     }
                 }
             }
