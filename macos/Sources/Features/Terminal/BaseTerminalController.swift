@@ -241,6 +241,18 @@ class BaseTerminalController: NSWindowController,
         // We can only create new splits for surfaces in our tree.
         guard surfaceTree.root?.node(view: oldView) != nil else { return nil }
 
+        if config?.vigilAttach == nil {
+            let directionName: String
+            switch direction {
+            case .left: directionName = "left"
+            case .right: directionName = "right"
+            case .up: directionName = "up"
+            case .down: directionName = "down"
+            }
+            if VigilSessionManager.shared.remoteSessionCommand(
+                in: self, from: oldView, operation: "split", direction: directionName) { return nil }
+        }
+
         // Create a new surface view. Splits inside a vigil session are
         // daemon-backed like every other pane of it: the whole workspace
         // survives, not just the first pane.

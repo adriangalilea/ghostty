@@ -706,7 +706,7 @@ struct VigilSidebarView: View {
             }
             Button("Close Pane…", role: .destructive) {
                 VigilSessionManager.shared.closePaneFromSidebar(
-                    name: session, paneId: pane.paneId, in: model.hostController)
+                    name: session, paneId: pane.navigationId, in: model.hostController)
             }
         }
         .opacity(hintFade(id)

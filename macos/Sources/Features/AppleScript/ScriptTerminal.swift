@@ -87,6 +87,12 @@ final class ScriptTerminal: NSObject {
             return nil
         }
 
+        guard surfaceView.vigilHost == nil, !surfaceView.vigilMirror else {
+            command.scriptErrorNumber = errAEEventFailed
+            command.scriptErrorString = "Mirrored session edits use home identities. Use vigild session on the pane's home host."
+            return nil
+        }
+
         guard let directionCode = command.evaluatedArguments?["direction"] as? UInt32 else {
             command.scriptErrorNumber = errAEParamMissed
             command.scriptErrorString = "Missing or unknown split direction."

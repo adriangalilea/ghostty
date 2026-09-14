@@ -3,11 +3,11 @@ import SystemConfiguration
 
 /// Other Macs' sessions, read through ssh. ONE source: `ssh <alias> vigild
 /// dir` returns the machine's registry (vigil.json verbatim) plus per-pane
-/// process truth (alive, agent state token, tree argv), polled on a slow
-/// tick per alias and on demand. Nothing here owns anything: a remote
-/// session is a VIEWPORT target only (mounted as mirror surfaces attached
-/// through `ssh <alias> vigild proxy <pane>`), never persisted, killed or
-/// buried from this Mac. Reachability, keys and the network are the
+/// process truth (alive, agent state token, tree argv), streamed per change.
+/// Surfaces attach through `ssh <alias> vigild proxy <pane>`. Structural
+/// intent uses `vigild session`: the home app commits it, and the directory
+/// stream projects it here. This Mac never writes the home registry.
+/// Reachability, keys and the network are the
 /// user's ssh config (`vigil-hosts` lists aliases, nothing more).
 @MainActor
 final class VigilRemote: ObservableObject {
@@ -28,6 +28,8 @@ final class VigilRemote: ObservableObject {
         var emoji: String?
         var cwd: String
         var tabs: [VigilSessionManager.Tab]?
+        var buriedUntil: Double?
+        var layoutRevision: String?
     }
 
     struct PaneTruth: Decodable, Equatable {
@@ -231,9 +233,42 @@ final class VigilRemote: ObservableObject {
 
     func host(_ alias: String) -> Host? { hosts.first { $0.alias == alias } }
 
+    /// One finite RPC per user edit. The held directory stream publishes
+    /// the result to every viewport; pane proxy streams remain untouched.
+    func command(_ alias: String, request: VigilSessionControl.Request) async throws -> VigilSessionControl.Reply {
+        let payload = try JSONEncoder().encode(request) + Data([10])
+        return try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                 "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
+                                 alias, "vigild", "session"]
+            let input = Pipe(), output = Pipe(), errors = Pipe()
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = errors
+            try process.run()
+            try input.fileHandleForWriting.write(contentsOf: payload)
+            try input.fileHandleForWriting.close()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            let error = errors.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw NSError(domain: "VigilSessionControl", code: Int(process.terminationStatus), userInfo: [
+                    NSLocalizedDescriptionKey: String(data: error, encoding: .utf8) ?? "The home session writer did not reply."
+                ])
+            }
+            let reply = try JSONDecoder().decode(VigilSessionControl.Reply.self, from: data)
+            guard reply.id == request.id else {
+                throw NSError(domain: "VigilSessionControl", code: 1, userInfo: [NSLocalizedDescriptionKey: "The home reply did not match this command."])
+            }
+            return reply
+        }.value
+    }
+
     func session(_ composite: String) -> (alias: String, session: Session)? {
         guard let (alias, name) = Self.split(composite),
-              let session = host(alias)?.directory?.sessions.first(where: { $0.name == name })
+              let session = host(alias)?.directory?.sessions.first(where: { $0.name == name && $0.buriedUntil == nil })
         else { return nil }
         return (alias, session)
     }
@@ -304,6 +339,7 @@ final class VigilRemote: ObservableObject {
                     let shape = (dir.sessions.count, dir.panes.count)
                     let before = self.hosts[index].directory.map { ($0.sessions.count, $0.panes.count) }
                     self.hosts[index].directory = dir
+                    VigilSessionManager.shared.remoteDirectoryChanged(alias)
                     self.hosts[index].raw = data
                     self.hosts[index].error = nil
                     self.hosts[index].fetched = Date()
@@ -338,7 +374,8 @@ final class VigilRemote: ObservableObject {
                     stateTag: "remote", attention: .none, states: [], tabs: [], host: header))
                 continue
             }
-            let sessions = dir.sessions.sorted { ($0.label.lowercased(), $0.name) < ($1.label.lowercased(), $1.name) }
+            let sessions = dir.sessions.filter { $0.buriedUntil == nil }
+                .sorted { ($0.label.lowercased(), $0.name) < ($1.label.lowercased(), $1.name) }
             for session in sessions {
                 let composite = Self.compositeId(host.alias, session.name)
                 var tabs: [VigilSessionManager.SidebarTab] = []

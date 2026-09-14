@@ -432,6 +432,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // If our parent is in non-native fullscreen, then new tabs do not work.
+        if baseConfig?.vigilAttach == nil,
+           VigilSessionManager.shared.remoteSessionCommand(in: parentController, operation: "new_tab") { return nil }
+
         // See: https://github.com/mitchellh/ghostty/issues/392
         if let fullscreenStyle = parentController.fullscreenStyle,
            fullscreenStyle.isFullscreen && !fullscreenStyle.supportsTabs {
@@ -1314,6 +1317,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     @IBAction func closeTab(_ sender: Any?) {
+        if VigilSessionManager.shared.closeRemoteTab(self) { return }
         guard let window = window else { return }
         guard window.tabGroup?.windows.count ?? 0 > 1 else {
             // vigil viewport: a lone window's "close tab" closes the
