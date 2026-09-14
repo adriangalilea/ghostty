@@ -15,6 +15,7 @@ const input = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
+const termio = @import("../termio.zig");
 const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
@@ -1770,6 +1771,13 @@ pub const CAPI = struct {
     /// Vigil: re-request the screen from the daemon.
     export fn ghostty_surface_vigil_dump(surface: *Surface) void {
         surface.core_surface.vigilDump();
+    }
+
+    export fn ghostty_surface_vigil_transport_status(surface: *Surface) termio.Attach.TransportStatus {
+        return switch (surface.core_surface.io.backend) {
+            .attach => |*attach| attach.transportStatus(),
+            else => .{ .state = 0, .pending_bytes = 0, .written_bytes = 0 },
+        };
     }
 
     /// Return the size information a surface has.

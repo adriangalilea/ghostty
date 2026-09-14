@@ -77,6 +77,8 @@ final class VigilRemote: ObservableObject {
     /// nothing is polled and no process is spawned per tick. A dead stream
     /// re-dials after 15s.
     private var streams: [String: Process] = [:]
+    private var resolving = Set<String>()
+    private var stopped = false
     private var streamBuffers: [String: Data] = [:]
     private var inflight = Set<String>()
     private var arrivals: [String: (revision: String, at: Date)] = [:]
@@ -97,12 +99,13 @@ final class VigilRemote: ObservableObject {
     }
 
     func configure(aliases: [String]) {
+        guard !stopped else { return }
         let known = Set(hosts.map(\.alias))
         let wanted = Set(aliases)
         hosts.removeAll { !wanted.contains($0.alias) }
         arrivals = arrivals.filter { Self.split($0.key).map { wanted.contains($0.alias) } ?? false }
         for (alias, stream) in streams where !wanted.contains(alias) {
-            stream.terminate(); streams[alias] = nil; streamBuffers[alias] = nil
+            streams[alias] = nil; streamBuffers[alias] = nil; stream.terminate()
         }
         for alias in aliases where !known.contains(alias) {
             hosts.append(Host(alias: alias))
@@ -112,7 +115,21 @@ final class VigilRemote: ObservableObject {
         Self.trace?("remote: hosts \(aliases)")
         // The streams wait for self-resolution: a stream from this Mac's
         // own alias would paint a host row for the one tick it takes.
-        resolveSelf(aliases.filter { !known.contains($0) }) { [weak self] in self?.streamAll() }
+        let unresolved = aliases.filter { !known.contains($0) }
+        resolving.formUnion(unresolved)
+        resolveSelf(unresolved) { [weak self] in
+            self?.resolving.subtract(unresolved)
+            self?.streamAll()
+        }
+    }
+
+    func stop() {
+        stopped = true
+        let running = Array(streams.values)
+        streams.removeAll()
+        streamBuffers.removeAll()
+        for process in running where process.isRunning { process.terminate() }
+        Self.trace?("remote: directory streams stopped")
     }
 
     private func streamAll() {
@@ -120,23 +137,30 @@ final class VigilRemote: ObservableObject {
     }
 
     private func stream(_ alias: String) {
-        guard streams[alias] == nil, let host = host(alias), !host.isSelf else { return }
+        guard !stopped, !resolving.contains(alias), streams[alias] == nil,
+              let host = host(alias), !host.isSelf else { return }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=15",
-                          "-o", "ServerAliveCountMax=2", "-T", alias, "vigild", "dir", "--watch"]
+                          "-o", "ServerAliveCountMax=2", "-T", alias, "vigild", "dir", "--watch", "--until-eof"]
+        // The write end lives with Process. App death closes it; the home
+        // subscription exits on EOF even if no directory fact changes.
+        proc.standardInput = Pipe()
         let out = Pipe()
         proc.standardOutput = out
         proc.standardError = FileHandle.nullDevice
-        out.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        out.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            Task { @MainActor [weak self] in self?.streamed(alias, data) }
+            Task { @MainActor [weak self, weak proc] in
+                guard let self, let proc, self.streams[alias] === proc else { return }
+                self.streamed(alias, data)
+            }
         }
         proc.terminationHandler = { [weak self] proc in
             out.fileHandleForReading.readabilityHandler = nil
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.streams[alias] === proc else { return }
                 self.streams[alias] = nil
                 self.streamBuffers[alias] = nil
                 if let index = self.hosts.firstIndex(where: { $0.alias == alias }) {
@@ -205,6 +229,8 @@ final class VigilRemote: ObservableObject {
                     self.hosts[index].error = Self.selfError
                     self.hosts[index].directory = nil
                     self.hosts[index].raw = nil
+                    if let stream = self.streams.removeValue(forKey: alias) { stream.terminate() }
+                    self.streamBuffers[alias] = nil
                 }
                 if !selfAliases.isEmpty {
                     NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
@@ -336,6 +362,8 @@ final class VigilRemote: ObservableObject {
                             self.hosts[index].isSelf = true
                             self.hosts[index].error = Self.selfError
                             self.hosts[index].directory = nil
+                            if let stream = self.streams.removeValue(forKey: alias) { stream.terminate() }
+                            self.streamBuffers[alias] = nil
                             self.hosts[index].raw = nil
                             NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
                         }

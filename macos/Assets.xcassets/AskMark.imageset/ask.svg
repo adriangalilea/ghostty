@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- ask: an alert that asks instead of tells. Triangle = attention; ? = the human's call. -->
+  <path d="M32 8 L58 52 L6 52 Z" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M27.2 29.9 a4.9 4.9 0 1 1 7.8 4.9 c-1.5 1.15 -3 1.9 -3 4.9" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M32 44.6 l0.01 0" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"/>
+</svg>

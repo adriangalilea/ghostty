@@ -93,6 +93,25 @@ write_buf: std.ArrayListUnmanaged(u8) = .{},
 write_closed: bool = false,
 write_thread: ?std.Thread = null,
 
+/// Transport receipts only: no terminal contents or keystrokes.
+transport_state: std.atomic.Value(u8) = .init(0),
+pending_bytes: std.atomic.Value(u64) = .init(0),
+written_bytes: std.atomic.Value(u64) = .init(0),
+
+pub const TransportStatus = extern struct {
+    state: u8, // 0 connecting, 1 stream open, 2 disconnected
+    pending_bytes: u64,
+    written_bytes: u64,
+};
+
+pub fn transportStatus(self: *const Attach) TransportStatus {
+    return .{
+        .state = self.transport_state.load(.acquire),
+        .pending_bytes = self.pending_bytes.load(.monotonic),
+        .written_bytes = self.written_bytes.load(.monotonic),
+    };
+}
+
 pub const Config = struct {
     id: []const u8,
     cwd: ?[]const u8 = null,
@@ -171,6 +190,8 @@ fn connectSSH(self: *Attach, host: []const u8) !void {
     const stdout = child.stdout.?;
     // Never inherited by anything we spawn later.
     _ = try posix.fcntl(stdin.handle, posix.F.SETFD, posix.FD_CLOEXEC);
+    const flags = try posix.fcntl(stdin.handle, posix.F.GETFL, 0);
+    _ = try posix.fcntl(stdin.handle, posix.F.SETFL, flags | @as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
     _ = try posix.fcntl(stdout.handle, posix.F.SETFD, posix.FD_CLOEXEC);
     self.sock_fd = stdout.handle;
     self.write_fd = stdin.handle;
@@ -181,6 +202,7 @@ fn connectSSH(self: *Attach, host: []const u8) !void {
 /// Cut the stream so the reader sees EOF: shutdown for a socket, kill
 /// the ssh child for a pipe (a pipe cannot be shut down).
 fn sever(self: *Attach) void {
+    self.transport_state.store(2, .release);
     if (self.ssh_pid != 0) {
         posix.kill(self.ssh_pid, posix.SIG.TERM) catch {};
         return;
@@ -249,6 +271,7 @@ pub fn threadEnter(
     td: *termio.Termio.ThreadData,
 ) !void {
     _ = alloc;
+    errdefer self.transport_state.store(2, .release);
 
     // Attach: locally, creating the daemon on first contact; remotely,
     // through an ssh child (never creating anything).
@@ -302,9 +325,10 @@ pub fn threadEnter(
     const read_thread = try std.Thread.spawn(
         .{},
         readThreadMain,
-        .{ fd, io, pipe[0], closing, std.time.milliTimestamp() },
+        .{ self, fd, io, pipe[0], closing, std.time.milliTimestamp() },
     );
     read_thread.setName("io-reader") catch {};
+    _ = self.transport_state.cmpxchgStrong(0, 1, .release, .monotonic);
 
     td.backend = .{ .attach = .{
         .sock_fd = fd,
@@ -321,6 +345,7 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
     // Deliberate teardown: the EOF the read thread is about to see is not
     // a session death.
     attach.closing.store(true, .release);
+    self.transport_state.store(2, .release);
 
     _ = posix.write(attach.read_thread_pipe, "x") catch |err| switch (err) {
         error.BrokenPipe => {},
@@ -407,6 +432,25 @@ test "Vigil local focus remains an implicit claim" {
     try std.testing.expectEqualSlices(u8, "o\x00\x00", attach.write_buf.items);
 }
 
+test "Vigil transport receipts count queued and written frames without contents" {
+    const pipe = try posix.pipe();
+    defer posix.close(pipe[0]);
+    defer posix.close(pipe[1]);
+    var attach = try Attach.init(std.testing.allocator, .{ .id = "test", .host = "m4" });
+    defer attach.deinit();
+    attach.write_fd = pipe[1];
+    attach.enqueueFrame('d', "abc");
+    try std.testing.expectEqual(@as(u64, 6), attach.transportStatus().pending_bytes);
+    try std.testing.expect(attach.writeAll(attach.write_buf.items));
+    try std.testing.expectEqual(@as(u64, 0), attach.transportStatus().pending_bytes);
+    try std.testing.expectEqual(@as(u64, 6), attach.transportStatus().written_bytes);
+    var frame: [6]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), try posix.read(pipe[0], &frame));
+    try std.testing.expectEqualSlices(u8, "d\x03\x00abc", &frame);
+    attach.sever();
+    try std.testing.expectEqual(@as(u8, 2), attach.transportStatus().state);
+}
+
 /// 'q': the daemon re-sends the exact screen over a clear.
 pub fn vigilDump(self: *Attach) void {
     if (self.write_fd < 0) return;
@@ -445,6 +489,12 @@ fn writeAll(self: *Attach, data: []const u8) bool {
                 return false;
             },
         };
+        if (n == 0) {
+            self.sever();
+            return false;
+        }
+        _ = self.written_bytes.fetchAdd(n, .monotonic);
+        _ = self.pending_bytes.fetchSub(n, .monotonic);
         off += n;
     }
     return true;
@@ -470,8 +520,15 @@ fn enqueueFrame(self: *Attach, typ: u8, payload: []const u8) void {
         @intCast(payload.len & 0xff),
         @intCast((payload.len >> 8) & 0xff),
     };
-    self.write_buf.appendSlice(self.alloc, &hdr) catch return;
-    self.write_buf.appendSlice(self.alloc, payload) catch return;
+    self.write_buf.ensureUnusedCapacity(self.alloc, hdr.len + payload.len) catch {
+        self.sever();
+        self.write_closed = true;
+        self.write_cond.signal();
+        return;
+    };
+    self.write_buf.appendSliceAssumeCapacity(&hdr);
+    self.write_buf.appendSliceAssumeCapacity(payload);
+    _ = self.pending_bytes.fetchAdd(hdr.len + payload.len, .monotonic);
     self.write_cond.signal();
 }
 
@@ -629,6 +686,7 @@ fn readPidfile(self: *Attach) ?[]u8 {
 /// a normal process exit, so a shell `exit` closes the pane exactly like
 /// vanilla ghostty instead of wearing the failed-to-launch screen.
 fn readThreadMain(
+    self: *Attach,
     fd: posix.fd_t,
     io: *termio.Termio,
     quit: posix.fd_t,
@@ -637,6 +695,10 @@ fn readThreadMain(
 ) void {
     termio.Exec.ReadThread.threadMainPosix(fd, io, quit);
     if (closing.load(.acquire)) return;
+    self.transport_state.store(2, .release);
+    // SSH EOF says nothing about the home process. Keep its last screen;
+    // the Mac viewport shows connection loss and offers an explicit reconnect.
+    if (self.host != null) return;
     // NEVER a blocking push: a surface mid-release drains no mailbox, and
     // a .forever push parks this thread exactly when threadExit is about
     // to join it — reader waits on the mailbox futex, the io thread waits

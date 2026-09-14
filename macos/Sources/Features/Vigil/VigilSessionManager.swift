@@ -1217,6 +1217,8 @@ class VigilSessionManager {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/vigild")
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
             guard let id = view.vigilAttachId, view.surface != nil else { continue }
+            view.vigilRefreshTransportStatus()
+            if view.vigilHost != nil, view.vigilTransportState == 2 { continue }
             // A remote pane's size fact rides the host's directory (the file
             // is on the other Mac); a mirror that never claims would otherwise
             // paint the owner's narrow bytes into its own wide grid.
@@ -1961,6 +1963,22 @@ class VigilSessionManager {
         mountRemote(controller, composite: VigilRemote.compositeId(alias, session.name), anchor: VigilRemote.compositeId(alias, pane))
         controller.window?.makeKeyAndOrderFront(nil)
         return controller
+    }
+
+    func reconnectRemoteViewport(_ view: Ghostty.SurfaceView) {
+        if let current = mirror, current.view === view, view.vigilHost != nil {
+            let name = current.name, pane = current.pane
+            endMirror()
+            float(name: name, landOn: pane)
+            return
+        }
+        guard let controller = view.window?.windowController as? TerminalController,
+              let composite = mirroredSession(of: controller), let alias = view.vigilHost,
+              let pane = view.vigilAttachId,
+              VigilRemote.shared.session(composite) != nil else { return }
+        vlog("transport: reconnect viewport \(composite) from \(pane); home processes preserved")
+        endMirrorViewport(controller)
+        mountRemote(controller, composite: composite, anchor: VigilRemote.compositeId(alias, pane))
     }
 
     private func mountRemote(_ controller: TerminalController, composite: String, anchor: String?) {

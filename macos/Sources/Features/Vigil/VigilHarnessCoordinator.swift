@@ -15,6 +15,7 @@ import VigilHarness
 /// in the daily footer; secret-bearing requests stay excluded regardless.
 private struct VigilAuthorizationSettings: View {
     let close: () -> Void
+    @ObservedObject private var remote = VigilRemote.shared
     @AppStorage(VigilAsk.debugCaptureKey) private var debugCapture = false
 
     var body: some View {
@@ -41,7 +42,9 @@ private struct VigilAuthorizationSettings: View {
             .padding(.horizontal, 20)
             .padding(.top, 18)
             .padding(.bottom, 4)
-            EnrollmentView()
+            EnrollmentView(destinations: remote.hosts.filter { !$0.isSelf }.map {
+                PairingDestination(name: $0.directory?.host ?? $0.alias, route: $0.alias)
+            })
                 .scrollContentBackground(.hidden)
             Rectangle().fill(.inkRest).frame(height: 1).padding(.horizontal, 20)
             Form {

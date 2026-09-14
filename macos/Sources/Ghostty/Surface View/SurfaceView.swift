@@ -239,6 +239,29 @@ extension Ghostty {
                 //
                 // This is disabled except on macOS because it uses AppKit drag/drop APIs.
                 SurfaceGrabHandle(surfaceView: surfaceView)
+                if surfaceView.vigilHost != nil,
+                   surfaceView.vigilTransportState != 1 || surfaceView.vigilInputPending {
+                    VStack {
+                        HStack {
+                            if surfaceView.vigilTransportState == 2 {
+                                Button { surfaceView.vigilReconnectSession() } label: {
+                                    Label("Connection lost · Reconnect", systemImage: "wifi.slash")
+                                }
+                            } else {
+                                Label(surfaceView.vigilInputPending ? "Sending input…" : "Connecting…",
+                                      systemImage: "network")
+                            }
+                            Spacer()
+                        }
+                        .font(.caption)
+                        .padding(7)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        Spacer()
+                    }
+                    .buttonStyle(.borderless)
+                    .focusable(false)
+                    .padding(6)
+                }
                 if surfaceView.vigilSizeLost {
                     VStack {
                         HStack {

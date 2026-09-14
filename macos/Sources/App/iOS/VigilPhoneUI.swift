@@ -30,14 +30,14 @@ struct VigilPhoneRoot: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            HomeView()
+            HomeView(authorization: $authorization)
         }
         .environmentObject(model)
         // vigil://<host>/<session>/<pane>: an alert's landing.
         .onOpenURL { url in
             if url.scheme == "vigil", url.host == "requests" { authorization = true; return }
             Task { @MainActor in
-                if let ref = await model.resolve(url: url) { path = [ref] }
+                if let ref = await model.resolve(url: url) { authorization = false; path = [ref] }
             }
         }
         .onAppear { model.startDiscovery() }
@@ -48,11 +48,11 @@ struct VigilPhoneRoot: View {
 // MARK: - Home: the tree
 
 struct HomeView: View {
+    @Binding var authorization: Bool
     @EnvironmentObject private var model: VigilPhone
     @EnvironmentObject private var ghostty: Ghostty.App
     @State private var adding = false
     @State private var settings = false
-    @State private var authorization = false
     /// The coordinate space preview rows report their frames in: the
     /// scroll view's own, so the visible area is its size at the origin.
     static let treeSpace = "tree"
@@ -81,14 +81,16 @@ struct HomeView: View {
         .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref) }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button { authorization = true } label: { Image(systemName: "checkmark.shield") }
+                Button { authorization = true } label: {
+                    Image("AskMark").renderingMode(.template).resizable().scaledToFit().frame(width: 24, height: 24)
+                }
+                .accessibilityLabel("Requests · authz.space")
                 Button { settings = true } label: { Image(systemName: "gearshape") }
                 Button { adding = true } label: { Image(systemName: "plus") }
             }
         }
         .sheet(isPresented: $adding) { AddHostView() }
         .sheet(isPresented: $settings) { SettingsView() }
-        .sheet(isPresented: $authorization) { VigilAuthorizationView() }
         .refreshable { model.refreshAll() }
         .onAppear { model.refreshAll() }
     }

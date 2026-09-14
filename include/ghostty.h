@@ -1143,6 +1143,12 @@ GHOSTTY_API ghostty_surface_size_s ghostty_surface_size_for_grid(ghostty_surface
 GHOSTTY_API void ghostty_surface_vigil_claim(ghostty_surface_t, bool);
 GHOSTTY_API uint64_t ghostty_surface_vigil_client_id(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_vigil_dump(ghostty_surface_t);
+typedef struct {
+  uint8_t state; // 0 connecting, 1 stream open, 2 disconnected
+  uint64_t pending_bytes;
+  uint64_t written_bytes;
+} ghostty_vigil_transport_status_s;
+GHOSTTY_API ghostty_vigil_transport_status_s ghostty_surface_vigil_transport_status(ghostty_surface_t);
 GHOSTTY_API uint64_t ghostty_surface_vigil_screen_hash(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_vigil_screen_text(ghostty_surface_t);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);

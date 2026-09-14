@@ -248,6 +248,61 @@ extension Ghostty {
         /// cannot take it back from another viewport.
         @Published private(set) var vigilWantsSize = false
         @Published private(set) var vigilSizeLost = false
+        @Published private(set) var vigilTransportState: UInt8 = 0
+        @Published private(set) var vigilInputPending = false
+
+        func vigilRefreshTransportStatus() {
+            guard vigilHost != nil, let surface else { return }
+            let status = ghostty_surface_vigil_transport_status(surface)
+            if vigilTransportState != status.state {
+                vigilTransportState = status.state
+                VigilSessionManager.shared.vlog("transport: \(vigilHost ?? "")/\(vigilAttachId ?? "") state=\(status.state) queued=\(status.pending_bytes) written=\(status.written_bytes)")
+            }
+            let pending = status.pending_bytes > 0 && status.state != 2
+            if vigilInputPending != pending {
+                vigilInputPending = pending
+                VigilSessionManager.shared.vlog("transport: \(vigilHost ?? "")/\(vigilAttachId ?? "") queued=\(status.pending_bytes) written=\(status.written_bytes)")
+            }
+        }
+
+        @objc func vigilReconnectSession(_ sender: Any? = nil) {
+            VigilSessionManager.shared.reconnectRemoteViewport(self)
+        }
+
+        @objc func vigilConnectionDetails(_ sender: Any?) {
+            guard let surface, let alias = vigilHost, let pane = vigilAttachId else { return }
+            let status = ghostty_surface_vigil_transport_status(surface)
+            let host = VigilRemote.shared.host(alias)
+            let truth = host?.directory?.panes[pane]
+            let stream = status.state == 2 ? "Disconnected" : status.state == 1 ? "Open" : "Connecting"
+            let details = """
+            Pane: \(alias)/\(pane)
+            View: \(String(ghostty_surface_vigil_client_id(surface), radix: 16))
+            SSH stream: \(stream)
+            Outbound bytes waiting: \(status.pending_bytes)
+            Bytes handed to SSH: \(status.written_bytes)
+            Directory: \(host?.error ?? (host?.directory == nil ? "Not received" : "Available"))
+            Home daemon: \(truth.map { $0.alive ? "Alive" : "Not alive" } ?? "Unknown")
+            Read-only: \(readonly); keyboard focus: \(window?.firstResponder === self)
+            Size: \(truth?.size ?? "Unknown")
+
+            An open stream does not prove the program consumed input. A quiet program is not necessarily stuck.
+            """
+            VigilSessionManager.shared.vlog("connection details: " + details.replacingOccurrences(of: "\n", with: " | "))
+            let alert = NSAlert()
+            alert.messageText = "Connection to \(alias)"
+            alert.informativeText = details
+            alert.addButton(withTitle: "Done")
+            alert.addButton(withTitle: "Copy details")
+            alert.addButton(withTitle: "Reconnect session")
+            guard let window else { return }
+            alert.beginSheetModal(for: window) { [weak self] response in
+                if response == .alertSecondButtonReturn {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(details, forType: .string)
+                } else if response == .alertThirdButtonReturn { self?.vigilReconnectSession() }
+            }
+        }
         private static weak var vigilPointerView: SurfaceView?
         private var vigilSizeAcknowledged = false
         private var vigilPendingSizeClaim: String?
@@ -1812,6 +1867,11 @@ extension Ghostty {
             item.setImageIfDesired(systemSymbolName: "rectangle.tophalf.inset.filled")
 
             menu.addItem(.separator())
+            if vigilHost != nil {
+                menu.addItem(withTitle: "Connection Details…", action: #selector(vigilConnectionDetails(_:)), keyEquivalent: "")
+                menu.addItem(withTitle: "Reconnect Session", action: #selector(vigilReconnectSession(_:)), keyEquivalent: "")
+                menu.addItem(.separator())
+            }
             item = menu.addItem(withTitle: "Reset Terminal", action: #selector(resetTerminal(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "arrow.trianglehead.2.clockwise")
             item = menu.addItem(withTitle: "Toggle Terminal Inspector", action: #selector(toggleTerminalInspector(_:)), keyEquivalent: "")
