@@ -15,22 +15,21 @@ struct VigilAuthorizationView: View {
     @State private var selected: TrustedHome?
     @State private var error = ""
     @State private var visible = false
-    @State private var pairingHost: VigilPhone.Host?
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
                 if let model { AuthzInbox(model: model) } else {
                     List {
                         Section {
-                            ForEach(phone.hosts) { host in
+                            ForEach(phone.hosts.filter { pairedHome(for: $0) != nil }) { host in
                                 Button {
-                                    if let home = pairedHome(for: host) { connect(home) } else { pairingHost = host }
+                                    if let home = pairedHome(for: host) { connect(home) }
                                 } label: {
                                     HStack {
                                         Image(systemName: "laptopcomputer")
                                         VStack(alignment: .leading) {
                                             Text(host.name).foregroundStyle(.primary)
-                                            Text(pairedHome(for: host) == nil ? "Pair to answer requests" : "Paired · Open requests")
+                                            Text("Paired · Open requests")
                                                 .font(.caption).foregroundStyle(.secondary)
                                         }
                                         Spacer()
@@ -38,8 +37,22 @@ struct VigilAuthorizationView: View {
                                     }
                                 }
                             }
-                        } footer: {
-                            Text("Your saved Vigil Macs. Answering requests needs a separate confirmation on each Mac.")
+                        }
+                        Section {
+                            PairingView(destinations: phone.hosts.filter { pairedHome(for: $0) == nil }.map {
+                                .init(name: $0.name, route: $0.hostname)
+                            }, connect: { route in
+                                guard let host = await MainActor.run(body: {
+                                    VigilPhone.shared.hosts.first { $0.hostname == route }
+                                }) else { throw TransportError.invalidPeer }
+                                return PairingTransport {
+                                    let fd = try await Self.open(host, command: "pairing")
+                                    Framing.configure(fd)
+                                    return RemoteStream(input: fd, output: fd) {
+                                        _ = Darwin.shutdown(fd, SHUT_RDWR); Darwin.close(fd)
+                                    }
+                                }
+                            })
                         }
                     }
                     .overlay {
@@ -60,22 +73,13 @@ struct VigilAuthorizationView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { stop(); dismiss() } }
             }
-            .navigationDestination(item: $pairingHost) { host in
-                ScrollView {
-                    PairingView(destinations: [.init(name: host.name, route: host.hostname)], initialRoute: host.hostname)
-                        .padding()
-                }
-                .navigationTitle("Pair \(host.name)")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { stop(); dismiss() } } }
-            }
+
         }
         .onAppear { visible = true; refresh() }
         .onDisappear { visible = false; stop() }
         .onChange(of: phase) { _, phase in
-            if phase == .background { stop() } else if phase == .active, visible, pairingHost == nil, model == nil, let selected { connect(selected) }
+            if phase == .background { stop() } else if phase == .active, visible, model == nil, let selected { connect(selected) }
         }
-        .onChange(of: pairingHost) { _, host in if host != nil { stop() } else { refresh() } }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("authz.peers.changed"))) { _ in refresh() }
     }
     private func pairedHome(for host: VigilPhone.Host) -> TrustedHome? {
@@ -90,9 +94,9 @@ struct VigilAuthorizationView: View {
         connection = nil
     }
     private func connect(_ home: TrustedHome) {
-        guard visible, phase == .active, pairingHost == nil else { return }
+        guard visible, phase == .active else { return }
         guard let host = phone.hosts.first(where: { $0.hostname == home.route || $0.name == home.route }) else {
-            error = "Add this home to the phone’s Macs, using its address or name as the pairing route."
+            error = "This Mac is no longer saved in Vigil. Add it from the home screen to reconnect."
             return
         }
         do {
@@ -110,9 +114,9 @@ struct VigilAuthorizationView: View {
             self.connection = connection; self.model = model; model.start(); error = ""
         } catch { self.error = "Device identity unavailable. Pair this phone first." }
     }
-    @MainActor private static func open(_ host: VigilPhone.Host) async throws -> Int32 {
+    @MainActor private static func open(_ host: VigilPhone.Host, command: String = "endpoint") async throws -> Int32 {
         let ssh = try await VigilPhone.shared.connection(for: host)
-        return try await ssh.stream("$HOME/.local/bin/authz endpoint")
+        return try await ssh.stream("$HOME/.local/bin/authz \(command)")
     }
 }
 #endif
