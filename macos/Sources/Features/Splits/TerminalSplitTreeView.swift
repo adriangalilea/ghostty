@@ -142,7 +142,8 @@ private struct TerminalSplitLeaf: View {
         let action: (TerminalSplitOperation) -> Void
 
         func validateDrop(info: DropInfo) -> Bool {
-            info.hasItemsConforming(to: [.ghosttySurfaceId])
+            !destinationSurface.vigilMirror && destinationSurface.vigilHost == nil
+                && info.hasItemsConforming(to: [.ghosttySurfaceId])
         }
 
         func dropEntered(info: DropInfo) {

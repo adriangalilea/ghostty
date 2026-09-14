@@ -949,6 +949,15 @@ class BaseTerminalController: NSWindowController,
         destination: Ghostty.SurfaceView,
         zone: TerminalSplitDropZone
     ) {
+        guard !source.vigilMirror, !destination.vigilMirror,
+              source.vigilHost == nil, destination.vigilHost == nil else {
+            let alert = NSAlert()
+            alert.messageText = "Cannot Move a Mirrored Pane"
+            alert.informativeText = "Moving panes into or out of a mirrored session is not supported yet. The sessions have not changed."
+            if let window { alert.beginSheetModal(for: window) }
+            VigilSessionManager.vlogSync("session edit: refused native pane drop involving a mirror")
+            return
+        }
         // Map drop zone to split direction
         let direction: SplitTree<Ghostty.SurfaceView>.NewDirection = switch zone {
         case .top: .up
