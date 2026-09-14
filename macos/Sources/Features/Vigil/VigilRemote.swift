@@ -65,7 +65,12 @@ final class VigilRemote: ObservableObject {
     @Published private(set) var hosts: [Host] = []
     static var trace: ((String) -> Void)?
 
-    private var timer: Timer?
+    /// One `ssh <alias> vigild dir --watch` per host, for as long as the
+    /// host is configured: the remote emits its directory once per change,
+    /// nothing is polled and no process is spawned per tick. A dead stream
+    /// re-dials after 15s.
+    private var streams: [String: Process] = [:]
+    private var streamBuffers: [String: Data] = [:]
     private var inflight = Set<String>()
 
     /// Session ids of remote sessions are namespaced by alias so they can
@@ -81,23 +86,74 @@ final class VigilRemote: ObservableObject {
         let known = Set(hosts.map(\.alias))
         let wanted = Set(aliases)
         hosts.removeAll { !wanted.contains($0.alias) }
+        for (alias, stream) in streams where !wanted.contains(alias) {
+            stream.terminate(); streams[alias] = nil; streamBuffers[alias] = nil
+        }
         for alias in aliases where !known.contains(alias) {
             hosts.append(Host(alias: alias))
         }
-        timer?.invalidate()
-        timer = nil
         guard !aliases.isEmpty else { return }
         Self.trace?("remote: hosts \(aliases)")
-        // The first poll waits for self-resolution: a poll of this Mac's
+        // The streams wait for self-resolution: a stream from this Mac's
         // own alias would paint a host row for the one tick it takes.
-        resolveSelf(aliases.filter { !known.contains($0) }) { [weak self] in self?.refreshAll() }
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshAll() }
+        resolveSelf(aliases.filter { !known.contains($0) }) { [weak self] in self?.streamAll() }
+    }
+
+    private func streamAll() {
+        for host in hosts where !host.isSelf { stream(host.alias) }
+    }
+
+    private func stream(_ alias: String) {
+        guard streams[alias] == nil, let host = host(alias), !host.isSelf else { return }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=15",
+                          "-o", "ServerAliveCountMax=2", "-T", alias, "vigild", "dir", "--watch"]
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = FileHandle.nullDevice
+        out.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            Task { @MainActor [weak self] in self?.streamed(alias, data) }
+        }
+        proc.terminationHandler = { [weak self] proc in
+            out.fileHandleForReading.readabilityHandler = nil
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.streams[alias] = nil
+                self.streamBuffers[alias] = nil
+                if let index = self.hosts.firstIndex(where: { $0.alias == alias }) {
+                    let msg = "stream ended (ssh exit \(proc.terminationStatus))"
+                    if self.hosts[index].error != msg {
+                        Self.trace?("remote: \(alias) \(msg); re-dialing in 15s")
+                        self.hosts[index].error = msg
+                        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+                    MainActor.assumeIsolated { self?.stream(alias) }
+                }
+            }
+        }
+        do {
+            try proc.run()
+            streams[alias] = proc
+            Self.trace?("remote: \(alias) stream opened")
+        } catch {
+            Self.trace?("remote: \(alias) stream failed to start: \(error.localizedDescription)")
         }
     }
 
-    func refreshAll() {
-        for host in hosts where !host.isSelf { refresh(host.alias) }
+    /// Lines off the stream, each a whole directory document.
+    private func streamed(_ alias: String, _ data: Data) {
+        streamBuffers[alias, default: Data()].append(data)
+        while let buffer = streamBuffers[alias], let newline = buffer.firstIndex(of: 0x0a) {
+            let line = Data(buffer[buffer.startIndex..<newline])
+            streamBuffers[alias]?.removeSubrange(buffer.startIndex...newline)
+            do { apply(alias, .success((try JSONDecoder().decode(Directory.self, from: line), line))) }
+            catch { apply(alias, .failure(error)) }
+        }
     }
 
     /// Which aliases name this Mac, decided from the ssh CONFIG (`ssh -G`
@@ -209,8 +265,17 @@ final class VigilRemote: ObservableObject {
                 result = .failure(error)
             }
             Task { @MainActor [weak self] in
-                guard let self, let index = self.hosts.firstIndex(where: { $0.alias == alias }) else { return }
+                guard let self else { return }
                 self.inflight.remove(alias)
+                self.apply(alias, result)
+            }
+        }
+    }
+
+    /// One directory landed (from the stream or a one-shot refresh): the
+    /// host's rows follow, with a receipt only when something changed.
+    private func apply(_ alias: String, _ result: Result<(Directory, Data), Error>) {
+        guard let index = hosts.firstIndex(where: { $0.alias == alias }) else { return }
                 switch result {
                 case .success((let dir, let data)):
                     // An alias that resolves to THIS Mac would list every
@@ -244,8 +309,6 @@ final class VigilRemote: ObservableObject {
                         NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
                     }
                 }
-            }
-        }
     }
 
     /// The sidebar's rows for every remote host, in `vigil-hosts` order,

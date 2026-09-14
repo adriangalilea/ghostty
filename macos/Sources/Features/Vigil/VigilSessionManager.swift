@@ -1156,13 +1156,44 @@ class VigilSessionManager {
             .flatMap { UInt64($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
         eventsOffset = truncated ? 0 : min(saved ?? size, size)
         drainEvents()
+        watchEvents()
+        // The presence pulse: "still looking" is a fact with no event of its
+        // own, and the owner-grid receipt reads in-place files no directory
+        // kqueue reports. One tick a second, nothing else rides it.
         eventsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    VigilSessionManager.shared.drainEvents()
+                    VigilSessionManager.shared.ackVisiblePanes()
+                    VigilSessionManager.shared.syncOwnerGrids()
                 }
             }
         }
+    }
+
+    /// The attention log is append-only and every writer appends a whole
+    /// line, so a vnode watch on the file IS the event; the drain runs on
+    /// the write, not on a clock. A truncation replaces the inode
+    /// (atomic write) and re-arms.
+    private var eventsWatch: DispatchSourceFileSystemObject?
+    private func watchEvents() {
+        eventsWatch?.cancel(); eventsWatch = nil
+        if !FileManager.default.fileExists(atPath: eventsURL.path) {
+            FileManager.default.createFile(atPath: eventsURL.path, contents: nil)
+        }
+        let fd = Darwin.open(eventsURL.path, O_EVTONLY)
+        guard fd >= 0 else { vlog("!! events watcher failed to open \(eventsURL.path)"); return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .delete, .rename], queue: .main)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            let flags = source.data
+            MainActor.assumeIsolated { self.drainEvents() }
+            if flags.contains(.delete) || flags.contains(.rename) {
+                MainActor.assumeIsolated { self.watchEvents() }
+            }
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        eventsWatch = source
     }
 
     /// A surface whose pane's pty is OWNED by another client (the phone
@@ -1282,8 +1313,6 @@ class VigilSessionManager {
     }
 
     private func drainEvents() {
-        ackVisiblePanes() // the 1s presence pulse rides the events tick
-        syncOwnerGrids()
         guard let handle = try? FileHandle(forReadingFrom: eventsURL) else { return }
         defer { try? handle.close() }
         let size = handle.seekToEndOfFile()
