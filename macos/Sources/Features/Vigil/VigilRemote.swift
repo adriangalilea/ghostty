@@ -39,6 +39,10 @@ final class VigilRemote: ObservableObject {
         /// seen >= since is the one seen-rule, the same the home Mac applies.
         var since: Double?
         var seen: Double?
+        /// `<pane>.size` as the daemon publishes it: "rows cols <owner hello>".
+        /// A mirror here letterboxes a foreign owner's grid from it, exactly
+        /// as a local surface does from the file.
+        var size: String?
     }
 
     struct Directory: Decodable {

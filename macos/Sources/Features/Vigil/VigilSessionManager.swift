@@ -1206,9 +1206,17 @@ class VigilSessionManager {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/vigild")
         let me = "ghostty:\(getpid())"
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
-            guard let id = view.vigilAttachId, view.vigilHost == nil, view.surface != nil else { continue }
-            let line = ((try? String(contentsOf: dir.appendingPathComponent("\(id).size"), encoding: .utf8)) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let id = view.vigilAttachId, view.surface != nil else { continue }
+            // A remote pane's size fact rides the host's directory (the file
+            // is on the other Mac); a mirror that never claims would otherwise
+            // paint the owner's narrow bytes into its own wide grid.
+            let raw: String
+            if let alias = view.vigilHost {
+                raw = VigilRemote.shared.host(alias)?.directory?.panes[id]?.size ?? ""
+            } else {
+                raw = (try? String(contentsOf: dir.appendingPathComponent("\(id).size"), encoding: .utf8)) ?? ""
+            }
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             let parts = line.split(separator: " ", maxSplits: 2)
             let rows = parts.count >= 2 ? Int(parts[0]) ?? 0 : 0
             let cols = parts.count >= 2 ? Int(parts[1]) ?? 0 : 0
@@ -1235,7 +1243,8 @@ class VigilSessionManager {
                 }
             }
             fitLetterbox(view, grid: grid)
-            checkScreen(view, id: id, dir: dir)
+            // The content receipt compares against the local daemon's hash file.
+            if view.vigilHost == nil { checkScreen(view, id: id, dir: dir) }
         }
     }
 
@@ -1865,11 +1874,22 @@ class VigilSessionManager {
         swapTree(controller, SplitTree(view: view))
         mirrorViewports.setObject(name as NSString, forKey: controller)
         materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
-        let landing = anchor.flatMap { a in controller.surfaceTree.first { $0.vigilAttachId == a } } ?? view
-        DispatchQueue.main.async { Ghostty.moveFocus(to: landing) }
+        landAfterSplits(controller, anchor: anchor, fallback: view)
         vlog("mirror: window of '\(sessionName(of: controller) ?? "-")' -> viewport onto '\(name)' (\(tab.panes.count) panes)")
         touchRecent(name)
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+    }
+
+    /// Focus the clicked pane once the splits EXIST. The materializer lands
+    /// them on the next runloop tick around the layout's first leaf, so a
+    /// landing resolved at mount time could only ever find that first leaf
+    /// (a click on the other pane focused the wrong one, 2026-09-14).
+    private func landAfterSplits(_ controller: TerminalController, anchor: String?, fallback: Ghostty.SurfaceView) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak controller] in
+            guard let controller else { return }
+            let landing = anchor.flatMap { a in controller.surfaceTree.first { $0.vigilAttachId == a } } ?? fallback
+            Ghostty.moveFocus(to: landing)
+        }
     }
 
     /// A REMOTE session (another Mac, VigilRemote) in this viewport: the
@@ -1886,6 +1906,14 @@ class VigilSessionManager {
         let tabs = session.tabs ?? []
         let tab = rawAnchor.flatMap { a in tabs.first { tabPaneIds($0).contains(a) } } ?? tabs.first
         guard let tab, !tab.panes.isEmpty else { return }
+        // Already this viewport's mirror and the clicked pane is on screen:
+        // a click is a focus move, never a teardown and two fresh ssh
+        // proxies (four re-mounts in five seconds of clicking, 2026-09-14).
+        if mirroredSession(of: controller) == composite,
+           let shown = controller.surfaceTree.first(where: { $0.vigilAttachId == rawAnchor ?? "" }) ?? (rawAnchor == nil ? controller.surfaceTree.first : nil) {
+            DispatchQueue.main.async { Ghostty.moveFocus(to: shown) }
+            return
+        }
         if mirroredSession(of: controller) != nil {
             endMirrorViewport(controller)
         } else {
@@ -1904,8 +1932,7 @@ class VigilSessionManager {
         swapTree(controller, SplitTree(view: view))
         mirrorViewports.setObject(composite as NSString, forKey: controller)
         materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
-        let landing = rawAnchor.flatMap { a in controller.surfaceTree.first { $0.vigilAttachId == a } } ?? view
-        DispatchQueue.main.async { Ghostty.moveFocus(to: landing) }
+        landAfterSplits(controller, anchor: rawAnchor, fallback: view)
         vlog("remote: window -> viewport onto '\(composite)' via ssh \(alias) (\(tab.panes.count) panes)")
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
