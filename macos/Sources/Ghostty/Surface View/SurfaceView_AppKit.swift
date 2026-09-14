@@ -250,6 +250,7 @@ extension Ghostty {
         @Published private(set) var vigilSizeLost = false
         private static weak var vigilPointerView: SurfaceView?
         private var vigilSizeAcknowledged = false
+        private var vigilPendingSizeClaim: String?
         private(set) var vigilViewportSize: CGSize = .zero
 
         func vigilOwnsSize(owner: String) -> Bool {
@@ -273,17 +274,29 @@ extension Ghostty {
             guard size != vigilViewportSize else { return }
             vigilViewportSize = size
             if vigilWantsSize { sizeDidChange(size) }
+            if let reason = vigilPendingSizeClaim { vigilControlSize(true, reason: reason) }
+        }
+
+        /// A pane created by an input gesture may not have a host frame yet.
+        /// Keep that gesture until layout supplies the real viewport size.
+        func vigilRequestSize(reason: String) {
+            guard NSApp.isActive, !vigilWantsSize else { return }
+            vigilPendingSizeClaim = reason
+            vigilControlSize(true, reason: reason)
         }
 
         func vigilLeaveActiveApp() {
             Self.vigilPointerView = nil
+            vigilPendingSizeClaim = nil
         }
 
         func vigilControlSize(_ own: Bool, reason: String) {
+            if !own { vigilPendingSizeClaim = nil }
             guard vigilAttachId != nil, let surface, own != vigilWantsSize else { return }
             if own {
                 guard NSApp.isActive, window?.isKeyWindow == true,
                       vigilViewportSize.width > 0, vigilViewportSize.height > 0 else { return }
+                vigilPendingSizeClaim = nil
                 if Self.vigilPointerView !== self {
                     Self.vigilPointerView = self
                 }

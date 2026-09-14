@@ -4058,7 +4058,7 @@ class VigilSessionManager {
                 mirrorInto(controller, name: composite, anchor: pane)
             } else if let pane = reply.pane, let landing = controller.surfaceTree.first(where: { $0.vigilAttachId == pane }) {
                 Ghostty.moveFocus(to: landing)
-                DispatchQueue.main.async { landing.vigilControlSize(true, reason: "session edit") }
+                if controller.window?.isKeyWindow == true { landing.vigilRequestSize(reason: "session edit") }
             }
             return true
         }
@@ -4168,7 +4168,7 @@ class VigilSessionManager {
             if let pending, let landing = controller.surfaceTree.first(where: { $0.vigilAttachId == pending }) {
                 remoteLandings.removeValue(forKey: ObjectIdentifier(controller))
                 Ghostty.moveFocus(to: landing)
-                DispatchQueue.main.async { landing.vigilControlSize(true, reason: "remote session edit") }
+                if controller.window?.isKeyWindow == true { landing.vigilRequestSize(reason: "remote session edit") }
             }
             vlog("remote layout: \(composite) reconciled \(tab.panes.count) panes; retained existing clients")
         }
