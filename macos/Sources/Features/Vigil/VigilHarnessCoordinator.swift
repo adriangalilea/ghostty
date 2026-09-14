@@ -81,6 +81,7 @@ private struct VigilAuthorizationSettings: View {
         // content and no window chrome doubles it.
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: .inkPanel, style: .continuous))
         .onExitCommand(perform: close)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in close() }
     }
 }
 
@@ -493,12 +494,25 @@ final class VigilHarnessCoordinator: ObservableObject {
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Authorization settings"; panel.isReleasedWhenClosed = false
         panel.isFloatingPanel = true; panel.level = .floating
+        panel.hidesOnDeactivate = false
         panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = false
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.contentView = NSHostingView(rootView: VigilAuthorizationSettings(close: { [weak panel] in panel?.orderOut(nil) }))
+        // NSHostingView has no SwiftUI Scene: its default scenePhase is
+        // background. This visible AppKit panel owns the presentation lifetime.
+        // Removing its root on close cancels discovery and withdraws pairing.
+        panel.contentView = NSHostingView(rootView: VigilAuthorizationSettings(close: { [weak self] in self?.closeEnrollment() })
+            .environment(\.scenePhase, .active))
         panel.center(); panel.makeKeyAndOrderFront(nil)
         enrollmentPanel = panel
+        VigilSessionManager.shared.vlog("authz settings: visible; pairing discovery enabled")
+    }
+    private func closeEnrollment() {
+        guard let panel = enrollmentPanel else { return }
+        panel.contentView = nil
+        panel.close()
+        enrollmentPanel = nil
+        VigilSessionManager.shared.vlog("authz settings: closed; pairing presentation ended")
     }
     private func dictate(_ snapshot: RequestSnapshot, finished: @escaping (String) -> Void) {
         guard current?.handle == snapshot.handle, !snapshot.request.containsSecrets, !VigilVoice.isActive else { return }
