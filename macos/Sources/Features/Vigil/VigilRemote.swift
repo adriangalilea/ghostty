@@ -1,4 +1,5 @@
 import Foundation
+import SystemConfiguration
 
 /// Other Macs' sessions, read through ssh. ONE source: `ssh <alias> vigild
 /// dir` returns the machine's registry (vigil.json verbatim) plus per-pane
@@ -49,7 +50,13 @@ final class VigilRemote: ObservableObject {
         var raw: Data?
         var error: String?
         var fetched: Date?
+        /// The alias points at THIS Mac (`vigil-hosts` is one shared
+        /// config across Adrian's Macs, so every Mac lists itself): never
+        /// polled, never a row.
+        var isSelf = false
     }
+
+    static let selfError = "this Mac"
 
     @Published private(set) var hosts: [Host] = []
     static var trace: ((String) -> Void)?
@@ -77,14 +84,85 @@ final class VigilRemote: ObservableObject {
         timer = nil
         guard !aliases.isEmpty else { return }
         Self.trace?("remote: hosts \(aliases)")
-        refreshAll()
+        // The first poll waits for self-resolution: a poll of this Mac's
+        // own alias would paint a host row for the one tick it takes.
+        resolveSelf(aliases.filter { !known.contains($0) }) { [weak self] in self?.refreshAll() }
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshAll() }
         }
     }
 
     func refreshAll() {
-        for host in hosts { refresh(host.alias) }
+        for host in hosts where !host.isSelf { refresh(host.alias) }
+    }
+
+    /// Which aliases name this Mac, decided from the ssh CONFIG (`ssh -G`
+    /// prints the resolved HostName), never from a reply: self must read
+    /// as self before sshd is even enabled here. Matches this Mac's own
+    /// names and every address on its interfaces.
+    private func resolveSelf(_ aliases: [String], then done: @escaping @MainActor () -> Void) {
+        guard !aliases.isEmpty else { done(); return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let mine = Self.localIdentities()
+            var selfAliases: [String] = []
+            for alias in aliases {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+                proc.arguments = ["-G", alias]
+                let out = Pipe()
+                proc.standardOutput = out
+                proc.standardError = FileHandle.nullDevice
+                guard (try? proc.run()) != nil else { continue }
+                let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                proc.waitUntilExit()
+                let target = text.split(separator: "\n")
+                    .first { $0.hasPrefix("hostname ") }
+                    .map { String($0.dropFirst("hostname ".count)).lowercased() } ?? alias.lowercased()
+                if mine.contains(target) { selfAliases.append(alias) }
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                for alias in selfAliases {
+                    guard let index = self.hosts.firstIndex(where: { $0.alias == alias }) else { continue }
+                    Self.trace?("remote: \(alias) is this Mac, never polled")
+                    self.hosts[index].isSelf = true
+                    self.hosts[index].error = Self.selfError
+                    self.hosts[index].directory = nil
+                    self.hosts[index].raw = nil
+                }
+                if !selfAliases.isEmpty {
+                    NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+                }
+                done()
+            }
+        }
+    }
+
+    /// This Mac's names (hostName, its short form, the Bonjour name) and
+    /// every numeric address on its interfaces, lowercased.
+    private static func localIdentities() -> Set<String> {
+        var ids = Set<String>()
+        let full = ProcessInfo.processInfo.hostName.lowercased()
+        ids.insert(full)
+        ids.insert(String(full.split(separator: ".").first ?? Substring(full)))
+        if let local = SCDynamicStoreCopyLocalHostName(nil) as String? {
+            ids.insert(local.lowercased())
+            ids.insert(local.lowercased() + ".local")
+        }
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return ids }
+        defer { freeifaddrs(list) }
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard let addr = ptr.pointee.ifa_addr else { continue }
+            let family = Int32(addr.pointee.sa_family)
+            guard family == AF_INET || family == AF_INET6 else { continue }
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &buffer, socklen_t(buffer.count),
+                           nil, 0, NI_NUMERICHOST) == 0 {
+                ids.insert(String(cString: buffer).lowercased())
+            }
+        }
+        return ids
     }
 
     func host(_ alias: String) -> Host? { hosts.first { $0.alias == alias } }
@@ -135,9 +213,10 @@ final class VigilRemote: ObservableObject {
                     // local session twice under a host header: not a
                     // remote, dropped with a receipt.
                     if dir.host == ProcessInfo.processInfo.hostName.split(separator: ".").first.map(String.init) {
-                        if self.hosts[index].error != "this Mac" {
+                        if self.hosts[index].error != Self.selfError {
                             Self.trace?("remote: \(alias) is this Mac (\(dir.host)), ignored")
-                            self.hosts[index].error = "this Mac"
+                            self.hosts[index].isSelf = true
+                            self.hosts[index].error = Self.selfError
                             self.hosts[index].directory = nil
                             self.hosts[index].raw = nil
                             NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
@@ -171,7 +250,7 @@ final class VigilRemote: ObservableObject {
     /// views exist), row ids namespaced by alias.
     func sidebarRows() -> [VigilSessionManager.SidebarSessionRow] {
         var rows: [VigilSessionManager.SidebarSessionRow] = []
-        for host in hosts {
+        for host in hosts where !host.isSelf {
             let hostLabel = host.directory?.host ?? host.alias
             let header = host.error.map { "\(hostLabel) (\($0))" } ?? hostLabel
             guard let dir = host.directory else {

@@ -64,19 +64,18 @@ struct VigilSidebarView: View {
                                 ForEach(Array(model.rows.enumerated()), id: \.element.id) { index, row in
                                     // Remote hosts group under a header:
                                     // another Mac's sessions, viewports
-                                    // only (VigilRemote).
-                                    if let host = row.host,
+                                    // only (VigilRemote). The header folds
+                                    // the whole Mac, keyed by its alias.
+                                    let alias = row.host.flatMap { _ in VigilRemote.split(row.id)?.alias }
+                                    if let host = row.host, let alias,
                                        index == 0 || model.rows[index - 1].host != host {
-                                        HStack(spacing: 6) {
-                                            Image(systemName: "desktopcomputer")
-                                            Text(host)
-                                        }
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.top, 10)
-                                        .padding(.horizontal, 6)
+                                        hostHeader(host, alias: alias)
                                     }
-                                    sessionGroup(row)
+                                    if let alias, collapse.hosts.contains(alias) {
+                                        EmptyView()
+                                    } else {
+                                        sessionGroup(row)
+                                    }
                                 }
                             }
                             .padding(.vertical, 8)
@@ -349,6 +348,24 @@ struct VigilSidebarView: View {
         .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
         .onTapGesture { VigilSessionManager.shared.exhume(burial.id) }
         .help("Killed; dies for real in \(burial.remaining)s. Click to recover it whole (⌘⇧T also exhumes).")
+    }
+
+    // MARK: Remote host header (one per other Mac)
+
+    private func hostHeader(_ title: String, alias: String) -> some View {
+        let collapsed = collapse.hosts.contains(alias)
+        return HStack(spacing: 4) {
+            chevron(collapsed: collapsed) {
+                if collapsed { collapse.hosts.remove(alias) }
+                else { collapse.hosts.insert(alias) }
+            }
+            Image(systemName: "desktopcomputer")
+            Text(title)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.top, 10)
+        .padding(.horizontal, 2)
     }
 
     // MARK: Session group (one block per session)
