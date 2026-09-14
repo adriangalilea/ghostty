@@ -123,6 +123,9 @@ final class VigilHarnessCoordinator: ObservableObject {
         NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { _ in
             Task { @MainActor in VigilSessionManager.shared.pumpAskGate() }
         }
+        NotificationCenter.default.addObserver(forName: Notification.Name("authz.peers.changed"), object: nil, queue: .main) { _ in
+            Task { @MainActor in VigilHarnessCoordinator.shared.configureRemoteHomes() }
+        }
     }
     private var inbox: InboxModel?
     private var panel: NSPanel?
@@ -139,6 +142,8 @@ final class VigilHarnessCoordinator: ObservableObject {
     private var deferredForDictation = false
     private var nextServiceCheck = Date.distantPast
     private var brokerEnsured = false
+    private var remoteHomes: [String: TrustedHome] = [:]
+    private var remotePresenceMemo: [String: [String]] = [:]
 
     func pump(preferredPane: String?) {
         // The broker is the one writer of every pane's state: it runs on
@@ -148,11 +153,26 @@ final class VigilHarnessCoordinator: ObservableObject {
         if !brokerEnsured { brokerEnsured = true; launch("vigil-agent", ["ensure"]) }
         guard enrolled else { stop(); return }
         if inbox == nil { connect() }
-        let panes = inbox?.requests.map { $0.request.context }.filter { VigilSessionManager.shared.paneOnAnyScreen($0) } ?? []
-        let focused = NSApp.isActive ? preferredPane : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let panes = inbox?.requests.filter { inbox?.isRemote($0) != true }.map { $0.request.context }.filter { VigilSessionManager.shared.paneOnAnyScreen($0) } ?? []
+        let remoteFocus = (NSApp.keyWindow?.windowController as? TerminalController)?.focusedSurface?.vigilHost != nil
+        let focused = NSApp.isActive && !remoteFocus ? preferredPane : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         if self.preferredPane != focused || panes != visible {
             self.preferredPane = focused; visible = panes
             Task { await inbox?.presence(focusedContext: focused, visibleContexts: panes) }
+        }
+        if let inbox {
+            let views = (NSApp.keyWindow?.windowController as? TerminalController).map { Array($0.surfaceTree) } ?? []
+            for (id, home) in remoteHomes {
+                let visible = NSApp.isActive ? views.filter { $0.vigilHost == home.route && !$0.isHiddenOrHasHiddenAncestor }.compactMap(\.vigilAttachId) : []
+                let focused = visible.contains(preferredPane ?? "") ? preferredPane : nil
+                let memo = visible + [focused ?? ""]
+                if remotePresenceMemo[id] != memo {
+                    remotePresenceMemo[id] = memo
+                    Task { await inbox.remotePresence(id, focusedContext: visible.contains(preferredPane ?? "") ? preferredPane : nil, visibleContexts: visible) }
+                }
+            }
+            if let current, inbox.isRemote(current), !inbox.remoteAutomaticAllowed(current), !inbox.manualSelection { clear() }
+            inbox.reconsider()
         }
         if deferredForDictation, !VigilVoice.isActive {
             deferredForDictation = false
@@ -172,11 +192,24 @@ final class VigilHarnessCoordinator: ObservableObject {
             let transport = EndpointTransport(endpointID: id, key: key,
                 underlying: SocketTransport(path: root.appendingPathComponent("service.sock").path, verifyServer: PlatformTrust.verifyService))
             let model = InboxModel(transport: transport)
+            model.onRequestsChanged = { [weak self] in self?.objectWillChange.send() }
             model.onPresentation = { [weak self] request in
                 if let request { self?.present(request) } else { self?.clear() }
             }
-            model.onHandoff = { pane in
-                if let view = VigilSessionManager.shared.liveView(attachId: pane) { view.window?.makeKeyAndOrderFront(nil); view.window?.makeFirstResponder(view) }
+            model.onRequestHandoff = { [weak self] request in
+                let pane = request.request.context
+                if let id = request.handle.homeID, let home = self?.remoteHomes[id] {
+                    VigilSessionManager.shared.openRemotePane(alias: home.route, pane: pane)
+                } else if let view = VigilSessionManager.shared.liveView(attachId: pane) {
+                    view.window?.makeKeyAndOrderFront(nil); view.window?.makeFirstResponder(view)
+                }
+            }
+            model.automaticEligibility = { [weak self] request in
+                guard let id = request.handle.homeID, let home = self?.remoteHomes[id] else { return true }
+                guard let truth = VigilRemote.shared.hosts.first(where: { $0.alias == home.route })?.directory?.panes[request.request.context],
+                      truth.alive, truth.stateRevision != nil,
+                      (truth.seen ?? 0) < (truth.since ?? 0) else { return false }
+                return true
             }
             model.onHush = { held in if held { Hush.claim("authz-endpoint") } else { Hush.release("authz-endpoint") } }
             model.onDictate = { [weak self] snapshot, finished in self?.dictate(snapshot, finished: finished) }
@@ -188,10 +221,28 @@ final class VigilHarnessCoordinator: ObservableObject {
                 VigilSessionManager.shared.vlog("authz application failed: request=\(request.id) revision=\(request.handle.revision) outcome=\(request.receipt?.application.rawValue ?? "unknown")")
             }
             inbox = model; model.start(focusedContext: preferredPane)
+            configureRemoteHomes()
             startServices()
             VigilSessionManager.shared.vlog("authz endpoint: connected; addressed event stream enabled")
         } catch { VigilSessionManager.shared.vlog("authz endpoint: enrollment unavailable; native attention remains active") }
     }
+    func configureRemoteHomes() {
+        guard let inbox, let key = try? DeviceIdentity.key() else { return }
+        let routes = Set(VigilRemote.shared.hosts.map(\.alias))
+        let homes = ((try? PeerTrust.homes()) ?? []).filter { routes.contains($0.route) }
+        let wanted = Set(homes.map(\.id))
+        for id in inbox.homeIDs.subtracting(wanted) { inbox.removeHome(id); remotePresenceMemo[id] = nil }
+        for home in homes where remoteHomes[home.id] != home {
+            inbox.removeHome(home.id); remotePresenceMemo[home.id] = nil
+        }
+        remoteHomes = Dictionary(uniqueKeysWithValues: homes.map { ($0.id, $0) })
+        for home in homes where !inbox.homeIDs.contains(home.id) {
+            let id = Canonical.digest(key.publicKey.rawRepresentation)
+            let connection = RemoteTransport.ssh(home: home, endpointID: id, key: key)
+            inbox.addHome(home, transport: EndpointTransport(endpointID: id, key: key, underlying: connection), connection: connection)
+        }
+    }
+
     private func startServices() {
         guard enrolled, Date() >= nextServiceCheck else { return }
         nextServiceCheck = Date().addingTimeInterval(10)
@@ -231,6 +282,13 @@ final class VigilHarnessCoordinator: ObservableObject {
         }
         do { try process.run(); starters.append(process) } catch { VigilSessionManager.shared.vlog("authz service: installed \(binary) unavailable") }
     }
+    private func presentationPane(_ snapshot: RequestSnapshot) -> String {
+        if let id = snapshot.handle.homeID, let home = remoteHomes[id] {
+            return VigilRemote.compositeId(home.route, snapshot.request.context)
+        }
+        return snapshot.request.context
+    }
+
     private func present(_ snapshot: RequestSnapshot) {
         guard current?.handle != snapshot.handle, let inbox else { return }
         // The summon owns interruption/veto policy. Showing an independent
@@ -252,16 +310,25 @@ final class VigilHarnessCoordinator: ObservableObject {
         // allow-once permission on its own; the review surface opens itself
         // only for what the fast lane cannot faithfully carry, and otherwise
         // waits behind the plate's pending badge.
-        if needsSurface(snapshot.request) { showPanel() } else { panel?.orderOut(nil) }
+        if inbox.manualSelection || needsSurface(snapshot.request) { showPanel() } else { panel?.orderOut(nil) }
+        let activeInput = !inbox.manualSelection && !needsSurface(snapshot.request)
         preparing = Task { [weak self] in
-            guard await inbox.presented(snapshot, claim: true), let self, self.current?.handle == snapshot.handle else { return }
-            if self.hushOwner == nil { self.hushOwner = UUID().uuidString }
-            if let owner = self.hushOwner { await inbox.hush(owner: owner, acquire: true) }
+            guard let self, self.current?.handle == snapshot.handle else { return }
+            guard activeInput else {
+                _ = await inbox.presented(snapshot, claim: false)
+                return
+            }
             while VigilAsk.inFlight || VigilVoice.isActive {
                 try? await Task.sleep(for: .milliseconds(100))
                 guard !Task.isCancelled, self.current?.handle == snapshot.handle else { return }
             }
             guard !Task.isCancelled, self.current?.handle == snapshot.handle, VigilAsk.armed else { return }
+            guard !inbox.manualSelection else { return }
+            if inbox.isRemote(snapshot), !inbox.remoteAutomaticAllowed(snapshot) { return }
+            guard await inbox.presented(snapshot, claim: true), !Task.isCancelled,
+                  self.current?.handle == snapshot.handle else { return }
+            if self.hushOwner == nil { self.hushOwner = UUID().uuidString }
+            if let owner = self.hushOwner { await inbox.hush(owner: owner, acquire: true) }
             let request = snapshot.request
             // Never solicit an answer nowhere can deliver: a manual-only
             // request is announced, not raced.
@@ -285,7 +352,7 @@ final class VigilHarnessCoordinator: ObservableObject {
             // like the inbox colors it. Secrets never reach the fast lane
             // (needsSurface), so a detail here is already showable.
             let detail = request.detail.map { Ask.Detail(text: $0, format: request.detailFormat) }
-            VigilAsk.ask(request.safeGist, detail: detail, request: snapshot,
+            VigilAsk.ask([inbox.homeName(snapshot), request.safeGist].compactMap { $0 }.joined(separator: ": "), detail: detail, request: snapshot, paneIdentity: self.presentationPane(snapshot),
                          allowVoice: voice, allowNod: nod) { [weak self] answer, source, reason in
                 guard let self, self.current?.handle == snapshot.handle, self.inputGeneration == generation else { return }
                 Task { @MainActor in
@@ -377,7 +444,7 @@ final class VigilHarnessCoordinator: ObservableObject {
     private func clear(releaseHush: Bool = true) {
         inputGeneration += 1
         preparing?.cancel(); preparing = nil
-        if let current { VigilAsk.cancel(pane: current.request.context, reason: "authz-presentation-closed") }
+        if let current { VigilAsk.cancel(pane: presentationPane(current), reason: "authz-presentation-closed") }
         current = nil; panel?.orderOut(nil)
         if releaseHush, let inbox, let owner = hushOwner {
             hushOwner = nil
@@ -387,6 +454,7 @@ final class VigilHarnessCoordinator: ObservableObject {
     private func stop() {
         guard inbox != nil || current != nil else { return }
         clear(); inbox?.stop(); inbox?.onHush = nil; inbox = nil
+        remoteHomes = [:]; remotePresenceMemo = [:]
         Hush.release("authz-endpoint")
         VigilSessionManager.shared.vlog("authz endpoint: stopped")
     }
@@ -433,7 +501,7 @@ final class VigilHarnessCoordinator: ObservableObject {
         guard current?.handle == snapshot.handle, !snapshot.request.containsSecrets, !VigilVoice.isActive else { return }
         inputGeneration += 1
         let generation = inputGeneration
-        VigilAsk.cancel(pane: snapshot.request.context, reason: "edit-request-draft")
+        VigilAsk.cancel(pane: presentationPane(snapshot), reason: "edit-request-draft")
         preparing?.cancel()
         preparing = Task { [weak self] in
             while VigilAsk.inFlight {
@@ -441,7 +509,7 @@ final class VigilHarnessCoordinator: ObservableObject {
                 guard !Task.isCancelled else { return }
             }
             guard let self, self.current?.handle == snapshot.handle, !Task.isCancelled else { return }
-            VigilAsk.ask("Dictate your answer", options: ["Answer"], textOptions: [0], request: snapshot,
+            VigilAsk.ask("Dictate your answer", options: ["Answer"], textOptions: [0], request: snapshot, paneIdentity: self.presentationPane(snapshot),
                 enterText: true) { [weak self] answer, _, _ in
                 guard self?.current?.handle == snapshot.handle, self?.inputGeneration == generation,
                       case .text(let text, _) = answer else { return }
@@ -453,7 +521,7 @@ final class VigilHarnessCoordinator: ObservableObject {
         guard let current else { return }
         inputGeneration += 1; deferredForDictation = true
         preparing?.cancel(); preparing = nil
-        VigilAsk.cancel(pane: current.request.context, reason: "terminal-dictation")
+        VigilAsk.cancel(pane: presentationPane(current), reason: "terminal-dictation")
     }
 }
 

@@ -39,6 +39,7 @@ final class VigilRemote: ObservableObject {
         var pid: String?
         /// The state file's mtime and the `<pane>.seen` mtime, unix seconds:
         /// seen >= since is the one seen-rule, the same the home Mac applies.
+        var stateRevision: String?
         var since: Double?
         var seen: Double?
         /// `<pane>.size` as the daemon publishes it: "rows cols <owner hello>".
@@ -78,6 +79,13 @@ final class VigilRemote: ObservableObject {
     private var streams: [String: Process] = [:]
     private var streamBuffers: [String: Data] = [:]
     private var inflight = Set<String>()
+    private var arrivals: [String: (revision: String, at: Date)] = [:]
+    func arrival(alias: String, pane: String, revision: String) -> Date {
+        let id = Self.compositeId(alias, pane)
+        if let value = arrivals[id], value.revision == revision { return value.at }
+        let now = Date(); arrivals[id] = (revision, now)
+        return now
+    }
 
     /// Session ids of remote sessions are namespaced by alias so they can
     /// never collide with local ones: `alias/name`.
@@ -92,12 +100,14 @@ final class VigilRemote: ObservableObject {
         let known = Set(hosts.map(\.alias))
         let wanted = Set(aliases)
         hosts.removeAll { !wanted.contains($0.alias) }
+        arrivals = arrivals.filter { Self.split($0.key).map { wanted.contains($0.alias) } ?? false }
         for (alias, stream) in streams where !wanted.contains(alias) {
             stream.terminate(); streams[alias] = nil; streamBuffers[alias] = nil
         }
         for alias in aliases where !known.contains(alias) {
             hosts.append(Host(alias: alias))
         }
+        VigilHarnessCoordinator.shared.configureRemoteHomes()
         guard !aliases.isEmpty else { return }
         Self.trace?("remote: hosts \(aliases)")
         // The streams wait for self-resolution: a stream from this Mac's
@@ -338,6 +348,10 @@ final class VigilRemote: ObservableObject {
                     // a second.
                     let shape = (dir.sessions.count, dir.panes.count)
                     let before = self.hosts[index].directory.map { ($0.sessions.count, $0.panes.count) }
+                    arrivals = arrivals.filter { entry in
+                        guard let split = Self.split(entry.key), split.alias == alias else { return true }
+                        return dir.panes[split.name] != nil
+                    }
                     self.hosts[index].directory = dir
                     VigilSessionManager.shared.remoteDirectoryChanged(alias)
                     self.hosts[index].raw = data
@@ -421,7 +435,7 @@ final class VigilRemote: ObservableObject {
                     emoji: session.emoji,
                     label: session.label,
                     stateTag: "remote",
-                    attention: .none,
+                    attention: tabs.flatMap(\.panes).contains(where: { $0.state == .blocked }) ? .input : (tabs.flatMap(\.panes).contains(where: { $0.state == .done }) ? .done : .none),
                     states: VigilSessionManager.clusterStates(tabs.flatMap(\.panes).compactMap(\.state)),
                     tabs: tabs,
                     host: header))
@@ -454,7 +468,8 @@ final class VigilRemote: ObservableObject {
     /// What the row shows: the home Mac's seen-decay applied here too.
     /// done/blocked that has been seen (anywhere) reads idle.
     static func displayState(_ truth: PaneTruth?) -> VigilSessionManager.AgentState? {
-        guard let truth, let token = truth.state, let state = agentState(token) else { return nil }
+        guard let truth, let revision = truth.stateRevision, revision.utf8.allSatisfy({ (48...57).contains($0) || $0 == 45 }),
+              let token = truth.state, let state = agentState(token) else { return nil }
         if state == .done || state == .blocked,
            let seen = truth.seen, let since = truth.since, seen >= since { return .idle }
         return state
@@ -470,23 +485,29 @@ final class VigilRemote: ObservableObject {
     func seen(alias: String, pane: String) {
         guard let index = hosts.firstIndex(where: { $0.alias == alias }),
               let truth = hosts[index].directory?.panes[pane],
+              let revision = truth.stateRevision, revision.utf8.allSatisfy({ (48...57).contains($0) || $0 == 45 }),
               let token = truth.state, let state = Self.agentState(token),
               state == .done || state == .blocked,
               (truth.seen ?? 0) < (truth.since ?? 0) else { return }
         let key = "\(alias)/\(pane)"
         guard !seenInFlight.contains(key) else { return }
         seenInFlight.insert(key)
-        hosts[index].directory?.panes[pane]?.seen = Date().timeIntervalSince1970
+        hosts[index].directory?.panes[pane]?.seen = truth.since
         NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-T", alias, "vigild", "seen", pane]
+            proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-T", alias, "vigild", "seen", pane, revision]
             proc.standardOutput = FileHandle.nullDevice
             proc.standardError = FileHandle.nullDevice
             let status: Int32 = (try? proc.run()).map { proc.waitUntilExit(); return proc.terminationStatus } ?? -1
             Task { @MainActor [weak self] in
                 self?.seenInFlight.remove(key)
+                if status != 0, let self, let index = self.hosts.firstIndex(where: { $0.alias == alias }),
+                   self.hosts[index].directory?.panes[pane]?.stateRevision == revision {
+                    self.hosts[index].directory?.panes[pane]?.seen = truth.seen
+                    NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+                }
                 Self.trace?("remote: seen \(key)" + (status == 0 ? "" : " FAILED (ssh exit \(status))"))
             }
         }

@@ -144,21 +144,24 @@ class VigilSessionManager {
     /// session: the session-keyed ledger acked asks living in unmounted
     /// tabs of the watched session sight-unseen (dot decayed, no attention,
     /// no follow - an invisible console you could never have answered).
-    /// HELD ON THE PANE'S OWN MAC as `state/<pane>.seen` (mtime = when),
-    /// beside the state file it is compared against (PROTOCOL.md): seen is
-    /// a fact about the console, not about a viewer, so another Mac's
-    /// sidebar or the phone writes the same file through `vigild seen`
-    /// over ssh and every viewport reads one answer - an opened mail is
-    /// opened everywhere (Adrian 2026-09-14; the per-app acks.json made
-    /// every machine demand its own visit). Survives an app restart by
-    /// being a file. Race-free by construction: seen = ack >= the state
-    /// file's mtime, so a state that changed while nobody looked carries
-    /// a newer mtime and correctly reads unseen - time arbitrates, no flag
-    /// can go stale. Written only on a seen-FLIP, never on the presence
-    /// pulse.
+    /// The home stores the exact observed state revision. File timestamps are
+    /// presentation clocks, never authority to acknowledge a later state.
+    private func stateRevision(_ pane: String) -> String? {
+        var info = stat()
+        guard Darwin.lstat(agentStateDir.appendingPathComponent("\(pane).state").path, &info) == 0 else { return nil }
+        return "\(info.st_ino)-\(info.st_mtimespec.tv_sec * 1_000_000_000 + info.st_mtimespec.tv_nsec)"
+    }
+
     func lastAck(_ pane: String) -> Date? {
+        if let remote = VigilRemote.split(pane) {
+            return VigilRemote.shared.host(remote.alias)?.directory?.panes[remote.name]?.seen.map(Date.init(timeIntervalSince1970:))
+        }
         if let cached = paneAckCache?[pane] { return cached }
-        let ack = (try? FileManager.default.attributesOfItem(atPath: seenURL(pane).path))?[.modificationDate] as? Date
+        guard let revision = stateRevision(pane),
+              let receipt = try? String(contentsOf: seenURL(pane), encoding: .utf8),
+              receipt.trimmingCharacters(in: .whitespacesAndNewlines) == revision else { return nil }
+        let ack = (try? FileManager.default.attributesOfItem(atPath: agentStateDir.appendingPathComponent("\(pane).state").path))?[.modificationDate] as? Date
+        guard stateRevision(pane) == revision else { return nil }
         paneAckCache?[pane] = ack
         return ack
     }
@@ -167,15 +170,9 @@ class VigilSessionManager {
         agentStateDir.appendingPathComponent("\(pane).seen")
     }
 
-    /// tmp + rename: the state-dir kqueue is silent on in-place writes.
-    func markSeen(_ pane: String) {
-        let url = seenURL(pane)
-        let tmp = url.appendingPathExtension("tmp")
-        guard (try? "\(Int(Date().timeIntervalSince1970))\n".write(to: tmp, atomically: false, encoding: .utf8)) != nil,
-              Darwin.rename(tmp.path, url.path) == 0 else {
-            vlog("!! seen: cannot write \(url.lastPathComponent)")
-            return
-        }
+    func markSeen(_ pane: String, revision: String? = nil) {
+        guard let observed = revision ?? stateRevision(pane), stateRevision(pane) == observed else { return }
+        do { try "\(observed)\n".write(to: seenURL(pane), atomically: true, encoding: .utf8) } catch { vlog("!! seen: cannot write \(pane)") }
     }
 
     /// Custom identities for PANES and TABS (label + emoji, display-only
@@ -470,7 +467,7 @@ class VigilSessionManager {
     var onAttentionChange: (() -> Void)?
 
     var pendingCount: Int {
-        sessions.values.filter { $0.attention != .none }.count
+        Set(attentionQueue().map { $0.candidate.name }).count
     }
 
     private var persistURL: URL {
@@ -1460,7 +1457,7 @@ class VigilSessionManager {
             if let s = paneAgentState(pane),
                s.state == .blocked || s.state == .done,
                (lastAck(pane) ?? .distantPast) < s.since {
-                markSeen(pane)
+                markSeen(pane, revision: s.revision)
                 changed = true
             }
         }
@@ -1478,16 +1475,30 @@ class VigilSessionManager {
 
     /// The head of the attention FIFO: input beats done, oldest first
     /// within a rank.
-    private var mostUrgent: Session? {
-        sessions.values
-            .filter { $0.attention != .none }
-            .sorted {
-                if $0.attention.rawValue != $1.attention.rawValue {
-                    return $0.attention.rawValue > $1.attention.rawValue
-                }
-                return ($0.attentionSince ?? .distantPast) < ($1.attentionSince ?? .distantPast)
+    private struct AttentionEntry {
+        let candidate: SummonCandidate
+        let rank: Int
+    }
+    /// One queue across homes: urgency first, then this endpoint's arrival
+    /// order. Home timestamps never compete with a different machine's clock.
+    private func attentionQueue() -> [AttentionEntry] {
+        var entries: [AttentionEntry] = []
+        for session in sessions.values {
+            for pane in ownedPaneIds(session) {
+                guard let state = paneAgentState(pane), state.state == .blocked || state.state == .done,
+                      (lastAck(pane) ?? .distantPast) < state.since else { continue }
+                let rank = state.state == .done ? 1 : (state.flavor?.midTurn == true ? 3 : 2)
+                entries.append(AttentionEntry(candidate: SummonCandidate(name: session.name, pane: pane, since: state.since), rank: rank))
             }
-            .first
+        }
+        for candidate in remoteAttention() {
+            guard let state = paneAgentState(candidate.pane) else { continue }
+            let rank = state.state == .done ? 1 : (state.flavor?.midTurn == true ? 3 : 2)
+            entries.append(AttentionEntry(candidate: candidate, rank: rank))
+        }
+        return entries.sorted {
+            $0.rank != $1.rank ? $0.rank > $1.rank : $0.candidate.since < $1.candidate.since
+        }
     }
 
     /// The attention FIFO: open the most urgent session. IDEMPOTENT
@@ -1496,34 +1507,15 @@ class VigilSessionManager {
     /// stays reachable, rotating past the current one so repeated
     /// presses walk every open ask.
     func next() {
-        // Attention navigation is pane-precise: follow() lands on the
-        // asking console (shapeshifting the key terminal window when
-        // there is one; open() semantics remain the no-window fallback).
-        // The session you are STANDING IN is never a target: being there
-        // IS having seen it, and a stuck attention head pinned ⌘⇧J to the
-        // current session forever - unable to reach any other ask
-        // (Adrian 2026-08-06). Rotation emerges from the exclusion:
-        // jumping somewhere makes it current, which excludes it from the
-        // next press.
         let controller = NSApp.keyWindow?.windowController as? TerminalController
-        let current = controller.flatMap { sessionName(of: $0) }
-        // The head must EARN the jump like everyone else: a stuck
-        // attention entry on a seen session pinned ⌘⇧J once.
-        if let session = mostUrgent, session.name != current, unseenNeedy(session.name) {
-            follow(session.name, in: controller)
-            return
-        }
-        let queue = sessions.values
-            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .filter { $0.name != current && unseenNeedy($0.name) }
-            .map(\.name)
-        guard let target = queue.first else { return }
-        follow(target, in: controller)
+        let current = controller.flatMap { mirroredSession(of: $0) ?? sessionName(of: $0) }
+        guard let target = attentionQueue().first(where: { $0.candidate.name != current }) else { return }
+        follow(target.candidate.name, in: controller)
     }
 
     /// The head of the attention FIFO by name (the sidebar's direct-access
     /// key shapeshifts to it).
-    var mostUrgentName: String? { mostUrgent?.name }
+    var mostUrgentName: String? { attentionQueue().first?.candidate.name }
 
     // MARK: Summon (mid-turn blockers pull the quick terminal in)
 
@@ -1591,12 +1583,35 @@ class VigilSessionManager {
         return parts.joined(separator: " ")
     }
 
+    /// Remote identities remain namespaced. Arrival order uses this endpoint's
+    /// clock; home clocks are used only for home facts, never local snooze time.
+    func remoteAttention(midTurn: Bool? = nil) -> [SummonCandidate] {
+        var result: [SummonCandidate] = []
+        for host in VigilRemote.shared.hosts where host.error == nil {
+            guard let directory = host.directory else { continue }
+            for session in directory.sessions where session.buriedUntil == nil {
+                for pane in (session.tabs ?? []).flatMap({ tabPaneIds($0) }) {
+                    guard let truth = directory.panes[pane], truth.alive,
+                          let revision = truth.stateRevision, let token = truth.state,
+                          let state = VigilRemote.agentState(token), state == .blocked || state == .done,
+                          (truth.seen ?? 0) < (truth.since ?? 0) else { continue }
+                    let flavor = token.split(separator: " ").dropFirst().first.flatMap { BlockFlavor(rawValue: String($0)) }
+                    let isMidTurn = state == .blocked && flavor?.midTurn == true
+                    if let midTurn, midTurn != isMidTurn { continue }
+                    result.append(SummonCandidate(name: VigilRemote.compositeId(host.alias, session.name),
+                        pane: VigilRemote.compositeId(host.alias, pane), since: VigilRemote.shared.arrival(alias: host.alias, pane: pane, revision: revision)))
+                }
+            }
+        }
+        return result.sorted { $0.since < $1.since }
+    }
+
     func summonQueue() -> [SummonCandidate] {
         midTurnAsks { session in
             if session.float != nil, session.name != floatingName { return false }
             return true
         }
-        .filter { (lastAck($0.pane) ?? .distantPast) < $0.since }
+        .filter { VigilRemote.split($0.pane) != nil || (lastAck($0.pane) ?? .distantPast) < $0.since }
     }
 
     /// Panes whose TURN ENDED, any session: the soft-chime feed. Both
@@ -1607,7 +1622,7 @@ class VigilSessionManager {
     /// the eye and stays summonable (⌘⇧H), but never moves glass; only
     /// mid-turn blockers float (Adrian 2026-08-23).
     func turnEnds() -> [SummonCandidate] {
-        var out: [SummonCandidate] = []
+        var out: [SummonCandidate] = remoteAttention(midTurn: false)
         for session in sessions.values {
             for pane in ownedPaneIds(session) {
                 guard let s = paneAgentState(pane) else { continue }
@@ -1624,7 +1639,7 @@ class VigilSessionManager {
     /// noise is the contract; presence only decides whether anything
     /// MOVES.
     func midTurnAsks(_ include: (Session) -> Bool = { _ in true }) -> [SummonCandidate] {
-        var out: [SummonCandidate] = []
+        var out: [SummonCandidate] = remoteAttention(midTurn: true)
         for session in sessions.values where include(session) {
             for pane in ownedPaneIds(session) {
                 guard let s = paneAgentState(pane), s.state == .blocked,
@@ -1668,18 +1683,15 @@ class VigilSessionManager {
             quickController(create: false)?.animateOut()
             return
         }
-        if let session = mostUrgent {
-            // Pane-precise like every attention landing (follow()'s rule),
-            // which also means an ASLEEP asker resurrects into the panel
-            // exactly as the auto-summon would — one behavior, two
-            // triggers. A done-head has no asking pane; session-level
-            // float (no runtimes -> real window, the peek-vs-rebuild doctrine).
-            float(name: session.name, landOn: askingPane(session.name))
+        if let head = attentionQueue().first?.candidate {
+            float(name: head.name, landOn: head.pane)
             return
         }
         guard let controller = TerminalController.preferredParent,
-              let name = sessionName(of: controller) else { return }
-        float(name: name)
+              let name = mirroredSession(of: controller) ?? sessionName(of: controller) else { return }
+        if let alias = controller.focusedSurface?.vigilHost, let pane = controller.focusedSurface?.vigilAttachId {
+            float(name: name, landOn: VigilRemote.compositeId(alias, pane))
+        } else { float(name: name) }
     }
 
     /// Host a session in the quick terminal. A windowed session is
@@ -1693,6 +1705,23 @@ class VigilSessionManager {
     /// same rule as follow()): THAT pane mirrors, or the tab CONTAINING it
     /// floats with the pane focused, never merely the first tab.
     func float(name: String, landOn pane: String? = nil) {
+        if let remote = VigilRemote.split(name), let pane,
+           let target = VigilRemote.split(pane), let quick = quickController(create: true),
+           let app = ghosttyApp?.app,
+           VigilRemote.shared.host(remote.alias)?.directory?.panes[target.name]?.alive == true {
+            if mirror?.pane == pane { quick.animateIn(); return }
+            if let current = floatingName { reclaim(current, from: quick, restoreStash: false) } else if mirror != nil { endMirror(restoreStash: false) } else if !quick.surfaceTree.isEmpty { stashedQuickTree = quick.surfaceTree }
+            var config = Ghostty.SurfaceConfiguration()
+            config.vigilAttach = target.name; config.vigilHost = remote.alias
+            config.vigilMirror = true; config.vigilExplicitClaim = true
+            let view = Ghostty.SurfaceView(app, baseConfig: config)
+            mirror = Mirror(name: name, pane: pane, view: view)
+            quickTreeSwap = true; quick.surfaceTree = SplitTree(view: view); quickTreeSwap = false
+            quick.animateIn()
+            DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
+            vlog("float: remote mirror \(pane) -> quick terminal")
+            return
+        }
         guard let session = sessions[name] else { return }
         guard let quick = quickController(create: true) else { return }
 
@@ -1922,6 +1951,18 @@ class VigilSessionManager {
     /// same mirror viewport, its surfaces attached through
     /// `ssh <alias> vigild proxy <pane>`. Nothing is spawned or owned
     /// remotely; the remote's own app keeps every fact.
+    @discardableResult
+    func openRemotePane(alias: String, pane: String) -> TerminalController? {
+        guard let directory = VigilRemote.shared.host(alias)?.directory,
+              let session = directory.sessions.first(where: { session in (session.tabs ?? []).contains { tabPaneIds($0).contains(pane) } }),
+              let ghostty = ghosttyApp else { return nil }
+        let controller = (NSApp.keyWindow?.windowController as? TerminalController)
+            ?? TerminalController.newWindow(ghostty, tree: SplitTree(), confirmUndo: false)
+        mountRemote(controller, composite: VigilRemote.compositeId(alias, session.name), anchor: VigilRemote.compositeId(alias, pane))
+        controller.window?.makeKeyAndOrderFront(nil)
+        return controller
+    }
+
     private func mountRemote(_ controller: TerminalController, composite: String, anchor: String?) {
         guard let app = ghosttyApp?.app, controller.window != nil,
               let (alias, session) = VigilRemote.shared.session(composite) else {
@@ -3953,6 +3994,11 @@ class VigilSessionManager {
     /// with the ask in tab 4 you arrived at tab 1's console (Adrian
     /// 2026-08-04, "often leads me to the wrong console").
     func follow(_ name: String, in controller: TerminalController?) {
+        if let remote = VigilRemote.split(name), let candidate = remoteAttention().first(where: { $0.name == name }),
+           let pane = VigilRemote.split(candidate.pane) {
+            if let controller { mountRemote(controller, composite: name, anchor: candidate.pane) } else { openRemotePane(alias: remote.alias, pane: pane.name) }
+            return
+        }
         if let pane = askingPane(name) {
             vlog("follow: '\(name)' -> asking pane \(pane)")
             activatePane(name: name, paneId: pane, in: controller)
@@ -3982,29 +4028,15 @@ class VigilSessionManager {
     /// off, and visiting the head re-derives the next - the hint IS the
     /// queue, one head at a time (Adrian 2026-08-04).
     func nextAskHint() -> AskHint? {
-        // Mirrors next() exactly: the queue is UNSEEN work only (done or
-        // blocked after its console was last on screen), never the
-        // session you are in. An affordance pointing at the room you are
-        // standing in - or at anything already seen - is noise (Adrian
-        // 2026-08-06).
-        let current = (NSApp.keyWindow?.windowController as? TerminalController)
-            .flatMap { sessionName(of: $0) }
-        let queue = sessions.values
-            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .filter { $0.name != current && unseenNeedy($0.name) }
-            .map(\.name)
-        let head: String?
-        if let urgent = mostUrgentName, urgent != current, unseenNeedy(urgent) {
-            head = urgent
-        } else {
-            head = queue.first
-        }
-        guard let head, let session = sessions[head] else { return nil }
-        var pending = Set(queue)
-        pending.insert(head)
-        return AskHint(
-            name: head, label: session.label, emoji: session.emoji,
-            pane: askingPane(head), more: pending.count - 1)
+        let controller = NSApp.keyWindow?.windowController as? TerminalController
+        let current = controller.flatMap { mirroredSession(of: $0) ?? sessionName(of: $0) }
+        let queue = attentionQueue().filter { $0.candidate.name != current }
+        guard let head = queue.first?.candidate else { return nil }
+        let remote = VigilRemote.shared.session(head.name)?.1
+        let label = sessions[head.name]?.label ?? remote?.label ?? head.name
+        let emoji = sessions[head.name]?.emoji ?? remote?.emoji
+        return AskHint(name: head.name, label: label, emoji: emoji, pane: head.pane,
+                       more: max(0, Set(queue.map { $0.candidate.name }).count - 1))
     }
 
     /// Auto-follow's target: the attention FIFO's input head, else the
@@ -4012,21 +4044,7 @@ class VigilSessionManager {
     /// re-yank (Adrian 2026-08-04: "if I already clicked away allow me
     /// to"); they stay reachable through ⌘⇧J.
     var followTarget: String? {
-        if let name = sessions.values
-            .filter({ $0.attention.rawValue >= Attention.input.rawValue })
-            .sorted(by: {
-                if $0.attention.rawValue != $1.attention.rawValue {
-                    return $0.attention.rawValue > $1.attention.rawValue
-                }
-                return ($0.attentionSince ?? .distantPast) < ($1.attentionSince ?? .distantPast)
-            })
-            .first?.name {
-            return name
-        }
-        return sessions.values
-            .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-            .first { blockedUnseen($0.name) }?
-            .name
+        attentionQueue().first(where: { $0.rank >= 2 })?.candidate.name
     }
 
     // MARK: Sidebar navigation (rows resolve through shapeshift)
@@ -4036,6 +4054,12 @@ class VigilSessionManager {
     @discardableResult
     func remoteSessionCommand(in base: BaseTerminalController, from view: Ghostty.SurfaceView? = nil,
                               operation: String, direction: String? = nil, expectedRevision: String? = nil) -> Bool {
+        if !(base is TerminalController), let surface = view ?? base.focusedSurface,
+           let alias = surface.vigilHost, let pane = surface.vigilAttachId {
+            guard let controller = openRemotePane(alias: alias, pane: pane) else { return true }
+            dismissQuickTerminal()
+            return remoteSessionCommand(in: controller, from: surface, operation: operation, direction: direction, expectedRevision: expectedRevision)
+        }
         guard let controller = base as? TerminalController,
               let composite = mirroredSession(of: controller) else { return false }
         // Another local window is a mirror of the same home registry too.
@@ -4998,7 +5022,13 @@ class VigilSessionManager {
     /// The same memo for the pane's state file and seen mark: paneRow read
     /// and stat'd each twice per pane (display state, then watchers), and
     /// stat'd the harness gate once per pane on top (2026-09-14).
-    private var paneStateCache: [String: (state: AgentState, flavor: BlockFlavor?, since: Date)?]?
+    struct PaneState {
+        let state: AgentState
+        let flavor: BlockFlavor?
+        let since: Date
+        let revision: String
+    }
+    private var paneStateCache: [String: PaneState?]?
     private var paneAckCache: [String: Date?]?
 
     private func paneFileLines(_ pane: String, _ ext: String) -> [String] {
@@ -5255,16 +5285,23 @@ class VigilSessionManager {
     /// The pane's continuous program state as its adapter last wrote it.
     /// First token only; trailing tokens tolerated (older files carried
     /// a "blocked input" flavor).
-    func paneAgentState(_ pane: String) -> (state: AgentState, flavor: BlockFlavor?, since: Date)? {
+    func paneAgentState(_ pane: String) -> PaneState? {
+        if let remote = VigilRemote.split(pane), let truth = VigilRemote.shared.host(remote.alias)?.directory?.panes[remote.name],
+           let token = truth.state, let state = VigilRemote.agentState(token), let revision = truth.stateRevision {
+            let flavor = token.split(separator: " ").dropFirst().first.flatMap { BlockFlavor(rawValue: String($0)) }
+            return PaneState(state: state, flavor: flavor, since: Date(timeIntervalSince1970: truth.since ?? 0), revision: revision)
+        }
         if let cached = paneStateCache?[pane] { return cached }
         let read = readPaneAgentState(pane)
         paneStateCache?[pane] = read
         return read
     }
 
-    private func readPaneAgentState(_ pane: String) -> (state: AgentState, flavor: BlockFlavor?, since: Date)? {
+    private func readPaneAgentState(_ pane: String) -> PaneState? {
         let url = agentStateDir.appendingPathComponent("\(pane).state")
-        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        guard let revision = stateRevision(pane),
+              let raw = try? String(contentsOf: url, encoding: .utf8),
+              stateRevision(pane) == revision else { return nil }
         let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         let state: AgentState
         switch parts.first.map(String.init) ?? "" {
@@ -5280,10 +5317,10 @@ class VigilSessionManager {
         let since = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
         // A broker outage never erases an already observed attention flavor.
         if state == .working, parts.count > 1 {
-            if parts[1] == "unknown" { return (.unknown, nil, since ?? .distantPast) }
-            if parts[1] == "interrupting" { return (.interrupting, nil, since ?? .distantPast) }
+            if parts[1] == "unknown" { return PaneState(state: .unknown, flavor: nil, since: since ?? .distantPast, revision: revision) }
+            if parts[1] == "interrupting" { return PaneState(state: .interrupting, flavor: nil, since: since ?? .distantPast, revision: revision) }
         }
-        return (state, flavor, since ?? .distantPast)
+        return PaneState(state: state, flavor: flavor, since: since ?? .distantPast, revision: revision)
     }
 
     /// Seen-ack changes presentation only; it never resolves a broker request.
@@ -5368,6 +5405,11 @@ class VigilSessionManager {
     /// silently did nothing (2026-08-24, "I can't focus this session").
     /// The windowed one is the answer; a second match is a leak to report.
     func liveView(attachId: String) -> Ghostty.SurfaceView? {
+        if let remote = VigilRemote.split(attachId) {
+            return Ghostty.SurfaceView.vigilAttachSurfaces.allObjects.first {
+                $0.vigilHost == remote.alias && $0.vigilAttachId == remote.name && $0.window?.isVisible == true && !$0.isHiddenOrHasHiddenAncestor
+            }
+        }
         let matches = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
             .filter { $0.vigilAttachId == attachId && !$0.vigilMirror }
         if matches.count > 1 {

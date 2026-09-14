@@ -94,13 +94,14 @@ enum VigilAsk {
         textOptions: Set<Int> = [],
         multi: Bool = false,
         request: RequestSnapshot,
+        paneIdentity: String? = nil,
         timeout: TimeInterval = 20,
         enterText: Bool = false,
         allowVoice: Bool = true,
         allowNod: Bool = true,
         completion: @escaping (Answer?, String, String) -> Void
     ) {
-        let pane = request.request.context
+        let pane = paneIdentity ?? request.request.context
         let recording = request.request.allowsDebugCapture(enabled: UserDefaults.standard.bool(forKey: debugCaptureKey))
         var sources: [any AnswerSource] = []
         if allowNod, nodEnabled, nodAvailable { sources.append(NodSource()) }

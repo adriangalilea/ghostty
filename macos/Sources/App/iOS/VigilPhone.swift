@@ -79,6 +79,7 @@ final class VigilPhone: ObservableObject {
         /// FNV-1a (hex) of the daemon's viewport text: the content receipt.
         var screen: String?
         /// The state file's mtime and the `<pane>.seen` mtime, unix seconds.
+        var stateRevision: String?
         var since: Double?
         var seen: Double?
         /// What a row shows, the ONE reading every viewport gives the
@@ -670,17 +671,21 @@ final class VigilPhone: ObservableObject {
     /// decays with the glance and the next poll confirms it.
     private func markSeen(_ ref: PaneRef) {
         guard let truth = directories[ref.host.id]?.panes[ref.pane],
+              let revision = truth.stateRevision, revision.utf8.allSatisfy({ (48...57).contains($0) || $0 == 45 }),
               let first = truth.state?.split(separator: " ").first,
               first == "done" || first == "blocked",
               (truth.seen ?? 0) < (truth.since ?? 0) else { return }
-        directories[ref.host.id]?.panes[ref.pane]?.seen = Date().timeIntervalSince1970
+        directories[ref.host.id]?.panes[ref.pane]?.seen = truth.since
         Task { [weak self] in
             guard let self else { return }
             do {
                 let ssh = try await connection(for: ref.host)
-                _ = try await ssh.exec("vigild seen \(ref.pane)")
+                _ = try await ssh.exec("vigild seen \(ref.pane) \(revision)")
                 log("seen: \(ref.pane) marked on \(ref.host.name)")
             } catch {
+                if directories[ref.host.id]?.panes[ref.pane]?.stateRevision == revision {
+                    directories[ref.host.id]?.panes[ref.pane]?.seen = truth.seen
+                }
                 log("seen: \(ref.pane) on \(ref.host.name) FAILED: \(error.receipt)")
             }
         }
