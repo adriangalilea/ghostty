@@ -359,6 +359,10 @@ final class VigilPhone: ObservableObject {
         guard fresh != nodes else { return }
         nodes = fresh
         indexTree()
+        let leaves = fresh.flatMap(\.leaves)
+        let gridded = leaves.filter { $0.pane != nil && $0.rows > 0 }.count
+        let folded = collapsed.count
+        log("tree: \(leaves.count) pane rows, \(gridded) with a grid (previewable), \(folded) nodes folded")
     }
 
     private func deriveTree() -> [Node] {
@@ -515,12 +519,75 @@ final class VigilPhone: ObservableObject {
     /// (which container holds the UIView right now) is the representable's
     /// business (`SurfaceHost`), lifetime is this table's.
     private(set) var surfaces: [String: Ghostty.SurfaceView] = [:]
-    /// Panes whose row is on screen (a row scrolled out leaves; the
-    /// surface outlives the row only while the pane screen shows it).
-    private var rowsOnScreen = Set<String>()
     /// The pane the screen shows, ONE fact: rows read it to know their
     /// view is borrowed, the occlusion policy reads it to idle the rest.
     @Published private(set) var presenting: PaneRef?
+
+    // MARK: Previews follow the viewport
+    //
+    // The tree realizes a whole host at once (a host is one nested VStack
+    // in the LazyVStack), so "realized" says nothing about "visible". Rows
+    // report their frame in the tree's space, the tree reports its size,
+    // and the cap's slots go to the rows actually in view, nearest the
+    // centre first. Frames are written into non-observed storage per
+    // scroll frame; only a CHANGE of the previewed set publishes.
+
+    /// Every realized preview row's frame in the tree's coordinate space.
+    private var rowFrames: [String: CGRect] = [:]
+    private var treeViewport: CGSize = .zero
+    /// The panes whose rows show a live preview right now.
+    @Published private(set) var previewed = Set<String>()
+
+    func rowFrame(_ ref: PaneRef, _ frame: CGRect) {
+        if rowFrames[ref.pane] == nil { log("row: \(ref.pane) at y \(Int(frame.minY))..\(Int(frame.maxY))") }
+        rowFrames[ref.pane] = frame
+        allocatePreviews()
+    }
+
+    func treeSize(_ size: CGSize) {
+        treeViewport = size
+        log("tree: viewport \(Int(size.width))x\(Int(size.height))")
+        allocatePreviews()
+    }
+
+    /// A preview row left the tree (scrolled out of the realized range,
+    /// or the tree itself is hidden under a pushed screen). The surface
+    /// stays while the screen shows it; `present(nil)` sweeps on return.
+    func rowDisappeared(_ ref: PaneRef) {
+        rowFrames[ref.pane] = nil
+        allocatePreviews()
+    }
+
+    private func allocatePreviews() {
+        let viewport = CGRect(origin: .zero, size: treeViewport)
+        let wanted = rowFrames
+            .filter { $0.value.intersects(viewport) }
+            .sorted { abs($0.value.midY - viewport.midY) < abs($1.value.midY - viewport.midY) }
+            .prefix(Self.surfaceCap)
+            .map(\.key)
+        let set = Set(wanted)
+        guard set != previewed else { return }
+        previewed = set
+        log("previews: \(wanted.joined(separator: " ")) (\(rowFrames.count) rows reported, viewport \(Int(treeViewport.width))x\(Int(treeViewport.height)))")
+        if presenting == nil { sweepUnwanted() }
+    }
+
+    /// Ends every surface no previewed row holds, ONE turn later: rows
+    /// report frames one at a time within a layout pass, and a sweep at
+    /// each report would end a preview the next report wants back. Under
+    /// a pushed screen nothing ends (the presented surface is borrowed);
+    /// the return schedules its own, later sweep.
+    private var sweepScheduled = false
+    private func sweepUnwanted(after delay: TimeInterval = 0) {
+        guard !sweepScheduled else { return }
+        sweepScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.sweepScheduled = false
+            guard self.presenting == nil else { return }
+            for pane in self.surfaces.keys where !self.previewed.contains(pane) { self.endSurface(pane) }
+        }
+    }
 
     /// Every live surface is a full Metal renderer plus an ssh channel,
     /// and sshd grants 10 channels per connection (MaxSessions): the cap
@@ -577,16 +644,6 @@ final class VigilPhone: ObservableObject {
         log("surface: \(pane) ended (\(surfaces.count) live)")
     }
 
-    /// A row with a preview came on screen / left it.
-    func rowAppeared(_ ref: PaneRef) { rowsOnScreen.insert(ref.pane) }
-    func rowDisappeared(_ ref: PaneRef) {
-        rowsOnScreen.remove(ref.pane)
-        // A row leaves under a pushed screen too (the nav stack hides the
-        // list): the surface stays while presented, and ends when its row
-        // is gone once the screen returns (`present(nil)` sweeps).
-        if presenting == nil { endSurface(ref.pane) }
-    }
-
     /// The pane screen is showing `ref` (nil = the tree). Occlusion
     /// follows: only the presented surface renders while a screen is up;
     /// with the tree up, every row's surface renders.
@@ -598,16 +655,11 @@ final class VigilPhone: ObservableObject {
             view.visible = ref == nil || pane == ref?.pane
         }
         if let ref { markSeen(ref) }
-        // Back on the tree: rows re-appear within a frame (the stack's
-        // pop fires their onAppear after this); a surface no row claims
-        // by then ends. Deferred, never at the pop itself, so a return
-        // never re-dials what the rows still show.
-        if ref == nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self, self.presenting == nil else { return }
-                for pane in self.surfaces.keys where !self.rowsOnScreen.contains(pane) { self.endSurface(pane) }
-            }
-        }
+        // Back on the tree: rows re-report their frames within a frame
+        // (the stack's pop lays the list out after this); a surface no
+        // visible row wants by then ends. Deferred, never at the pop
+        // itself, so a return never re-dials what the rows still show.
+        if ref == nil { sweepUnwanted(after: 0.5) }
     }
 
     /// A pane shown full screen here was seen: the fact belongs to ITS Mac

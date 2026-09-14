@@ -53,6 +53,9 @@ struct HomeView: View {
     @State private var adding = false
     @State private var settings = false
     @State private var authorization = false
+    /// The coordinate space preview rows report their frames in: the
+    /// scroll view's own, so the visible area is its size at the origin.
+    static let treeSpace = "tree"
 
     var body: some View {
         let tree = model.tree()
@@ -70,6 +73,8 @@ struct HomeView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
+        .coordinateSpace(name: Self.treeSpace)
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { model.treeSize($0) }
         .background(Color(ghostty.config.backgroundColor).ignoresSafeArea())
         .navigationTitle("vigil")
         .navigationBarTitleDisplayMode(.large)
@@ -328,15 +333,22 @@ struct PanePreview: View {
         .frame(height: height)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.08)))
-        .task { await load() }
+        // The model hands this row a slot by its place in the viewport;
+        // a row dials only while it holds one, and drops its view (the
+        // model already ended the surface) when the slot moves on.
+        .task(id: wanted) {
+            if wanted { await load() } else { surfaceView = nil; denied = false }
+        }
         .onChange(of: model.streamGeneration) { _, _ in
-            guard surfaceView?.surface == nil else { return }
+            guard wanted, surfaceView?.surface == nil else { return }
             surfaceView = nil
             Task { await load() }
         }
-        .onAppear { model.rowAppeared(ref) }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(HomeView.treeSpace)) } action: { model.rowFrame(ref, $0) }
         .onDisappear { model.rowDisappeared(ref) }
     }
+
+    private var wanted: Bool { model.previewed.contains(ref.pane) }
 
     private func load() async {
         guard let app = ghostty.app else { return }
