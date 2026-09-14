@@ -440,10 +440,15 @@ final class VigilPhone: ObservableObject {
         guard browser == nil else { return }
         let b = NWBrowser(for: .bonjour(type: "_ssh._tcp", domain: nil), using: .tcp)
         b.browseResultsChangedHandler = { [weak self] results, _ in
-            let macs = results.compactMap { r -> DiscoveredMac? in
-                if case .service(let name, _, _, _) = r.endpoint { return DiscoveredMac(name: name) }
-                return nil
-            }.sorted { $0.name < $1.name }
+            // One result PER INTERFACE the service is seen on (a docked Mac
+            // on cable + Wi-Fi is two results with one name); the Mac is
+            // one, and a duplicate id in the picker's Form is a crash on
+            // "Add Mac" (2026-09-14). Names are the identity here.
+            var names = Set<String>()
+            for r in results {
+                if case .service(let name, _, _, _) = r.endpoint { names.insert(name) }
+            }
+            let macs = names.sorted().map { DiscoveredMac(name: $0) }
             Task { @MainActor in
                 guard let self else { return }
                 if macs != self.discovered {
