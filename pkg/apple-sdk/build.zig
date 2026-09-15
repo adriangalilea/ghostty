@@ -50,6 +50,33 @@ pub fn addPaths(
 
     if (!gop.found_existing) init: {
         if (comptime builtin.os.tag.isDarwin()) darwin: {
+            // An SDK named by the environment is the build's own fact,
+            // ahead of whatever `xcrun --sdk macosx` resolves (which
+            // ignores SDKROOT): zig 0.15's bundled libc++ does not compile
+            // against the macOS 27 SDK (its math.h hands INFINITY/NAN to
+            // <float.h> behind a `__need_infinity_nan` protocol zig's
+            // clang headers lack), so a build names a 26 SDK here.
+            if (std.process.getEnvVarOwned(b.allocator, "GHOSTTY_APPLE_SDK")) |sdk| {
+                const include_dir = b.pathJoin(&.{ sdk, "usr", "include" });
+                const wf = b.addWriteFiles();
+                const path = wf.add("libc.txt", b.fmt(
+                    \\include_dir={s}
+                    \\sys_include_dir={s}
+                    \\crt_dir=
+                    \\msvc_lib_dir=
+                    \\kernel32_lib_dir=
+                    \\gcc_dir=
+                    \\
+                , .{ include_dir, include_dir }));
+                gop.value_ptr.* = .{ .native = .{
+                    .libc = path,
+                    .framework = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }),
+                    .system_include = include_dir,
+                    .library = b.pathJoin(&.{ sdk, "usr", "lib" }),
+                } };
+                break :init;
+            } else |_| {}
+
             // Detect our SDK using the "findNative" Zig stdlib function.
             // This is really important because it forces using `xcrun` to
             // find the SDK path.
