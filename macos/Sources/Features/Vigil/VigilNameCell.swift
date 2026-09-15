@@ -8,6 +8,7 @@ import SwiftUI
 struct VigilNameCell<Fallback: View>: View {
     let emoji: String?
     let title: String
+    var scale: CGFloat = 1
     let font: Font
     let color: Color
     /// nil = this row cannot be renamed (no identity to write to).
@@ -23,7 +24,7 @@ struct VigilNameCell<Fallback: View>: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 4 * scale) {
             face
             if editing {
                 TextField("", text: $draft)
@@ -56,7 +57,7 @@ struct VigilNameCell<Fallback: View>: View {
     private var face: some View {
         Group {
             if let onPickEmoji {
-                VigilFaceButton(emoji: emoji, onPick: onPickEmoji) { fallback() }
+                VigilFaceButton(emoji: emoji, scale: scale, onPick: onPickEmoji) { fallback() }
             } else {
                 slot
             }
@@ -66,12 +67,12 @@ struct VigilNameCell<Fallback: View>: View {
     private var slot: some View {
         Group {
             if let emoji, let first = emoji.first {
-                Text(String(first)).font(.system(size: 11))
+                Text(String(first)).font(.system(size: 11 * scale))
             } else {
                 fallback()
             }
         }
-        .frame(width: 20)
+        .frame(width: 20 * scale)
     }
 
     private func commit() {

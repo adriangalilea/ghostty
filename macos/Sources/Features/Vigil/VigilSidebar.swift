@@ -99,6 +99,12 @@ final class VigilSidebarHost: NSVisualEffectView {
         super.mouseDown(with: event)
     }
 
+    // Native View → font-size actions resolve through the first responder.
+    // When the sidebar owns the keyboard, its text and hit areas zoom together.
+    @IBAction func increaseFontSize(_ sender: Any) { VigilSidebarSize.change(by: 1) }
+    @IBAction func decreaseFontSize(_ sender: Any) { VigilSidebarSize.change(by: -1) }
+    @IBAction func resetFontSize(_ sender: Any) { VigilSidebarSize.reset() }
+
     override func keyDown(with event: NSEvent) {
         if model.hintMode {
             switch event.keyCode {
@@ -807,4 +813,23 @@ struct VigilTreeDrop: DropDelegate {
         MainActor.assumeIsolated { model.dragPerform(at: info.location) }
         return true
     }
+}
+
+/// Independent of terminal fonts: moving between panes or fitting a remote grid
+/// must never change the sidebar's geometry. All windows share this preference.
+enum VigilSidebarSize {
+    static let key = "vigil.sidebar.fontSize"
+    static let compact: Double = 12
+    static let range: ClosedRange<Double> = 12...20
+
+    static func bounded(_ value: Double) -> Double {
+        value.isFinite ? min(range.upperBound, max(range.lowerBound, value)) : compact
+    }
+
+    static func change(by delta: Double) {
+        let stored = UserDefaults.standard.object(forKey: key) as? Double ?? compact
+        UserDefaults.standard.set(bounded(bounded(stored) + delta), forKey: key)
+    }
+
+    static func reset() { UserDefaults.standard.removeObject(forKey: key) }
 }

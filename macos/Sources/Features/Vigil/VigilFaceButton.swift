@@ -8,6 +8,7 @@ import SwiftUI
 /// being in some edit mode.
 struct VigilFaceButton<Fallback: View>: View {
     let emoji: String?
+    var scale: CGFloat = 1
     let onPick: (String?) -> Void
     @ViewBuilder var fallback: () -> Fallback
 
@@ -16,22 +17,22 @@ struct VigilFaceButton<Fallback: View>: View {
 
     var body: some View {
         Button(action: { picking = true }) {
-            HStack(spacing: 3) {
+            HStack(spacing: 3 * scale) {
                 Group {
                     if let emoji, let first = emoji.first {
-                        Text(String(first)).font(.system(size: 11))
+                        Text(String(first)).font(.system(size: 11 * scale))
                     } else {
                         fallback()
                     }
                 }
-                .frame(width: 16)
-                Divider().frame(height: 9)
+                .frame(width: 16 * scale)
+                Divider().frame(height: 9 * scale)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 7, weight: .semibold))
+                    .font(.system(size: 7 * scale, weight: .semibold))
                     .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 3)
-            .padding(.vertical, 1)
+            .padding(.horizontal, 3 * scale)
+            .padding(.vertical, 1 * scale)
             .background(
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.primary.opacity(hovering ? 0.15 : 0.06)))

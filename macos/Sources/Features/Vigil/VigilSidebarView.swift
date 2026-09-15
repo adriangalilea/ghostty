@@ -13,6 +13,8 @@ struct VigilSidebarView: View {
     /// chevron toggled in ANY window re-render THIS sidebar (the model
     /// only proxies its values).
     @ObservedObject private var collapse = VigilSidebarCollapse.shared
+    @AppStorage(VigilSidebarSize.key) private var sidebarFontSize = VigilSidebarSize.compact
+    private var scale: CGFloat { CGFloat(VigilSidebarSize.bounded(sidebarFontSize) / VigilSidebarSize.compact) }
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
     @AppStorage(VigilVoice.localeKey) private var voiceLocale = "auto"
@@ -102,6 +104,7 @@ struct VigilSidebarView: View {
                             })
                         .onDrop(of: [UTType.text], delegate: VigilTreeDrop(model: model))
                     }
+                    .contextMenu { sidebarSizeMenu }
                     .onChange(of: model.selection) { selection in
                         if let selection { proxy.scrollTo(selection) }
                     }
@@ -161,6 +164,19 @@ struct VigilSidebarView: View {
         return tab.id
     }
 
+    private var sidebarSizeMenu: some View {
+        Menu("Sidebar Size") {
+            Button("Larger") { VigilSidebarSize.change(by: 1) }
+                .disabled(sidebarFontSize >= VigilSidebarSize.range.upperBound)
+            Button("Smaller") { VigilSidebarSize.change(by: -1) }
+                .disabled(sidebarFontSize <= VigilSidebarSize.compact)
+            Divider()
+            Button("Compact") { VigilSidebarSize.reset() }
+            Button("Spacious") { sidebarFontSize = 16 }
+        }
+        .help("Focus the sidebar with ⌘⇧B, then use ⌘+ / ⌘− to resize it; ⌘0 restores compact size.")
+    }
+
     // MARK: Up next (the manual-follow affordance, CO-LOCATED)
 
     /// The row ⌘⇧J would land on, promoted to the deepest VISIBLE row
@@ -188,7 +204,7 @@ struct VigilSidebarView: View {
     private func followKeycap(_ id: String) -> some View {
         if hintRowId == id {
             Text("⌘⇧J")
-                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .font(.system(size: 8 * scale, weight: .semibold, design: .monospaced))
                 .foregroundColor(.orange)
                 .padding(.horizontal, 3)
                 .padding(.vertical, 1)
@@ -292,10 +308,10 @@ struct VigilSidebarView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
                 Image(systemName: "trash")
-                    .font(.system(size: 8))
+                    .font(.system(size: 8 * scale))
                     .foregroundColor(.secondary)
                 Text("recently killed")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 9 * scale, weight: .medium))
                     .foregroundColor(.secondary)
                 Spacer()
             }
@@ -317,22 +333,22 @@ struct VigilSidebarView: View {
         let id = "burial-\(burial.id)"
         return HStack(spacing: 4) {
             Text(face(burial.emoji))
-                .font(.system(size: 12))
+                .font(.system(size: 12 * scale))
                 .frame(width: Grid.icon)
             Text(burial.label)
-                .font(.system(size: 11))
+                .font(.system(size: 11 * scale))
                 .foregroundColor(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 4)
             Text("\(burial.remaining)s")
-                .font(.system(size: 9))
+                .font(.system(size: 9 * scale))
                 .monospacedDigit()
                 .foregroundColor(.secondary)
             Button {
                 VigilSessionManager.shared.reapNow(burial.id)
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 7, weight: .bold))
+                    .font(.system(size: 7 * scale, weight: .bold))
                     .foregroundColor(.secondary)
                     .frame(width: 16, height: 16)
                     .contentShape(Rectangle())
@@ -340,7 +356,7 @@ struct VigilSidebarView: View {
             .buttonStyle(.plain)
             .help("Let it die now (skips the remaining grace).")
         }
-        .frame(height: 22)
+        .frame(height: 22 * scale)
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(id: id, hovered: hovered == id))
@@ -362,7 +378,7 @@ struct VigilSidebarView: View {
             Image(systemName: "desktopcomputer")
             Text(title)
         }
-        .font(.caption.weight(.semibold))
+        .font(.system(size: 11 * scale, weight: .semibold))
         .foregroundStyle(.secondary)
         .padding(.top, 10)
         .padding(.horizontal, 2)
@@ -424,12 +440,13 @@ struct VigilSidebarView: View {
                     else { model.collapsedSessions.insert(id) }
                 }
             } else {
-                Color.clear.frame(width: Grid.chevron, height: 1)
+                Color.clear.frame(width: (Grid.chevron * scale), height: 1)
             }
             VigilNameCell(
                 emoji: row.emoji,
                 title: row.label,
-                font: .system(size: 12, weight: .semibold),
+                scale: scale,
+                font: .system(size: 12 * scale, weight: .semibold),
                 color: .primary,
                 onRename: { label in
                     let manager = VigilSessionManager.shared
@@ -442,7 +459,7 @@ struct VigilSidebarView: View {
                     manager.rename(name: id, label: session.label, emoji: emoji)
                 }
             ) {
-                Text("·").font(.system(size: 13))
+                Text("·").font(.system(size: 13 * scale))
             }
             .opacity(row.stateTag == "windowed" ? 1 : 0.85)
             Spacer(minLength: 4)
@@ -466,7 +483,7 @@ struct VigilSidebarView: View {
                 if collapsed { dotCluster(row.states) } else { dotSlot(nil) }
             }
         }
-        .frame(height: 26)
+        .frame(height: 26 * scale)
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
@@ -481,6 +498,8 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: id as NSString)
         }
         .contextMenu {
+            sidebarSizeMenu
+            Divider()
             Button("Rename…") { VigilIdentity.editModal(name: id) }
             if model.rows.count > 1 {
                 Menu("Merge Into") {
@@ -527,7 +546,8 @@ struct VigilSidebarView: View {
             VigilNameCell(
                 emoji: tab.emoji,
                 title: tab.title,
-                font: .system(size: 11, weight: tab.captured ? .regular : .medium),
+                scale: scale,
+                font: .system(size: 11 * scale, weight: tab.captured ? .regular : .medium),
                 color: tab.captured ? .secondary : .primary,
                 onRename: tab.anchor.map { anchor in
                     { label in
@@ -546,12 +566,12 @@ struct VigilSidebarView: View {
                 }
             ) {
                 Image(systemName: tab.captured ? "rectangle.on.rectangle" : "rectangle.inset.filled.on.rectangle")
-                    .font(.system(size: 9))
+                    .font(.system(size: 9 * scale))
                     .foregroundColor(tab.captured ? .secondary : .primary.opacity(0.8))
             }
             if tab.panes.count > 1 {
                 Text("\(tab.panes.count)")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 9 * scale, weight: .medium))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
@@ -576,8 +596,8 @@ struct VigilSidebarView: View {
                 }
             }
         }
-        .frame(height: 22)
-        .padding(.leading, Grid.indent)
+        .frame(height: 22 * scale)
+        .padding(.leading, (Grid.indent * scale))
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
@@ -597,6 +617,8 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: tab.id as NSString)
         }
         .contextMenu {
+            sidebarSizeMenu
+            Divider()
             if let anchor = tab.anchor {
                 Button("Rename…") {
                     VigilIdentity.editModal(
@@ -642,7 +664,8 @@ struct VigilSidebarView: View {
             VigilNameCell(
                 emoji: pane.emoji,
                 title: pane.title,
-                font: .system(size: 11),
+                scale: scale,
+                font: .system(size: 11 * scale),
                 color: .primary.opacity(0.85),
                 onRename: pane.paneId.map { id in
                     { label in
@@ -661,7 +684,7 @@ struct VigilSidebarView: View {
                 }
             ) {
                 Image(systemName: pane.isDock ? "sidebar.right" : "terminal")
-                    .font(.system(size: 8))
+                    .font(.system(size: 8 * scale))
                     .foregroundColor(Color.secondary.opacity(0.8))
             }
             Spacer(minLength: 4)
@@ -669,8 +692,8 @@ struct VigilSidebarView: View {
             watchGlyph(pane)
             dotSlot(pane.state)
         }
-        .frame(height: 20)
-        .padding(.leading, Grid.indent * CGFloat(level) + Grid.chevron)
+        .frame(height: 20 * scale)
+        .padding(.leading, (Grid.indent * scale) * CGFloat(level) + (Grid.chevron * scale))
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
@@ -690,6 +713,8 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: id as NSString)
         }
         .contextMenu {
+            sidebarSizeMenu
+            Divider()
             if let paneId = pane.paneId {
                 Button("Rename…") {
                     VigilIdentity.editModal(
@@ -726,7 +751,7 @@ struct VigilSidebarView: View {
                 Text(label.dropFirst(model.hintBuffer.count))
                     .foregroundColor(.black)
             }
-            .font(.system(size: 11, weight: .bold, design: .monospaced))
+            .font(.system(size: 11 * scale, weight: .bold, design: .monospaced))
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
             .background(RoundedRectangle(cornerRadius: 3).fill(Color.yellow))
@@ -756,9 +781,9 @@ struct VigilSidebarView: View {
     private func chevron(collapsed: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                .font(.system(size: 8, weight: .semibold))
+                .font(.system(size: 8 * scale, weight: .semibold))
                 .foregroundColor(.secondary)
-                .frame(width: Grid.chevron, height: 20)
+                .frame(width: (Grid.chevron * scale), height: 20 * scale)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -790,7 +815,7 @@ struct VigilSidebarView: View {
 
     private func antennaGlyph(_ what: [String]) -> some View {
         Image(systemName: "antenna.radiowaves.left.and.right")
-            .font(.system(size: 8, weight: .semibold))
+            .font(.system(size: 8 * scale, weight: .semibold))
             .foregroundColor(.yellow)
             .help(what.joined(separator: "\n"))
     }
