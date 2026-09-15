@@ -23,7 +23,7 @@ final class VigilRemote: ObservableObject {
         var command: String?
     }
 
-    struct Session: Decodable {
+    struct Session: Decodable, Equatable {
         let name: String
         var label: String
         var emoji: String?
@@ -49,7 +49,7 @@ final class VigilRemote: ObservableObject {
         var size: String?
     }
 
-    struct Directory: Decodable {
+    struct Directory: Decodable, Equatable {
         var host: String
         var sessions: [Session]
         var panes: [String: PaneTruth]
@@ -58,10 +58,7 @@ final class VigilRemote: ObservableObject {
     struct Host {
         let alias: String
         var directory: Directory?
-        /// The bytes the directory was decoded from: change detection.
-        var raw: Data?
         var error: String?
-        var fetched: Date?
         /// The alias points at THIS Mac (`vigil-hosts` is one shared
         /// config across Adrian's Macs, so every Mac lists itself): never
         /// polled, never a row.
@@ -195,7 +192,7 @@ final class VigilRemote: ObservableObject {
         while let buffer = streamBuffers[alias], let newline = buffer.firstIndex(of: 0x0a) {
             let line = Data(buffer[buffer.startIndex..<newline])
             streamBuffers[alias]?.removeSubrange(buffer.startIndex...newline)
-            do { apply(alias, .success((try JSONDecoder().decode(Directory.self, from: line), line))) }
+            do { apply(alias, .success(try JSONDecoder().decode(Directory.self, from: line))) }
             catch { apply(alias, .failure(error)) }
         }
     }
@@ -232,7 +229,6 @@ final class VigilRemote: ObservableObject {
                     self.hosts[index].isSelf = true
                     self.hosts[index].error = Self.selfError
                     self.hosts[index].directory = nil
-                    self.hosts[index].raw = nil
                     if let stream = self.streams.removeValue(forKey: alias) { stream.terminate() }
                     self.streamBuffers[alias] = nil
                 }
@@ -323,7 +319,7 @@ final class VigilRemote: ObservableObject {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
             proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-T", alias, "vigild", "dir"]
-            var result: Result<(Directory, Data), Error>
+            var result: Result<Directory, Error>
             do {
                 let out = try ProcessPipe.make(), err = try ProcessPipe.make()
                 proc.standardOutput = out
@@ -338,7 +334,7 @@ final class VigilRemote: ObservableObject {
                     throw NSError(domain: "vigil.remote", code: Int(proc.terminationStatus),
                                   userInfo: [NSLocalizedDescriptionKey: msg.isEmpty ? "ssh exit \(proc.terminationStatus)" : msg])
                 }
-                result = .success((try JSONDecoder().decode(Directory.self, from: data), data))
+                result = .success(try JSONDecoder().decode(Directory.self, from: data))
             } catch {
                 result = .failure(error)
             }
@@ -352,10 +348,10 @@ final class VigilRemote: ObservableObject {
 
     /// One directory landed (from the stream or a one-shot refresh): the
     /// host's rows follow, with a receipt only when something changed.
-    private func apply(_ alias: String, _ result: Result<(Directory, Data), Error>) {
+    private func apply(_ alias: String, _ result: Result<Directory, Error>) {
         guard let index = hosts.firstIndex(where: { $0.alias == alias }) else { return }
                 switch result {
-                case .success((let dir, let data)):
+                case .success(let dir):
                     // An alias that resolves to THIS Mac would list every
                     // local session twice under a host header: not a
                     // remote, dropped with a receipt.
@@ -367,12 +363,14 @@ final class VigilRemote: ObservableObject {
                             self.hosts[index].directory = nil
                             if let stream = self.streams.removeValue(forKey: alias) { stream.terminate() }
                             self.streamBuffers[alias] = nil
-                            self.hosts[index].raw = nil
                             NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
                         }
                         return
                     }
-                    let changed = self.hosts[index].raw != data
+                    // Wire-only renderer hashes are not sidebar inputs. Compare
+                    // decoded facts before deciding whether projections changed.
+                    let changed = self.hosts[index].directory != dir || self.hosts[index].error != nil
+                    guard changed else { return }
                     // A receipt per SHAPE change (a session or pane came or
                     // went), not per state flip: the stream delivers every
                     // flip and a busy fleet would write the log a few times
@@ -385,15 +383,11 @@ final class VigilRemote: ObservableObject {
                     }
                     self.hosts[index].directory = dir
                     VigilSessionManager.shared.remoteDirectoryChanged(alias)
-                    self.hosts[index].raw = data
                     self.hosts[index].error = nil
-                    self.hosts[index].fetched = Date()
-                    if changed {
-                        if before == nil || before! != shape {
-                            Self.trace?("remote: \(alias) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
-                        }
-                        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+                    if before == nil || before! != shape {
+                        Self.trace?("remote: \(alias) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
                     }
+                    NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
                 case .failure(let error):
                     let msg = error.localizedDescription
                     if self.hosts[index].error != msg {

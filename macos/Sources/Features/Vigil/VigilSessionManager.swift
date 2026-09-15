@@ -261,7 +261,7 @@ class VigilSessionManager {
     /// (`vigil-<birth session>-<index>`, minted monotonic, never recycled);
     /// resurrection is a native reattach to that daemon, and a daemon that
     /// died comes back as a fresh shell in `cwd` (honest, nothing replayed).
-    struct Pane: Codable {
+    struct Pane: Codable, Equatable {
         let id: String
         var cwd: String
         /// The pane's last known terminal title, refreshed while it is
@@ -292,7 +292,7 @@ class VigilSessionManager {
 
     /// Recursive shape of one tab's splits. Pane indices refer to Tab.panes,
     /// whose order is the tree's DFS leaf order (SplitTree iteration order).
-    indirect enum Layout: Codable {
+    indirect enum Layout: Codable, Equatable {
         case leaf(Int)
         case h(Double, Layout, Layout) // left | right, ratio = left share
         case v(Double, Layout, Layout) // top / bottom
@@ -308,7 +308,7 @@ class VigilSessionManager {
     /// One tab of the workspace, captured: its panes (DFS leaf order) and
     /// their split shape. nil layout = single pane. The dock is the tab's
     /// right bar (a stack of tool panes, one visible), captured alongside.
-    struct Tab: Codable {
+    struct Tab: Codable, Equatable {
         var panes: [Pane]
         var layout: Layout?
         var dock: DockCapture?
@@ -331,7 +331,7 @@ class VigilSessionManager {
     /// The captured shape of one tab's dock: its tenants (ordinary
     /// daemon-backed panes), which one shows, its width, and whether it is
     /// collapsed. Collapse never kills: the tenants' daemons run on.
-    struct DockCapture: Codable {
+    struct DockCapture: Codable, Equatable {
         var panes: [Pane]
         var active: Int
         var width: Double
