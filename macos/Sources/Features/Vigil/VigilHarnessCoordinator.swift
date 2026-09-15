@@ -87,11 +87,15 @@ private struct VigilAuthorizationSettings: View {
 
 /// The review surface's chrome: the brand header (the mark wearing the
 /// current request's level), authz.space's inbox card as content, one
-/// pane of Liquid Glass hugging it. esc or × = Later.
+/// pane of Liquid Glass hugging it. esc or × = Later. The header is pinned
+/// and the card scrolls under it, capped to the screen: a card taller than
+/// the display once grew off the top and took its close button with it.
 private struct VigilRequestsPane: View {
     @ObservedObject var inbox: InboxModel
     let tint: () -> Color?
     let close: () -> Void
+    let maxBodyHeight: CGFloat
+    @State private var bodyHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -108,7 +112,11 @@ private struct VigilRequestsPane: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 16)
-            AuthzInbox(model: inbox)
+            ScrollView {
+                AuthzInbox(model: inbox)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bodyHeight = $0 }
+            }
+            .frame(height: min(max(bodyHeight, 80), maxBodyHeight))
         }
         .frame(width: 560)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: .inkPanel, style: .continuous))
@@ -328,15 +336,16 @@ final class VigilHarnessCoordinator: ObservableObject {
         }
         clear(releaseHush: false); current = snapshot
         let generation = inputGeneration
-        // The fast lane (narration + nod/voice/keys) carries a plain
-        // allow-once permission on its own; the review surface opens itself
-        // only for what the fast lane cannot faithfully carry, and otherwise
-        // waits behind the plate's pending badge.
-        if inbox.manualSelection || needsSurface(snapshot.request) { showPanel() } else { panel?.orderOut(nil) }
-        let activeInput = !inbox.manualSelection && !needsSurface(snapshot.request)
+        // The fast lane (narration + keys/nod/voice on the HUD) carries every
+        // answerable kind: a permission as yes/no, a questionnaire one
+        // question at a time, a plan review as its verbs. The card opens
+        // itself only for what no ask shape can carry, and otherwise waits
+        // behind the plate's pending badge.
+        let steps = inbox.manualSelection ? nil : VigilAskPlan.steps(for: snapshot.request)
+        if steps == nil { showPanel() } else { panel?.orderOut(nil) }
         preparing = Task { [weak self] in
             guard let self, self.current?.handle == snapshot.handle else { return }
-            guard activeInput else {
+            guard let steps, VigilAsk.armed else {
                 _ = await inbox.presented(snapshot, claim: false)
                 return
             }
@@ -358,30 +367,37 @@ final class VigilHarnessCoordinator: ObservableObject {
                 VigilAsk.announce(request.safeGist.isEmpty ? "Answer this one in the terminal" : request.safeGist + ". Answer it in the terminal", pane: request.context)
                 return
             }
-            guard request.kind == .permission, request.requirement.minimum == .intent,
-                  request.privacy.narration, !request.containsSecrets, !request.safeGist.isEmpty,
-                  let yes = request.actions.first(where: { $0.effect == .approveOnce }),
-                  // No is a refusal, whatever the provider calls it: Codex
-                  // offers accept and cancel with no decline, and a spoken no
-                  // must still stop the command (cancel is the stricter of the
-                  // two, so nothing runs either way).
-                  let no = request.actions.first(where: { $0.effect == .reject })
-                    ?? request.actions.first(where: { $0.effect == .cancel }) else { return }
-            let voice = yes.channels.contains(.voice) && no.channels.contains(.voice)
-            let nod = yes.channels.contains(.nod) && no.channels.contains(.nod)
-            guard voice || nod else { return }
-            // The evidence under the question: what a yes approves, colored
-            // like the inbox colors it. Secrets never reach the fast lane
-            // (needsSurface), so a detail here is already showable.
-            let detail = request.detail.map { Ask.Detail(text: $0, format: request.detailFormat) }
-            VigilAsk.ask([inbox.homeName(snapshot), request.safeGist].compactMap { $0 }.joined(separator: ": "), detail: detail, request: snapshot, paneIdentity: self.presentationPane(snapshot),
-                         allowVoice: voice, allowNod: nod) { [weak self] answer, source, reason in
-                guard let self, self.current?.handle == snapshot.handle, self.inputGeneration == generation else { return }
-                Task { @MainActor in
-                    if answer == .yes || answer == .no {
-                        let channel: InputChannel = source == "nod" ? .nod : source == "surface" ? .surface : .voice
-                        await inbox.submit(snapshot, answer: .action(answer == .yes ? yes.id : no.id, feedback: nil), channel: channel)
-                    } else if reason.contains("esc") {
+            self.run(steps, at: 0, answers: [:], snapshot: snapshot, generation: generation)
+        }
+    }
+
+    /// One HUD ask per step, in order; a questionnaire's answers collect
+    /// across steps and submit once, a verb submits at its step. Every exit
+    /// that is not an answer is the human's (esc = Later) or the channel's
+    /// (retry); an answer the request refuses on its channel (a scoped grant
+    /// or a plan approval spoken rather than seen) opens the card instead
+    /// of vanishing.
+    private func run(_ steps: [VigilAskPlan.Step], at index: Int, answers: [String: QuestionAnswer],
+                     snapshot: RequestSnapshot, generation: Int) {
+        guard let inbox, current?.handle == snapshot.handle, inputGeneration == generation else { return }
+        let request = snapshot.request
+        guard index < steps.count else {
+            deliver(.questionnaire(answers), channel: .surface, snapshot: snapshot)
+            return
+        }
+        let step = steps[index]
+        // Spoken channels answer only what the contract lets them: a narrated
+        // request with a gist. The face answers everything.
+        let spoken = request.privacy.narration && !request.safeGist.isEmpty
+        let home = inbox.homeName(snapshot)
+        VigilAsk.ask([home, step.spoken].compactMap { $0 }.joined(separator: ": "), detail: step.detail,
+                     options: step.options, textOptions: step.textOptions, multi: step.multi,
+                     request: snapshot, paneIdentity: presentationPane(snapshot), timeout: step.timeout,
+                     enterText: step.enterText, allowVoice: spoken, allowNod: spoken) { [weak self] answer, source, reason in
+            guard let self, self.current?.handle == snapshot.handle, self.inputGeneration == generation else { return }
+            Task { @MainActor in
+                guard let answer else {
+                    if reason.contains("esc") {
                         // A human dismissal is Later, never the auto-retry
                         // lane: an esc'd ask re-presenting 11s later taught
                         // the difference (2026-09-13). It waits in the inbox.
@@ -390,22 +406,41 @@ final class VigilHarnessCoordinator: ObservableObject {
                     // Completion is after channel teardown. Next presentation
                     // arrives from the service stream, including timeout/Later.
                     VigilSessionManager.shared.pumpAskGate()
+                    return
+                }
+                let channel: InputChannel = source == "nod" ? .nod : source == "surface" ? .surface : .voice
+                guard let part = step.resolve(answer, Ask.currentPicks) else {
+                    VigilSessionManager.shared.vlog("authz present: \(request.context) answer \(answer) fits no outcome of \(request.kind.rawValue) - the card takes it")
+                    self.showPanel()
+                    return
+                }
+                switch part {
+                case .decision(let decision):
+                    self.deliver(decision, channel: channel, snapshot: snapshot)
+                case .answer(let id, let value):
+                    var answers = answers
+                    answers[id] = value
+                    self.run(steps, at: index + 1, answers: answers, snapshot: snapshot, generation: generation)
                 }
             }
         }
     }
-    /// What the fast lane cannot carry: anything but a plain allow-once
-    /// permission with narration, or a permission when no spoken channel is
-    /// armed to answer it. Everything else reaches the surface on demand.
-    private func needsSurface(_ request: AskRequest) -> Bool {
-        guard request.responseMode == .interactive, request.kind == .permission,
-              request.requirement.minimum == .intent, request.privacy.narration,
-              !request.containsSecrets, !request.safeGist.isEmpty, VigilAsk.armed,
-              let yes = request.actions.first(where: { $0.effect == .approveOnce }),
-              let no = request.actions.first(where: { $0.effect == .reject })
-                ?? request.actions.first(where: { $0.effect == .cancel }) else { return true }
-        let spoken: (Action) -> Bool = { $0.channels.contains(.voice) || $0.channels.contains(.nod) }
-        return !(spoken(yes) && spoken(no))
+
+    private func deliver(_ decision: Decision, channel: InputChannel, snapshot: RequestSnapshot) {
+        guard let inbox else { return }
+        let request = snapshot.request
+        // The HUD showed the review body as its evidence block, so a
+        // decision made on the surface has seen the digest it approves.
+        let reviewed = channel == .surface ? request.reviewDigest : nil
+        guard request.accepts(decision, channel: channel, reviewedDigest: reviewed) else {
+            VigilSessionManager.shared.vlog("authz present: \(request.context) refuses \(decision) over \(channel.rawValue) - the card takes it")
+            showPanel()
+            return
+        }
+        Task { @MainActor in
+            await inbox.submit(snapshot, answer: decision, channel: channel, reviewedDigest: reviewed)
+            VigilSessionManager.shared.pumpAskGate()
+        }
     }
     var pendingCount: Int { inbox?.requests.count ?? 0 }
     /// The plate's badge: open the review surface for whatever is waiting.
@@ -434,15 +469,41 @@ final class VigilHarnessCoordinator: ObservableObject {
                 self.panel?.orderOut(nil)
                 if let request, let inbox = self.inbox { Task { await inbox.later(request) } }
             }
+            // The panel follows its content's size; whatever size that is,
+            // the whole pane stays on the screen it was summoned to.
+            panelDelegate.onResize = { [weak self] in self?.keepPanelOnScreen() }
             panel.delegate = panelDelegate
             let host = NSHostingView(rootView: VigilRequestsPane(inbox: inbox, tint: { [weak self] in self?.plateTint },
-                                                                 close: { [weak self] in self?.panelDelegate.onClose?() }))
+                                                                 close: { [weak self] in self?.panelDelegate.onClose?() },
+                                                                 maxBodyHeight: Self.maxCardBodyHeight))
             host.sizingOptions = .preferredContentSize
             panel.contentView = host
-            panel.center()
             self.panel = panel
         }
-        panel?.orderFront(nil)
+        guard let panel else { return }
+        if !panel.isVisible {
+            let screen = NSApp.keyWindow?.screen ?? NSScreen.main
+            if let frame = screen?.visibleFrame {
+                panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.midY - panel.frame.height / 2))
+            }
+        }
+        panel.orderFront(nil)
+        keepPanelOnScreen()
+    }
+    /// The tallest card body any display here allows: the visible frame
+    /// minus the header and a margin. Measured once per show, on the
+    /// display the key window sits on.
+    private static var maxCardBodyHeight: CGFloat {
+        let screen = NSApp.keyWindow?.screen ?? NSScreen.main
+        return max(200, (screen?.visibleFrame.height ?? 800) - 140)
+    }
+    private func keepPanelOnScreen() {
+        guard let panel, let screen = panel.screen ?? NSApp.keyWindow?.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        var origin = panel.frame.origin
+        origin.x = min(max(origin.x, visible.minX), max(visible.minX, visible.maxX - panel.frame.width))
+        origin.y = min(max(origin.y, visible.minY), max(visible.minY, visible.maxY - panel.frame.height))
+        if origin != panel.frame.origin { panel.setFrameOrigin(origin) }
     }
     private func canPresent(_ snapshot: RequestSnapshot) -> Bool {
         let refuse: (String) -> Bool = { why in
@@ -563,6 +624,8 @@ final class VigilHarnessCoordinator: ObservableObject {
 @MainActor
 private final class AuthorizationPanelDelegate: NSObject, NSWindowDelegate {
     var onClose: (() -> Void)?
+    var onResize: (() -> Void)?
     func windowWillClose(_ notification: Notification) { onClose?() }
+    func windowDidResize(_ notification: Notification) { onResize?() }
 }
 #endif

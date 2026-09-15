@@ -37,10 +37,10 @@ enum VigilAsk {
     static var nodAvailable: Bool { MotionTap.ready }
     static var voiceAvailable: Bool { MicCapture.available }
 
-    /// The pump's entry guard: at least one enabled channel could work.
-    static var armed: Bool {
-        AskSettings.enabled && ((nodEnabled && nodAvailable) || (voiceEnabled && voiceAvailable))
-    }
+    /// The pump's entry guard. The face is itself a channel (keys, clicks),
+    /// so the master switch alone arms the fast lane; nod and voice join
+    /// the race when enabled and able.
+    static var armed: Bool { AskSettings.enabled }
 
     /// Audio-route diagnostics share the session manager's timeline.
     nonisolated(unsafe) static var trace: ((String) -> Void)?
@@ -109,7 +109,6 @@ enum VigilAsk {
             sources.append(
                 VoiceSource(locales: VigilVoice.chosenLocales, sink: recording ? VoiceLogSink() : nil))
         }
-        guard !sources.isEmpty else { return completion(nil, "unavailable", "unavailable") }
         guard !Ask.isAsking else { return completion(nil, "busy", "busy") }
         if !wired {
             wired = true
@@ -159,7 +158,7 @@ enum VigilAsk {
         if voiceEnabled, voiceAvailable {
             sources.append(VoiceSource(locales: VigilVoice.chosenLocales, sink: nil))
         }
-        guard !sources.isEmpty, !Ask.isAsking else { return }
+        guard !Ask.isAsking else { return }
         if !wired {
             wired = true
             Ask.trace = { line in trace?("ask \(line)") }

@@ -104,7 +104,6 @@ final class VigilSummon {
     var currentAskPane: String? { current?.pane }
 
     private func schedule() {
-        guard VigilFollowMode.current == .summon else { return }
         work?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.evaluate() }
         work = w
@@ -198,9 +197,12 @@ final class VigilSummon {
     }
 
     private func evaluate() {
+        // The chimes are the noise contract and ring in every follow mode;
+        // only the glass moving is the summon's own business (a follow
+        // mode of `off` once silenced every blocker for four days).
+        announce()
         guard VigilFollowMode.current == .summon else { return }
         let manager = VigilSessionManager.shared
-        announce()
 
         if let cur = current {
             // Adrian moved the flow himself (manual float of another

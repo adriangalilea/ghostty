@@ -10,8 +10,9 @@ import SwiftUI
 /// this process runs gets the same face for free, and the face ANSWERS:
 /// hover the glass and the yes/no (or option) buttons click through,
 /// y/n/1-9 answer, esc cancels - the `surface` channel racing nod and
-/// voice, ledgered like them. The panel lingers just long enough to SHOW
-/// the verdict, then leaves.
+/// voice, ledgered like them. Enter takes the highlighted answer or the
+/// default, arrows move the highlight. The panel lingers just long enough
+/// to SHOW the verdict, then leaves.
 @MainActor
 final class VigilAskHUD {
     static let shared = VigilAskHUD()
@@ -30,11 +31,7 @@ final class VigilAskHUD {
 
     private func makeHUD() -> FloatingHUD {
         let hud = FloatingHUD(hoverAware: true) { [model] in AskHUDView(model: model) }
-        hud.onKey = { [model] event in
-            model.key(
-                event.charactersIgnoringModifiers ?? "", escape: event.keyCode == 53,
-                enter: event.keyCode == 36 || event.keyCode == 76)
-        }
+        hud.onKey = { [model] event in model.key(AskPromptModel.Key(event)) }
         return hud
     }
 
@@ -50,10 +47,17 @@ final class VigilAskHUD {
             // The text stage owns the keyboard: the panel takes key focus
             // so the input's caret is live the instant it opens, and gives
             // it back when the options return.
-            if case .entering = stage { hud?.focusForTyping() } else { hud?.releaseFocus() }
+            if case .entering = stage {
+                hud?.keyboardOwnedByContent = true
+                hud?.focusForTyping()
+            } else {
+                hud?.keyboardOwnedByContent = false
+                hud?.releaseFocus()
+            }
         case .levels, .heard, .picks, .deadline, .verdict:
             break
         case .ended:
+            hud?.keyboardOwnedByContent = false
             hud?.releaseFocus()
             generation += 1
             let gen = generation
