@@ -251,18 +251,51 @@ fn spawnDaemon(self: *Attach) !void {
         },
     };
 
-    var child = std.process.Child.init(argv.items, self.alloc);
-    child.env_map = &env;
-    child.cwd = self.cwd;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    const term = try child.spawnAndWait();
-    switch (term) {
-        .Exited => |code| if (code != 0) return error.DaemonSpawnFailed,
-        else => return error.DaemonSpawnFailed,
+    // posix_spawn with responsibility DISCLAIMED, never std.process.Child
+    // (a fork, which inherits the app as the child's privacy identity):
+    // while the app lives the daemon rides its grants, and the moment the
+    // app quits (every deploy) macOS judges the daemon as itself, with no
+    // grant and no prompt, so a pane's Local Network calls failed silently
+    // after every deploy (2026-09-15). Disclaimed, the daemon is itself
+    // from birth; its TCC row pins to vigild's Developer ID requirement.
+    var arena_state = std.heap.ArenaAllocator.init(self.alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const c_argv = try arena.allocSentinel(?[*:0]const u8, argv.items.len, null);
+    for (argv.items, 0..) |arg, i| c_argv[i] = (try arena.dupeZ(u8, arg)).ptr;
+    const c_env = try std.process.createNullDelimitedEnvMap(arena, &env);
+
+    var attr: std.c.posix_spawnattr_t = undefined;
+    if (std.c.posix_spawnattr_init(&attr) != 0) return error.DaemonSpawnFailed;
+    defer _ = std.c.posix_spawnattr_destroy(&attr);
+    if (responsibility_spawnattrs_setdisclaim(&attr, 1) != 0) {
+        log.warn("attach: {s} spawn: responsibility disclaim refused - the daemon inherits the app's privacy identity", .{self.id});
+    }
+    var actions: std.c.posix_spawn_file_actions_t = undefined;
+    if (std.c.posix_spawn_file_actions_init(&actions) != 0) return error.DaemonSpawnFailed;
+    defer _ = std.c.posix_spawn_file_actions_destroy(&actions);
+    if (self.cwd) |cwd| {
+        _ = std.c.posix_spawn_file_actions_addchdir_np(&actions, (try arena.dupeZ(u8, cwd)).ptr);
+    }
+    // stdio to /dev/null: the daemon's receipts are its own log.
+    const rdwr: c_int = @bitCast(@as(u32, @bitCast(posix.O{ .ACCMODE = .RDWR })));
+    for ([_]posix.fd_t{ 0, 1, 2 }) |fd| {
+        _ = std.c.posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", rdwr, 0);
+    }
+    var pid: posix.pid_t = 0;
+    const binz = try arena.dupeZ(u8, bin);
+    if (std.c.posix_spawn(&pid, binz.ptr, &actions, &attr, c_argv.ptr, @ptrCast(c_env.ptr)) != 0) {
+        return error.DaemonSpawnFailed;
+    }
+    const result = posix.waitpid(pid, 0);
+    if (!posix.W.IFEXITED(result.status) or posix.W.EXITSTATUS(result.status) != 0) {
+        return error.DaemonSpawnFailed;
     }
 }
+
+/// libSystem's unpublished spawn attribute (Chromium's
+/// `disclaim_responsibility`): the child answers for its own privacy.
+extern "c" fn responsibility_spawnattrs_setdisclaim(attr: *std.c.posix_spawnattr_t, disclaim: c_int) c_int;
 
 pub fn threadEnter(
     self: *Attach,
