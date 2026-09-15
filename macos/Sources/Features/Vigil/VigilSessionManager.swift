@@ -523,6 +523,7 @@ class VigilSessionManager {
     private init() {
         acquireInstanceLock()
         load()
+        respawnMachineKilledDaemons()
         collectOrphans()
         // Publish revisions for older registries without changing their
         // saved login-restoration intent before any windows are restored.
@@ -4892,6 +4893,37 @@ class VigilSessionManager {
     /// State files and resume pointers of panes with no daemon and no
     /// owner are pruned with it (a stale resume pointer is typed into
     /// whoever inherits the index; 44 were lying in wait once).
+    /// `vigild restore` at every launch, not only at login. A spec with no
+    /// live daemon can only mean a machine-death-class event: a deliberate
+    /// kill unlinks the spec BEFORE signaling, so respawning from a spec is
+    /// never wrong. The login agent alone missed a whole fleet (2026-09-15:
+    /// a logout started at 01:40, SIGTERM reached every daemon, the logout
+    /// was interrupted, and launchd left the restore spawn "pending" with
+    /// no login to follow; 17 specs sat dead for ten hours). Synchronous
+    /// and before collectOrphans, so a restored daemon is never read as
+    /// an orphan of a session the registry still lists.
+    private func respawnMachineKilledDaemons() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: Self.vigildBin)
+        proc.arguments = ["restore"]
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = out
+        do {
+            try proc.run()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+            let respawned = lines.filter { $0.hasSuffix(" up") }.count
+            if respawned > 0 || proc.terminationStatus != 0 {
+                vlog("restore(daemons): \(respawned) machine-killed daemon(s) respawned from their specs (exit \(proc.terminationStatus))")
+                for line in lines where !line.hasSuffix(" up") { vlog("restore(daemons): \(line)") }
+            }
+        } catch {
+            vlog("!! restore(daemons): vigild restore could not run (\(error))")
+        }
+    }
+
     private func collectOrphans() {
         // Two-instance safety: another instance of THIS bundle shares the
         // vigild state dir and its registry; killing under it would race
