@@ -104,7 +104,6 @@ struct VigilSidebarView: View {
                             })
                         .onDrop(of: [UTType.text], delegate: VigilTreeDrop(model: model))
                     }
-                    .contextMenu { sidebarSizeMenu }
                     .onChange(of: model.selection) { selection in
                         if let selection { proxy.scrollTo(selection) }
                     }
@@ -162,19 +161,6 @@ struct VigilSidebarView: View {
         if model.collapsedTabs.contains(tab.id) { return tab.id }
         if let pane = tab.panes.first(where: { model.isFocused($0) }) { return "\(tab.id)#\(pane.id)" }
         return tab.id
-    }
-
-    private var sidebarSizeMenu: some View {
-        Menu("Sidebar Size") {
-            Button("Larger") { VigilSidebarSize.change(by: 1) }
-                .disabled(sidebarFontSize >= VigilSidebarSize.range.upperBound)
-            Button("Smaller") { VigilSidebarSize.change(by: -1) }
-                .disabled(sidebarFontSize <= VigilSidebarSize.compact)
-            Divider()
-            Button("Compact") { VigilSidebarSize.reset() }
-            Button("Spacious") { sidebarFontSize = 16 }
-        }
-        .help("Focus the sidebar with ⌘⇧B, then use ⌘+ / ⌘− to resize it; ⌘0 restores compact size.")
     }
 
     // MARK: Up next (the manual-follow affordance, CO-LOCATED)
@@ -498,8 +484,6 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: id as NSString)
         }
         .contextMenu {
-            sidebarSizeMenu
-            Divider()
             Button("Rename…") { VigilIdentity.editModal(name: id) }
             if model.rows.count > 1 {
                 Menu("Merge Into") {
@@ -617,8 +601,6 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: tab.id as NSString)
         }
         .contextMenu {
-            sidebarSizeMenu
-            Divider()
             if let anchor = tab.anchor {
                 Button("Rename…") {
                     VigilIdentity.editModal(
@@ -713,8 +695,6 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: id as NSString)
         }
         .contextMenu {
-            sidebarSizeMenu
-            Divider()
             if let paneId = pane.paneId {
                 Button("Rename…") {
                     VigilIdentity.editModal(

@@ -374,20 +374,67 @@ final class VigilSidebarToggleAccessory: NSTitlebarAccessoryViewController {}
 struct VigilSidebarToggle: View {
     let on: Bool
     var action: () -> Void
+    @State private var sizing = false
+    @AppStorage(VigilSidebarSize.key) private var fontSize = VigilSidebarSize.compact
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: "sidebar.left")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(on ? .primary : .secondary)
-                .frame(width: 18, height: 18)
-                .background(Circle().fill(Color.primary.opacity(on ? 0.18 : 0.08)))
+        HStack(spacing: 6) {
+            Button(action: action) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(on ? .primary : .secondary)
+                    .frame(width: 18, height: 18)
+                    .background(Circle().fill(Color.primary.opacity(on ? 0.18 : 0.08)))
+            }
+            .buttonStyle(.plain)
+            .help(on
+                ? "Hide the session sidebar (⌘⇧B focuses it for keyboard navigation)."
+                : "Show the session sidebar: every session, its tabs, its panes, what they run. ⌘⇧B summons it with the keyboard; arrows move, enter lands, esc returns.")
+            Button { sizing.toggle() } label: {
+                Image(systemName: "textformat.size")
+                    .font(.system(size: 12))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Sidebar size")
+            .help("Sidebar size: scale text and rows together")
+            .disabled(!on)
+            // Reserve its slot so hiding the sidebar never moves the toggle.
+            .opacity(on ? 1 : 0)
+            .accessibilityHidden(!on)
+            .popover(isPresented: $sizing, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Sidebar size").font(.headline)
+                        Spacer()
+                        Text("\(Int(VigilSidebarSize.bounded(fontSize) / VigilSidebarSize.compact * 100))%")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 10) {
+                        Text("A").font(.system(size: 11))
+                            .accessibilityHidden(true)
+                        Slider(value: $fontSize, in: VigilSidebarSize.range, step: 1)
+                            .accessibilityLabel("Sidebar size")
+                        Text("A").font(.system(size: 20))
+                            .accessibilityHidden(true)
+                    }
+                    HStack {
+                        Button("Reset") { VigilSidebarSize.reset() }
+                            .disabled(fontSize == VigilSidebarSize.compact)
+                        Spacer()
+                        Text("⌘⇧B, then ⌘+ / ⌘−")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(16)
+                .frame(width: 260)
+            }
         }
-        .buttonStyle(.plain)
-        .help(on
-            ? "Hide the session sidebar (⌘⇧B focuses it for keyboard navigation)."
-            : "Show the session sidebar: every session, its tabs, its panes, what they run. ⌘⇧B summons it with the keyboard; arrows move, enter lands, esc returns.")
         .padding(.leading, 8)
         .frame(height: 28)
+        .onChange(of: on) { shown in if !shown { sizing = false } }
     }
 }
