@@ -224,6 +224,7 @@ final class VigilSidebarModel: ObservableObject {
     private var refreshQueued = false
     private var stormWindowStart: Date = .distantPast
     private var stormCount = 0
+    private var stormSources: [String: Int] = [:]
 
     /// Coalesced + throttled: any number of triggers (ticker, state
     /// notifications, bar syncs) collapse into at most ~4 snapshots/s.
@@ -232,7 +233,7 @@ final class VigilSidebarModel: ObservableObject {
     /// launch restore never ran (2026-08-01). `immediate` bypasses the
     /// throttle for human-rate triggers (a key-window or focus change):
     /// the tree must repaint with the click, never a tick later.
-    func refresh(immediate: Bool = false) {
+    func refresh(immediate: Bool = false, reason: String = "action") {
         // Storm tripwire on RATE, not lifetime count: the cumulative
         // version screamed !! every ~17 min of NORMAL use, training the
         // marker to be ignored. The real storm was hundreds of calls/s.
@@ -240,10 +241,13 @@ final class VigilSidebarModel: ObservableObject {
         if now.timeIntervalSince(stormWindowStart) > 10 {
             stormWindowStart = now
             stormCount = 0
+            stormSources.removeAll(keepingCapacity: true)
         }
         stormCount += 1
+        stormSources[reason, default: 0] += 1
         if stormCount == 200 {
-            VigilSessionManager.shared.vlog("!! sidebar refresh storm: 200 calls in 10s")
+            let sources = stormSources.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+            VigilSessionManager.shared.vlog("!! sidebar refresh storm: 200 calls in 10s (\(sources))")
         }
         guard immediate || now.timeIntervalSince(lastRefresh) >= 0.25 else {
             if !refreshQueued {
@@ -251,7 +255,7 @@ final class VigilSidebarModel: ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                     guard let self else { return }
                     self.refreshQueued = false
-                    self.refresh()
+                    self.refresh(reason: "coalesced")
                 }
             }
             return

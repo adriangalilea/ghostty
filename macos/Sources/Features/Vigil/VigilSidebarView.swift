@@ -120,13 +120,13 @@ struct VigilSidebarView: View {
             }
             footer
         }
-        .onReceive(staleHealer) { _ in model.refresh() }
+        .onReceive(staleHealer) { _ in model.refresh(reason: "stale labels") }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.stateDidChange)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh() }
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "facts") }
         .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.focusDidChange)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true) }
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "focus") }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true) }
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "key window") }
     }
 
     /// A row's report into the shared geometry map: a DIRECT write on

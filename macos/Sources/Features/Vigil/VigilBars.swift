@@ -273,7 +273,7 @@ final class VigilBars {
         let showSidebar = sidebarVisible(for: controller)
         sidebar.isHidden = !showSidebar
         sidebar.widthConstraint.constant = sidebarWidth
-        if showSidebar { sidebar.model.refresh() }
+        if showSidebar { sidebar.model.refresh(reason: "bars") }
 
         // Right: the tab's dock.
         let manager = VigilSessionManager.shared
