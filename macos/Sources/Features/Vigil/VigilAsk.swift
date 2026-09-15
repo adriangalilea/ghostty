@@ -107,7 +107,7 @@ enum VigilAsk {
         if allowNod, nodEnabled, nodAvailable { sources.append(NodSource()) }
         if allowVoice, voiceEnabled, voiceAvailable {
             sources.append(
-                VoiceSource(locales: VigilVoice.chosenLocales, sink: recording ? VoiceLogSink() : nil))
+                VoiceSource(sink: recording ? VoiceLogSink() : nil))
         }
         guard !Ask.isAsking else { return completion(nil, "busy", "busy") }
         if !wired {
@@ -156,7 +156,7 @@ enum VigilAsk {
         var sources: [any AnswerSource] = []
         if nodEnabled, nodAvailable { sources.append(NodSource()) }
         if voiceEnabled, voiceAvailable {
-            sources.append(VoiceSource(locales: VigilVoice.chosenLocales, sink: nil))
+            sources.append(VoiceSource(sink: nil))
         }
         guard !Ask.isAsking else { return }
         if !wired {

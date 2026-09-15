@@ -5,6 +5,7 @@ import Carbon.HIToolbox
 import Ink
 import Keymap
 import Listen
+import Say
 
 /// Dictation as co-writing: speech lands in the focused pane's input line
 /// exactly as if typed - `vigild sendraw`, NO Enter - so keyboard edits
@@ -20,32 +21,13 @@ enum VigilVoice {
     /// Fires on start/stop so the status item can show the mic.
     static var onStateChange: (() -> Void)?
 
-    /// Dictation language: "auto" runs the candidate locales ARBITRATED
-    /// (one recognizer each, per-utterance confidence verdict, the
-    /// Spanglish answer: one English recognizer alone mangles Spanish), or
-    /// an explicit BCP-47 id for one recognizer. The sidebar mic button's
-    /// context menu writes it.
-    static let localeKey = "vigil.voice.locale"
-    /// The arbitrated candidate set (comma-separated BCP-47).
-    static let localesKey = "vigil.voice.locales"
-
-    /// THE language truth every voice consumer reads - dictation AND the
-    /// ask gate: the session's chosen language (`vigil.voice.locale`, the
-    /// flag picker persists it) narrows the race to one recognizer; auto
-    /// runs every candidate. One rule, or the flag and the engine disagree
-    /// (a picker showing one language while the ask's source races both).
-    nonisolated static var chosenLocales: [Locale] {
-        let preference = UserDefaults.standard.string(forKey: localeKey) ?? "auto"
-        return preference == "auto" ? candidateLocales : [Locale(identifier: preference)]
-    }
-
-    nonisolated static var candidateLocales: [Locale] {
-        let stored = UserDefaults.standard.string(forKey: localesKey) ?? "es-ES, en-US"
-        let ids = stored.split(separator: ",").map {
-            $0.trimmingCharacters(in: .whitespaces)
-        }.filter { !$0.isEmpty }
-        return ids.isEmpty ? [Locale.current] : ids.map(Locale.init(identifier:))
-    }
+    /// The languages are the suite's (`Languages` in Say: the human's
+    /// chosen set, a pin narrowing it to one). Several run ARBITRATED (one
+    /// recognizer each, per-utterance confidence verdict, the Spanglish
+    /// answer: one English recognizer alone mangles Spanish); one runs a
+    /// single recognizer with no race at all. Vigil holds no language of
+    /// its own; the footer's picker and the settings editor write the
+    /// suite's keys.
 
     /// THE interaction state machine (swift-utils Ink): hold-to-talk or
     /// tap-to-latch, shared by the sidebar MicButton's gesture and the
@@ -121,15 +103,11 @@ enum VigilVoice {
         onStateChange?()
 
         let identity = VigilSessionManager.shared.cortexIdentity(ofPane: pane)
-        let locales = chosenLocales
+        let wanted = Languages.activeLocales
         var grounding = GroundingSet()
         if let keywords = identity?.keywords, !keywords.isEmpty {
             grounding[.session] = keywords
         }
-        trace?(
-            "voice: dictation -> \(pane)"
-                + " locales=\(locales.map { $0.identifier(.bcp47) }.joined(separator: "+"))"
-                + " grounding=\(grounding.totalCount) mic=\"\(MicCapture.inputName)\"")
 
         Task {
             do {
@@ -146,6 +124,28 @@ enum VigilVoice {
                     if generation == gen { stop(reason: "mic denied") }
                     return
                 }
+                // Only a language whose model is on disk can listen: a
+                // chosen one without its model is skipped with a receipt,
+                // never handed to a session that would fail at its first
+                // word (a recipient's dictation "initiated then stopped"
+                // on a Spanish model his Mac never had, 2026-09-15).
+                var locales: [Locale] = []
+                for locale in wanted {
+                    if let ready = try? await AssetStore.resolveInstalled(locale) {
+                        locales.append(ready)
+                    } else {
+                        trace?("voice: \(locale.identifier(.bcp47)) has no speech model installed, skipped (ask settings > Languages)")
+                    }
+                }
+                guard !locales.isEmpty else {
+                    trace?("voice: no installed model for \(wanted.map { $0.identifier(.bcp47) }.joined(separator: "+")) - download one in ask settings > Languages")
+                    if generation == gen { stop(reason: "no language model") }
+                    return
+                }
+                trace?(
+                    "voice: dictation -> \(pane)"
+                        + " locales=\(locales.map { $0.identifier(.bcp47) }.joined(separator: "+"))"
+                        + " grounding=\(grounding.totalCount) mic=\"\(MicCapture.inputName)\"")
                 // Volatiles feed the floating HUD (wet-ink preview); only
                 // FINALS ever reach the pane.
                 let session: any SpeechSession

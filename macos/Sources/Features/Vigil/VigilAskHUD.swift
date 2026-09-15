@@ -3,6 +3,7 @@
 import AppKit
 import AskKit
 import Face
+import Say
 import SwiftUI
 
 /// The ask prompt's face: Face's `AskPrompt` in Face's `FloatingHUD`,
@@ -79,12 +80,12 @@ private struct AskHUDView: View {
     @ObservedObject var dictation = VigilDictationHUD.shared
 
     var body: some View {
+        let chosen = Languages.chosen
         AskPrompt(
             model: model,
-            languages: LanguagePicker(
-                options: VigilVoice.candidateLocales.map { $0.identifier(.bcp47) },
-                selected: dictation.forcedLocale,
-                onSelect: { dictation.select(locale: $0) }))
+            languages: chosen.count > 1
+                ? LanguagePicker(options: chosen, selected: dictation.forcedLocale, onSelect: { dictation.select(locale: $0) })
+                : nil)
     }
 }
 #endif

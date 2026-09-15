@@ -48,6 +48,13 @@ private struct VigilAuthorizationSettings: View {
                 .scrollContentBackground(.hidden)
             Rectangle().fill(.inkRest).frame(height: 1).padding(.horizontal, 20)
             Form {
+                Section {
+                    LanguagesEditor()
+                } header: {
+                    Text("Languages")
+                } footer: {
+                    Text("What this Mac listens and speaks in. The default is the Mac's own languages; a language is never assumed. Several race per phrase; the footer's picker pins one.")
+                }
                 Section("Voice") {
                     VoiceEngineRow(.init(
                         name: "Kokoro",
@@ -73,9 +80,9 @@ private struct VigilAuthorizationSettings: View {
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
-            .frame(height: 226)
+            .frame(height: 380)
         }
-        .frame(width: 640, height: 600)
+        .frame(width: 640, height: 754)
         // The pane IS the glass: a borderless panel with nothing but this
         // shape (Face's FloatingHUD pattern), so the material hugs the
         // content and no window chrome doubles it.

@@ -59,8 +59,7 @@ final class VigilDictationHUD: ObservableObject {
             if editing { hud?.focusForTyping() } else { hud?.releaseFocus() }
             model.paused = editing || (hud?.hovering ?? false)
         }
-        let preference = UserDefaults.standard.string(forKey: VigilVoice.localeKey) ?? "auto"
-        forcedLocale = preference == "auto" ? nil : preference
+        forcedLocale = Languages.pinned
         let doubt = UserDefaults.standard.double(forKey: Self.doubtKey)
         if doubt > 0 { model.doubtBelow = doubt }
         model.onDoubtChange = { value in
@@ -102,12 +101,13 @@ final class VigilDictationHUD: ObservableObject {
         if model.committed.isEmpty && model.races.isEmpty { hide() }
     }
 
-    /// The language control: Auto lets the race decide; a forced language
-    /// runs ONE recognizer - no race, no flip-flopping. A live dictation
-    /// restarts on its pane.
+    /// The language control: Auto lets the race decide among the chosen
+    /// languages; a pinned one runs ONE recognizer - no race, no
+    /// flip-flopping. The pin is the suite's (`Languages.pinned`). A live
+    /// dictation restarts on its pane.
     func select(locale: String?) {
         forcedLocale = locale
-        UserDefaults.standard.set(locale ?? "auto", forKey: VigilVoice.localeKey)
+        Languages.pinned = locale
         VigilVoice.trace?("voice: language -> \(locale ?? "auto")")
         if let pane, VigilVoice.isActive {
             VigilVoice.stop(reason: "language changed")
@@ -125,12 +125,13 @@ private struct DictationHUDView: View {
     @ObservedObject var hud: VigilDictationHUD
 
     var body: some View {
+        // One chosen language has nothing to pick; the flag slot stays quiet.
+        let chosen = Languages.chosen
         LiveTranscript(
             model: hud.model,
-            languages: LanguagePicker(
-                options: VigilVoice.candidateLocales.map { $0.identifier(.bcp47) },
-                selected: hud.forcedLocale,
-                onSelect: { hud.select(locale: $0) }))
+            languages: chosen.count > 1
+                ? LanguagePicker(options: chosen, selected: hud.forcedLocale, onSelect: { hud.select(locale: $0) })
+                : nil)
     }
 }
 #endif

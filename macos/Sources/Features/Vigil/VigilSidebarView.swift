@@ -1,6 +1,7 @@
 import AppKit
 import Face
 import Ink
+import Say
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -17,7 +18,10 @@ struct VigilSidebarView: View {
     private var scale: CGFloat { CGFloat(VigilSidebarSize.bounded(sidebarFontSize) / VigilSidebarSize.compact) }
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
-    @AppStorage(VigilVoice.localeKey) private var voiceLocale = "auto"
+    /// The suite's languages, read live: the footer's picker exists only
+    /// when there is more than one to pick from.
+    @AppStorage(Languages.key) private var languagesRaw = ""
+    @AppStorage(Languages.pinnedKey) private var pinnedLanguage: String?
 
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
@@ -257,20 +261,27 @@ struct VigilSidebarView: View {
                                 hint: VigilVoice.hotkeyHint,
                                 size: 22)
                             Spacer()
-                            Menu {
-                                Picker("Language", selection: $voiceLocale) {
-                                    Text("Auto (es+en, arbitrated)").tag("auto")
-                                    Text("Español").tag("es-ES")
-                                    Text("English").tag("en-US")
+                            // `languagesRaw` is observed only so the rail
+                            // re-renders when the set changes; the set
+                            // itself is the suite's.
+                            let chosen = Languages.chosen
+                            if chosen.count > 1 {
+                                Menu {
+                                    Picker("Language", selection: $pinnedLanguage) {
+                                        Text("Auto (every language, arbitrated)").tag(String?.none)
+                                        ForEach(chosen, id: \.self) { id in
+                                            Text("\(LocaleFlag.emoji(id) ?? "") \(Languages.name(id))").tag(String?.some(id))
+                                        }
+                                    }
+                                } label: {
+                                    Text(pinnedLanguage.map { LocaleFlag.emoji($0) ?? $0 } ?? "auto")
+                                        .font(.system(size: 9, weight: .medium))
+                                        .foregroundStyle(.secondary)
                                 }
-                            } label: {
-                                Text(voiceLocale == "auto" ? "auto" : voiceLocale)
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundStyle(.secondary)
+                                .menuStyle(.borderlessButton)
+                                .fixedSize()
+                                .help("Dictation language: auto races every chosen language; a pin runs one recognizer. Languages are chosen in ask settings.")
                             }
-                            .menuStyle(.borderlessButton)
-                            .fixedSize()
-                            .help("Dictation language")
                         }
                         .help("Dictate into the focused pane: hold to talk, tap to lock on (tap again to stop), or \(VigilVoice.hotkeyHint) from anywhere. Speech lands in the input line - no Enter, you submit.")
                     } else {
