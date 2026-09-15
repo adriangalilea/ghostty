@@ -1943,9 +1943,19 @@ class VigilSessionManager {
     private func landAfterSplits(_ controller: TerminalController, anchor: String?, fallback: Ghostty.SurfaceView, takeSize: Bool = false) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak controller] in
             guard let controller else { return }
-            let landing = anchor.flatMap { a in controller.surfaceTree.first { $0.vigilAttachId == a } } ?? fallback
+            let target: Ghostty.SurfaceView?
+            if let anchor {
+                target = controller.surfaceTree.first { $0.vigilAttachId == anchor }
+            } else {
+                target = fallback
+            }
+            guard let landing = target else {
+                VigilSessionManager.shared.vlog("handoff: landing refused; pane \(anchor ?? "unknown") absent from window \(controller.window?.windowNumber ?? -1)")
+                return
+            }
             Ghostty.moveFocus(to: landing)
             if takeSize { landing.vigilControlSize(true, reason: "sidebar pane selected") }
+            VigilSessionManager.shared.vlog("handoff: landed \(landing.vigilHost ?? "local")/\(landing.vigilAttachId ?? "unknown") in window \(controller.window?.windowNumber ?? -1)")
         }
     }
 
@@ -1956,12 +1966,25 @@ class VigilSessionManager {
     @discardableResult
     func openRemotePane(alias: String, pane: String) -> TerminalController? {
         guard let directory = VigilRemote.shared.host(alias)?.directory,
-              let session = directory.sessions.first(where: { session in (session.tabs ?? []).contains { tabPaneIds($0).contains(pane) } }),
-              let ghostty = ghosttyApp else { return nil }
-        let controller = (NSApp.keyWindow?.windowController as? TerminalController)
-            ?? TerminalController.newWindow(ghostty, tree: SplitTree(), confirmUndo: false)
-        mountRemote(controller, composite: VigilRemote.compositeId(alias, session.name), anchor: VigilRemote.compositeId(alias, pane))
+              let session = directory.sessions.first(where: { session in (session.tabs ?? []).contains { tabPaneIds($0).contains(pane) } }) else {
+            vlog("handoff: remote \(alias)/\(pane) refused; pane absent from directory")
+            return nil
+        }
+        // A request panel may be key. The main/last-main terminal remains the
+        // user's viewport; closed-window undo corpses are never destinations.
+        let candidates = [NSApp.keyWindow?.windowController as? TerminalController,
+                          NSApp.mainWindow?.windowController as? TerminalController,
+                          TerminalController.lastMain]
+            + NSApp.orderedWindows.map { $0.windowController as? TerminalController }
+        let viewport = candidates.compactMap { $0 }.first {
+            !$0.surfaceTree.isEmpty && ($0.window?.isVisible == true || $0.window?.isMiniaturized == true)
+        }
+        guard let controller = mountRemote(viewport, composite: VigilRemote.compositeId(alias, session.name),
+                                           anchor: VigilRemote.compositeId(alias, pane)) else { return nil }
+        vlog("handoff: remote \(alias)/\(pane) -> session \(session.name), window \(controller.window?.windowNumber ?? -1), \(viewport == nil ? "created" : "reused")")
+        if controller.window?.isMiniaturized == true { controller.window?.deminiaturize(nil) }
         controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         return controller
     }
 
@@ -1981,31 +2004,34 @@ class VigilSessionManager {
         mountRemote(controller, composite: composite, anchor: VigilRemote.compositeId(alias, pane))
     }
 
-    private func mountRemote(_ controller: TerminalController, composite: String, anchor: String?) {
-        guard let app = ghosttyApp?.app, controller.window != nil,
+    @discardableResult
+    private func mountRemote(_ viewport: TerminalController?, composite: String, anchor: String?) -> TerminalController? {
+        guard let ghostty = ghosttyApp, let app = ghostty.app,
               let (alias, session) = VigilRemote.shared.session(composite) else {
             vlog("remote: '\(composite)' unknown or unreachable - refused")
-            return
+            return nil
         }
         let rawAnchor = anchor.flatMap { VigilRemote.split($0)?.name }
         let tabs = session.tabs ?? []
         let tab = rawAnchor.flatMap { a in tabs.first { tabPaneIds($0).contains(a) } } ?? tabs.first
-        guard let tab, !tab.panes.isEmpty else { return }
+        guard let tab, !tab.panes.isEmpty else { return nil }
         // Already this viewport's mirror and the clicked pane is on screen:
         // a click is a focus move, never a teardown and two fresh ssh
         // proxies (four re-mounts in five seconds of clicking, 2026-09-14).
-        if mirroredSession(of: controller) == composite,
+        if let controller = viewport, mirroredSession(of: controller) == composite,
            let shown = controller.surfaceTree.first(where: { $0.vigilAttachId == rawAnchor ?? "" }) ?? (rawAnchor == nil ? controller.surfaceTree.first : nil) {
             DispatchQueue.main.async {
                 Ghostty.moveFocus(to: shown)
                 shown.vigilControlSize(true, reason: "sidebar pane selected")
             }
-            return
+            return controller
         }
-        if mirroredSession(of: controller) != nil {
-            endMirrorViewport(controller)
-        } else {
-            releaseOccupant(of: controller)
+        if let controller = viewport {
+            if mirroredSession(of: controller) != nil {
+                endMirrorViewport(controller)
+            } else {
+                releaseOccupant(of: controller)
+            }
         }
         let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { pane in
             var config = Ghostty.SurfaceConfiguration()
@@ -2018,13 +2044,17 @@ class VigilSessionManager {
         }
         let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
         let view = Ghostty.SurfaceView(app, baseConfig: configFor(tab.panes[firstPane]))
-        swapTree(controller, SplitTree(view: view))
+        // A necessary new viewport is born with its real remote surface. An
+        // empty tree schedules a blank window before there is anything to mount.
+        let controller = viewport ?? TerminalController.newWindow(ghostty, tree: SplitTree(view: view), confirmUndo: false)
+        if viewport != nil { swapTree(controller, SplitTree(view: view)) }
         mirrorViewports.setObject(composite as NSString, forKey: controller)
         remoteLayouts[ObjectIdentifier(controller)] = VigilSessionControl.revision([tab])
         materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
         landAfterSplits(controller, anchor: rawAnchor, fallback: view, takeSize: rawAnchor != nil)
         vlog("remote: window -> viewport onto '\(composite)' via ssh \(alias) (\(tab.panes.count) panes)")
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+        return controller
     }
 
     /// The mirrors of this viewport die NOW, explicitly (a mirror view

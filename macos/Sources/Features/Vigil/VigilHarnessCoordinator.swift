@@ -201,12 +201,30 @@ final class VigilHarnessCoordinator: ObservableObject {
                 if let request { self?.present(request) } else { self?.clear() }
             }
             model.onRequestHandoff = { [weak self] request in
+                guard let self else { return }
                 let pane = request.request.context
-                if let id = request.handle.homeID, let home = self?.remoteHomes[id] {
-                    VigilSessionManager.shared.openRemotePane(alias: home.route, pane: pane)
+                let manager = VigilSessionManager.shared
+                if self.inbox?.isRemote(request) == true {
+                    guard let id = request.handle.homeID, let home = self.remoteHomes[id] else {
+                        manager.vlog("handoff: remote request \(request.request.id) has no enrolled route")
+                        return
+                    }
+                    guard manager.openRemotePane(alias: home.route, pane: pane) != nil else {
+                        let alert = NSAlert()
+                        alert.messageText = "This remote pane is unavailable"
+                        alert.informativeText = "Reconnect to \(home.route) and try again."
+                        alert.runModal()
+                        return
+                    }
                 } else if let view = VigilSessionManager.shared.liveView(attachId: pane) {
                     view.window?.makeKeyAndOrderFront(nil); view.window?.makeFirstResponder(view)
+                } else {
+                    manager.vlog("handoff: request \(request.request.id) pane \(pane) unavailable")
+                    return
                 }
+                // The request still stands at its provider. Only the card's
+                // presentation gets out of the terminal's way.
+                self.panel?.orderOut(nil)
             }
             model.automaticEligibility = { [weak self] request in
                 guard let id = request.handle.homeID, let home = self?.remoteHomes[id] else { return true }
