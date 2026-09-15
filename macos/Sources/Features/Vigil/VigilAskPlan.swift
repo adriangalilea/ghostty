@@ -36,9 +36,17 @@ enum VigilAskPlan {
         switch request.kind {
         case .questionnaire, .form:
             guard !request.questions.isEmpty else { return nil }
+            // A batch reads like the terminal's tab strip: the question's
+            // header and its place in the batch lead, so the HUD and the
+            // dialog beside it name the same question even though only the
+            // HUD advances (the dialog closes when the batch submits).
+            let count = request.questions.count
             var steps: [Step] = []
-            for question in request.questions {
-                guard let step = self.step(for: question, timeout: 45) else { return nil }
+            for (index, question) in request.questions.enumerated() {
+                let place = count > 1 ? "\(index + 1) of \(count)" : nil
+                let lead = [question.header, place].compactMap { $0 }.joined(separator: " · ")
+                let spoken = lead.isEmpty ? question.title : "\(lead): \(question.title)"
+                guard let step = self.step(for: question, spoken: spoken, timeout: 45) else { return nil }
                 steps.append(step)
             }
             return steps
@@ -81,7 +89,7 @@ enum VigilAskPlan {
         }
     }
 
-    private static func step(for question: Question, timeout: TimeInterval) -> Step? {
+    private static func step(for question: Question, spoken: String, timeout: TimeInterval) -> Step? {
         let id = question.id
         // Choice descriptions are shown as evidence under the question,
         // never narrated: the labels carry the voice, the block the fine
@@ -97,7 +105,7 @@ enum VigilAskPlan {
             let other = question.allowOther ? question.choices.count : nil
             let options = question.choices.map(\.label) + (other == nil ? [] : ["Something else"])
             let multi = question.kind == .multipleChoice
-            return Step(spoken: question.title, detail: detail, options: options,
+            return Step(spoken: spoken, detail: detail, options: options,
                         textOptions: other.map { [$0] } ?? [], multi: multi, enterText: false,
                         timeout: timeout) { answer, picks in
                 switch answer {
@@ -114,20 +122,20 @@ enum VigilAskPlan {
                 }
             }
         case .text:
-            return Step(spoken: question.title, detail: detail, options: ["Answer"], textOptions: [0],
+            return Step(spoken: spoken, detail: detail, options: ["Answer"], textOptions: [0],
                         multi: false, enterText: true, timeout: timeout) { answer, _ in
                 guard case .text(let text, _) = answer else { return nil }
                 return .answer(questionID: id, .text(text))
             }
         case .number:
-            return Step(spoken: question.title, detail: detail, options: ["Answer"], textOptions: [0],
+            return Step(spoken: spoken, detail: detail, options: ["Answer"], textOptions: [0],
                         multi: false, enterText: true, timeout: timeout) { answer, _ in
                 guard case .text(let text, _) = answer, let value = Double(text.trimmingCharacters(in: .whitespaces))
                 else { return nil }
                 return .answer(questionID: id, .number(value))
             }
         case .boolean:
-            return Step(spoken: question.title, detail: detail, options: nil, textOptions: [], multi: false,
+            return Step(spoken: spoken, detail: detail, options: nil, textOptions: [], multi: false,
                         enterText: false, timeout: timeout) { answer, _ in
                 switch answer {
                 case .yes: .answer(questionID: id, .boolean(true))
