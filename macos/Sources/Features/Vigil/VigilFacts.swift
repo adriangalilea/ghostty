@@ -21,6 +21,7 @@ final class VigilFacts: @unchecked Sendable {
     }
     struct Snapshot: Sendable {
         var revision: UInt64 = 0
+        var sidebarRevision: UInt64 = 0
         var files: [String: File] = [:]
         var leases: [Lease] = []
     }
@@ -136,7 +137,13 @@ final class VigilFacts: @unchecked Sendable {
         watchInPlace(files)
         watchProcesses(Set(leases.map(\.pid)))
         guard files != current.files || leases != current.leases || current.revision == 0 else { return }
-        current = Snapshot(revision: current.revision + 1, files: files, leases: leases)
+        // Renderer receipts can change on every output beat. They update the
+        // cache, but never invalidate a sidebar whose inputs stayed identical.
+        let sidebarChanged = current.revision == 0 || leases != current.leases ||
+            files.contains { key, file in Self.sidebarKey(key) && current.files[key] != file } ||
+            current.files.keys.contains { Self.sidebarKey($0) && files[$0] == nil }
+        current = Snapshot(revision: current.revision + 1,
+            sidebarRevision: current.sidebarRevision + (sidebarChanged ? 1 : 0), files: files, leases: leases)
         deliver(current)
         let elapsed = began.duration(to: .now)
         if elapsed > .milliseconds(100) { trace("facts: revision \(current.revision) read off main in \(elapsed)") }
@@ -173,6 +180,10 @@ final class VigilFacts: @unchecked Sendable {
 
     private static func identity(_ info: stat) -> String {
         "\(info.st_ino)-\(info.st_mtimespec.tv_sec * 1_000_000_000 + Int(info.st_mtimespec.tv_nsec))"
+    }
+
+    private static func sidebarKey(_ key: String) -> Bool {
+        !(key.hasPrefix("vigild/") && (key.hasSuffix(".size") || key.hasSuffix(".screen")))
     }
 
     private static func read(_ path: String, previous: File? = nil) -> File? {

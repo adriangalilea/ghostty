@@ -52,8 +52,9 @@ class VigilSessionManager {
     private lazy var factsLoader = VigilFacts(trace: { Self.vlogSync($0) }) { [weak self] snapshot in
         Task { @MainActor [weak self] in
             guard let self, snapshot.revision > self.facts.revision else { return }
+            let sidebarChanged = snapshot.sidebarRevision != self.facts.sidebarRevision
             self.facts = snapshot
-            NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+            if sidebarChanged { NotificationCenter.default.post(name: Self.stateDidChange, object: nil) }
         }
     }
 
