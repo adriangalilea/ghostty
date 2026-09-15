@@ -1,4 +1,5 @@
 import Foundation
+import AuthzClient
 import SystemConfiguration
 
 /// Other Macs' sessions, read through ssh. ONE source: `ssh <alias> vigild
@@ -145,8 +146,11 @@ final class VigilRemote: ObservableObject {
                           "-o", "ServerAliveCountMax=2", "-T", alias, "vigild", "dir", "--watch", "--until-eof"]
         // The write end lives with Process. App death closes it; the home
         // subscription exits on EOF even if no directory fact changes.
-        proc.standardInput = Pipe()
-        let out = Pipe()
+        guard let input = try? ProcessPipe.make(), let out = try? ProcessPipe.make() else {
+            Self.trace?("remote: \(alias) could not create directory stream pipes")
+            return
+        }
+        proc.standardInput = input
         proc.standardOutput = out
         proc.standardError = FileHandle.nullDevice
         out.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
@@ -209,7 +213,7 @@ final class VigilRemote: ObservableObject {
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
                 proc.arguments = ["-G", alias]
-                let out = Pipe()
+                guard let out = try? ProcessPipe.make() else { continue }
                 proc.standardOutput = out
                 proc.standardError = FileHandle.nullDevice
                 guard (try? proc.run()) != nil else { continue }
@@ -279,7 +283,7 @@ final class VigilRemote: ObservableObject {
             process.arguments = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
                                  "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
                                  alias, "vigild", "session"]
-            let input = Pipe(), output = Pipe(), errors = Pipe()
+            let input = try ProcessPipe.make(), output = try ProcessPipe.make(), errors = try ProcessPipe.make()
             process.standardInput = input
             process.standardOutput = output
             process.standardError = errors
@@ -319,12 +323,11 @@ final class VigilRemote: ObservableObject {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
             proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-T", alias, "vigild", "dir"]
-            let out = Pipe()
-            let err = Pipe()
-            proc.standardOutput = out
-            proc.standardError = err
             var result: Result<(Directory, Data), Error>
             do {
+                let out = try ProcessPipe.make(), err = try ProcessPipe.make()
+                proc.standardOutput = out
+                proc.standardError = err
                 try proc.run()
                 let data = out.fileHandleForReading.readDataToEndOfFile()
                 let errData = err.fileHandleForReading.readDataToEndOfFile()
