@@ -438,7 +438,7 @@ final class VigilRemote: ObservableObject {
                             ?? program
                             ?? pane.command.flatMap(VigilSessionManager.processLabel)
                             ?? pane.title
-                            ?? URL(fileURLWithPath: pane.cwd).lastPathComponent
+                            ?? (pane.cwd as NSString).lastPathComponent
                         return .init(
                             id: Self.compositeId(host.alias, pane.id),
                             paneId: nil,
@@ -450,7 +450,7 @@ final class VigilRemote: ObservableObject {
                     }
                     let anchor = all.first.map { Self.compositeId(host.alias, $0.id) }
                     let title = tab.label.flatMap { $0.isEmpty ? nil : $0 }
-                        ?? URL(fileURLWithPath: tab.panes.first?.cwd ?? "").lastPathComponent
+                        ?? ((tab.panes.first?.cwd ?? "") as NSString).lastPathComponent
                     tabs.append(.init(
                         id: VigilSessionManager.tabRowId(composite, anchor: anchor, index: index),
                         title: title.isEmpty ? "tab \(index + 1)" : title,

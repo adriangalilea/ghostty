@@ -1033,7 +1033,7 @@ class VigilSessionManager {
         var buried = Session(
             name: newSessionId(),
             label: pane.label ?? pane.title ?? paneProgram(pane.id)
-                ?? URL(fileURLWithPath: pane.cwd).lastPathComponent,
+                ?? (pane.cwd as NSString).lastPathComponent,
             emoji: pane.emoji,
             cwd: pane.cwd)
         buried.tabs = [Tab(panes: [pane], layout: nil)]
@@ -3024,7 +3024,7 @@ class VigilSessionManager {
         var buried = Session(
             name: newSessionId(),
             label: tab.label ?? surface.flatMap { capturedTitle(of: $0) }
-                ?? URL(fileURLWithPath: cwd).lastPathComponent,
+                ?? (cwd as NSString).lastPathComponent,
             emoji: tab.emoji,
             cwd: cwd,
             held: [TabRuntime(tree: tree, dock: dock)])
@@ -3246,7 +3246,7 @@ class VigilSessionManager {
             let runtime = TabRuntime(tree: tree, dock: nil)
             var stray = Session(
                 name: newSessionId(),
-                label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
+                label: title.isEmpty ? (cwd as NSString).lastPathComponent : title,
                 cwd: cwd,
                 held: [runtime])
             stray.thumbnail = surface?.asImage
@@ -3575,7 +3575,7 @@ class VigilSessionManager {
         let cwd = tab.panes.first?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
         var buried = Session(
             name: newSessionId(),
-            label: tab.label ?? tab.panes.first?.title ?? URL(fileURLWithPath: cwd).lastPathComponent,
+            label: tab.label ?? tab.panes.first?.title ?? (cwd as NSString).lastPathComponent,
             emoji: tab.emoji,
             cwd: cwd)
         buried.tabs = [tab]
@@ -4813,7 +4813,7 @@ class VigilSessionManager {
 
         var session = Session(
             name: newSessionId(),
-            label: title.isEmpty ? URL(fileURLWithPath: cwd).lastPathComponent : title,
+            label: title.isEmpty ? (cwd as NSString).lastPathComponent : title,
             cwd: cwd,
             held: [TabRuntime(tree: tree, dock: nil)])
         let (panes, layout) = capture(tree, carrying: [])
@@ -5042,7 +5042,8 @@ class VigilSessionManager {
     static func processLabel(_ argv: String) -> String? {
         let parts = argv.split(separator: " ")
         guard let first = parts.first else { return nil }
-        let base = URL(fileURLWithPath: String(first)).lastPathComponent
+        // Labels are lexical; argv and remote paths need no filesystem lookup.
+        let base = (String(first) as NSString).lastPathComponent
         if base.hasPrefix("-") { return nil }
         // "ssh: /path/ctl [mux]" and friends: daemons that rewrite argv0
         // with a colon are background machinery, never the pane's program.
@@ -5052,7 +5053,7 @@ class VigilSessionManager {
         let interpreters: Set<String> = ["node", "python", "python3", "ruby", "bun", "deno", "tsx"]
         if interpreters.contains(base) {
             for part in parts.dropFirst() where !part.hasPrefix("-") && !part.contains("=") {
-                let pb = URL(fileURLWithPath: String(part)).lastPathComponent
+                let pb = (String(part) as NSString).lastPathComponent
                 if pb.contains(".") { return pb }
             }
         }
@@ -5614,7 +5615,7 @@ class VigilSessionManager {
                 ?? pane.command.flatMap(Self.processLabel)
                 ?? liveTitle
                 ?? pane.title
-                ?? URL(fileURLWithPath: pane.cwd).lastPathComponent
+                ?? (pane.cwd as NSString).lastPathComponent
             return SidebarPane(
                 id: pane.id,
                 paneId: pane.id,
@@ -5632,7 +5633,7 @@ class VigilSessionManager {
         /// that; a terminal title is the full path).
         func tabTitle(cwd: String?, fallback: String) -> String {
             guard let cwd, !cwd.isEmpty else { return fallback }
-            let base = URL(fileURLWithPath: cwd).lastPathComponent
+            let base = (cwd as NSString).lastPathComponent
             return base.isEmpty ? fallback : base
         }
 
