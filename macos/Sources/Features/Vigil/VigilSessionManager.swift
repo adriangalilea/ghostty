@@ -2333,7 +2333,9 @@ class VigilSessionManager {
     /// session that is not running is the lie this call exists to kill.
     @discardableResult
     private func startDaemon(pane: Pane, session: String) -> Bool {
-        var args = [Self.vigildBin, "new", pane.id]
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: Self.vigildBin)
+        var args = ["new", pane.id]
         if let cmd = pane.command {
             if cmd.hasPrefix("direct:") {
                 // ghostty's command syntax: `direct:` argv, space-separated.
@@ -2344,64 +2346,24 @@ class VigilSessionManager {
                 args += ["-c", cmd]
             }
         }
+        proc.arguments = args
+        proc.currentDirectoryURL = URL(fileURLWithPath: pane.cwd)
         var env = ProcessInfo.processInfo.environment
         env["VIGIL_SESSION"] = session
-        guard let pid = Self.spawnDisclaimed(args, env: env, cwd: pane.cwd) else {
-            vlog("!! daemon: \(pane.id) spawn FAILED (posix_spawn errno \(errno))")
-            return false
+        proc.environment = env
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            if proc.terminationStatus == 0 {
+                vlog("daemon: \(pane.id) up (created running)")
+                return true
+            } else {
+                vlog("!! daemon: \(pane.id) spawn FAILED (exit \(proc.terminationStatus))")
+            }
+        } catch {
+            vlog("!! daemon: \(pane.id) spawn FAILED (\(error))")
         }
-        var status: Int32 = 0
-        while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
-        let exited = (status & 0x7f) == 0
-        let code = exited ? (status >> 8) & 0xff : -1
-        if code == 0 {
-            vlog("daemon: \(pane.id) up (created running, responsible for itself)")
-            return true
-        }
-        vlog("!! daemon: \(pane.id) spawn FAILED (\(exited ? "exit \(code)" : "signal \(status & 0x7f)"))")
         return false
-    }
-
-    /// `responsibility_spawnattrs_setdisclaim`, libSystem's unpublished
-    /// spawn attribute (Chromium's `disclaim_responsibility`): the child is
-    /// the process macOS holds responsible for its own privacy decisions.
-    /// Resolved by name so a build never fails on a header Apple does not
-    /// ship; a system without it spawns undisclaimed and says so once.
-    private static let disclaimSpawnAttrs: (@convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32)? = {
-        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_spawnattrs_setdisclaim") else { return nil }
-        return unsafeBitCast(symbol, to: (@convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32).self)
-    }()
-    private static var disclaimWarned = false
-
-    /// Spawn a daemon RESPONSIBLE FOR ITSELF. Foundation's Process (a plain
-    /// posix_spawn) makes the child's privacy identity the app's: while the
-    /// app lives the daemon rides its grants, and the moment the app quits
-    /// (every deploy) the daemon is judged as itself with no grant and no
-    /// prompt (a headless process is never asked), so a pane's Local
-    /// Network calls failed silently after every deploy (2026-09-15). A
-    /// disclaimed daemon is itself from birth, its TCC row is pinned to
-    /// vigild's Developer ID requirement, and one prompt covers every
-    /// rebuild.
-    static func spawnDisclaimed(_ argv: [String], env: [String: String], cwd: String) -> pid_t? {
-        var attr: posix_spawnattr_t?
-        posix_spawnattr_init(&attr)
-        defer { posix_spawnattr_destroy(&attr) }
-        if let disclaimSpawnAttrs {
-            _ = disclaimSpawnAttrs(&attr, 1)
-        } else if !disclaimWarned {
-            disclaimWarned = true
-            shared.vlog("!! daemon spawn: responsibility_spawnattrs_setdisclaim missing from libSystem - daemons inherit the app's privacy identity")
-        }
-        var actions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&actions)
-        defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addchdir_np(&actions, cwd)
-        let cArgs: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) } + [nil]
-        let cEnv: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") } + [nil]
-        defer { (cArgs + cEnv).forEach { free($0) } }
-        var pid: pid_t = 0
-        let rc = posix_spawn(&pid, argv[0], &actions, &attr, cArgs, cEnv)
-        return rc == 0 ? pid : nil
     }
 
     /// New Session (⌘N, menu-bar New Session, overview `n`): the fresh
