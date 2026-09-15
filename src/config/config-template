@@ -1,7 +1,8 @@
-# This is the configuration file for Ghostty.
+# This is the configuration file for Vigil (the Ghostty fork).
+# Vanilla Ghostty has its own configuration; settings here affect only Vigil.
 #
 # This template file has been automatically created at the following
-# path since Ghostty couldn't find any existing config files on your system:
+# path because Vigil's configuration did not exist:
 #
 #   {[path]s}
 #

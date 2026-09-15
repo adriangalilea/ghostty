@@ -428,7 +428,10 @@ extension Ghostty {
 
         var macosCustomIcon: String {
             #if os(macOS)
-            let defaultValue = NSString("~/.config/ghostty/Ghostty.icns").expandingTildeInPath
+            let configHome = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config").path
+            let defaultValue = URL(fileURLWithPath: configHome)
+                .appendingPathComponent("vigil/Ghostty.icns").path
             guard let config = self.config else { return defaultValue }
             var v: UnsafePointer<Int8>?
             let key = "macos-custom-icon"

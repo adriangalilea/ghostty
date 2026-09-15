@@ -551,8 +551,8 @@ language: ?[:0]const u8 = null,
 /// include path separators unless it is an absolute pathname.
 ///
 /// The first directory is the `themes` subdirectory of your Ghostty
-/// configuration directory. This is `$XDG_CONFIG_HOME/ghostty/themes` or
-/// `~/.config/ghostty/themes`.
+/// configuration directory. This is `$XDG_CONFIG_HOME/vigil/themes` or
+/// `~/.config/vigil/themes`.
 ///
 /// The second directory is the `themes` subdirectory of the Ghostty resources
 /// directory. Ghostty ships with a multitude of themes that will be installed
@@ -1176,7 +1176,9 @@ command: ?Command = null,
 /// comma-separated list of ssh aliases (`vigil-hosts = m4,studio`). Each
 /// is read through `ssh <alias> vigild dir` and its panes attach through
 /// `ssh <alias> vigild proxy <id>`: everything about reachability, keys
-/// and the network is the user's ssh config, never vigil's.
+/// and the network is the user's ssh config, never vigil's. Lives in
+/// `$XDG_CONFIG_HOME/vigil/config`, never in the ghostty config: a vanilla
+/// Ghostty reading the shared file rejects the key as unknown.
 @"vigil-hosts": ?[:0]const u8 = null,
 
 /// Vigil: an already-connected stream to `vigil-attach`'s daemon, owned
@@ -2545,7 +2547,7 @@ keybind: Keybinds = .{},
 
 /// When this is true, the default configuration file paths will be loaded.
 /// The default configuration file paths are currently only the XDG
-/// config path ($XDG_CONFIG_HOME/ghostty/config.ghostty).
+/// config path ($XDG_CONFIG_HOME/vigil/config).
 ///
 /// If this is false, the default configuration paths will not be loaded.
 /// This is targeted directly at using Ghostty from the CLI in a way
@@ -3499,7 +3501,7 @@ keybind: Keybinds = .{},
 /// The absolute path to the custom icon file.
 /// Supported formats include PNG, JPEG, and ICNS.
 ///
-/// Defaults to `~/.config/ghostty/Ghostty.icns`
+/// Defaults to `~/.config/vigil/Ghostty.icns`
 @"macos-custom-icon": ?[:0]const u8 = null,
 
 /// The material to use for the frame of the macOS app icon.
@@ -3909,10 +3911,9 @@ pub fn deinit(self: *Config) void {
 /// Load the configuration according to the default rules:
 ///
 ///   1. Defaults
-///   2. XDG config dir
-///   3. "Application Support" directory (macOS only)
-///   4. CLI flags
-///   5. Recursively defined configuration files
+///   2. Vigil XDG config file
+///   3. CLI flags
+///   4. Recursively defined configuration files
 ///
 pub fn load(alloc_gpa: Allocator) !Config {
     var result = try default(alloc_gpa);
@@ -4096,83 +4097,16 @@ fn writeConfigTemplate(path: []const u8) !void {
     );
 }
 
-/// Load configurations from the default configuration files. The default
-/// configuration file is at `$XDG_CONFIG_HOME/ghostty/config.ghostty`.
-///
-/// On macOS, `$HOME/Library/Application Support/$CFBundleIdentifier/`
-/// is also loaded.
-///
-/// The legacy `config` file (without extension) is first loaded,
-/// then `config.ghostty`.
+/// Load Vigil's configuration only. Vanilla Ghostty's XDG and Application
+/// Support directories are never inherited. Explicit `config-file` includes
+/// still follow Ghostty's normal rules.
 pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
-    // Load XDG first
-    const legacy_xdg_path = try file_load.legacyDefaultXdgPath(alloc);
-    defer alloc.free(legacy_xdg_path);
-    const xdg_path = try file_load.defaultXdgPath(alloc);
-    defer alloc.free(xdg_path);
-    const xdg_loaded: bool = xdg_loaded: {
-        const legacy_xdg_action = self.loadOptionalFile(alloc, legacy_xdg_path);
-        const xdg_action = self.loadOptionalFile(alloc, xdg_path);
-        if (xdg_action != .not_found and legacy_xdg_action != .not_found) {
-            log.warn("both config files `{s}` and `{s}` exist.", .{ legacy_xdg_path, xdg_path });
-            log.warn("loading them both in that order", .{});
-            break :xdg_loaded true;
-        }
-
-        break :xdg_loaded xdg_action != .not_found or
-            legacy_xdg_action != .not_found;
-    };
-
-    // On macOS load the app support directory as well
-    if (comptime builtin.os.tag == .macos) {
-        const legacy_app_support_path = try file_load.legacyDefaultAppSupportPath(alloc);
-        defer alloc.free(legacy_app_support_path);
-        const app_support_path = try file_load.preferredAppSupportPath(alloc);
-        defer alloc.free(app_support_path);
-        const app_support_loaded: bool = loaded: {
-            const legacy_app_support_action = self.loadOptionalFile(
-                alloc,
-                legacy_app_support_path,
-            );
-
-            // The app support path and legacy may be the same, since we
-            // use the `preferred` call above. If its the same, avoid
-            // a double-load.
-            const app_support_action: OptionalFileAction = if (!std.mem.eql(
-                u8,
-                legacy_app_support_path,
-                app_support_path,
-            )) self.loadOptionalFile(
-                alloc,
-                app_support_path,
-            ) else .not_found;
-
-            if (app_support_action != .not_found and legacy_app_support_action != .not_found) {
-                log.warn(
-                    "both config files `{s}` and `{s}` exist.",
-                    .{ legacy_app_support_path, app_support_path },
-                );
-                log.warn("loading them both in that order", .{});
-                break :loaded true;
-            }
-
-            break :loaded app_support_action != .not_found or
-                legacy_app_support_action != .not_found;
+    const config_path = try file_load.preferredDefaultFilePath(alloc);
+    defer alloc.free(config_path);
+    if (self.loadOptionalFile(alloc, config_path) == .not_found) {
+        writeConfigTemplate(config_path) catch |err| {
+            log.warn("error creating Vigil config file err={}", .{err});
         };
-
-        // If both files are not found, then we create a template file.
-        // For macOS, we only create the template file in the app support
-        if (!app_support_loaded and !xdg_loaded) {
-            writeConfigTemplate(app_support_path) catch |err| {
-                log.warn("error creating template config file err={}", .{err});
-            };
-        }
-    } else {
-        if (!xdg_loaded) {
-            writeConfigTemplate(xdg_path) catch |err| {
-                log.warn("error creating template config file err={}", .{err});
-            };
-        }
     }
 }
 

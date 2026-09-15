@@ -242,7 +242,7 @@ fn runInner(
         };
 
         const cache: ?DiskCache = if (opts.cache) cache: {
-            const path = DiskCache.defaultPath(alloc, "ghostty") catch |err| {
+            const path = DiskCache.defaultPath(alloc, "vigil") catch |err| {
                 warnPrint(stderr, "ghostty terminfo cache unavailable: {}", .{err});
                 break :session .{ .term = "xterm-256color" };
             };

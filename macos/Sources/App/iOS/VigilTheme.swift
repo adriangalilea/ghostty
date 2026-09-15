@@ -3,7 +3,7 @@ import UIKit
 /// The phone renders with the Mac's theme, not Ghostty's stock palette:
 /// iOS loads no config files, so the theme is written into the app's
 /// sandbox at every launch and loaded from there (idempotent; the file
-/// is derived, never edited). Catppuccin Mocha = `~/.config/ghostty/config`
+/// is derived, never edited). Catppuccin Mocha = `~/.config/vigil/config`
 /// on Adrian's Macs; the values are the theme file's verbatim.
 enum VigilTheme {
     static let config = """
