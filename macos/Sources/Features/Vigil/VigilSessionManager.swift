@@ -48,6 +48,14 @@ import GhosttyKit
 @MainActor
 class VigilSessionManager {
     static let shared = VigilSessionManager()
+    private var facts = VigilFacts.Snapshot()
+    private lazy var factsLoader = VigilFacts(trace: { Self.vlogSync($0) }) { [weak self] snapshot in
+        Task { @MainActor [weak self] in
+            guard let self, snapshot.revision > self.facts.revision else { return }
+            self.facts = snapshot
+            NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+        }
+    }
 
     /// One tab's live runtime while it has no window: its split tree (views
     /// alive, daemons attached) and its dock, if any. Held by the session's
@@ -147,32 +155,22 @@ class VigilSessionManager {
     /// The home stores the exact observed state revision. File timestamps are
     /// presentation clocks, never authority to acknowledge a later state.
     private func stateRevision(_ pane: String) -> String? {
-        var info = stat()
-        guard Darwin.lstat(agentStateDir.appendingPathComponent("\(pane).state").path, &info) == 0 else { return nil }
-        return "\(info.st_ino)-\(info.st_mtimespec.tv_sec * 1_000_000_000 + info.st_mtimespec.tv_nsec)"
+        facts.files["wake/state/\(pane).state"]?.revision
     }
 
     func lastAck(_ pane: String) -> Date? {
         if let remote = VigilRemote.split(pane) {
             return VigilRemote.shared.host(remote.alias)?.directory?.panes[remote.name]?.seen.map(Date.init(timeIntervalSince1970:))
         }
-        if let cached = paneAckCache?[pane] { return cached }
-        guard let revision = stateRevision(pane),
-              let receipt = try? String(contentsOf: seenURL(pane), encoding: .utf8),
-              receipt.trimmingCharacters(in: .whitespacesAndNewlines) == revision else { return nil }
-        let ack = (try? FileManager.default.attributesOfItem(atPath: agentStateDir.appendingPathComponent("\(pane).state").path))?[.modificationDate] as? Date
-        guard stateRevision(pane) == revision else { return nil }
-        paneAckCache?[pane] = ack
-        return ack
-    }
-
-    private func seenURL(_ pane: String) -> URL {
-        agentStateDir.appendingPathComponent("\(pane).seen")
+        guard let state = facts.files["wake/state/\(pane).state"],
+              facts.files["wake/state/\(pane).seen"]?.text.trimmingCharacters(in: .whitespacesAndNewlines) == state.revision
+        else { return nil }
+        return state.since
     }
 
     func markSeen(_ pane: String, revision: String? = nil) {
         guard let observed = revision ?? stateRevision(pane), stateRevision(pane) == observed else { return }
-        do { try "\(observed)\n".write(to: seenURL(pane), atomically: true, encoding: .utf8) } catch { vlog("!! seen: cannot write \(pane)") }
+        factsLoader.markSeen(pane, revision: observed)
     }
 
     /// Custom identities for PANES and TABS (label + emoji, display-only
@@ -1214,7 +1212,6 @@ class VigilSessionManager {
     /// grid difference flipped every second once the surface framed
     /// itself at the owner's grid, 2026-08-29.)
     private func syncOwnerGrids() {
-        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/vigild")
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
             guard let id = view.vigilAttachId, view.surface != nil else { continue }
             view.vigilRefreshTransportStatus()
@@ -1226,7 +1223,7 @@ class VigilSessionManager {
             if let alias = view.vigilHost {
                 raw = VigilRemote.shared.host(alias)?.directory?.panes[id]?.size ?? ""
             } else {
-                raw = (try? String(contentsOf: dir.appendingPathComponent("\(id).size"), encoding: .utf8)) ?? ""
+                raw = facts.files["vigild/\(id).size"]?.text ?? ""
             }
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             let parts = line.split(separator: " ", maxSplits: 2)
@@ -1263,7 +1260,7 @@ class VigilSessionManager {
             }
             fitLetterbox(view, grid: grid)
             // The content receipt compares against the local daemon's hash file.
-            if view.vigilHost == nil { checkScreen(view, id: id, dir: dir) }
+            if view.vigilHost == nil { checkScreen(view, id: id) }
         }
     }
 
@@ -1273,9 +1270,9 @@ class VigilSessionManager {
     /// held still across two ticks (a spinning TUI is not a desync); two
     /// strikes log `!! screen mismatch` and re-sync from the daemon. The
     /// first agreement per surface logs once, proving the mechanism.
-    private func checkScreen(_ view: Ghostty.SurfaceView, id: String, dir: URL) {
+    private func checkScreen(_ view: Ghostty.SurfaceView, id: String) {
         guard let surface = view.surface,
-              let daemon = try? String(contentsOf: dir.appendingPathComponent("\(id).screen"), encoding: .utf8)
+              let daemon = facts.files["vigild/\(id).screen"]?.text
                 .trimmingCharacters(in: .whitespacesAndNewlines), !daemon.isEmpty else { return }
         let stable = daemon == view.vigilScreenSeen
         view.vigilScreenSeen = daemon
@@ -5061,32 +5058,15 @@ class VigilSessionManager {
         return base
     }
 
-    /// One snapshot = one disk read per pane file: paneRow asks for the
-    /// same tree/pid file up to five times (program, foreground,
-    /// watchers), and at 66 hook sessions the repeat reads were ~10% of
-    /// idle main-thread time (sampled 2026-09-05). While `sidebarSnapshot`
-    /// is measuring, the first read serves the rest; nil = live reads.
-    private var paneFileCache: [String: [String]]?
-    /// The same memo for the pane's state file and seen mark: paneRow read
-    /// and stat'd each twice per pane (display state, then watchers), and
-    /// stat'd the harness gate once per pane on top (2026-09-14).
+    /// Immutable file facts are loaded by the directory watcher off main.
     struct PaneState {
         let state: AgentState
         let flavor: BlockFlavor?
         let since: Date
         let revision: String
     }
-    private var paneStateCache: [String: PaneState?]?
-    private var paneAckCache: [String: Date?]?
-
     private func paneFileLines(_ pane: String, _ ext: String) -> [String] {
-        let key = "\(pane).\(ext)"
-        if let cached = paneFileCache?[key] { return cached }
-        let url = vigildStateDir.appendingPathComponent(key)
-        let lines = (try? String(contentsOf: url, encoding: .utf8))
-            .map { $0.components(separatedBy: "\n").filter { !$0.isEmpty } } ?? []
-        paneFileCache?[key] = lines
-        return lines
+        facts.files["vigild/\(pane).\(ext)"]?.lines ?? []
     }
 
     /// argv column of a tree/died file. Line 1 is the daemon's child: a
@@ -5190,53 +5170,16 @@ class VigilSessionManager {
         let deadline: Date?
     }
 
-    private struct LeaseFile: Decodable {
-        let pane: String
-        let pid: Int32
-        let note: String
-        let deadline: Double?
-    }
-
-    private var leasesDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/leases")
-    }
-
-    /// All live leases, grouped by pane. A lease whose pid is dead is
-    /// garbage (its process broke the remove-on-exit contract or was
-    /// SIGKILLed) and is swept here, the read path.
     func watchLeases() -> [String: [WatchLease]] {
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: leasesDir, includingPropertiesForKeys: nil) else { return [:] }
-        var out: [String: [WatchLease]] = [:]
-        for file in files where file.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: file),
-                  let lease = try? JSONDecoder().decode(LeaseFile.self, from: data) else { continue }
-            guard Darwin.kill(lease.pid, 0) == 0 else {
-                try? FileManager.default.removeItem(at: file)
-                continue
-            }
-            out[lease.pane, default: []].append(WatchLease(
-                pane: lease.pane,
-                note: lease.note,
-                deadline: lease.deadline.map { Date(timeIntervalSince1970: $0) }))
-        }
-        return out
+        Dictionary(grouping: facts.leases.map {
+            WatchLease(pane: $0.pane, note: $0.note, deadline: $0.deadline.map(Date.init(timeIntervalSince1970:)))
+        }, by: \.pane)
     }
 
     private var agentStateDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/wake/state")
     }
-
-    /// Event-driven state, not polled: any hook write into the state dir
-    /// repaints the projections within the refresh throttle, instead of
-    /// waiting for the sidebar's 2s ticker. (Whatever latency remains on a
-    /// permission prompt latency is whatever its adapter/source reports.)
-    private var stateDirWatcher: DispatchSourceFileSystemObject?
-    /// The twin watcher on vigild's own state dir (tree/pid renames).
-    private var vigildDirWatcher: DispatchSourceFileSystemObject?
-    private var vigildDirPulse: DispatchWorkItem?
 
     // MARK: Structured harness requests
 
@@ -5283,51 +5226,7 @@ class VigilSessionManager {
             Task { @MainActor in self?.vlog(line) }
         }
         SpeechRouter.warmAll()
-        try? FileManager.default.createDirectory(at: agentStateDir, withIntermediateDirectories: true)
-        let fd = Darwin.open(agentStateDir.path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd, eventMask: .write, queue: .main)
-        source.setEventHandler {
-            NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
-        }
-        source.setCancelHandler { close(fd) }
-        source.resume()
-        stateDirWatcher = source
-        // The daemon side of event-driven: vigild RENAMES tree/pid files
-        // into its state dir on every process-tree or deep-foreground
-        // change, so the sidebar's program column repaints from THIS
-        // watcher. It replaced the sidebar's 2s poll (2026-09-06); the
-        // refresh throttle (~4/s) absorbs a busy fleet's event rate.
-        try? FileManager.default.createDirectory(
-            at: vigildStateDir, withIntermediateDirectories: true)
-        let vfd = Darwin.open(vigildStateDir.path, O_EVTONLY)
-        if vfd < 0 {
-            vlog("!! vigild dir watcher failed to open \(vigildStateDir.path) - program column repaints only via side-channels")
-        }
-        if vfd >= 0 {
-            let vsource = DispatchSource.makeFileSystemObjectSource(
-                fileDescriptor: vfd, eventMask: .write, queue: .main)
-            // Coalesced to one pulse per 300ms: pid/tree tmp+rename pairs
-            // land twice per fg/tree change across the fleet, plus
-            // screen.txt unlink/create cycles (screen-hash and size files
-            // write IN-PLACE and are invisible to this kqueue, by the
-            // dir-watch lesson), and the raw event rate re-lit the
-            // sidebar storm tripwire the hour this watcher shipped
-            // (2026-09-06).
-            vsource.setEventHandler { [weak self] in
-                guard let self, self.vigildDirPulse == nil else { return }
-                let pulse = DispatchWorkItem { [weak self] in
-                    self?.vigildDirPulse = nil
-                    NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
-                }
-                self.vigildDirPulse = pulse
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: pulse)
-            }
-            vsource.setCancelHandler { close(vfd) }
-            vsource.resume()
-            vigildDirWatcher = vsource
-        }
+        factsLoader.start()
     }
 
     /// The pane's continuous program state as its adapter last wrote it.
@@ -5339,17 +5238,13 @@ class VigilSessionManager {
             let flavor = token.split(separator: " ").dropFirst().first.flatMap { BlockFlavor(rawValue: String($0)) }
             return PaneState(state: state, flavor: flavor, since: Date(timeIntervalSince1970: truth.since ?? 0), revision: revision)
         }
-        if let cached = paneStateCache?[pane] { return cached }
-        let read = readPaneAgentState(pane)
-        paneStateCache?[pane] = read
-        return read
+        return readPaneAgentState(pane)
     }
 
     private func readPaneAgentState(_ pane: String) -> PaneState? {
-        let url = agentStateDir.appendingPathComponent("\(pane).state")
-        guard let revision = stateRevision(pane),
-              let raw = try? String(contentsOf: url, encoding: .utf8),
-              stateRevision(pane) == revision else { return nil }
+        guard let file = facts.files["wake/state/\(pane).state"] else { return nil }
+        let revision = file.revision
+        let raw = file.text
         let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         let state: AgentState
         switch parts.first.map(String.init) ?? "" {
@@ -5362,13 +5257,13 @@ class VigilSessionManager {
         default: return nil
         }
         let flavor = parts.count > 1 ? BlockFlavor(rawValue: String(parts[1])) : nil
-        let since = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        let since = file.since
         // A broker outage never erases an already observed attention flavor.
         if state == .working, parts.count > 1 {
-            if parts[1] == "unknown" { return PaneState(state: .unknown, flavor: nil, since: since ?? .distantPast, revision: revision) }
-            if parts[1] == "interrupting" { return PaneState(state: .interrupting, flavor: nil, since: since ?? .distantPast, revision: revision) }
+            if parts[1] == "unknown" { return PaneState(state: .unknown, flavor: nil, since: since, revision: revision) }
+            if parts[1] == "interrupting" { return PaneState(state: .interrupting, flavor: nil, since: since, revision: revision) }
         }
-        return PaneState(state: state, flavor: flavor, since: since ?? .distantPast, revision: revision)
+        return PaneState(state: state, flavor: flavor, since: since, revision: revision)
     }
 
     /// Seen-ack changes presentation only; it never resolves a broker request.
@@ -5705,8 +5600,6 @@ class VigilSessionManager {
     /// AgentState. A tab materializing its splits one tick apart renders
     /// every registered row from the first paint: nothing flashes.
     func sidebarSnapshot() -> [SidebarSessionRow] {
-        paneFileCache = [:]; paneStateCache = [:]; paneAckCache = [:]
-        defer { paneFileCache = nil; paneStateCache = nil; paneAckCache = nil }
         let leases = watchLeases()
 
         func paneRow(_ pane: Pane, view: Ghostty.SurfaceView?, isDock: Bool) -> SidebarPane {
@@ -5987,7 +5880,8 @@ class VigilSessionManager {
     /// session transition is recorded so an impossible state is caught the
     /// moment it appears instead of being guessed at from a screenshot.
     /// Dev builds only: a public (Release) build writes nothing to disk.
-    func vlog(_ msg: String) { Self.vlogSync(msg) }
+    private nonisolated static let vlogQueue = DispatchQueue(label: "vigil.log", qos: .utility)
+    func vlog(_ msg: String) { Self.vlogQueue.async { Self.vlogSync(msg) } }
 
     /// The append itself, callable from ANY thread with no hop: the
     /// watchdog's stall line and the uncaught-exception handler's last
@@ -6000,12 +5894,11 @@ class VigilSessionManager {
         // cost a 2h mental offset on every receipt read.
         let stamp = vlogStamp.string(from: Date())
         let line = "\(stamp) \(msg)\n"
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/vigil.log")
-        if let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()
-        } else {
-            try? line.data(using: .utf8)!.write(to: url)
+        let fd = Darwin.open(NSHomeDirectory() + "/.local/state/wake/vigil.log", O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
+        if fd >= 0 {
+            defer { close(fd) }
+            let data = Data(line.utf8)
+            data.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, $0.count) }
         }
         #endif
     }
