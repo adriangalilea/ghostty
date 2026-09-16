@@ -153,8 +153,12 @@ final class VigilSummon {
         }
     }
 
+    /// The attention pair's falling half: an agent finished on a pane you
+    /// cannot see. Pop rang on every message across the fleet (2026-09-16).
     static func doneChime() {
-        NSSound(named: NSSound.Name("Pop"))?.play()
+        if !Earcon.ended.play() {
+            VigilSessionManager.shared.vlog("summon: ended cue SILENT - output player refused")
+        }
     }
 
     private func announce() {
