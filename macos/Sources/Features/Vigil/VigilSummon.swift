@@ -144,8 +144,13 @@ final class VigilSummon {
     /// glass moves (the eye and ⌘⇧H already carry it).
     private var chimedDone: [String: Date] = [:]
 
+    /// The waiting cue, the earcon family's own (two notes rising): only
+    /// for a blocker nothing narrates. Glass was a system alert on top of
+    /// the ask's voice and annoyed even alone (Adrian, 2026-09-16).
     static func chime() {
-        NSSound(named: NSSound.Name("Glass"))?.play()
+        if !Earcon.waiting.play() {
+            VigilSessionManager.shared.vlog("summon: waiting cue SILENT - output player refused")
+        }
     }
 
     static func doneChime() {
@@ -168,26 +173,32 @@ final class VigilSummon {
         // distinguishable from the log alone.
         var fresh = false
         for ask in asks where (chimed[ask.pane] ?? .distantPast) < ask.since {
-            // The gate is TALKING to the human about this pane right now:
-            // the narration is the announcement, and a chime in the answer
-            // window masked the spoken word (drill two, 2026-08-25). Not
-            // marked chimed - an ask that times out unanswered leaves the
-            // pane blocked, and THEN the chime does its job.
-            if ask.pane == VigilAsk.askingPane { continue }
+            // ONE cue per moment, owned by the layer that owns it. A blocker
+            // the ask lane carries (narrated now, or queued in the inbox to
+            // be narrated next) gets the ask's own cues - narration, the
+            // ears-open earcon, accepted/unheard - and a Glass on top was
+            // a second sound for the same permission on every command
+            // (2026-09-16). Not marked chimed: an ask that times out
+            // unanswered leaves the pane blocked with nothing carrying it,
+            // and THEN the chime does its job.
+            if ask.pane == VigilAsk.askingPane || VigilHarnessCoordinator.shared.carries(pane: ask.pane) { continue }
             chimed[ask.pane] = ask.since
             fresh = true
         }
         if fresh {
-            manager.vlog("summon: chime")
+            manager.vlog("summon: waiting cue")
             Self.chime()
         }
-        // Ended turns ding softer — news, not interruption.
+        // Ended turns ding softer — news, not interruption — and news is
+        // what you cannot see: a turn ending on screen is seen, and a Pop
+        // for every visible message was a sound per message.
         let done = manager.turnEnds()
         let openDone = Set(done.map(\.pane))
         chimedDone = chimedDone.filter { openDone.contains($0.key) }
         var freshDone = false
         for d in done where (chimedDone[d.pane] ?? .distantPast) < d.since {
             chimedDone[d.pane] = d.since
+            if manager.paneOnAnyScreen(d.pane) { continue }
             freshDone = true
         }
         if freshDone {

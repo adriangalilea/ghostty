@@ -1,4 +1,5 @@
 import AppKit
+import AskKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -123,7 +124,7 @@ final class VigilSidebarHost: NSVisualEffectView {
                    chars.count == 1, chars.first!.isLetter {
                     model.hintType(chars)
                 } else {
-                    NSSound.beep()
+                    _ = Earcon.knock.play()
                 }
             }
             return
@@ -371,7 +372,7 @@ final class VigilSidebarModel: ObservableObject {
     func hintType(_ char: String) {
         let candidate = hintBuffer + char
         guard hintLabels.contains(where: { $0.value.hasPrefix(candidate) }) else {
-            NSSound.beep() // invalid letter: ignored, buffer stands
+            _ = Earcon.knock.play() // invalid letter: ignored, buffer stands
             return
         }
         hintBuffer = candidate
@@ -414,7 +415,7 @@ final class VigilSidebarModel: ObservableObject {
         if let exact = hintLabels.first(where: { $0.value == hintBuffer }) {
             activateHint(exact.key)
         } else {
-            NSSound.beep()
+            _ = Earcon.knock.play()
         }
     }
 
@@ -429,7 +430,7 @@ final class VigilSidebarModel: ObservableObject {
     func jumpAttention() {
         exitHintMode()
         guard let name = VigilSessionManager.shared.mostUrgentName else {
-            NSSound.beep()
+            _ = Earcon.knock.play()
             return
         }
         selection = name

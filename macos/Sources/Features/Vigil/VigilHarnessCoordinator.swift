@@ -450,6 +450,17 @@ final class VigilHarnessCoordinator: ObservableObject {
         }
     }
     var pendingCount: Int { inbox?.requests.count ?? 0 }
+    /// Whether the ask lane is carrying this pane's blocker: enrolled, the
+    /// master switch on, and an answerable request for the pane in the
+    /// inbox (presented now or queued next). A carried blocker gets the
+    /// ask's own cues (narration, the ears-open earcon, accepted/unheard);
+    /// a second chime for the same moment is noise about noise.
+    func carries(pane: String) -> Bool {
+        guard enrolled, AskSettings.enabled, let inbox else { return false }
+        return inbox.requests.contains {
+            !inbox.isRemote($0) && $0.request.context == pane && $0.request.responseMode == .interactive
+        }
+    }
     /// The plate's badge: open the review surface for whatever is waiting.
     func showInbox() { guard inbox != nil else { return }; showPanel() }
     private func showPanel() {
