@@ -139,8 +139,11 @@ final class VigilFacts: @unchecked Sendable {
         guard files != current.files || leases != current.leases || current.revision == 0 else { return }
         // Renderer receipts can change on every output beat. They update the
         // cache, but never invalidate a sidebar whose inputs stayed identical.
+        // Identical means the BYTES: a tree rewritten with the same lines (a
+        // child that came and went between two reads) is a new inode and
+        // mtime and no new fact; each such rewrite was a sidebar revision.
         let sidebarChanged = current.revision == 0 || leases != current.leases ||
-            files.contains { key, file in Self.sidebarKey(key) && current.files[key] != file } ||
+            files.contains { key, file in Self.sidebarKey(key) && (key.hasSuffix(".tree") ? current.files[key]?.data != file.data : current.files[key] != file) } ||
             current.files.keys.contains { Self.sidebarKey($0) && files[$0] == nil }
         current = Snapshot(revision: current.revision + 1,
             sidebarRevision: current.sidebarRevision + (sidebarChanged ? 1 : 0), files: files, leases: leases)

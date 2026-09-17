@@ -364,8 +364,10 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
         t.join();
         self.write_thread = null;
     }
-    if (self.write_fd != attach.sock_fd and self.write_fd >= 0) posix.close(self.write_fd);
-    posix.close(attach.sock_fd);
+    // The read thread's CURRENT socket, never the one recorded at enter: a
+    // reconnect replaced it, and the number may be another surface's by now.
+    if (self.write_fd != self.sock_fd and self.write_fd >= 0) posix.close(self.write_fd);
+    if (self.sock_fd >= 0) posix.close(self.sock_fd);
     if (self.ssh_pid != 0) {
         _ = posix.waitpid(self.ssh_pid, 0);
         self.ssh_pid = 0;
@@ -693,12 +695,35 @@ fn readThreadMain(
     closing: *std.atomic.Value(bool),
     birth_ms: i64,
 ) void {
-    termio.Exec.ReadThread.threadMainPosix(fd, io, quit);
-    if (closing.load(.acquire)) return;
-    self.transport_state.store(2, .release);
-    // SSH EOF says nothing about the home process. Keep its last screen;
-    // the Mac viewport shows connection loss and offers an explicit reconnect.
-    if (self.host != null) return;
+    // Exec's loop closes the quit descriptor it is given on return; each
+    // stream gets a dup, and the pipe itself (its bytes shared by every
+    // dup, so a quit written mid-reconnect is still readable) lives as
+    // long as this thread.
+    defer posix.close(quit);
+    var current_fd = fd;
+    while (true) {
+        const quit_dup = posix.dup(quit) catch |err| {
+            log.err("attach: {s} cannot dup the quit pipe err={}", .{ self.id, err });
+            return;
+        };
+        termio.Exec.ReadThread.threadMainPosix(current_fd, io, quit_dup);
+        if (closing.load(.acquire)) return;
+        self.transport_state.store(2, .release);
+        // SSH EOF says nothing about the home process. Keep its last screen;
+        // the Mac viewport shows connection loss and offers an explicit reconnect.
+        if (self.host != null) return;
+        // The phone's stream is the embedder's; it reconnects on its own.
+        if (self.given_fd != null) break;
+        // A local daemon ended under a live surface. Its spec decides what
+        // that meant: a deliberate end (shell exit, `vigild kill`) unlinks
+        // the spec before the socket goes, a machine-death class end (a
+        // logout's SIGTERM, a crash, a kill by hand) leaves it, and then the
+        // daemon comes back under the same id: reattach in place, never
+        // paint the exit overlay (the sentinel's view was lost to it,
+        // 2026-09-15). The quit pipe stays armed throughout, so a teardown
+        // mid-reconnect returns at the next check.
+        current_fd = self.reconnect(closing) orelse break;
+    }
     // NEVER a blocking push: a surface mid-release drains no mailbox, and
     // a .forever push parks this thread exactly when threadExit is about
     // to join it — reader waits on the mailbox futex, the io thread waits
@@ -712,6 +737,95 @@ fn readThreadMain(
         },
     }, .{ .instant = {} });
     if (pushed == 0) log.warn("attach child_exited dropped (mailbox full or dying)", .{});
+}
+
+fn specExists(self: *Attach) bool {
+    const home = posix.getenv("HOME") orelse return false;
+    var buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/.local/state/vigild/{s}.spec", .{ home, self.id }) catch return false;
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+/// `vigild restore`: every spec with no live daemon respawns, exactly what
+/// the login agent and the app's launch do. Under a running app nobody
+/// else respawns a daemon that died, so the surface that lost it does.
+fn restoreDaemons(self: *Attach) void {
+    const home = posix.getenv("HOME") orelse return;
+    const bin = std.fmt.allocPrint(self.alloc, "{s}/.local/bin/vigild", .{home}) catch return;
+    defer self.alloc.free(bin);
+    var child = std.process.Child.init(&.{ bin, "restore" }, self.alloc);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    _ = child.spawnAndWait() catch |err| log.warn("attach: {s} vigild restore failed err={}", .{ self.id, err });
+}
+
+/// Runs on the read thread after EOF. Returns the new socket, wired into
+/// this Attach with a fresh writer, hello and size (the daemon replays its
+/// screen to a fresh client over a clear, so nothing else is owed); null
+/// when the end was deliberate, the teardown began, or the daemon never
+/// came back within the window.
+fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
+    if (!self.specExists()) return null;
+    log.warn("attach: {s} stream ended with its spec on disk; reconnecting", .{self.id});
+    self.transport_state.store(0, .release);
+    // Retire the writer (it may have severed itself on the dead socket
+    // already) before the descriptor closes; a new one is born per socket.
+    self.write_mutex.lock();
+    self.write_closed = true;
+    self.write_cond.signal();
+    self.write_mutex.unlock();
+    if (self.write_thread) |t| {
+        t.join();
+        self.write_thread = null;
+    }
+    const old = self.sock_fd;
+    self.sock_fd = -1;
+    self.write_fd = -1;
+    if (old >= 0) posix.close(old);
+
+    const began = std.time.milliTimestamp();
+    var restored = false;
+    while (std.time.milliTimestamp() - began < 30_000) {
+        if (closing.load(.acquire)) return null;
+        if (self.connectSock()) |nfd| {
+            self.write_mutex.lock();
+            self.write_closed = false;
+            self.write_buf.clearRetainingCapacity();
+            self.pending_bytes.store(0, .monotonic);
+            self.write_mutex.unlock();
+            const t = std.Thread.spawn(.{}, writeThreadMain, .{self}) catch |err| {
+                log.warn("attach: {s} reconnect writer failed err={}", .{ self.id, err });
+                posix.close(nfd);
+                return null;
+            };
+            t.setName("io-writer") catch {};
+            self.write_thread = t;
+            self.sock_fd = nfd;
+            self.write_fd = nfd;
+            self.sendHello("surface");
+            self.sendResize();
+            self.transport_state.store(1, .release);
+            // warn, not info: the receipt must reach the unified log in a
+            // release build; "I saw no overlay" is not a fact.
+            log.warn("attach: {s} reattached in place after {d}ms", .{ self.id, std.time.milliTimestamp() - began });
+            return nfd;
+        } else |_| {}
+        if (!self.specExists()) {
+            log.info("attach: {s} spec gone while reconnecting; a deliberate end", .{self.id});
+            return null;
+        }
+        // One beat for a respawn already in flight (the login agent, the
+        // app's launch restore); then respawn it from here.
+        if (!restored and std.time.milliTimestamp() - began >= 1_000) {
+            restored = true;
+            self.restoreDaemons();
+        }
+        std.Thread.sleep(200 * std.time.ns_per_ms);
+    }
+    log.warn("attach: {s} daemon did not come back in 30s", .{self.id});
+    return null;
 }
 
 /// Thread-local state: the socket and the reader.
