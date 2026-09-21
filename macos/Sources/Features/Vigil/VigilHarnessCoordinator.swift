@@ -457,9 +457,7 @@ final class VigilHarnessCoordinator: ObservableObject {
     /// a second chime for the same moment is noise about noise.
     func carries(pane: String) -> Bool {
         guard enrolled, AskSettings.enabled, let inbox else { return false }
-        return inbox.requests.contains {
-            !inbox.isRemote($0) && $0.request.context == pane && $0.request.responseMode == .interactive
-        }
+        return inbox.carries(context: pane)
     }
     /// The plate's badge: open the review surface for whatever is waiting.
     func showInbox() { guard inbox != nil else { return }; showPanel() }
