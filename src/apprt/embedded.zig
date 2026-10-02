@@ -1749,6 +1749,12 @@ pub const CAPI = struct {
         surface.core_surface.vigilClaim(claim);
     }
 
+    /// Vigil: the size last set is the laid-out viewport; the attach may
+    /// now send it and claim on focus.
+    export fn ghostty_surface_vigil_viewport(surface: *Surface) void {
+        surface.core_surface.vigilViewport();
+    }
+
     export fn ghostty_surface_vigil_client_id(surface: *Surface) u64 {
         return surface.core_surface.vigilClientId();
     }

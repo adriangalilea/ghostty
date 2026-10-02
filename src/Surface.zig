@@ -874,6 +874,12 @@ pub fn vigilClaim(self: *Surface, claim: bool) void {
     self.queueIo(.{ .vigil_claim = claim }, .unlocked);
 }
 
+/// Vigil: the apprt's size is now the laid-out viewport. See
+/// `termio.Attach.viewport`.
+pub fn vigilViewport(self: *Surface) void {
+    self.queueIo(.{ .vigil_viewport = {} }, .unlocked);
+}
+
 /// Immutable identity of this attach client, shared with its hello receipt.
 pub fn vigilClientId(self: *const Surface) u64 {
     return switch (self.io.backend) {

@@ -347,8 +347,15 @@ extension Ghostty {
 
         func vigilSetViewportSize(_ size: CGSize) {
             guard size != vigilViewportSize else { return }
+            let first = vigilViewportSize == .zero && size.width > 0 && size.height > 0
             vigilViewportSize = size
             if vigilWantsSize { sizeDidChange(size) }
+            if first, vigilAttachId != nil, let surface {
+                // The core's grid until now came from the placeholder
+                // frame. Hand it the viewport's, then let the attach speak.
+                if !vigilWantsSize && vigilOwnerGrid == nil { sizeDidChange(size) }
+                ghostty_surface_vigil_viewport(surface)
+            }
             if let reason = vigilPendingSizeClaim { vigilControlSize(true, reason: reason) }
         }
 

@@ -81,8 +81,20 @@ ssh_pid: posix.pid_t = 0,
 /// Cached tty name of the daemon's pty (from its pidfile).
 cached_tty: ?[:0]const u8 = null,
 
-/// Last known size, sent on connect and on change.
+/// Last known size, sent on change once `viewport` is true.
 grid_size: renderer.GridSize = .{ .columns = 80, .rows = 24 },
+
+/// The embedder has declared the grid real (`vigilViewport`). Until then
+/// the grid is the core's guess from the view's placeholder frame (800x600
+/// at birth, 49x17 cells): sent to the daemon and claimed on focus, it
+/// resized a live TUI to that guess on every mount and the program
+/// reflowed its transcript into 49 columns. A size is never sent and focus
+/// never claims before this. Explicit-claim viewports start true: they
+/// never adopt or claim passively, and claim only with a laid-out grid.
+viewport: bool,
+
+/// Focus arrived before the viewport: the passive claim waits for it.
+focus_pending: bool = false,
 
 /// Outbound frame queue: enqueueFrame appends (io thread, never blocks),
 /// the writer thread alone writes the socket. Order is total — resize and
@@ -125,6 +137,7 @@ pub const Config = struct {
 };
 
 pub fn init(alloc: Allocator, cfg: Config) !Attach {
+    const explicit_claim = cfg.explicit_claim or (if (cfg.host) |host| host.len > 0 else false);
     return .{
         .alloc = alloc,
         .id = try alloc.dupe(u8, cfg.id),
@@ -133,7 +146,8 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .command = if (cfg.command) |v| try v.clone(alloc) else null,
         .host = if (cfg.host) |v| if (v.len > 0) try alloc.dupe(u8, v) else null else null,
         .given_fd = cfg.fd,
-        .explicit_claim = cfg.explicit_claim or (if (cfg.host) |host| host.len > 0 else false),
+        .explicit_claim = explicit_claim,
+        .viewport = explicit_claim,
         .client_id = std.crypto.random.int(u64),
     };
 }
@@ -304,9 +318,9 @@ pub fn threadEnter(
     write_thread.setName("io-writer") catch {};
     self.write_thread = write_thread;
 
-    // Hello, then our size. The size is RECORDED by the daemon; it is
-    // applied to the pty only while this client owns the size (claimed
-    // on focus, or adopted when nobody owns it yet).
+    // Hello, then our size once it is real. The size is RECORDED by the
+    // daemon; it is applied to the pty only while this client owns the
+    // size (claimed on focus, or adopted when nobody owns it yet).
     self.sendHello(if (self.given_fd != null) "app" else if (self.host != null) "remote" else "surface");
     self.sendResize();
 
@@ -389,15 +403,40 @@ pub fn focusGained(
     focused: bool,
 ) !void {
     _ = td;
-    if (!focused or self.explicit_claim or self.write_fd < 0) return;
+    if (self.explicit_claim) return;
+    self.focus_pending = focused and !self.viewport;
+    if (!focused or !self.viewport or self.write_fd < 0) return;
     self.enqueueFrame('o', "");
+}
+
+/// The embedder's grid is real: send it, then any focus claim that
+/// arrived before it, then ask for the screen again. The replay every
+/// new connection gets was parsed into the placeholder grid, and
+/// cursor-addressed content wrapped there does not unwrap on resize.
+pub fn vigilViewport(self: *Attach) void {
+    if (self.viewport) return;
+    self.viewport = true;
+    self.sendResize();
+    if (self.write_fd < 0) return;
+    if (self.focus_pending) self.enqueueFrame('o', "");
+    self.focus_pending = false;
+    self.enqueueFrame('q', "");
 }
 
 /// Explicit ownership: 'o' claims the pty size for this client, 'y'
 /// yields it (the daemon hands the size to the first sized survivor).
+/// The embedder claims only with a laid-out grid, so a claim declares
+/// the viewport too.
 pub fn vigilClaim(self: *Attach, claim: bool) void {
     if (self.write_fd < 0) return;
+    const first = claim and !self.viewport;
+    if (first) {
+        self.viewport = true;
+        self.focus_pending = false;
+        self.sendResize();
+    }
     self.enqueueFrame(if (claim) 'o' else 'y', if (claim) "intent" else "");
+    if (first) self.enqueueFrame('q', "");
 }
 
 test "Vigil remote focus cannot claim; only input intent can" {
@@ -428,10 +467,39 @@ test "Vigil local focus remains an implicit claim" {
     var attach = try Attach.init(std.testing.allocator, .{ .id = "test" });
     defer attach.deinit();
     attach.write_fd = 1;
+    attach.vigilViewport();
+    attach.write_buf.clearRetainingCapacity();
     var td: termio.Termio.ThreadData = undefined;
     try attach.focusGained(&td, false);
     try attach.focusGained(&td, true);
     try std.testing.expectEqualSlices(u8, "o\x00\x00", attach.write_buf.items);
+}
+
+test "Vigil local surface sends no size and claims nothing before its viewport" {
+    var attach = try Attach.init(std.testing.allocator, .{ .id = "test" });
+    defer attach.deinit();
+    attach.write_fd = 1;
+    var td: termio.Termio.ThreadData = undefined;
+    // The placeholder frame's grid, then focus: both held.
+    try attach.resize(.{ .columns = 49, .rows = 17 }, undefined);
+    try attach.focusGained(&td, true);
+    try std.testing.expectEqual(@as(usize, 0), attach.write_buf.items.len);
+    // Layout lands: the real grid, then the claim focus asked for.
+    try attach.resize(.{ .columns = 153, .rows = 53 }, undefined);
+    attach.vigilViewport();
+    try std.testing.expectEqualSlices(u8, "r\x04\x00\x35\x00\x99\x00o\x00\x00q\x00\x00", attach.write_buf.items);
+}
+
+test "Vigil focus lost before the viewport leaves no pending claim" {
+    var attach = try Attach.init(std.testing.allocator, .{ .id = "test" });
+    defer attach.deinit();
+    attach.write_fd = 1;
+    var td: termio.Termio.ThreadData = undefined;
+    try attach.focusGained(&td, true);
+    try attach.focusGained(&td, false);
+    attach.vigilViewport();
+    try std.testing.expectEqual(@as(u8, 'r'), attach.write_buf.items[0]);
+    try std.testing.expectEqualSlices(u8, "q\x00\x00", attach.write_buf.items[7..]);
 }
 
 test "Vigil transport receipts count queued and written frames without contents" {
@@ -564,7 +632,7 @@ fn writeThreadMain(self: *Attach) void {
 }
 
 fn sendResize(self: *Attach) void {
-    if (self.write_fd < 0) return;
+    if (self.write_fd < 0 or !self.viewport) return;
     const rows: u16 = @intCast(self.grid_size.rows);
     const cols: u16 = @intCast(self.grid_size.columns);
     const payload: [4]u8 = .{

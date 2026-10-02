@@ -81,6 +81,13 @@ pub const Backend = union(Kind) {
         }
     }
 
+    pub fn vigilViewport(self: *Backend) !void {
+        switch (self.*) {
+            .exec => {},
+            .attach => |*attach| attach.vigilViewport(),
+        }
+    }
+
     pub fn vigilDump(self: *Backend) !void {
         switch (self.*) {
             .exec => {},

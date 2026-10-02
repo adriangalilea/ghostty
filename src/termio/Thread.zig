@@ -334,16 +334,12 @@ fn drainMailbox(
             .linefeed_mode => |v| self.flags.linefeed_mode = v,
             .focused => |v| try io.focusGained(data, v),
             .vigil_claim => |v| {
-                // Resize messages are coalesced by a timer. An ownership
-                // claim is an ordering boundary: apply the queued viewport
-                // size first, so the daemon never claims the old fit grid.
-                if (v) {
-                    if (self.coalesce_data.resize) |size| {
-                        self.coalesce_data.resize = null;
-                        try io.resize(data, size);
-                    }
-                }
+                if (v) try self.flushCoalescedResize(io, data);
                 try io.backend.vigilClaim(v);
+            },
+            .vigil_viewport => {
+                try self.flushCoalescedResize(io, data);
+                try io.backend.vigilViewport();
             },
             .vigil_dump => try io.backend.vigilDump(),
             .write_small => |v| try io.queueWrite(
@@ -372,6 +368,15 @@ fn drainMailbox(
     if (redraw) {
         try io.renderer_wakeup.notify();
     }
+}
+
+/// Vigil: resizes are coalesced by a timer, and a claim or a viewport
+/// declaration is an ordering boundary. The size it speaks for is the
+/// queued one, never the grid before it.
+fn flushCoalescedResize(self: *Thread, io: *termio.Termio, data: *termio.Termio.ThreadData) !void {
+    const size = self.coalesce_data.resize orelse return;
+    self.coalesce_data.resize = null;
+    try io.resize(data, size);
 }
 
 fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {

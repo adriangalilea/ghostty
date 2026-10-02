@@ -78,6 +78,10 @@ pub const Message = union(enum) {
     /// focus is not a sizing fact (a phone mirroring the Mac's grid).
     vigil_claim: bool,
 
+    /// Vigil: the embedder's grid is the laid-out viewport, no longer the
+    /// placeholder frame's. Until then no size reaches the daemon.
+    vigil_viewport: void,
+
     /// Vigil: ask the daemon for a fresh dump of the screen (a viewport
     /// that was suspended and missed the stream).
     vigil_dump: void,
