@@ -1007,9 +1007,9 @@ class VigilSessionManager {
         let (panes, layout) = capture(to, carrying: previous + carried)
         if let index {
             // Panes listed but in neither tree are still captured-only (a
-            // tab materializing its splits one tick apart): they stay
-            // listed, and the shape is the one being built toward, not
-            // the half-built one.
+            // tab whose anchor is mounted and whose whole tree lands in
+            // the same turn): they stay listed, and the shape is the one
+            // being built toward, not the anchor alone.
             let captured = session.tabs[index].panes.filter { !touched.contains($0.id) }
             session.tabs[index].panes = panes + captured
             if captured.isEmpty { session.tabs[index].layout = layout }
@@ -1928,34 +1928,30 @@ class VigilSessionManager {
         swapTree(controller, SplitTree(view: view))
         mirrorViewports.setObject(name as NSString, forKey: controller)
         remoteLayouts[ObjectIdentifier(controller)] = VigilSessionControl.revision([tab])
-        materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
-        landAfterSplits(controller, anchor: anchor, fallback: view)
+        materializeSplits(controller, tab: tab, configFor: configFor)
+        land(controller, anchor: anchor, fallback: view)
         vlog("mirror: window of '\(sessionName(of: controller) ?? "-")' -> viewport onto '\(name)' (\(tab.panes.count) panes)")
         touchRecent(name)
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
 
-    /// Focus the clicked pane once the splits EXIST. The materializer lands
-    /// them on the next runloop tick around the layout's first leaf, so a
-    /// landing resolved at mount time could only ever find that first leaf
-    /// (a click on the other pane focused the wrong one, 2026-09-14).
-    private func landAfterSplits(_ controller: TerminalController, anchor: String?, fallback: Ghostty.SurfaceView, takeSize: Bool = false) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak controller] in
-            guard let controller else { return }
-            let target: Ghostty.SurfaceView?
-            if let anchor {
-                target = controller.surfaceTree.first { $0.vigilAttachId == anchor }
-            } else {
-                target = fallback
-            }
-            guard let landing = target else {
-                VigilSessionManager.shared.vlog("handoff: landing refused; pane \(anchor ?? "unknown") absent from window \(controller.window?.windowNumber ?? -1)")
+    /// Focus the clicked pane of a freshly mounted tab. The tree is whole
+    /// by now (materializeSplits builds it in the mount's turn); a size
+    /// claim waits for the pane's layout through `vigilRequestSize`.
+    private func land(_ controller: TerminalController, anchor: String?, fallback: Ghostty.SurfaceView, takeSize: Bool = false) {
+        let landing: Ghostty.SurfaceView
+        if let anchor {
+            guard let found = controller.surfaceTree.first(where: { $0.vigilAttachId == anchor }) else {
+                vlog("handoff: landing refused; pane \(anchor) absent from window \(controller.window?.windowNumber ?? -1)")
                 return
             }
-            Ghostty.moveFocus(to: landing)
-            if takeSize { landing.vigilControlSize(true, reason: "sidebar pane selected") }
-            VigilSessionManager.shared.vlog("handoff: landed \(landing.vigilHost ?? "local")/\(landing.vigilAttachId ?? "unknown") in window \(controller.window?.windowNumber ?? -1)")
+            landing = found
+        } else {
+            landing = fallback
         }
+        DispatchQueue.main.async { Ghostty.moveFocus(to: landing) }
+        if takeSize { landing.vigilRequestSize(reason: "sidebar pane selected") }
+        vlog("handoff: landed \(landing.vigilHost ?? "local")/\(landing.vigilAttachId ?? "unknown") in window \(controller.window?.windowNumber ?? -1)")
     }
 
     /// A REMOTE session (another Mac, VigilRemote) in this viewport: the
@@ -2049,8 +2045,8 @@ class VigilSessionManager {
         if viewport != nil { swapTree(controller, SplitTree(view: view)) }
         mirrorViewports.setObject(composite as NSString, forKey: controller)
         remoteLayouts[ObjectIdentifier(controller)] = VigilSessionControl.revision([tab])
-        materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
-        landAfterSplits(controller, anchor: rawAnchor, fallback: view, takeSize: rawAnchor != nil)
+        materializeSplits(controller, tab: tab, configFor: configFor)
+        land(controller, anchor: rawAnchor, fallback: view, takeSize: rawAnchor != nil)
         vlog("remote: window -> viewport onto '\(composite)' via ssh \(alias) (\(tab.panes.count) panes)")
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
         return controller
@@ -2167,7 +2163,7 @@ class VigilSessionManager {
         let view = adoptable(first.id) ?? Ghostty.SurfaceView(app, baseConfig: configFor(first))
         let controller = TerminalController.vigilNewTab(ghostty, parent: host, tree: SplitTree(view: view))
         registerMember(controller, name: name)
-        materializeSplits(controller, tab: tab, configFor: configFor, delay: 0)
+        materializeSplits(controller, tab: tab, configFor: configFor)
         materializeDockCapture(controller, tab.dock, configFor: configFor)
         focusLeftmost(controller)
         vlog("float: captured tab \(tabIndex) of '\(name)' materialized as a silent native tab")
@@ -2239,20 +2235,14 @@ class VigilSessionManager {
         quick.surfaceTree = SplitTree(view: anchor)
         quickTreeSwap = false
         quick.animateIn()
+        // Same runloop turn as the anchor: the panel's first layout is the
+        // whole tab. Outside the swap flag, so the chokepoint records the
+        // materialized panes.
         materializeSplits(quick, tab: tab, configFor: {
             self.resurrectConfig(name: name, pane: $0)
-        }, delay: 0.35)
-        if let pane, pane != tab.panes[firstIndex].id, tab.panes.count > 1 {
-            // Focus lands once the splits settle.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                guard let self, self.floatingName == name,
-                      let target = self.quickController(create: false)?
-                          .surfaceTree.first(where: { $0.vigilAttachId == pane }) else { return }
-                Ghostty.moveFocus(to: target)
-            }
-        } else {
-            DispatchQueue.main.async { Ghostty.moveFocus(to: anchor) }
-        }
+        })
+        let landing = pane.flatMap { p in quick.surfaceTree.first { $0.vigilAttachId == p } } ?? anchor
+        DispatchQueue.main.async { Ghostty.moveFocus(to: landing) }
         touchRecent(name)
         persist()
     }
@@ -2547,34 +2537,6 @@ class VigilSessionManager {
         return held
     }
 
-    /// Captured ratios onto a freshly materialized tree. Structural walk:
-    /// wherever the realized node and the layout agree (same split kind),
-    /// the captured ratio replaces the 0.5 the split was born with; any
-    /// divergence (a split that failed to materialize) passes through.
-    static func applyRatios(
-        _ node: SplitTree<Ghostty.SurfaceView>.Node,
-        _ layout: Layout
-    ) -> SplitTree<Ghostty.SurfaceView>.Node {
-        guard case .split(let split) = node else { return node }
-        let ratio: Double
-        let l: Layout
-        let r: Layout
-        switch layout {
-        case .leaf: return node
-        case .h(let captured, let left, let right):
-            guard split.direction == .horizontal else { return node }
-            ratio = captured; l = left; r = right
-        case .v(let captured, let left, let right):
-            guard split.direction == .vertical else { return node }
-            ratio = captured; l = left; r = right
-        }
-        return .split(.init(
-            direction: split.direction,
-            ratio: ratio,
-            left: applyRatios(split.left, l),
-            right: applyRatios(split.right, r)))
-    }
-
     /// The workspace's split shape, pane indices in DFS leaf order (the
     /// same order capturePanes walks).
     static func captureLayout(_ tree: SplitTree<Ghostty.SurfaceView>) -> Layout? {
@@ -2836,89 +2798,66 @@ class VigilSessionManager {
         VigilBars.shared.sync(controller)
     }
 
-    /// Rebuild one tab's splits a beat after its window presents (a split
-    /// against an unhosted surface is dropped), then re-shape to the
-    /// captured ratios.
+    /// Complete one tab's tree in the SAME runloop turn its anchor was
+    /// mounted: every pane is adopted or minted, the whole shape is built
+    /// as a value with the captured ratios, and the tree is assigned once.
+    /// No layout pass ever sees a partial tree, so every pane's first
+    /// laid-out size is its final one. Grafting split by split a tick later
+    /// laid the anchor out at the full window and each pane out at every
+    /// intermediate shape, and each of those sizes reached the pty: a TUI
+    /// reflowed its transcript at 153 columns, then at 70, on every mount.
     private func materializeSplits(
         _ controller: BaseTerminalController,
         tab: Tab,
-        configFor: @escaping (Pane) -> Ghostty.SurfaceConfiguration,
-        delay: TimeInterval = 0.7
+        configFor: (Pane) -> Ghostty.SurfaceConfiguration
     ) {
         let panes = tab.panes
         guard panes.count > 1 else { return }
-        let layout = tab.layout
-        // The closure is BOUND to the tree it was scheduled for: a swap
-        // between schedule and fire (a rival mount racing this one) would
-        // otherwise graft this tab's splits onto whatever tree the
-        // controller holds at fire time - the twin-pane manufacturer
-        // (2026-08-07: click-mount + shapeshiftTab re-mount, each
-        // materializing pane 8 into the survivor's tree).
-        let bornAnchor = controller.surfaceTree.root?.leftmostLeaf()
-        // Adoption reaches into the manager from inside the deferred
-        // closure without juggling `self` through the nested materializer.
-        let adopt: (String) -> Ghostty.SurfaceView? = { [weak self] in self?.adoptable($0) }
-        // The default delay exists for windows that have not PRESENTED yet
-        // (splits against an unhosted surface drop); mounting into a live
-        // window passes 0 and splits land on the next runloop tick.
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else {
-                self?.vlog("resurrect: splits DROPPED (no anchor surface)")
-                return
-            }
-            guard anchor === bornAnchor else {
-                self?.vlog("!! materialize: tree swapped under the mount - stale splits aborted")
-                return
-            }
-            if let layout {
-                // Real shape: split the region first (preorder), then
-                // recurse into each side.
-                @MainActor
-                func materialize(_ node: Layout, anchor: Ghostty.SurfaceView) {
-                    let direction: SplitTree<Ghostty.SurfaceView>.NewDirection
-                    let l: Layout, r: Layout
-                    switch node {
-                    case .leaf: return
-                    case .h(_, let left, let right):
-                        direction = .right
-                        l = left; r = right
-                    case .v(_, let left, let right):
-                        direction = .down
-                        l = left; r = right
-                    }
-                    guard r.firstLeaf < panes.count else { return }
-                    let rightPane = panes[r.firstLeaf]
-                    let rightView: Ghostty.SurfaceView
-                    if let existing = adopt(rightPane.id) {
-                        guard let tree = try? controller.surfaceTree.inserting(
-                            view: existing, at: anchor, direction: direction) else { return }
-                        controller.surfaceTree = tree
-                        rightView = existing
-                    } else if let minted = controller.newSplit(
-                        at: anchor, direction: direction, baseConfig: configFor(rightPane)) {
-                        rightView = minted
-                    } else { return }
-                    materialize(l, anchor: anchor)
-                    materialize(r, anchor: rightView)
-                }
-                materialize(layout, anchor: anchor)
-                // Splits are born 0.5; re-shape to the captured ratios
-                // wherever the realized tree matches the layout. Same
-                // panes, so the chokepoint only recaptures the shape.
-                if let root = controller.surfaceTree.root {
-                    controller.surfaceTree = SplitTree(
-                        root: Self.applyRatios(root, layout),
-                        zoomed: nil)
-                }
-            } else {
-                var at: Ghostty.SurfaceView? = anchor
-                for pane in panes.dropFirst() {
-                    guard let anchorView = at else { break }
-                    at = controller.newSplit(at: anchorView, direction: .right, baseConfig: configFor(pane)) ?? at
-                }
-            }
-            self?.assertInvariants("materialize")
+        guard let app = ghosttyApp?.app else { vlog("!! materialize: no ghostty app"); return }
+        guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else {
+            vlog("!! materialize: splits DROPPED (no anchor surface)")
+            return
         }
+        let layout = tab.layout ?? Self.chainLayout(count: panes.count)
+        let anchorIndex = layout.firstLeaf
+        guard Self.leaves(layout).sorted() == Array(panes.indices) else {
+            vlog("!! materialize: layout leaves \(Self.leaves(layout)) do not cover \(panes.count) panes - splits DROPPED")
+            return
+        }
+        guard anchor.vigilAttachId == panes[anchorIndex].id else {
+            vlog("!! materialize: anchor '\(anchor.vigilAttachId ?? "-")' is not the layout's first pane '\(panes[anchorIndex].id)' - splits DROPPED")
+            return
+        }
+        func view(_ index: Int) -> Ghostty.SurfaceView {
+            if index == anchorIndex { return anchor }
+            return adoptable(panes[index].id) ?? Ghostty.SurfaceView(app, baseConfig: configFor(panes[index]))
+        }
+        func build(_ node: Layout) -> SplitTree<Ghostty.SurfaceView>.Node {
+            switch node {
+            case .leaf(let i):
+                return .leaf(view: view(i))
+            case .h(let ratio, let l, let r):
+                return .split(.init(direction: .horizontal, ratio: ratio, left: build(l), right: build(r)))
+            case .v(let ratio, let l, let r):
+                return .split(.init(direction: .vertical, ratio: ratio, left: build(l), right: build(r)))
+            }
+        }
+        controller.surfaceTree = SplitTree(root: build(layout), zoomed: nil)
+        assertInvariants("materialize")
+    }
+
+    static func leaves(_ node: Layout) -> [Int] {
+        switch node {
+        case .leaf(let i): return [i]
+        case .h(_, let l, let r), .v(_, let l, let r): return leaves(l) + leaves(r)
+        }
+    }
+
+    /// The shape a tab with panes but no captured layout takes: each pane
+    /// split to the right of the previous one.
+    static func chainLayout(count: Int, from index: Int = 0) -> Layout {
+        guard index < count - 1 else { return .leaf(index) }
+        return .h(0.5, .leaf(index), chainLayout(count: count, from: index + 1))
     }
 
     // MARK: Close (vigil owns every close; scope decides the meaning)
@@ -3360,7 +3299,7 @@ class VigilSessionManager {
             let view = Ghostty.SurfaceView(app, baseConfig: configFor(panes[firstIndex]))
             swapTree(controller, SplitTree(view: view))
             registerMember(controller, name: name)
-            materializeSplits(controller, tab: first, configFor: configFor, delay: 0)
+            materializeSplits(controller, tab: first, configFor: configFor)
             materializeDockCapture(controller, first.dock, configFor: configFor)
             focusLeftmost(controller)
             // Remaining tabs come back as NATIVE tabs, ALL in one next
@@ -3392,7 +3331,7 @@ class VigilSessionManager {
                             ordered: before ? .below : .above)
                         if !before { lastAfter = tabController.window ?? lastAfter }
                         self.registerMember(tabController, name: name)
-                        self.materializeSplits(tabController, tab: tab, configFor: configFor, delay: 0)
+                        self.materializeSplits(tabController, tab: tab, configFor: configFor)
                         self.materializeDockCapture(tabController, tab.dock, configFor: configFor)
                         self.focusLeftmost(tabController)
                     }
@@ -3409,8 +3348,7 @@ class VigilSessionManager {
     /// tab materializes in place. The viewport rule, one level down.
     /// `anchor` is any pane id of the captured tab (indices shift as tabs go
     /// live/cold; pane ids never lie). A tab with ANY pane live in this
-    /// session's windows is already showing (its siblings may still be
-    /// materializing a tick behind).
+    /// session's windows is already showing.
     func shapeshiftTab(name: String, anchor: String, in controller: TerminalController) {
         guard sessionName(of: controller) == name, let session = sessions[name] else { return }
         let t0 = Date()
@@ -3459,7 +3397,7 @@ class VigilSessionManager {
         }
         let view = adoptable(first.id) ?? Ghostty.SurfaceView(app, baseConfig: configFor(first))
         swapTree(controller, SplitTree(view: view))
-        materializeSplits(controller, tab: target, configFor: configFor, delay: 0)
+        materializeSplits(controller, tab: target, configFor: configFor)
         materializeDockCapture(controller, target.dock, configFor: configFor)
         focusLeftmost(controller)
     }
@@ -5631,8 +5569,8 @@ class VigilSessionManager {
     /// tabs → their panes (splits AND dock tenants), each pane decorated
     /// with its live view when one exists (title, focus) and with its
     /// program (argv truth from the daemon's tree file) and continuous
-    /// AgentState. A tab materializing its splits one tick apart renders
-    /// every registered row from the first paint: nothing flashes.
+    /// AgentState. Every registered row renders whether or not its view
+    /// exists yet: nothing flashes while a tab mounts.
     func sidebarSnapshot() -> [SidebarSessionRow] {
         let leases = watchLeases()
 
