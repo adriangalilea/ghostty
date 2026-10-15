@@ -4,11 +4,11 @@ import VigilActivity
 import VigilWire
 import WidgetKit
 
-/// A followed session on the Lock Screen and in the Dynamic Island: its
-/// face and name (the phone's own), its Mac, and what it is doing as its
-/// Mac last pushed (blocked asks for you, working, done, idle) with how
-/// long. A tap opens the session on the pane that asks. Laid out to
-/// Apple's Live Activity guidance: 14 pt margins, the title first.
+/// A followed session, tab or pane on the Lock Screen and in the Dynamic
+/// Island: the session's face and name (the phone's own) and the tab or
+/// pane followed, its Mac, and what it is doing (blocked asks for you,
+/// working, done, idle) with how long. A tap opens it. Laid out to Apple's
+/// Live Activity guidance: 14 pt margins, the title first.
 @main struct VigilLive: WidgetBundle {
     var body: some Widget { SessionActivityWidget() }
 }
@@ -31,7 +31,8 @@ struct SessionActivityWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(context.attributes.label).font(.headline).lineLimit(1)
+                        Text([context.attributes.label, context.attributes.detail].compactMap { $0 }.joined(separator: " · "))
+                            .font(.headline).lineLimit(1)
                         Status(state: state)
                     }
                     .padding(.horizontal, 6)
@@ -64,6 +65,9 @@ private struct LockScreen: View {
             HStack(spacing: 8) {
                 if let emoji = attributes.emoji { Text(emoji).font(.title3) }
                 Text(attributes.label).font(.headline).lineLimit(1)
+                if let detail = attributes.detail {
+                    Text(detail).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
             Status(state: state)
         }

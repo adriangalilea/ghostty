@@ -27,8 +27,11 @@
 	<string>vigil reaches your Macs directly when you share a network with them.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Face ID confirms an answer before it is signed.</string>
-	<!-- A followed session rides the Lock Screen (VigilFollow). -->
+	<!-- A followed session rides the Lock Screen (VigilFollow); its Mac
+	     pushes every change of state at priority 10, a larger budget. -->
 	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
 	<true/>
 	<key>UIBackgroundModes</key>
 	<array>

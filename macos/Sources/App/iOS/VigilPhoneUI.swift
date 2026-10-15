@@ -149,7 +149,7 @@ struct TreeNodeView: View {
                         .font(font)
                         .foregroundStyle(node.alive ? .primary : .secondary)
                         .lineLimit(1)
-                    if node.kind == .session && model.followed.contains(node.id) {
+                    if following {
                         Image(systemName: "bell.fill").font(.caption2).foregroundStyle(.secondary)
                             .accessibilityLabel("Followed on this iPhone")
                     }
@@ -172,22 +172,26 @@ struct TreeNodeView: View {
                     in: RoundedRectangle(cornerRadius: 10))
         .contentShape(Rectangle())
 
-        if let ref = node.pane {
-            NavigationLink(value: ref) { content.frame(maxWidth: .infinity, alignment: .leading) }
-                .buttonStyle(.plain)
-                .simultaneousGesture(TapGesture().onEnded { model.log("tap: row \(node.title) (\(ref.pane))") })
-        } else if node.kind == .session {
-            let following = model.followed.contains(node.id)
-            content.onTapGesture { if foldable { toggle() } }
-                .contextMenu {
-                    Button { model.follow(node, !following) } label: {
-                        Label(following ? "Stop following" : "Follow on this iPhone", systemImage: following ? "bell.slash" : "bell")
-                    }
+        Group {
+            if let ref = node.pane {
+                NavigationLink(value: ref) { content.frame(maxWidth: .infinity, alignment: .leading) }
+                    .buttonStyle(.plain)
+                    .simultaneousGesture(TapGesture().onEnded { model.log("tap: row \(node.title) (\(ref.pane))") })
+            } else {
+                content.onTapGesture { if foldable { toggle() } }
+            }
+        }
+        .contextMenu {
+            if node.scope != nil {
+                Button { model.follow(node, !following) } label: {
+                    Label(following ? "Stop following" : "Follow on this iPhone", systemImage: following ? "bell.slash" : "bell")
                 }
-        } else {
-            content.onTapGesture { if foldable { toggle() } }
+            }
         }
     }
+
+    /// Followed on this phone (its activity on the Lock Screen).
+    private var following: Bool { node.followKey.map(model.followed.contains) == true }
 
     private func toggle() {
         withAnimation(.snappy(duration: 0.2)) {

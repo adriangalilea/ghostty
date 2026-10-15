@@ -2,6 +2,7 @@ import Foundation
 import GhosttyKit
 import OSLog
 import TetherKit
+import VigilActivity
 import VigilLink
 import VigilWire
 
@@ -317,7 +318,16 @@ final class VigilPhone: ObservableObject {
         var rows: Int = 0
         var cols: Int = 0
         var sizeOwner: String = ""
+        /// What following this row follows (nil for a Mac).
+        var scope: Follow.Scope? = nil
         var children: [Node] = []
+
+        /// The Mac's tether root (every id below a Mac starts with it).
+        var root: String { String(id.prefix { $0 != "/" }) }
+        /// This row's follow id: `<Mac root>/<scope key>`, the activity's key.
+        var followKey: String? { scope.map { "\(root)/\($0.key)" } }
+        /// This node and every node under it.
+        var all: [Node] { [self] + children.flatMap(\.all) }
 
         /// The cluster this node shows when collapsed (its own state for a
         /// pane), the sidebar's rule.
@@ -352,62 +362,93 @@ final class VigilPhone: ObservableObject {
 
     func tree() -> [Node] { nodes }
 
-    // MARK: Following: a session's questions come to this app
+    // MARK: Following: a session, tab or pane on the Lock Screen
 
-    /// Followed sessions, by their node id (`<Mac root>/<session>`).
+    /// Follows, by key (`<Mac root>/<scope key>`, `Node.followKey`).
     @Published private(set) var followed: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vigil.followed") ?? []) {
         didSet { UserDefaults.standard.set(Array(followed), forKey: "vigil.followed") }
     }
 
+    /// Every followed row in the tree as it stands.
+    private var followedNodes: [Node] {
+        nodes.flatMap(\.all).filter { $0.followKey.map(followed.contains) == true }
+    }
+
     /// How long a claim lives (authz's limit): renewed on every foreground
-    /// and whenever a followed session gains a pane; vigil unopened for
-    /// longer hands its sessions' questions back to Authz.
+    /// and whenever a followed scope gains a pane; vigil unopened for
+    /// longer hands its questions back to Authz.
     static let claimSpan: TimeInterval = 8 * 3600
 
-    /// Follows a session (or stops): its panes are claimed with their Mac's
-    /// authz, so their questions come to this app and Authz for iPhone
-    /// stays quiet for them, and it rides the Lock Screen as a Live
-    /// Activity its Mac keeps current; stopping releases both at once.
-    func follow(_ session: Node, _ on: Bool) {
-        guard session.kind == .session else { return }
-        if on { followed.insert(session.id) } else { followed.remove(session.id) }
-        log("follow: \(session.title) \(on ? "followed" : "no longer followed")")
-        claim(session, until: on ? Date().addingTimeInterval(Self.claimSpan) : Date())
-        let root = String(session.id.prefix { $0 != "/" })
-        if on, let mac = hosts.first(where: { $0.id == root }) { VigilFollow.start(session, mac: mac) }
-        if !on { VigilFollow.end(session.id) }
+    /// Follows a session, tab or pane (or stops): its panes are claimed
+    /// with their Mac's authz, so their questions come to this app and
+    /// Authz for iPhone stays quiet for them, and it rides the Lock Screen
+    /// as a Live Activity; stopping releases both (a pane another follow
+    /// still covers stays claimed).
+    func follow(_ node: Node, _ on: Bool) {
+        guard let key = node.followKey, let scope = node.scope else { return }
+        if on { followed.insert(key) } else { followed.remove(key) }
+        log("follow: \(node.title) \(on ? "followed" : "no longer followed")")
+        if on {
+            claim(node, panes: livePanes(node), until: Date().addingTimeInterval(Self.claimSpan))
+            guard let mac = hosts.first(where: { $0.id == node.root }),
+                  let session = nodes.flatMap(\.children).first(where: { $0.scope?.session == scope.session && $0.kind == .session })
+            else { return }
+            let lead = lead(node)
+            VigilFollow.start(SessionActivity(mac: mac.name, device: mac.id, scope: scope, label: session.title, emoji: session.emoji,
+                                              detail: node.kind == .session ? nil : node.title),
+                              state: lead.state, since: lead.since)
+        } else {
+            let kept = Set(followedNodes.flatMap(livePanes))
+            claim(node, panes: livePanes(node).filter { !kept.contains($0) }, until: Date())
+            VigilFollow.end(key)
+        }
     }
 
-    /// Every followed session's panes, claimed again for a full span.
+    /// Every follow's panes, claimed again for a full span.
     func renewClaims() {
         let until = Date().addingTimeInterval(Self.claimSpan)
-        for session in nodes.flatMap(\.children) where followed.contains(session.id) { claim(session, until: until) }
+        for node in followedNodes { claim(node, panes: livePanes(node), until: until) }
     }
 
-    /// The panes of a followed session, as last claimed: a pane that joins
-    /// one is claimed when it appears.
+    /// The panes of the follows, as last claimed: a pane that joins one is
+    /// claimed when it appears.
     private var claimedPanes: Set<String> = []
 
-    private func claim(_ session: Node, until: Date) {
-        let root = String(session.id.prefix { $0 != "/" })
+    private func livePanes(_ node: Node) -> [String] { node.leaves.compactMap(\.pane?.pane) }
+
+    private func claim(_ node: Node, panes: [String], until: Date) {
         let runtime = VigilAuthz.shared.runtime
-        guard let home = runtime.macs.first(where: { $0.id == root }).flatMap({ mac -> String? in
+        guard let home = runtime.macs.first(where: { $0.id == node.root }).flatMap({ mac -> String? in
             if case .answering(let homeID, _) = mac.state { homeID } else { nil }
         }) else {
-            return log("follow: \(session.title): its Mac does not let vigil answer yet; its questions stay with Authz")
+            return log("follow: \(node.title): its Mac does not let vigil answer yet; its questions stay with Authz")
         }
-        for pane in session.leaves.compactMap(\.pane?.pane) {
+        for pane in panes {
             if until > Date() { claimedPanes.insert(pane) } else { claimedPanes.remove(pane) }
             Task { await runtime.claim(context: pane, home: home, until: until) }
         }
     }
 
-    /// A followed session gained a pane: it is claimed now.
-    private func claimNewPanes() {
+    /// The leading state of a row's panes and since when, read from its
+    /// Mac's directory the way the Mac reads it (`SessionState.lead`).
+    private func lead(_ node: Node) -> (state: SessionState, since: Double) {
+        let panes = directories[node.root]?.panes ?? [:]
+        let lead = SessionState.lead(node.leaves.compactMap(\.scope?.pane).map { (panes[$0]?.state, panes[$0]?.since, panes[$0]?.seen) })
+        return (lead.state, lead.since ?? Date().timeIntervalSince1970)
+    }
+
+    /// The tree moved: a follow that gained a pane claims it, and every
+    /// follow's activity shows the state now (vigil is open; the Mac's
+    /// pushes carry it while it is not).
+    private func followTree() {
         let until = Date().addingTimeInterval(Self.claimSpan)
-        for session in nodes.flatMap(\.children) where followed.contains(session.id) {
-            let panes = Set(session.leaves.compactMap(\.pane?.pane))
-            if !panes.isSubset(of: claimedPanes) { claim(session, until: until) }
+        for node in followedNodes {
+            let panes = livePanes(node)
+            if !Set(panes).isSubset(of: claimedPanes) { claim(node, panes: panes, until: until) }
+            if let key = node.followKey {
+                let lead = lead(node)
+                VigilFollow.update(key, state: lead.state, since: lead.since)
+            }
         }
     }
 
@@ -416,7 +457,7 @@ final class VigilPhone: ObservableObject {
         guard fresh != nodes else { return }
         nodes = fresh
         indexTree()
-        claimNewPanes()
+        followTree()
         let leaves = fresh.flatMap(\.leaves)
         let gridded = leaves.filter { $0.pane != nil && $0.rows > 0 }.count
         let folded = collapsed.count
@@ -434,7 +475,8 @@ final class VigilPhone: ObservableObject {
             node.children = sessions.map { s in
                 let tabs = s.tabs ?? []
                 let sid = "\(host.id)/\(s.name)"
-                var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji)
+                var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji,
+                                scope: Follow.Scope(session: s.name, kind: .session))
                 func paneNode(_ p: Pane) -> Node {
                     let truth = dir.panes[p.id]
                     let program = Self.program(truth?.tree)
@@ -447,14 +489,16 @@ final class VigilPhone: ObservableObject {
                                 alive: alive,
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
-                                sizeOwner: (truth?.size ?? "").split(separator: " ", maxSplits: 2).dropFirst(2).joined(separator: " "))
+                                sizeOwner: (truth?.size ?? "").split(separator: " ", maxSplits: 2).dropFirst(2).joined(separator: " "),
+                                scope: Follow.Scope(session: s.name, kind: .pane, pane: p.id))
                 }
                 for (ti, t) in tabs.enumerated() {
                     let all = t.panes + (t.dock?.panes ?? [])
                     let showTab = tabs.count > 1 || t.label != nil || t.emoji != nil
                     if showTab {
                         let name = t.label ?? URL(fileURLWithPath: t.panes.first?.cwd ?? "").lastPathComponent
-                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji)
+                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji,
+                                       scope: all.first.map { Follow.Scope(session: s.name, kind: .tab, pane: $0.id) })
                         tab.children = all.map(paneNode)
                         sess.children.append(tab)
                     } else {
