@@ -6036,7 +6036,16 @@ class VigilSessionManager {
         // cost a 2h mental offset on every receipt read.
         let stamp = vlogStamp.string(from: Date())
         let line = "\(stamp) \(msg)\n"
-        let fd = Darwin.open(NSHomeDirectory() + "/.local/state/wake/vigil.log", O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
+        // Bounded like every append-only log: past 16 MB the file becomes
+        // vigil.1.log (one generation) and a fresh one opens.
+        let path = NSHomeDirectory() + "/.local/state/wake/vigil.log"
+        var fd = Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
+        var info = stat()
+        if fd >= 0, fstat(fd, &info) == 0, info.st_size > 16 << 20 {
+            close(fd)
+            _ = Darwin.rename(path, NSHomeDirectory() + "/.local/state/wake/vigil.1.log")
+            fd = Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
+        }
         if fd >= 0 {
             defer { close(fd) }
             let data = Data(line.utf8)
