@@ -521,6 +521,7 @@ class VigilSessionManager {
     }
 
     private init() {
+        _ = Self.launchedAt // a static is lazy: stamp it at launch, not at the first status read
         acquireInstanceLock()
         load()
         respawnMachineKilledDaemons()
@@ -5412,6 +5413,34 @@ class VigilSessionManager {
     /// yield, so focus, float and move all aimed at a WINDOWLESS view and
     /// silently did nothing (2026-08-24, "I can't focus this session").
     /// The windowed one is the answer; a second match is a leak to report.
+    /// What `vigil doctor` asks the app: its views by kind and its memory
+    /// as the kernel counts it (phys_footprint is Activity Monitor's
+    /// "Memory"; heap in use is every malloc zone's live bytes).
+    func status() -> VigilSessionControl.Status {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let read = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        var heap = malloc_statistics_t()
+        malloc_zone_statistics(nil, &heap)
+        let views = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
+        let mb = { (bytes: UInt64) in (Double(bytes) / 1_048_576).rounded() }
+        return .init(
+            footprintMB: read == KERN_SUCCESS ? mb(info.phys_footprint) : -1,
+            heapInUseMB: mb(UInt64(heap.size_in_use)),
+            views: views.count,
+            windowedViews: views.filter { $0.window != nil }.count,
+            mirrorViews: views.filter(\.vigilMirror).count,
+            sessions: sessions.count,
+            heldTabs: sessions.values.reduce(0) { $0 + $1.held.count },
+            uptimeSeconds: (Date().timeIntervalSince(Self.launchedAt)).rounded())
+    }
+
+    private static let launchedAt = Date()
+
     func liveView(attachId: String) -> Ghostty.SurfaceView? {
         if let remote = VigilRemote.split(attachId) {
             return Ghostty.SurfaceView.vigilAttachSurfaces.allObjects.first {

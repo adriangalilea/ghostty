@@ -35,6 +35,20 @@ enum VigilSessionControl {
         let writtenBytes: UInt64?
     }
 
+    /// The app's own account of itself (`status`): the counts only it
+    /// knows and the kernel's memory figures, so a checker compares
+    /// structured facts instead of parsing a tool's table.
+    struct Status: Codable, Sendable {
+        let footprintMB: Double
+        let heapInUseMB: Double
+        let views: Int
+        let windowedViews: Int
+        let mirrorViews: Int
+        let sessions: Int
+        let heldTabs: Int
+        let uptimeSeconds: Double
+    }
+
     struct Reply: Codable, Sendable {
         let id: UUID?
         let ok: Bool
@@ -44,6 +58,7 @@ enum VigilSessionControl {
         var pane: String?
         var session: String?
         var input: [InputDiagnostic]?
+        var status: Status?
 
         static func failure(_ request: Request?, _ code: String, _ message: String) -> Self {
             .init(id: request?.id, ok: false, code: code, message: message)
@@ -176,6 +191,9 @@ enum VigilSessionControl {
                 .filter { request.anchor.isEmpty || $0.vigilAttachId == request.anchor }
                 .compactMap { $0.vigilInputDiagnostics() }
             return .init(id: request.id, ok: true, code: "ok", message: "Content-free input diagnostics.", input: views)
+        }
+        if request.operation == "status" {
+            return .init(id: request.id, ok: true, code: "ok", message: "App status.", status: VigilSessionManager.shared.status())
         }
         if request.operation == "describe" { return VigilSessionManager.shared.applySessionCommand(request) }
         let receipts = directory.appendingPathComponent("session-receipts")
