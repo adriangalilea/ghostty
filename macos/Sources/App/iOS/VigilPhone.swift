@@ -477,6 +477,7 @@ final class VigilPhone: ObservableObject {
     /// sure its directory is loaded, and hand back the pane to show.
     func resolve(url: URL) async -> PaneRef? {
         guard url.scheme == "vigil", let hostName = url.host else { return nil }
+        if hostName == "pane" { return await resolve(pane: url.lastPathComponent) }
         let parts = url.pathComponents.filter { $0 != "/" }
         guard parts.count == 2 else { log("url: \(url) wants /<session>/<pane>"); return nil }
         let (session, pane) = (parts[0], parts[1])
@@ -492,6 +493,21 @@ final class VigilPhone: ObservableObject {
             .leaves.first { $0.pane?.pane == pane }?.title ?? pane
         log("url: \(url) -> \(host.name) \(pane)")
         return PaneRef(host: host, pane: pane, title: title)
+    }
+
+    /// `vigil://pane/<id>` (a request's Go there, from Authz): the pane is
+    /// found by its daemon id on whichever Mac lists it (ids embed a random
+    /// session name, unique across Macs). Every Mac's directory is read
+    /// fresh, so a pane born a minute ago is found.
+    private func resolve(pane id: String) async -> PaneRef? {
+        guard id.hasPrefix("vigil-") else { log("url: vigil://pane/\(id) is not a pane id"); return nil }
+        for host in hosts { await refresh(host) }
+        guard let ref = nodes.flatMap(\.leaves).compactMap(\.pane).first(where: { $0.pane == id }) else {
+            log("url: no Mac lists pane \(id)")
+            return nil
+        }
+        log("url: vigil://pane/\(id) -> \(ref.host.name)")
+        return ref
     }
 
     // MARK: Attach

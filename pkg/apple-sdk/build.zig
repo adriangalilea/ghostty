@@ -55,8 +55,9 @@ pub fn addPaths(
             // ignores SDKROOT): zig 0.15's bundled libc++ does not compile
             // against the macOS 27 SDK (its math.h hands INFINITY/NAN to
             // <float.h> behind a `__need_infinity_nan` protocol zig's
-            // clang headers lack), so a build names a 26 SDK here.
-            if (std.process.getEnvVarOwned(b.allocator, "GHOSTTY_APPLE_SDK")) |sdk| {
+            // clang headers lack), so a build names a 26 SDK here. It is a
+            // macOS SDK: other Apple targets keep xcrun's.
+            if (target.os.tag == .macos) if (std.process.getEnvVarOwned(b.allocator, "GHOSTTY_APPLE_SDK")) |sdk| {
                 const include_dir = b.pathJoin(&.{ sdk, "usr", "include" });
                 const wf = b.addWriteFiles();
                 const path = wf.add("libc.txt", b.fmt(
@@ -75,7 +76,7 @@ pub fn addPaths(
                     .library = b.pathJoin(&.{ sdk, "usr", "lib" }),
                 } };
                 break :init;
-            } else |_| {}
+            } else |_| {};
 
             // Detect our SDK using the "findNative" Zig stdlib function.
             // This is really important because it forces using `xcrun` to
