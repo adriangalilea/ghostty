@@ -553,8 +553,10 @@ class VigilSessionManager {
         startEventWatcher()
         startStateDirWatcher()
         // The broker runs on every Mac and the screen's context follows
-        // focus (VigilHarnessCoordinator observes its own chokepoints).
-        VigilHarnessCoordinator.shared.start()
+        // focus (VigilHarnessCoordinator observes its own chokepoints). Next
+        // tick: it reads this manager, which is still being built here
+        // (a re-entrant `shared` traps before anything is logged).
+        DispatchQueue.main.async { VigilHarnessCoordinator.shared.start() }
         NotificationCenter.default.addObserver(
             forName: Self.stateDidChange, object: nil, queue: .main
         ) { [weak self] _ in
