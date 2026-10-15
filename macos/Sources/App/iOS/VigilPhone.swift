@@ -184,6 +184,7 @@ final class VigilPhone: ObservableObject {
         self.node = node
         unlinked = nil
         log("tether: node up (root \(node.root().prefix(10)))")
+        VigilFollow.adopt(followed: followed)
         readPeers()
         Task { [weak self] in
             for await event in node.events {
@@ -216,6 +217,7 @@ final class VigilPhone: ObservableObject {
             watches[id] = nil
         }
         readPeers()
+        renewClaims()
     }
 
     /// vigil could not start its tether node: nothing reaches a Mac.
@@ -350,11 +352,71 @@ final class VigilPhone: ObservableObject {
 
     func tree() -> [Node] { nodes }
 
+    // MARK: Following: a session's questions come to this app
+
+    /// Followed sessions, by their node id (`<Mac root>/<session>`).
+    @Published private(set) var followed: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vigil.followed") ?? []) {
+        didSet { UserDefaults.standard.set(Array(followed), forKey: "vigil.followed") }
+    }
+
+    /// How long a claim lives (authz's limit): renewed on every foreground
+    /// and whenever a followed session gains a pane; vigil unopened for
+    /// longer hands its sessions' questions back to Authz.
+    static let claimSpan: TimeInterval = 8 * 3600
+
+    /// Follows a session (or stops): its panes are claimed with their Mac's
+    /// authz, so their questions come to this app and Authz for iPhone
+    /// stays quiet for them, and it rides the Lock Screen as a Live
+    /// Activity its Mac keeps current; stopping releases both at once.
+    func follow(_ session: Node, _ on: Bool) {
+        guard session.kind == .session else { return }
+        if on { followed.insert(session.id) } else { followed.remove(session.id) }
+        log("follow: \(session.title) \(on ? "followed" : "no longer followed")")
+        claim(session, until: on ? Date().addingTimeInterval(Self.claimSpan) : Date())
+        let root = String(session.id.prefix { $0 != "/" })
+        if on, let mac = hosts.first(where: { $0.id == root }) { VigilFollow.start(session, mac: mac) }
+        if !on { VigilFollow.end(session.id) }
+    }
+
+    /// Every followed session's panes, claimed again for a full span.
+    func renewClaims() {
+        let until = Date().addingTimeInterval(Self.claimSpan)
+        for session in nodes.flatMap(\.children) where followed.contains(session.id) { claim(session, until: until) }
+    }
+
+    /// The panes of a followed session, as last claimed: a pane that joins
+    /// one is claimed when it appears.
+    private var claimedPanes: Set<String> = []
+
+    private func claim(_ session: Node, until: Date) {
+        let root = String(session.id.prefix { $0 != "/" })
+        let runtime = VigilAuthz.shared.runtime
+        guard let home = runtime.macs.first(where: { $0.id == root }).flatMap({ mac -> String? in
+            if case .answering(let homeID, _) = mac.state { homeID } else { nil }
+        }) else {
+            return log("follow: \(session.title): its Mac does not let vigil answer yet; its questions stay with Authz")
+        }
+        for pane in session.leaves.compactMap(\.pane?.pane) {
+            if until > Date() { claimedPanes.insert(pane) } else { claimedPanes.remove(pane) }
+            Task { await runtime.claim(context: pane, home: home, until: until) }
+        }
+    }
+
+    /// A followed session gained a pane: it is claimed now.
+    private func claimNewPanes() {
+        let until = Date().addingTimeInterval(Self.claimSpan)
+        for session in nodes.flatMap(\.children) where followed.contains(session.id) {
+            let panes = Set(session.leaves.compactMap(\.pane?.pane))
+            if !panes.isSubset(of: claimedPanes) { claim(session, until: until) }
+        }
+    }
+
     private func rebuildTree() {
         let fresh = deriveTree()
         guard fresh != nodes else { return }
         nodes = fresh
         indexTree()
+        claimNewPanes()
         let leaves = fresh.flatMap(\.leaves)
         let gridded = leaves.filter { $0.pane != nil && $0.rows > 0 }.count
         let folded = collapsed.count
@@ -432,7 +494,18 @@ final class VigilPhone: ObservableObject {
     /// born a moment ago arrives with its Mac's next document: up to five
     /// seconds of them are awaited.
     func resolve(url: URL) async -> PaneRef? {
-        guard url.scheme == "vigil", url.host == "pane" else { log("url: \(url) is not vigil://pane/<id>"); return nil }
+        guard url.scheme == "vigil" else { return nil }
+        // vigil://session/<mac>/<session> (a followed session's Live
+        // Activity): the pane asking for you, else its first.
+        if url.host == "session" {
+            let parts = url.pathComponents.filter { $0 != "/" }
+            guard parts.count == 2, let session = nodes.flatMap(\.children).first(where: { $0.id == "\(parts[0])/\(parts[1])" }) else {
+                log("url: \(url) names no session listed here"); return nil
+            }
+            let leaves = session.leaves.compactMap { leaf in leaf.pane.map { (leaf, $0) } }
+            return (leaves.first { $0.0.state == "blocked" } ?? leaves.first)?.1
+        }
+        guard url.host == "pane" else { log("url: \(url) is not vigil://pane/<id> or vigil://session/<mac>/<session>"); return nil }
         let id = url.lastPathComponent
         guard Open.validPane(id) else { log("url: \(url) names no pane"); return nil }
         let deadline = Date().addingTimeInterval(5)
@@ -447,6 +520,17 @@ final class VigilPhone: ObservableObject {
         }
         log("url: no Mac lists pane \(id)")
         return nil
+    }
+
+    /// A pane to show now (a tapped question): the root view navigates to
+    /// it and clears it.
+    @Published var opening: PaneRef?
+
+    func openPane(_ id: String) {
+        Task {
+            guard let url = URL(string: "vigil://pane/\(id)"), let ref = await resolve(url: url) else { return }
+            opening = ref
+        }
     }
 
     // MARK: Attach

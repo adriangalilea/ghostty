@@ -34,11 +34,18 @@ struct VigilPhoneRoot: View {
             HomeView()
         }
         .environmentObject(model)
-        // vigil://pane/<id>: a request's Go there.
+        // vigil://pane/<id> (a request's Go there) and
+        // vigil://session/<mac>/<session> (a followed session's activity).
         .onOpenURL { url in
             Task { @MainActor in
                 if let ref = await model.resolve(url: url) { path = [ref] }
             }
+        }
+        // A tapped question's pane.
+        .onChange(of: model.opening) { _, ref in
+            guard let ref else { return }
+            path = [ref]
+            model.opening = nil
         }
     }
 }
@@ -142,6 +149,10 @@ struct TreeNodeView: View {
                         .font(font)
                         .foregroundStyle(node.alive ? .primary : .secondary)
                         .lineLimit(1)
+                    if node.kind == .session && model.followed.contains(node.id) {
+                        Image(systemName: "bell.fill").font(.caption2).foregroundStyle(.secondary)
+                            .accessibilityLabel("Followed on this iPhone")
+                    }
                 }
                 if let sub = node.subtitle {
                     Text(sub).font(.caption2)
@@ -165,6 +176,14 @@ struct TreeNodeView: View {
             NavigationLink(value: ref) { content.frame(maxWidth: .infinity, alignment: .leading) }
                 .buttonStyle(.plain)
                 .simultaneousGesture(TapGesture().onEnded { model.log("tap: row \(node.title) (\(ref.pane))") })
+        } else if node.kind == .session {
+            let following = model.followed.contains(node.id)
+            content.onTapGesture { if foldable { toggle() } }
+                .contextMenu {
+                    Button { model.follow(node, !following) } label: {
+                        Label(following ? "Stop following" : "Follow on this iPhone", systemImage: following ? "bell.slash" : "bell")
+                    }
+                }
         } else {
             content.onTapGesture { if foldable { toggle() } }
         }

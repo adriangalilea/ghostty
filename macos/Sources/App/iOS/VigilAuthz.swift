@@ -1,4 +1,5 @@
 import AuthzEndpoint
+import AuthzGlance
 import AuthzProtocol
 import OSLog
 import SwiftUI
@@ -41,24 +42,97 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
         UIApplication.shared.registerForRemoteNotifications()
     }
 
-    /// APNs gave this app its push address (a development build: sandbox).
+    /// Allow or Deny under a question's notification: answered by the
+    /// runtime; what happened is a receipt (an answer that failed becomes a
+    /// notification saying so).
+    func answer(_ target: (id: String, home: String), action: String, shown: String) async {
+        switch await runtime.answer(target, action: action) {
+        case .answered: VigilPhone.shared.log("authz: answered \(target.id.prefix(8)) (\(action))")
+        case .alreadySettled, .gone: VigilPhone.shared.log("authz: \(target.id.prefix(8)) no longer waits")
+        case .failed(let why):
+            VigilPhone.shared.log("authz: \(target.id.prefix(8)) not answered: \(why)")
+            let content = UNMutableNotificationContent()
+            content.title = "Not answered"
+            content.body = "\(why) Open vigil to answer it: \(shown)"
+            try? await UNUserNotificationCenter.current().add(
+                UNNotificationRequest(identifier: "failed-\(target.id)", content: content, trigger: nil))
+        }
+    }
+
+    /// A tapped question: the pane that asks, once its home's view is current.
+    func open(_ target: (id: String, home: String)) async {
+        await runtime.start()
+        guard case .waiting(let snapshot)? = await runtime.readStanding(target, within: .seconds(5)) else {
+            return VigilPhone.shared.log("authz: \(target.id.prefix(8)) no longer waits")
+        }
+        VigilPhone.shared.openPane(snapshot.request.context)
+    }
+
+    /// This build's APNs environment (its entitlement: development), for
+    /// every token it hands out.
+    static let apns: PushRoute.Environment = .sandbox
+
+    /// APNs gave this app its push address.
     func pushToken(_ token: Data) {
         let hex = token.map { String(format: "%02x", $0) }.joined()
         do {
-            try runtime.setPush(token: hex, environment: .sandbox, activityToken: nil)
+            try runtime.setPush(token: hex, environment: Self.apns, activityToken: nil)
         } catch {
             authzLog.notice("authz: push route: \(String(describing: error), privacy: .public)")
         }
     }
 }
 
-/// The app delegate: APNs answers here (a SwiftUI app has no other door).
-final class VigilAppDelegate: NSObject, UIApplicationDelegate {
+/// The app delegate: APNs answers here (a SwiftUI app has no other door),
+/// and so do the notifications of a followed session's questions (the
+/// extension opened their sealed notes, `RequestNotification`).
+final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        UNUserNotificationCenter.current().setNotificationCategories([RequestNotification.quickCategory])
+        return true
+    }
+
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken token: Data) {
         Task { @MainActor in VigilAuthz.shared.pushToken(token) }
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
         authzLog.notice("authz: APNs registration failed: \(String(describing: error), privacy: .public)")
+    }
+
+    /// A question answered, withdrawn or expired elsewhere: its
+    /// notification goes.
+    func application(_ application: UIApplication, didReceiveRemoteNotification info: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+        guard let id = RequestNotification.retraction(info) else { return .noData }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+        return .newData
+    }
+
+    /// Open, the app is the surface: the notification only joins the list.
+    /// (Completion-handler forms completed on main: UIKit asserts otherwise.)
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+        withCompletionHandler completion: @escaping @Sendable (UNNotificationPresentationOptions) -> Void
+    ) {
+        DispatchQueue.main.async { completion([.list]) }
+    }
+
+    /// Allow or Deny answers from here; a tap opens the pane that asks.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+        withCompletionHandler completion: @escaping @Sendable () -> Void
+    ) {
+        let chosen = RequestNotification.read(response)
+        Task { @MainActor in
+            if let target = chosen.target {
+                if let action = chosen.action {
+                    await VigilAuthz.shared.answer(target, action: action, shown: chosen.shown)
+                } else {
+                    await VigilAuthz.shared.open(target)
+                }
+            }
+            completion()
+        }
     }
 }
