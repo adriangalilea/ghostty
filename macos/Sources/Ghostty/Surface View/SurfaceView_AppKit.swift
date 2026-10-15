@@ -369,6 +369,13 @@ extension Ghostty {
             vigilControlSize(true, reason: reason)
         }
 
+        /// SwiftUI reports a size before the view joins its window: a
+        /// gesture's claim made in between lands when it does.
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil { vigilResumePendingClaim() }
+        }
+
         /// The app or this window became active: a gesture's claim that
         /// was waiting for it lands now (the next turn, once key status
         /// has settled).
@@ -395,7 +402,7 @@ extension Ghostty {
                 guard NSApp.isActive, window?.isKeyWindow == true || (intent && window?.isVisible == true),
                       vigilViewportSize.width > 0, vigilViewportSize.height > 0 else {
                     if vigilPendingSizeClaim != nil {
-                        VigilSessionManager.vlogSync("size control: \(vigilHost ?? "")/\(vigilAttachId ?? "?") claim waits (\(reason)): active=\(NSApp.isActive) key=\(window?.isKeyWindow == true) viewport=\(Int(vigilViewportSize.width))x\(Int(vigilViewportSize.height))")
+                        VigilSessionManager.vlogSync("size control: \(vigilHost ?? "")/\(vigilAttachId ?? "?") claim waits (\(reason)): active=\(NSApp.isActive) window=\(window == nil ? "none" : "\(window!.windowNumber)") key=\(window?.isKeyWindow == true) visible=\(window?.isVisible == true) viewport=\(Int(vigilViewportSize.width))x\(Int(vigilViewportSize.height))")
                     }
                     return
                 }
