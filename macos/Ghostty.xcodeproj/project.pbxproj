@@ -8,9 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		0DAA111100000000000002A3 = {isa = PBXBuildFile; productRef = 0DAA111100000000000002A2; };
-		0DAA111100000000000002A4 = {isa = PBXBuildFile; productRef = 0DAA111100000000000002A2; };
 		0DAA111100000000000002B3 = {isa = PBXBuildFile; productRef = 0DAA111100000000000002B2; };
-		0DAA111100000000000002B4 = {isa = PBXBuildFile; productRef = 0DAA111100000000000002B2; };
+		0DAA111100000000000002C3 /* AuthzEndpoint in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000002C2 /* AuthzEndpoint */; };
 		0DAA111100000000000001A3 /* VigilHarness in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000001A2 /* VigilHarness */; };
 		29C15B1D2CDC3B2900520DD4 /* bat in Resources */ = {isa = PBXBuildFile; fileRef = 29C15B1C2CDC3B2000520DD4 /* bat */; };
 		55154BE02B33911F001622DC /* ghostty in Resources */ = {isa = PBXBuildFile; fileRef = 55154BDF2B33911F001622DC /* ghostty */; };
@@ -20,7 +19,9 @@
 		8F3A9B4C2FA6B88000A18D13 /* Ghostty.sdef in Resources */ = {isa = PBXBuildFile; fileRef = 8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */; };
 		9351BE8E3D22937F003B3499 /* nvim in Resources */ = {isa = PBXBuildFile; fileRef = 9351BE8E2D22937F003B3499 /* nvim */; };
 		A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A51BFC262B30F1B800E92F16 /* Sparkle */; };
-		0DAA11110000000000000F03 /* NIOSSH in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000000F02 /* NIOSSH */; };
+		0DAA11110000000000000F03 /* VigilLink in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000000F02 /* VigilLink */; };
+		0DAA11110000000000000F05 /* VigilWire in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000000F04 /* VigilWire */; };
+		0DAA11110000000000000F07 /* VigilWire in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000000F06 /* VigilWire */; };
 		0DAA111100000000000000A4 /* NodKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000A2 /* NodKit */; };
 		0DAA111100000000000000A5 /* NodSignal in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000A3 /* NodSignal */; };
 		0DAA111100000000000000B5 /* AskKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B2 /* AskKit */; };
@@ -298,7 +299,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				App/iOS/iOSApp.swift,
-				App/iOS/VigilSSH.swift,
+				App/iOS/VigilAuthz.swift,
 				App/iOS/VigilPhone.swift,
 				App/iOS/VigilPhoneUI.swift,
 				App/iOS/VigilTheme.swift,
@@ -345,6 +346,7 @@
 				0DAA111100000000000000A4 /* NodKit in Frameworks */,
 				0DAA111100000000000000A5 /* NodSignal in Frameworks */,
 				0DAA111100000000000001A3 /* VigilHarness in Frameworks */,
+				0DAA11110000000000000F07 /* VigilWire in Frameworks */,
 				0DAA111100000000000002A3 /* AuthzUI */,
 				0DAA111100000000000002B3 /* AuthzClient */,
 				0DAA111100000000000000B5 /* AskKit in Frameworks */,
@@ -365,9 +367,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				A53D0C8E2B53B0EA00305CE6 /* GhosttyKit.xcframework in Frameworks */,
-				0DAA11110000000000000F03 /* NIOSSH in Frameworks */,
-				0DAA111100000000000002A4 /* AuthzUI */,
-				0DAA111100000000000002B4 /* AuthzClient */,
+				0DAA11110000000000000F03 /* VigilLink in Frameworks */,
+				0DAA11110000000000000F05 /* VigilWire in Frameworks */,
+				0DAA111100000000000002C3 /* AuthzEndpoint in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -523,6 +525,7 @@
 				0DAA111100000000000000A2 /* NodKit */,
 				0DAA111100000000000000A3 /* NodSignal */,
 				0DAA111100000000000001A2 /* VigilHarness */,
+				0DAA11110000000000000F06 /* VigilWire */,
 				0DAA111100000000000002A2 /* AuthzUI */,
 				0DAA111100000000000002B2 /* AuthzClient */,
 				0DAA111100000000000000B2 /* AskKit */,
@@ -555,9 +558,9 @@
 			);
 			name = "Ghostty-iOS";
 			packageProductDependencies = (
-				0DAA11110000000000000F02 /* NIOSSH */,
-				0DAA111100000000000002A2 /* AuthzUI */,
-				0DAA111100000000000002B2 /* AuthzClient */,
+				0DAA11110000000000000F02 /* VigilLink */,
+				0DAA11110000000000000F04 /* VigilWire */,
+				0DAA111100000000000002C2 /* AuthzEndpoint */,
 			);
 			productName = "Ghostty-iOS";
 			productReference = A5D4499D2B53AE7B000F5B83 /* Ghostty-iOS.app */;
@@ -608,7 +611,6 @@
 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */,
 				0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */,
-				0DAA11110000000000000F01 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */,
 			);
 			productRefGroup = A5B30532299BEAAA0047F10C /* Products */;
 			projectDirPath = "";
@@ -1529,25 +1531,16 @@
 				minimumVersion = 2.5.1;
 			};
 		};
-		0DAA11110000000000000F01 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/apple/swift-nio-ssh";
-			requirement = {
-				kind = exactVersion;
-				version = 0.15.0;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		0DAA111100000000000002A2 = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000002A1; productName = AuthzUI; };
 		0DAA111100000000000002B2 = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000002A1; productName = AuthzClient; };
+		0DAA111100000000000002C2 /* AuthzEndpoint */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000002A1; productName = AuthzEndpoint; };
 		0DAA111100000000000001A2 /* VigilHarness */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */; productName = VigilHarness; };
-		0DAA11110000000000000F02 /* NIOSSH */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 0DAA11110000000000000F01 /* XCRemoteSwiftPackageReference "swift-nio-ssh" */;
-			productName = NIOSSH;
-		};
+		0DAA11110000000000000F02 /* VigilLink */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */; productName = VigilLink; };
+		0DAA11110000000000000F04 /* VigilWire */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */; productName = VigilWire; };
+		0DAA11110000000000000F06 /* VigilWire */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */; productName = VigilWire; };
 		A51BFC262B30F1B800E92F16 /* Sparkle */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */;

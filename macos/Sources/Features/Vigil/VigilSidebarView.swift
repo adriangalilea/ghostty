@@ -71,13 +71,13 @@ struct VigilSidebarView: View {
                                     // Remote hosts group under a header:
                                     // another Mac's sessions, viewports
                                     // only (VigilRemote). The header folds
-                                    // the whole Mac, keyed by its alias.
-                                    let alias = row.host.flatMap { _ in VigilRemote.split(row.id)?.alias }
-                                    if let host = row.host, let alias,
+                                    // the whole Mac, keyed by its device.
+                                    let device = row.host.flatMap { _ in VigilRemote.split(row.id)?.device }
+                                    if let host = row.host, let device,
                                        index == 0 || model.rows[index - 1].host != host {
-                                        hostHeader(host, alias: alias)
+                                        hostHeader(host, device: device)
                                     }
-                                    if let alias, collapse.hosts.contains(alias) {
+                                    if let device, collapse.hosts.contains(device) {
                                         EmptyView()
                                     } else {
                                         sessionGroup(row)
@@ -346,12 +346,12 @@ struct VigilSidebarView: View {
 
     // MARK: Remote host header (one per other Mac)
 
-    private func hostHeader(_ title: String, alias: String) -> some View {
-        let collapsed = collapse.hosts.contains(alias)
+    private func hostHeader(_ title: String, device: String) -> some View {
+        let collapsed = collapse.hosts.contains(device)
         return HStack(spacing: 4) {
             chevron(collapsed: collapsed) {
-                if collapsed { collapse.hosts.remove(alias) }
-                else { collapse.hosts.insert(alias) }
+                if collapsed { collapse.hosts.remove(device) }
+                else { collapse.hosts.insert(device) }
             }
             Image(systemName: "desktopcomputer")
             Text(title)

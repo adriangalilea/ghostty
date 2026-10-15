@@ -1,10 +1,9 @@
 import Foundation
-import CryptoKit
 import GhosttyKit
-import Network
-import NIOSSH
 import OSLog
-import Security
+import TetherKit
+import VigilLink
+import VigilWire
 
 /// Receipts, observed by the settings sheet ALONE.
 @MainActor
@@ -27,24 +26,21 @@ struct PaneRef: Hashable {
     func hash(into h: inout Hasher) { h.combine(host.id); h.combine(pane) }
 }
 
-/// The phone's model: the Macs it knows (ssh endpoints), one ed25519 key
-/// born on first launch and kept in the Keychain, each Mac's directory
-/// (`vigild dir`, the same document the Mac's own remote sidebar reads)
-/// rendered as the sidebar's tree, and the attach path (an fd from
-/// `vigild proxy <pane>`). Nothing here owns a session: the phone is a
-/// viewport, every fact stays on the Mac.
+/// The phone's model: the Macs it reaches (paired devices running vigil,
+/// over tether's `vigil/1`, on the node vigil's authz endpoint runs), each
+/// Mac's directory (the `dir` stream, the same document the Mac's own
+/// remote sidebar reads) rendered as the sidebar's tree, and the attach
+/// path (a pane's `proxy` stream, handed to the surface as an fd). Nothing
+/// here owns a session: the phone is a viewport, every fact stays on the Mac.
 @MainActor
 final class VigilPhone: ObservableObject {
     static let shared = VigilPhone()
     private static let logger = Logger(subsystem: "com.adriangalilea.vigil", category: "phone")
 
-    struct Host: Codable, Identifiable, Hashable {
-        var id = UUID()
+    /// A Mac: a paired device running vigil, named by its tether root.
+    struct Host: Identifiable, Hashable {
+        let id: String
         var name: String
-        var hostname: String
-        var port: Int = 22
-        var user: String
-        var endpoint: VigilSSH.Endpoint { .init(host: hostname, port: port, user: user) }
     }
 
     // The Mac's directory document (vigild dir).
@@ -105,17 +101,22 @@ final class VigilPhone: ObservableObject {
         var panes: [String: PaneTruth]
     }
 
-    @Published var hosts: [Host] {
-        didSet {
-            UserDefaults.standard.set(try? JSONEncoder().encode(hosts), forKey: "vigil.hosts")
-            rebuildTree()
-        }
-    }
+    /// The paired Macs running vigil, from tether (never typed in).
+    @Published private(set) var hosts: [Host] = [] { didSet { rebuildTree() } }
     /// Directories and errors publish; the TREE is derived once per change
     /// (never in a body), and receipts live in their own object so a log
     /// line can never re-render the tree (every receipt re-rendered every
     /// row and taps died mid-update, 2026-08-28).
-    private(set) var directories: [UUID: Directory] = [:] { didSet { rebuildTree(); checkScreens() } }
+    private(set) var directories: [String: Directory] = [:] {
+        didSet {
+            rebuildTree()
+            checkScreens()
+            let waiting = directoryWaiters
+            directoryWaiters = []
+            waiting.forEach { $0.resume() }
+        }
+    }
+    private var directoryWaiters: [Waiter] = []
 
     /// The content receipt (the Mac's `checkScreen`, same rule): every
     /// live surface hashes its viewport like the daemon does; a difference
@@ -147,37 +148,19 @@ final class VigilPhone: ObservableObject {
             }
         }
     }
-    private(set) var errors: [UUID: String] = [:] { didSet { rebuildTree() } }
+    private(set) var errors: [String: String] = [:] { didSet { rebuildTree() } }
     @Published private(set) var nodes: [Node] = []
     let receipts = VigilReceipts()
     var trace: [String] { receipts.lines }
-    let key: Curve25519.Signing.PrivateKey
-    private var connections: [UUID: VigilSSH] = [:]
-    private var timer: Timer?
+    /// vigil's tether node (the one its authz endpoint runs), once up.
+    private var node: TetherNode?
+    private var connections: [String: TetherConnection] = [:]
+    /// Each Mac's directory stream, open, being dialed or pausing to dial again.
+    private var watches: [String: Task<Void, Never>] = [:]
 
     private init() {
-        if let data = UserDefaults.standard.data(forKey: "vigil.hosts"),
-           let saved = try? JSONDecoder().decode([Host].self, from: data) {
-            hosts = saved
-        } else {
-            hosts = []
-        }
-        key = Self.loadOrMintKey()
-        VigilSSH.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
         Ghostty.SurfaceView.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
-        // The directory is polled every 15s on the tree and every 3s while
-        // a pane is on screen: a MIRROR draws the grid `dir` last reported,
-        // and a Mac window settling its size stepped the pty a dozen
-        // times while the phone lagged 15s behind each (2026-08-29).
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.ticks += 1
-                if self.presenting != nil || self.ticks % 5 == 0 { self.refreshAll() }
-            }
-        }
     }
-    private var ticks = 0
 
     /// Every receipt goes three ways: the in-app list, os_log (Console /
     /// `log stream`), and stderr (`devicectl … launch --console` over the
@@ -189,116 +172,133 @@ final class VigilPhone: ObservableObject {
         receipts.append("\(stamp) \(line)")
     }
 
-    var publicKeyLine: String { key.openSSHPublicLine }
+    // MARK: Macs (tether peers running vigil)
 
-    // MARK: Key (Keychain-held, minted once)
-
-    private static func loadOrMintKey() -> Curve25519.Signing.PrivateKey {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "vigil.ssh",
-            kSecAttrAccount as String: "ed25519",
-            kSecReturnData as String: true,
-        ]
-        var item: CFTypeRef?
-        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-           let data = item as? Data,
-           let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: data) {
-            return key
-        }
-        let key = Curve25519.Signing.PrivateKey()
-        let add: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "vigil.ssh",
-            kSecAttrAccount as String: "ed25519",
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData as String: key.rawRepresentation,
-        ]
-        SecItemAdd(add as CFDictionary, nil)
-        return key
-    }
-
-    // MARK: Connections
-
-    /// Host keys are trusted on first use, per hostname, remembered by
-    /// their serialized bytes. A changed key is REFUSED with a receipt;
-    /// forget it from the host's settings to re-trust.
-    /// Stored as the OpenSSH public-key line, per hostname (v2: the v1
-    /// store held a reflection string and is ignored).
-    private func trust(_ host: Host, _ fingerprint: String) -> Bool {
-        let store = "vigil.hostkey2.\(host.hostname)"
-        if let known = UserDefaults.standard.string(forKey: store) {
-            if known == fingerprint { return true }
-            Task { @MainActor in self.log("ssh: HOST KEY CHANGED for \(host.hostname), refused") }
-            return false
-        }
-        UserDefaults.standard.set(fingerprint, forKey: store)
-        Task { @MainActor in self.log("ssh: trusting \(host.hostname) on first use") }
-        return true
-    }
-
-    func forgetHostKey(_ host: Host) {
-        UserDefaults.standard.removeObject(forKey: "vigil.hostkey2.\(host.hostname)")
-        log("ssh: forgot host key for \(host.hostname)")
-        connections[host.id]?.close()
-        connections[host.id] = nil
-        errors[host.id] = nil
-    }
-
-    /// The live connection to a Mac, made on demand. Liveness is the
-    /// connection's own published `state` (never a Channel read); a
-    /// connection that closed is dropped here on its own report.
-    func connection(for host: Host) async throws -> VigilSSH {
-        if let live = connections[host.id], live.state == .connected, live.endpoint == host.endpoint { return live }
-        connections[host.id]?.close()
-        connections[host.id] = nil
-        let ssh = VigilSSH(endpoint: host.endpoint, key: key) { [weak self] line in
-            guard let self else { return false }
-            return self.trust(host, line)
-        }
-        ssh.onStateChange = { [weak self] state in
-            guard let self else { return }
-            if case .closed(let why) = state, self.connections[host.id] === ssh {
-                self.connections[host.id] = nil
-                self.errors[host.id] = why
+    /// vigil's node is up (VigilAuthz started it): the Macs are its paired
+    /// peers running vigil, read again whenever tether says who is paired
+    /// or what a device runs changed.
+    func attach(node: TetherNode) {
+        guard self.node == nil else { return }
+        self.node = node
+        log("tether: node up (root \(node.root().prefix(10)))")
+        readPeers()
+        Task { [weak self] in
+            for await event in node.events {
+                switch event {
+                case .paired, .revoked, .directoryUpdated: self?.readPeers()
+                default: break
+                }
             }
         }
-        try await ssh.connect()
-        connections[host.id] = ssh
-        return ssh
     }
 
-    // MARK: Directory
-
-    func refreshAll() {
-        for host in hosts { Task { await refresh(host) } }
+    private func readPeers() {
+        guard let node else { return }
+        let peers = ((try? node.peers()) ?? []).filter { $0.apps.contains(VigilWire.app) }
+        let next = peers.map { Host(id: $0.root, name: $0.name) }.sorted { $0.name < $1.name }
+        if next != hosts {
+            hosts = next
+            log("macs: \(next.map(\.name))")
+            let ids = Set(next.map(\.id))
+            directories = directories.filter { ids.contains($0.key) }
+            errors = errors.filter { ids.contains($0.key) }
+        }
+        for host in hosts { watch(host) }
     }
 
-    private var refreshing = Set<UUID>()
+    /// Back on screen: every Mac whose stream is down is dialed now, not
+    /// at the end of its pause.
+    func wake() {
+        for (id, task) in watches where errors[id] != nil {
+            task.cancel()
+            watches[id] = nil
+        }
+        readPeers()
+    }
 
-    func refresh(_ host: Host) async {
-        guard !refreshing.contains(host.id) else { return }
-        refreshing.insert(host.id)
-        defer { refreshing.remove(host.id) }
-        do {
-            var ssh = try await connection(for: host)
-            var data: Data
-            do {
-                data = try await ssh.exec("vigild dir")
-            } catch VigilSSH.Failure.timeout {
-                // Dead under us (network change): dial again, once.
-                ssh = try await connection(for: host)
-                data = try await ssh.exec("vigild dir")
+    /// The held connection to a Mac, dialed on demand.
+    private func connection(_ host: Host) async throws -> TetherConnection {
+        if let held = connections[host.id] { return held }
+        guard let node else { throw WireError.refused("vigil is not connected to tether yet") }
+        let made = try await VigilLink.connect(node, device: host.id)
+        connections[host.id] = made
+        return made
+    }
+
+    /// One attempt through the held connection, and one more through a
+    /// fresh one when it had died (the Mac restarted, the network moved).
+    private func withConnection<T>(_ host: Host, _ body: (TetherConnection) async throws -> T) async throws -> T {
+        let first = try await connection(host)
+        do { return try await body(first) } catch let refused as WireError { throw refused } catch {
+            if connections[host.id] === first { connections[host.id] = nil }
+            return try await body(connection(host))
+        }
+    }
+
+    // MARK: Directory (a stream per Mac: every change as it happens)
+
+    /// Opens a Mac's directory stream unless one is open: each NDJSON line
+    /// is the Mac's whole directory. A stream that ends is dialed again
+    /// after a pause that doubles to half a minute (a Mac asleep, out of
+    /// reach), and at once when the app comes back on screen.
+    private func watch(_ host: Host) {
+        guard watches[host.id] == nil else { return }
+        watches[host.id] = Task { [weak self] in
+            var pause: UInt64 = 1
+            while !Task.isCancelled, let self, self.hosts.contains(host) {
+                do {
+                    let stream = try await self.withConnection(host) { try await VigilLink.stream($0, .dir) }
+                    self.errors[host.id] = nil
+                    pause = 1
+                    var buffer = Data()
+                    while let chunk = try await stream.recv() {
+                        buffer.append(chunk)
+                        while let newline = buffer.firstIndex(of: 10) {
+                            let line = buffer[buffer.startIndex..<newline]
+                            buffer = Data(buffer[buffer.index(after: newline)...])
+                            guard !line.isEmpty else { continue }
+                            let dir = try JSONDecoder().decode(Directory.self, from: line)
+                            if self.directories[host.id] == nil {
+                                self.log("dir: \(host.name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
+                            }
+                            self.directories[host.id] = dir
+                        }
+                    }
+                    self.log("dir: \(host.name) stream ended")
+                } catch {
+                    self.errors[host.id] = "\(error)"
+                    self.log("dir: \(host.name): \(error)")
+                    if self.connections[host.id] != nil { self.connections[host.id] = nil }
+                }
+                try? await Task.sleep(for: .seconds(pause))
+                pause = min(pause * 2, 30)
             }
-            let dir = try JSONDecoder().decode(Directory.self, from: data)
-            directories[host.id] = dir
-            errors[host.id] = nil
-            log("dir: \(host.name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
-        } catch {
-            errors[host.id] = error.receipt
-            log("dir: \(host.name): \(error.receipt)")
-            connections[host.id]?.close()
-            connections[host.id] = nil
+            // A Mac no longer paired ends its watch; a cancelled one was
+            // already replaced by `wake`.
+            if !Task.isCancelled { self?.watches[host.id] = nil }
+        }
+    }
+
+    /// Returns when the next directory arrives, or after `seconds`.
+    private func nextDirectory(within seconds: TimeInterval) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let waiter = Waiter(continuation)
+            directoryWaiters.append(waiter)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(seconds))
+                self?.directoryWaiters.removeAll { $0 === waiter }
+                waiter.resume()
+            }
+        }
+    }
+
+    /// A continuation resumed once, by whichever comes first.
+    private final class Waiter {
+        private var continuation: CheckedContinuation<Void, Never>?
+        init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
+        func resume() {
+            continuation?.resume()
+            continuation = nil
         }
     }
 
@@ -370,14 +370,14 @@ final class VigilPhone: ObservableObject {
     private func deriveTree() -> [Node] {
         hosts.map { host in
             let dir = directories[host.id]
-            var node = Node(id: "host:\(host.id.uuidString)", kind: .host,
+            var node = Node(id: "host:\(host.id)", kind: .host,
                             title: dir?.host ?? host.name,
                             subtitle: errors[host.id] ?? (dir == nil ? "connecting…" : nil))
             guard let dir else { return node }
             let sessions = dir.sessions.sorted { ($0.order ?? 0, $0.label) < ($1.order ?? 0, $1.label) }
             node.children = sessions.map { s in
                 let tabs = s.tabs ?? []
-                let sid = "\(host.id.uuidString)/\(s.name)"
+                let sid = "\(host.id)/\(s.name)"
                 var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji)
                 func paneNode(_ p: Pane) -> Node {
                     let truth = dir.panes[p.id]
@@ -430,104 +430,50 @@ final class VigilPhone: ObservableObject {
         return out
     }
 
-    // MARK: Discovery (Bonjour: the Macs on THIS network)
-
-    /// A Mac advertising ssh on the local network (macOS Remote Login
-    /// publishes `_ssh._tcp`). Its `.local` name resolves on any LAN the
-    /// phone shares with it: a hotel's wifi, the phone's own hotspot.
-    struct DiscoveredMac: Identifiable, Equatable {
-        var id: String { name }
-        let name: String
-        var hostname: String { "\(name).local" }
-    }
-    @Published private(set) var discovered: [DiscoveredMac] = []
-    private var browser: NWBrowser?
-
-    func startDiscovery() {
-        guard browser == nil else { return }
-        let b = NWBrowser(for: .bonjour(type: "_ssh._tcp", domain: nil), using: .tcp)
-        b.browseResultsChangedHandler = { [weak self] results, _ in
-            // One result PER INTERFACE the service is seen on (a docked Mac
-            // on cable + Wi-Fi is two results with one name); the Mac is
-            // one, and a duplicate id in the picker's Form is a crash on
-            // "Add Mac" (2026-09-14). Names are the identity here.
-            var names = Set<String>()
-            for r in results {
-                if case .service(let name, _, _, _) = r.endpoint { names.insert(name) }
-            }
-            let macs = names.sorted().map { DiscoveredMac(name: $0) }
-            Task { @MainActor in
-                guard let self else { return }
-                if macs != self.discovered {
-                    self.discovered = macs
-                    self.log("bonjour: \(macs.map(\.name))")
-                }
-            }
-        }
-        b.stateUpdateHandler = { [weak self] state in
-            if case .failed(let err) = state { Task { @MainActor in self?.log("bonjour: failed \(err)") } }
-        }
-        b.start(queue: .global(qos: .utility))
-        browser = b
-    }
-
-    // MARK: URLs (vigil://<host>/<session>/<pane>)
-
-    /// The landing for an alert: resolve a host by name or hostname, make
-    /// sure its directory is loaded, and hand back the pane to show.
-    func resolve(url: URL) async -> PaneRef? {
-        guard url.scheme == "vigil", let hostName = url.host else { return nil }
-        if hostName == "pane" { return await resolve(pane: url.lastPathComponent) }
-        let parts = url.pathComponents.filter { $0 != "/" }
-        guard parts.count == 2 else { log("url: \(url) wants /<session>/<pane>"); return nil }
-        let (session, pane) = (parts[0], parts[1])
-        guard let host = hosts.first(where: {
-            $0.name.caseInsensitiveCompare(hostName) == .orderedSame
-                || $0.hostname.caseInsensitiveCompare(hostName) == .orderedSame
-                || $0.hostname.caseInsensitiveCompare("\(hostName).local") == .orderedSame
-                || (directories[$0.id]?.host).map { $0.caseInsensitiveCompare(hostName) == .orderedSame } ?? false
-        }) else { log("url: no Mac named \(hostName)"); return nil }
-        if directories[host.id] == nil { await refresh(host) }
-        let title = nodes.first { $0.id == "host:\(host.id.uuidString)" }?
-            .children.first { $0.title == session || $0.id.hasSuffix("/\(session)") }?
-            .leaves.first { $0.pane?.pane == pane }?.title ?? pane
-        log("url: \(url) -> \(host.name) \(pane)")
-        return PaneRef(host: host, pane: pane, title: title)
-    }
+    // MARK: URLs (vigil://pane/<id>)
 
     /// `vigil://pane/<id>` (a request's Go there, from Authz): the pane is
     /// found by its daemon id on whichever Mac lists it (ids embed a random
-    /// session name, unique across Macs). Every Mac's directory is read
-    /// fresh, so a pane born a minute ago is found.
-    private func resolve(pane id: String) async -> PaneRef? {
-        guard id.hasPrefix("vigil-") else { log("url: vigil://pane/\(id) is not a pane id"); return nil }
-        for host in hosts { await refresh(host) }
-        guard let ref = nodes.flatMap(\.leaves).compactMap(\.pane).first(where: { $0.pane == id }) else {
-            log("url: no Mac lists pane \(id)")
-            return nil
+    /// session name, unique across Macs). Directories stream, so a pane
+    /// born a moment ago arrives with its Mac's next document: up to five
+    /// seconds of them are awaited.
+    func resolve(url: URL) async -> PaneRef? {
+        guard url.scheme == "vigil", url.host == "pane" else { log("url: \(url) is not vigil://pane/<id>"); return nil }
+        let id = url.lastPathComponent
+        guard Open.validPane(id) else { log("url: \(url) names no pane"); return nil }
+        let deadline = Date().addingTimeInterval(5)
+        while true {
+            if let ref = nodes.flatMap(\.leaves).compactMap(\.pane).first(where: { $0.pane == id }) {
+                log("url: vigil://pane/\(id) -> \(ref.host.name)")
+                return ref
+            }
+            let left = deadline.timeIntervalSinceNow
+            guard left > 0 else { break }
+            await nextDirectory(within: left)
         }
-        log("url: vigil://pane/\(id) -> \(ref.host.name)")
-        return ref
+        log("url: no Mac lists pane \(id)")
+        return nil
     }
 
     // MARK: Attach
 
-    /// A live stream to one pane, as an fd for the Attach backend.
+    /// A live stream to one pane (`proxy`), as an fd for the Attach backend:
+    /// one end of a socketpair, the other bridged to the tether stream.
     func attach(_ host: Host, pane: String, preview: Bool = false) async throws -> Int32 {
-        // One retry: a stream that times out declared its connection
-        // dead, and the second attempt dials a fresh one.
-        for attempt in 1...2 {
-            do {
-                let ssh = try await connection(for: host)
-                let fd = try await ssh.stream("vigild proxy \(pane)")
-                log("\(preview ? "preview" : "attach"): \(host.name) \(pane) fd \(fd)\(attempt > 1 ? " (retry)" : "")")
-                return fd
-            } catch {
-                log("\(preview ? "preview" : "attach"): \(host.name) \(pane) attempt \(attempt) failed: \(error.receipt)")
-                if attempt == 2 { throw error }
-            }
+        let stream = try await withConnection(host) { try await VigilLink.stream($0, .proxy(pane)) }
+        var fds: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
+            try? await stream.finish()
+            throw WireError.refused("socketpair: \(String(cString: strerror(errno)))")
         }
-        fatalError("unreachable")
+        for fd in fds { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+        let ours = fds[1]
+        Task.detached {
+            await VigilLink.bridge(stream, read: ours, write: ours)
+            close(ours)
+        }
+        log("\(preview ? "preview" : "attach"): \(host.name) \(pane) fd \(fds[0])")
+        return fds[0]
     }
 
     // MARK: Surfaces: the model owns every live stream
@@ -608,10 +554,9 @@ final class VigilPhone: ObservableObject {
         }
     }
 
-    /// Every live surface is a full Metal renderer plus an ssh channel,
-    /// and sshd grants 10 channels per connection (MaxSessions): the cap
-    /// keeps every Mac's previews, the directory exec and the screen under
-    /// it. A dial in flight holds its slot, or every row of a fresh tree
+    /// Every live surface is a full Metal renderer and a stream: seven
+    /// focused full-grid renderers ran the phone hot, so six at most, the
+    /// screen's included. A dial in flight holds its slot, or every row of a fresh tree
     /// passes the check at zero and dials at once.
     static let surfaceCap = 6
     private var dialing = Set<String>()
@@ -653,7 +598,7 @@ final class VigilPhone: ObservableObject {
         return view
     }
 
-    /// Bumped when a live stream dies (the ssh connection dropped on a
+    /// Bumped when a live stream dies (the tether connection dropped on a
     /// network change): every screen holding a dead surface re-dials.
     @Published private(set) var streamGeneration = 0
 
@@ -684,7 +629,7 @@ final class VigilPhone: ObservableObject {
     /// A pane shown full screen here was seen: the fact belongs to ITS Mac
     /// (`vigild seen`, PROTOCOL.md), written only on a seen-flip (unseen
     /// done/blocked), the directory updated optimistically so the row
-    /// decays with the glance and the next poll confirms it.
+    /// decays with the glance and the Mac's next document confirms it.
     private func markSeen(_ ref: PaneRef) {
         guard let truth = directories[ref.host.id]?.panes[ref.pane],
               let revision = truth.stateRevision, revision.utf8.allSatisfy({ (48...57).contains($0) || $0 == 45 }),
@@ -695,14 +640,13 @@ final class VigilPhone: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let ssh = try await connection(for: ref.host)
-                _ = try await ssh.exec("vigild seen \(ref.pane) \(revision)")
+                _ = try await withConnection(ref.host) { try await VigilLink.call($0, .seen(ref.pane, revision: revision)) }
                 log("seen: \(ref.pane) marked on \(ref.host.name)")
             } catch {
                 if directories[ref.host.id]?.panes[ref.pane]?.stateRevision == revision {
                     directories[ref.host.id]?.panes[ref.pane]?.seen = truth.seen
                 }
-                log("seen: \(ref.pane) on \(ref.host.name) FAILED: \(error.receipt)")
+                log("seen: \(ref.pane) on \(ref.host.name) FAILED: \(error)")
             }
         }
     }

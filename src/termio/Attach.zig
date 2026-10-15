@@ -49,13 +49,14 @@ session: ?[]const u8,
 /// it survives detach, quit and reboot like the shell does.
 command: ?configpkg.Command,
 
-/// ssh alias of the Mac that owns the daemon; null = local. Remote =
-/// `ssh <host> vigild proxy <id>` as a child whose stdout is our read fd
-/// and stdin our write fd. The daemon is never spawned remotely.
+/// The Mac that owns the daemon, by its tether root; null = local. Remote =
+/// this Mac's vigil hub (vigil-agent's local socket) opening `proxy` on
+/// that Mac over tether: one socket, read and written like a local one.
+/// The daemon is never spawned remotely.
 host: ?[]const u8,
 
 /// A stream handed in already connected (iOS: a socketpair end the app
-/// pumps to its ssh channel). The transport is the embedder's; this
+/// bridges to a tether stream). The transport is the embedder's; this
 /// backend only speaks frames on whatever fd it is given.
 given_fd: ?posix.fd_t,
 
@@ -69,14 +70,10 @@ client_id: u64,
 
 alloc: Allocator,
 
-/// Read side: the socket, or the ssh child's stdout; -1 until threadEnter.
+/// Read side: the socket; -1 until threadEnter.
 sock_fd: posix.fd_t = -1,
-/// Write side: the same socket, or the ssh child's stdin.
+/// Write side: the same socket (a given fd may be one too).
 write_fd: posix.fd_t = -1,
-/// The ssh child for a remote pane (0 = local). Severing a pipe stream
-/// means killing it: a pipe has no shutdown(), and the reader only sees
-/// EOF once the child is gone.
-ssh_pid: posix.pid_t = 0,
 
 /// Cached tty name of the daemon's pty (from its pidfile).
 cached_tty: ?[:0]const u8 = null,
@@ -131,7 +128,7 @@ pub const Config = struct {
     command: ?configpkg.Command = null,
     host: ?[]const u8 = null,
     /// A pre-connected stream (the embedder's transport); overrides both
-    /// the local socket and ssh.
+    /// the local socket and the hub.
     fd: ?posix.fd_t = null,
     explicit_claim: bool = false,
 };
@@ -188,39 +185,55 @@ fn connectSock(self: *Attach) !posix.fd_t {
     return fd;
 }
 
-/// The remote transport: `ssh <host> vigild proxy <id>` as a child, its
-/// stdout our read fd, its stdin our write fd. Everything about the
-/// network (LAN, tailnet, jump host, keys) is the user's ssh config.
-/// `vigild` must be on the remote's non-interactive PATH; a missing
-/// binary surfaces as the child's immediate EOF (a failed launch).
-fn connectSSH(self: *Attach, host: []const u8) !void {
-    const argv = [_][]const u8{ "/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-T", host, "vigild", "proxy", self.id };
-    var child = std.process.Child.init(&argv, self.alloc);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-    const stdin = child.stdin.?;
-    const stdout = child.stdout.?;
-    // Never inherited by anything we spawn later.
-    _ = try posix.fcntl(stdin.handle, posix.F.SETFD, posix.FD_CLOEXEC);
-    const flags = try posix.fcntl(stdin.handle, posix.F.GETFL, 0);
-    _ = try posix.fcntl(stdin.handle, posix.F.SETFL, flags | @as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
-    _ = try posix.fcntl(stdout.handle, posix.F.SETFD, posix.FD_CLOEXEC);
-    self.sock_fd = stdout.handle;
-    self.write_fd = stdin.handle;
-    self.ssh_pid = child.id;
-    log.info("attach: remote {s} via ssh {s} (pid {d})", .{ self.id, host, child.id });
+/// The remote transport: this Mac's vigil hub (vigil-agent, VigilWire's
+/// `Local`), which opens `proxy <id>` on the owning Mac over tether. One
+/// request line, one Ack line read byte by byte (what follows is the
+/// stream's), then the socket IS the remote stream. The hub answers this
+/// app alone (code signature), and pairing is the only grant across Macs.
+fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
+    // Both are vigil-minted (a hex tether root, a pane id): never quoted.
+    for (host) |c| if (!std.ascii.isAlphanumeric(c)) return error.InvalidHost;
+    for (self.id) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return error.InvalidPane;
+
+    var path_buf: [512]u8 = undefined;
+    const path = if (posix.getenv("VIGIL_HARNESS_STATE")) |root|
+        try std.fmt.bufPrint(&path_buf, "{s}/hub.sock", .{root})
+    else
+        try std.fmt.bufPrint(&path_buf, "{s}/.local/state/vigil-harness/hub.sock", .{posix.getenv("HOME") orelse return error.NoHome});
+    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+    errdefer posix.close(fd);
+    _ = try posix.fcntl(fd, posix.F.SETFD, posix.FD_CLOEXEC);
+    var addr: std.net.Address = try .initUnix(path);
+    try posix.connect(fd, &addr.any, addr.getOsSockLen());
+
+    var req_buf: [512]u8 = undefined;
+    const request = try std.fmt.bufPrint(&req_buf, "{{\"kind\":\"open\",\"device\":\"{s}\",\"open\":{{\"op\":\"proxy\",\"pane\":\"{s}\"}}}}\n", .{ host, self.id });
+    var written: usize = 0;
+    while (written < request.len) written += try posix.write(fd, request[written..]);
+
+    var ack_buf: [1024]u8 = undefined;
+    var len: usize = 0;
+    while (true) {
+        if (len == ack_buf.len) return error.HubAnswerTooLong;
+        const n = try posix.read(fd, ack_buf[len .. len + 1]);
+        if (n == 0) return error.HubClosed;
+        if (ack_buf[len] == '\n') break;
+        len += 1;
+    }
+    const Ack = struct { ok: bool, @"error": ?[]const u8 = null };
+    const parsed = try std.json.parseFromSlice(Ack, self.alloc, ack_buf[0..len], .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (!parsed.value.ok) {
+        log.warn("attach: remote {s} refused by the hub: {s}", .{ self.id, parsed.value.@"error" orelse "no reason" });
+        return error.HubRefused;
+    }
+    log.info("attach: remote {s} on {s} through the hub", .{ self.id, host });
+    return fd;
 }
 
-/// Cut the stream so the reader sees EOF: shutdown for a socket, kill
-/// the ssh child for a pipe (a pipe cannot be shut down).
+/// Cut the stream so the reader sees EOF.
 fn sever(self: *Attach) void {
     self.transport_state.store(2, .release);
-    if (self.ssh_pid != 0) {
-        posix.kill(self.ssh_pid, posix.SIG.TERM) catch {};
-        return;
-    }
     if (self.sock_fd >= 0) posix.shutdown(self.sock_fd, .both) catch {};
 }
 
@@ -288,13 +301,15 @@ pub fn threadEnter(
     errdefer self.transport_state.store(2, .release);
 
     // Attach: locally, creating the daemon on first contact; remotely,
-    // through an ssh child (never creating anything).
+    // through this Mac's hub (never creating anything).
     if (self.given_fd) |given| {
         self.sock_fd = given;
         self.write_fd = given;
         log.info("attach: {s} on a given fd {d}", .{ self.id, given });
     } else if (self.host) |host| {
-        try self.connectSSH(host);
+        const fd = try self.connectHub(host);
+        self.sock_fd = fd;
+        self.write_fd = fd;
     } else {
         const fd = self.connectSock() catch fd: {
             try self.spawnDaemon();
@@ -382,10 +397,6 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
     // reconnect replaced it, and the number may be another surface's by now.
     if (self.write_fd != self.sock_fd and self.write_fd >= 0) posix.close(self.write_fd);
     if (self.sock_fd >= 0) posix.close(self.sock_fd);
-    if (self.ssh_pid != 0) {
-        _ = posix.waitpid(self.ssh_pid, 0);
-        self.ssh_pid = 0;
-    }
     self.sock_fd = -1;
     self.write_fd = -1;
 }

@@ -1,14 +1,16 @@
 import Foundation
-import SystemConfiguration
+import VigilHarness
+import VigilWire
 
-/// Other Macs' sessions, read through ssh. ONE source: `ssh <alias> vigild
-/// dir` returns the machine's registry (vigil.json verbatim) plus per-pane
-/// process truth (alive, agent state token, tree argv), streamed per change.
-/// Surfaces attach through `ssh <alias> vigild proxy <pane>`. Structural
-/// intent uses `vigild session`: the home app commits it, and the directory
-/// stream projects it here. This Mac never writes the home registry.
-/// Reachability, keys and the network are the
-/// user's ssh config (`vigil-hosts` lists aliases, nothing more).
+/// Other Macs' sessions, through this Mac's vigil hub (vigil-agent: the one
+/// tether node of app `vigil` here, VigilWire). The Macs are the paired
+/// devices running vigil, streamed by the hub as they change; each one's
+/// directory (its registry, vigil.json verbatim, plus per-pane process
+/// truth) arrives as a `dir` stream, one document per change. Surfaces
+/// attach through the same hub (the Zig attach opens `proxy` itself).
+/// Structural intent is a `session` call: the home app commits it and the
+/// directory stream projects it here. This Mac never writes the home
+/// registry. Who may reach whom is tether's pairing, nothing configured here.
 @MainActor
 final class VigilRemote: ObservableObject {
     static let shared = VigilRemote()
@@ -54,367 +56,235 @@ final class VigilRemote: ObservableObject {
         var panes: [String: PaneTruth]
     }
 
+    /// A paired Mac running vigil, by its tether root.
     struct Host {
-        let alias: String
+        let device: String
+        var name: String
         var directory: Directory?
         var error: String?
-        /// The alias points at THIS Mac (`vigil-hosts` is one shared
-        /// config across Adrian's Macs, so every Mac lists itself): never
-        /// polled, never a row.
-        var isSelf = false
     }
-
-    static let selfError = "this Mac"
 
     @Published private(set) var hosts: [Host] = []
     static var trace: ((String) -> Void)?
 
-    /// One `ssh <alias> vigild dir --watch` per host, for as long as the
-    /// host is configured: the remote emits its directory once per change,
-    /// nothing is polled and no process is spawned per tick. A dead stream
-    /// re-dials after 15s.
-    private var streams: [String: Process] = [:]
-    private var resolving = Set<String>()
+    private var started = false
     private var stopped = false
+    /// The open directory stream per Mac (its socket to the hub).
+    private var streams: [String: FileHandle] = [:]
     private var streamBuffers: [String: Data] = [:]
-    private var inflight = Set<String>()
     private var arrivals: [String: (revision: String, at: Date)] = [:]
-    func arrival(alias: String, pane: String, revision: String) -> Date {
-        let id = Self.compositeId(alias, pane)
+    func arrival(device: String, pane: String, revision: String) -> Date {
+        let id = Self.compositeId(device, pane)
         if let value = arrivals[id], value.revision == revision { return value.at }
         let now = Date(); arrivals[id] = (revision, now)
         return now
     }
 
-    /// Session ids of remote sessions are namespaced by alias so they can
-    /// never collide with local ones: `alias/name`.
-    static func compositeId(_ alias: String, _ name: String) -> String { "\(alias)/\(name)" }
+    /// Session ids of remote sessions are namespaced by the Mac so they can
+    /// never collide with local ones: `<device>/<name>` (a tether root is hex).
+    static func compositeId(_ device: String, _ name: String) -> String { "\(device)/\(name)" }
 
-    nonisolated static func split(_ composite: String) -> (alias: String, name: String)? {
+    nonisolated static func split(_ composite: String) -> (device: String, name: String)? {
         guard let slash = composite.firstIndex(of: "/") else { return nil }
         return (String(composite[..<slash]), String(composite[composite.index(after: slash)...]))
     }
 
-    func configure(aliases: [String]) {
-        guard !stopped else { return }
-        let known = Set(hosts.map(\.alias))
-        let wanted = Set(aliases)
-        hosts.removeAll { !wanted.contains($0.alias) }
-        arrivals = arrivals.filter { Self.split($0.key).map { wanted.contains($0.alias) } ?? false }
-        for (alias, stream) in streams where !wanted.contains(alias) {
-            streams[alias] = nil; streamBuffers[alias] = nil; stream.terminate()
-        }
-        for alias in aliases where !known.contains(alias) {
-            hosts.append(Host(alias: alias))
-        }
-        guard !aliases.isEmpty else { return }
-        Self.trace?("remote: hosts \(aliases)")
-        // The streams wait for self-resolution: a stream from this Mac's
-        // own alias would paint a host row for the one tick it takes.
-        let unresolved = aliases.filter { !known.contains($0) }
-        resolving.formUnion(unresolved)
-        resolveSelf(unresolved) { [weak self] in
-            self?.resolving.subtract(unresolved)
-            self?.streamAll()
-        }
+    /// Follows the hub's list of Macs for the app's life: each new Mac's
+    /// directory stream opens, a Mac gone takes its rows with it. A hub
+    /// not answering (vigil-agent restarting) is asked again after 5s.
+    func start() {
+        guard !started else { return }
+        started = true
+        followPeers()
     }
 
     func stop() {
         stopped = true
-        let running = Array(streams.values)
+        for handle in streams.values { try? handle.close() }
         streams.removeAll()
         streamBuffers.removeAll()
-        for process in running where process.isRunning { process.terminate() }
         Self.trace?("remote: directory streams stopped")
     }
 
-    private func streamAll() {
-        for host in hosts where !host.isSelf { stream(host.alias) }
+    private func followPeers() {
+        guard !stopped else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let fd: Int32
+            do { fd = try Hub.request(.peers) } catch {
+                Task { @MainActor [weak self] in
+                    Self.trace?("remote: hub: \(error); asking again in 5s")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { MainActor.assumeIsolated { self?.followPeers() } }
+                }
+                return
+            }
+            let reader = Hub.LineReader(fd: fd)
+            while let line = reader.next() {
+                guard let peers = try? JSONDecoder().decode([Local.Peer].self, from: line) else { continue }
+                Task { @MainActor [weak self] in self?.peers(peers) }
+            }
+            close(fd)
+            Task { @MainActor [weak self] in
+                Self.trace?("remote: hub closed the Macs stream; asking again in 5s")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { MainActor.assumeIsolated { self?.followPeers() } }
+            }
+        }
     }
 
-    private func stream(_ alias: String) {
-        guard !stopped, !resolving.contains(alias), streams[alias] == nil,
-              let host = host(alias), !host.isSelf else { return }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=15",
-                          "-o", "ServerAliveCountMax=2", "-T", alias, "vigild", "dir", "--watch", "--until-eof"]
-        // The write end lives with Process. App death closes it; the home
-        // subscription exits on EOF even if no directory fact changes.
-        guard let input = try? ProcessPipe.make(), let out = try? ProcessPipe.make() else {
-            Self.trace?("remote: \(alias) could not create directory stream pipes")
-            return
+    private func peers(_ peers: [Local.Peer]) {
+        let wanted = Set(peers.map(\.id))
+        for (device, handle) in streams where !wanted.contains(device) {
+            streams[device] = nil; streamBuffers[device] = nil; try? handle.close()
         }
-        proc.standardInput = input
-        proc.standardOutput = out
-        proc.standardError = FileHandle.nullDevice
-        out.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            Task { @MainActor [weak self, weak proc] in
-                guard let self, let proc, self.streams[alias] === proc else { return }
-                self.streamed(alias, data)
+        hosts.removeAll { !wanted.contains($0.device) }
+        arrivals = arrivals.filter { Self.split($0.key).map { wanted.contains($0.device) } ?? false }
+        for peer in peers {
+            if let index = hosts.firstIndex(where: { $0.device == peer.id }) {
+                hosts[index].name = peer.name
+            } else {
+                hosts.append(Host(device: peer.id, name: peer.name))
+                stream(peer.id)
             }
         }
-        proc.terminationHandler = { [weak self] proc in
-            out.fileHandleForReading.readabilityHandler = nil
+        Self.trace?("remote: Macs \(peers.map(\.name))")
+        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+    }
+
+    /// A Mac's directory stream, through the hub. A stream that ends is
+    /// dialed again after 15s while the Mac is still paired.
+    private func stream(_ device: String) {
+        guard !stopped, streams[device] == nil, host(device) != nil else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = Result { try Hub.request(.open(device: device, .dir)) }
             Task { @MainActor [weak self] in
-                guard let self, self.streams[alias] === proc else { return }
-                self.streams[alias] = nil
-                self.streamBuffers[alias] = nil
-                if let index = self.hosts.firstIndex(where: { $0.alias == alias }) {
-                    let msg = "stream ended (ssh exit \(proc.terminationStatus))"
-                    if self.hosts[index].error != msg {
-                        Self.trace?("remote: \(alias) \(msg); re-dialing in 15s")
-                        self.hosts[index].error = msg
-                        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+                guard let self else { return }
+                switch result {
+                case .failure(let error):
+                    self.ended(device, "\(error)")
+                case .success(let fd):
+                    guard self.host(device) != nil, !self.stopped else { close(fd); return }
+                    let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+                    handle.readabilityHandler = { [weak self] handle in
+                        let data = handle.availableData
+                        Task { @MainActor [weak self] in
+                            guard let self, self.streams[device] === handle else { return }
+                            if data.isEmpty {
+                                handle.readabilityHandler = nil
+                                self.streams[device] = nil
+                                self.streamBuffers[device] = nil
+                                self.ended(device, "stream ended")
+                            } else {
+                                self.streamed(device, data)
+                            }
+                        }
                     }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
-                    MainActor.assumeIsolated { self?.stream(alias) }
+                    self.streams[device] = handle
+                    Self.trace?("remote: \(self.host(device)?.name ?? device) stream opened")
                 }
             }
         }
-        do {
-            try proc.run()
-            streams[alias] = proc
-            Self.trace?("remote: \(alias) stream opened")
-        } catch {
-            Self.trace?("remote: \(alias) stream failed to start: \(error.localizedDescription)")
+    }
+
+    private func ended(_ device: String, _ why: String) {
+        guard let index = hosts.firstIndex(where: { $0.device == device }) else { return }
+        if hosts[index].error != why {
+            Self.trace?("remote: \(hosts[index].name) \(why); dialing again in 15s")
+            hosts[index].error = why
+            NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            MainActor.assumeIsolated { self?.stream(device) }
         }
     }
 
     /// Lines off the stream, each a whole directory document.
-    private func streamed(_ alias: String, _ data: Data) {
-        streamBuffers[alias, default: Data()].append(data)
-        while let buffer = streamBuffers[alias], let newline = buffer.firstIndex(of: 0x0a) {
+    private func streamed(_ device: String, _ data: Data) {
+        streamBuffers[device, default: Data()].append(data)
+        while let buffer = streamBuffers[device], let newline = buffer.firstIndex(of: 0x0a) {
             let line = Data(buffer[buffer.startIndex..<newline])
-            streamBuffers[alias]?.removeSubrange(buffer.startIndex...newline)
-            do { apply(alias, .success(try JSONDecoder().decode(Directory.self, from: line))) }
-            catch { apply(alias, .failure(error)) }
+            streamBuffers[device]?.removeSubrange(buffer.startIndex...newline)
+            do { apply(device, .success(try JSONDecoder().decode(Directory.self, from: line))) }
+            catch { apply(device, .failure(error)) }
         }
     }
 
-    /// Which aliases name this Mac, decided from the ssh CONFIG (`ssh -G`
-    /// prints the resolved HostName), never from a reply: self must read
-    /// as self before sshd is even enabled here. Matches this Mac's own
-    /// names and every address on its interfaces.
-    private func resolveSelf(_ aliases: [String], then done: @escaping @MainActor () -> Void) {
-        guard !aliases.isEmpty else { done(); return }
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let mine = Self.localIdentities()
-            var selfAliases: [String] = []
-            for alias in aliases {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-                proc.arguments = ["-G", alias]
-                guard let out = try? ProcessPipe.make() else { continue }
-                proc.standardOutput = out
-                proc.standardError = FileHandle.nullDevice
-                guard (try? proc.run()) != nil else { continue }
-                let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                proc.waitUntilExit()
-                let target = text.split(separator: "\n")
-                    .first { $0.hasPrefix("hostname ") }
-                    .map { String($0.dropFirst("hostname ".count)).lowercased() } ?? alias.lowercased()
-                if mine.contains(target) { selfAliases.append(alias) }
-            }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                for alias in selfAliases {
-                    guard let index = self.hosts.firstIndex(where: { $0.alias == alias }) else { continue }
-                    Self.trace?("remote: \(alias) is this Mac, never polled")
-                    self.hosts[index].isSelf = true
-                    self.hosts[index].error = Self.selfError
-                    self.hosts[index].directory = nil
-                    if let stream = self.streams.removeValue(forKey: alias) { stream.terminate() }
-                    self.streamBuffers[alias] = nil
-                }
-                if !selfAliases.isEmpty {
-                    NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
-                }
-                done()
-            }
-        }
-    }
+    func host(_ device: String) -> Host? { hosts.first { $0.device == device } }
 
-    /// This Mac's names (hostName, its short form, the Bonjour name) and
-    /// every numeric address on its interfaces, lowercased.
-    private static func localIdentities() -> Set<String> {
-        var ids = Set<String>()
-        let full = ProcessInfo.processInfo.hostName.lowercased()
-        ids.insert(full)
-        ids.insert(String(full.split(separator: ".").first ?? Substring(full)))
-        if let local = SCDynamicStoreCopyLocalHostName(nil) as String? {
-            ids.insert(local.lowercased())
-            ids.insert(local.lowercased() + ".local")
-        }
-        var list: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&list) == 0, let first = list else { return ids }
-        defer { freeifaddrs(list) }
-        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            guard let addr = ptr.pointee.ifa_addr else { continue }
-            let family = Int32(addr.pointee.sa_family)
-            guard family == AF_INET || family == AF_INET6 else { continue }
-            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            if getnameinfo(addr, socklen_t(addr.pointee.sa_len), &buffer, socklen_t(buffer.count),
-                           nil, 0, NI_NUMERICHOST) == 0 {
-                ids.insert(String(cString: buffer).lowercased())
-            }
-        }
-        return ids
-    }
-
-    func host(_ alias: String) -> Host? { hosts.first { $0.alias == alias } }
-
-    /// One finite RPC per user edit. The held directory stream publishes
+    /// One finite call per user edit. The held directory stream publishes
     /// the result to every viewport; pane proxy streams remain untouched.
-    func command(_ alias: String, request: VigilSessionControl.Request) async throws -> VigilSessionControl.Reply {
+    func command(_ device: String, request: VigilSessionControl.Request) async throws -> VigilSessionControl.Reply {
         let payload = try JSONEncoder().encode(request) + Data([10])
-        return try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            process.arguments = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                                 "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
-                                 alias, "vigild", "session"]
-            let input = try ProcessPipe.make(), output = try ProcessPipe.make(), errors = try ProcessPipe.make()
-            process.standardInput = input
-            process.standardOutput = output
-            process.standardError = errors
-            try process.run()
-            try input.fileHandleForWriting.write(contentsOf: payload)
-            try input.fileHandleForWriting.close()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            let error = errors.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                throw NSError(domain: "VigilSessionControl", code: Int(process.terminationStatus), userInfo: [
-                    NSLocalizedDescriptionKey: String(data: error, encoding: .utf8) ?? "The home session writer did not reply."
-                ])
-            }
-            let reply = try JSONDecoder().decode(VigilSessionControl.Reply.self, from: data)
-            guard reply.id == request.id else {
-                throw NSError(domain: "VigilSessionControl", code: 1, userInfo: [NSLocalizedDescriptionKey: "The home reply did not match this command."])
-            }
-            return reply
+        let data = try await Task.detached(priority: .userInitiated) {
+            try Hub.call(device: device, .session, input: payload)
         }.value
+        let reply = try JSONDecoder().decode(VigilSessionControl.Reply.self, from: data)
+        guard reply.id == request.id else {
+            throw NSError(domain: "VigilSessionControl", code: 1, userInfo: [NSLocalizedDescriptionKey: "The home reply did not match this command."])
+        }
+        return reply
     }
 
-    func session(_ composite: String) -> (alias: String, session: Session)? {
-        guard let (alias, name) = Self.split(composite),
-              let session = host(alias)?.directory?.sessions.first(where: { $0.name == name && $0.buriedUntil == nil })
+    func session(_ composite: String) -> (device: String, session: Session)? {
+        guard let (device, name) = Self.split(composite),
+              let session = host(device)?.directory?.sessions.first(where: { $0.name == name && $0.buriedUntil == nil })
         else { return nil }
-        return (alias, session)
+        return (device, session)
     }
 
-    /// One `ssh <alias> vigild dir`, off the main thread; the result lands
-    /// on the main actor. A failure keeps the last good directory and
-    /// records the error (the header shows it).
-    func refresh(_ alias: String) {
-        guard !inflight.contains(alias) else { return }
-        inflight.insert(alias)
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-T", alias, "vigild", "dir"]
-            var result: Result<Directory, Error>
-            do {
-                let out = try ProcessPipe.make(), err = try ProcessPipe.make()
-                proc.standardOutput = out
-                proc.standardError = err
-                try proc.run()
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                let errData = err.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
-                if proc.terminationStatus != 0 {
-                    let msg = String(data: errData, encoding: .utf8)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    throw NSError(domain: "vigil.remote", code: Int(proc.terminationStatus),
-                                  userInfo: [NSLocalizedDescriptionKey: msg.isEmpty ? "ssh exit \(proc.terminationStatus)" : msg])
-                }
-                result = .success(try JSONDecoder().decode(Directory.self, from: data))
-            } catch {
-                result = .failure(error)
+    /// One directory landed: the Mac's rows follow, with a receipt only
+    /// when something changed.
+    private func apply(_ device: String, _ result: Result<Directory, Error>) {
+        guard let index = hosts.firstIndex(where: { $0.device == device }) else { return }
+        switch result {
+        case .success(let dir):
+            // Wire-only renderer hashes are not sidebar inputs. Compare
+            // decoded facts before deciding whether projections changed.
+            let changed = hosts[index].directory != dir || hosts[index].error != nil
+            guard changed else { return }
+            // A receipt per SHAPE change (a session or pane came or went),
+            // not per state flip: the stream delivers every flip and a busy
+            // fleet would write the log a few times a second.
+            let shape = (dir.sessions.count, dir.panes.count)
+            let before = hosts[index].directory.map { ($0.sessions.count, $0.panes.count) }
+            arrivals = arrivals.filter { entry in
+                guard let split = Self.split(entry.key), split.device == device else { return true }
+                return dir.panes[split.name] != nil
             }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.inflight.remove(alias)
-                self.apply(alias, result)
+            hosts[index].directory = dir
+            VigilSessionManager.shared.remoteDirectoryChanged(device)
+            hosts[index].error = nil
+            if before == nil || before! != shape {
+                Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
+            }
+            NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+        case .failure(let error):
+            let msg = error.localizedDescription
+            if hosts[index].error != msg {
+                Self.trace?("remote: \(hosts[index].name) unreadable directory: \(msg)")
+                hosts[index].error = msg
+                NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
             }
         }
     }
 
-    /// One directory landed (from the stream or a one-shot refresh): the
-    /// host's rows follow, with a receipt only when something changed.
-    private func apply(_ alias: String, _ result: Result<Directory, Error>) {
-        guard let index = hosts.firstIndex(where: { $0.alias == alias }) else { return }
-                switch result {
-                case .success(let dir):
-                    // An alias that resolves to THIS Mac would list every
-                    // local session twice under a host header: not a
-                    // remote, dropped with a receipt.
-                    if dir.host == ProcessInfo.processInfo.hostName.split(separator: ".").first.map(String.init) {
-                        if self.hosts[index].error != Self.selfError {
-                            Self.trace?("remote: \(alias) is this Mac (\(dir.host)), ignored")
-                            self.hosts[index].isSelf = true
-                            self.hosts[index].error = Self.selfError
-                            self.hosts[index].directory = nil
-                            if let stream = self.streams.removeValue(forKey: alias) { stream.terminate() }
-                            self.streamBuffers[alias] = nil
-                            NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
-                        }
-                        return
-                    }
-                    // Wire-only renderer hashes are not sidebar inputs. Compare
-                    // decoded facts before deciding whether projections changed.
-                    let changed = self.hosts[index].directory != dir || self.hosts[index].error != nil
-                    guard changed else { return }
-                    // A receipt per SHAPE change (a session or pane came or
-                    // went), not per state flip: the stream delivers every
-                    // flip and a busy fleet would write the log a few times
-                    // a second.
-                    let shape = (dir.sessions.count, dir.panes.count)
-                    let before = self.hosts[index].directory.map { ($0.sessions.count, $0.panes.count) }
-                    arrivals = arrivals.filter { entry in
-                        guard let split = Self.split(entry.key), split.alias == alias else { return true }
-                        return dir.panes[split.name] != nil
-                    }
-                    self.hosts[index].directory = dir
-                    VigilSessionManager.shared.remoteDirectoryChanged(alias)
-                    self.hosts[index].error = nil
-                    if before == nil || before! != shape {
-                        Self.trace?("remote: \(alias) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
-                    }
-                    NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
-                case .failure(let error):
-                    let msg = error.localizedDescription
-                    if self.hosts[index].error != msg {
-                        Self.trace?("remote: \(alias) unreachable: \(msg)")
-                        self.hosts[index].error = msg
-                        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
-                    }
-                }
-    }
-
-    /// The sidebar's rows for every remote host, in `vigil-hosts` order,
-    /// built like the local snapshot: session → tabs → panes, program from
-    /// the tree argv, state from the token. Everything cold (no local
-    /// views exist), row ids namespaced by alias.
+    /// The sidebar's rows for every remote Mac, built like the local
+    /// snapshot: session → tabs → panes, program from the tree argv, state
+    /// from the token. Everything cold (no local views exist), row ids
+    /// namespaced by the Mac.
     func sidebarRows() -> [VigilSessionManager.SidebarSessionRow] {
         var rows: [VigilSessionManager.SidebarSessionRow] = []
-        for host in hosts where !host.isSelf {
-            let hostLabel = host.directory?.host ?? host.alias
+        for host in hosts {
+            let hostLabel = host.directory?.host ?? host.name
             let header = host.error.map { "\(hostLabel) (\($0))" } ?? hostLabel
             guard let dir = host.directory else {
                 rows.append(.init(
-                    id: Self.compositeId(host.alias, ""), emoji: nil, label: "…",
+                    id: Self.compositeId(host.device, ""), emoji: nil, label: "…",
                     stateTag: "remote", attention: .none, states: [], tabs: [], host: header))
                 continue
             }
             let sessions = dir.sessions.filter { $0.buriedUntil == nil }
                 .sorted { ($0.label.lowercased(), $0.name) < ($1.label.lowercased(), $1.name) }
             for session in sessions {
-                let composite = Self.compositeId(host.alias, session.name)
+                let composite = Self.compositeId(host.device, session.name)
                 var tabs: [VigilSessionManager.SidebarTab] = []
                 for (index, tab) in (session.tabs ?? []).enumerated() {
                     let all = tab.panes + (tab.dock?.panes ?? [])
@@ -432,7 +302,7 @@ final class VigilRemote: ObservableObject {
                             ?? pane.title
                             ?? (pane.cwd as NSString).lastPathComponent
                         return .init(
-                            id: Self.compositeId(host.alias, pane.id),
+                            id: Self.compositeId(host.device, pane.id),
                             paneId: nil,
                             title: title,
                             program: program,
@@ -440,7 +310,7 @@ final class VigilRemote: ObservableObject {
                             isDock: offset >= tab.panes.count,
                             emoji: pane.emoji)
                     }
-                    let anchor = all.first.map { Self.compositeId(host.alias, $0.id) }
+                    let anchor = all.first.map { Self.compositeId(host.device, $0.id) }
                     let title = tab.label.flatMap { $0.isEmpty ? nil : $0 }
                         ?? ((tab.panes.first?.cwd ?? "") as NSString).lastPathComponent
                     tabs.append(.init(
@@ -501,37 +371,132 @@ final class VigilRemote: ObservableObject {
     private var seenInFlight = Set<String>()
 
     /// A remote console is under the eyes here: the ack belongs to ITS Mac.
-    /// Written through `ssh <alias> vigild seen <pane>` only on a seen-FLIP
-    /// (unseen done/blocked), never on the presence pulse; the directory is
-    /// updated optimistically so the row decays with the glance, and the
-    /// next poll confirms it.
-    func seen(alias: String, pane: String) {
-        guard let index = hosts.firstIndex(where: { $0.alias == alias }),
+    /// Written through a `seen` call only on a seen-FLIP (unseen
+    /// done/blocked), never on the presence pulse; the directory is updated
+    /// optimistically so the row decays with the glance, and the Mac's next
+    /// document confirms it.
+    func seen(device: String, pane: String) {
+        guard let index = hosts.firstIndex(where: { $0.device == device }),
               let truth = hosts[index].directory?.panes[pane],
               let revision = truth.stateRevision, revision.utf8.allSatisfy({ (48...57).contains($0) || $0 == 45 }),
               let token = truth.state, let state = Self.agentState(token),
               state == .done || state == .blocked,
               (truth.seen ?? 0) < (truth.since ?? 0) else { return }
-        let key = "\(alias)/\(pane)"
+        let key = "\(device)/\(pane)"
         guard !seenInFlight.contains(key) else { return }
         seenInFlight.insert(key)
         hosts[index].directory?.panes[pane]?.seen = truth.since
         NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            proc.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-T", alias, "vigild", "seen", pane, revision]
-            proc.standardOutput = FileHandle.nullDevice
-            proc.standardError = FileHandle.nullDevice
-            let status: Int32 = (try? proc.run()).map { proc.waitUntilExit(); return proc.terminationStatus } ?? -1
+            let failure: String?
+            do {
+                _ = try Hub.call(device: device, .seen(pane, revision: revision))
+                failure = nil
+            } catch {
+                failure = "\(error)"
+            }
             Task { @MainActor [weak self] in
                 self?.seenInFlight.remove(key)
-                if status != 0, let self, let index = self.hosts.firstIndex(where: { $0.alias == alias }),
+                if failure != nil, let self, let index = self.hosts.firstIndex(where: { $0.device == device }),
                    self.hosts[index].directory?.panes[pane]?.stateRevision == revision {
                     self.hosts[index].directory?.panes[pane]?.seen = truth.seen
                     NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
                 }
-                Self.trace?("remote: seen \(key)" + (status == 0 ? "" : " FAILED (ssh exit \(status))"))
+                Self.trace?("remote: seen \(key)" + (failure.map { " FAILED (\($0))" } ?? ""))
+            }
+        }
+    }
+
+    /// This Mac's hub (`Local`), by blocking calls: off the main thread only.
+    enum Hub {
+        enum Failure: Error, CustomStringConvertible {
+            case unreachable(String), refused(String), garbled
+            var description: String {
+                switch self {
+                case .unreachable(let why): "this Mac's vigil-agent does not answer (\(why))"
+                case .refused(let why): why
+                case .garbled: "the hub's answer did not parse"
+                }
+            }
+        }
+
+        static var socket: String { Local.socket(root: HarnessPaths.root).path }
+
+        /// A socket to the hub with `request` sent. For `peers` it then
+        /// carries the lines; for a stream `open`, the Ack is read here and
+        /// the socket carries the remote stream's bytes.
+        static func request(_ request: Local.Request) throws -> Int32 {
+            let fd = try connect()
+            do {
+                guard WireIO.writeLine(fd, try JSONEncoder().encode(request)) else { throw Failure.unreachable("write") }
+                if request.kind == .open {
+                    // Byte by byte: what follows the Ack is the stream's.
+                    guard let line = WireIO.readLine(fd) else { throw Failure.unreachable("no answer") }
+                    guard let ack = try? JSONDecoder().decode(Ack.self, from: line) else { throw Failure.garbled }
+                    guard ack.ok else { throw Failure.refused(ack.error ?? "refused") }
+                }
+                return fd
+            } catch {
+                close(fd)
+                throw error
+            }
+        }
+
+        /// A call: its output, or why it failed.
+        static func call(device: String, _ open: Open, input: Data = Data()) throws -> Data {
+            let fd = try connect()
+            defer { close(fd) }
+            guard WireIO.writeLine(fd, try JSONEncoder().encode(Local.Request.open(device: device, open))) else { throw Failure.unreachable("write") }
+            if !input.isEmpty { _ = WireIO.writeAll(fd, input) }
+            shutdown(fd, SHUT_WR)
+            guard let line = WireIO.readLine(fd) else { throw Failure.unreachable("no answer") }
+            guard let result = try? JSONDecoder().decode(CallResult.self, from: line) else { throw Failure.garbled }
+            guard result.ok else { throw Failure.refused(result.error ?? "failed") }
+            return result.output
+        }
+
+        private static func connect() throws -> Int32 {
+            let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+            guard fd >= 0 else { throw Failure.unreachable("socket: \(errno)") }
+            _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            let path = Array(socket.utf8)
+            guard path.count < MemoryLayout.size(ofValue: address.sun_path) else { close(fd); throw Failure.unreachable("socket path too long") }
+            withUnsafeMutableBytes(of: &address.sun_path) { raw in
+                raw.copyBytes(from: path)
+                raw[path.count] = 0
+            }
+            let connected = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+            }
+            guard connected == 0 else {
+                let why = String(cString: strerror(errno))
+                close(fd)
+                throw Failure.unreachable(why)
+            }
+            return fd
+        }
+
+        /// Lines off a blocking socket, at most 16 MiB each (a directory).
+        final class LineReader {
+            private let fd: Int32
+            private var buffer = Data()
+            init(fd: Int32) { self.fd = fd }
+            func next() -> Data? {
+                var chunk = [UInt8](repeating: 0, count: 64 * 1024)
+                while true {
+                    if let newline = buffer.firstIndex(of: 10) {
+                        let line = Data(buffer[buffer.startIndex..<newline])
+                        buffer.removeSubrange(buffer.startIndex...newline)
+                        return line
+                    }
+                    guard buffer.count < 16 << 20 else { return nil }
+                    let n = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+                    if n < 0, errno == EINTR { continue }
+                    if n <= 0 { return nil }
+                    buffer.append(contentsOf: chunk[0..<n])
+                }
             }
         }
     }

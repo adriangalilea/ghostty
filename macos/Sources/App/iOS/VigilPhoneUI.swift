@@ -1,10 +1,12 @@
+import AuthzEndpoint
 import SwiftUI
 import GhosttyKit
 
 /// The phone's screens: ONE home tree (Macs → sessions → tabs → panes,
 /// collapsible, the sidebar's rollup dots on every folded row) and a pane,
 /// full screen. The pane IS a Ghostty surface (Metal, the Mac's renderer)
-/// attached through ssh; the model owns every surface, the screens borrow.
+/// attached over tether (`vigil/1`); the model owns every surface, the
+/// screens borrow.
 ///
 /// Patterns, named once here and referenced below:
 ///  - HOSTING: a representable's container `addSubview`s the model's
@@ -32,13 +34,12 @@ struct VigilPhoneRoot: View {
             HomeView()
         }
         .environmentObject(model)
-        // vigil://<host>/<session>/<pane>: an alert's landing.
+        // vigil://pane/<id>: a request's Go there.
         .onOpenURL { url in
             Task { @MainActor in
                 if let ref = await model.resolve(url: url) { path = [ref] }
             }
         }
-        .onAppear { model.startDiscovery() }
     }
 }
 
@@ -47,7 +48,6 @@ struct VigilPhoneRoot: View {
 struct HomeView: View {
     @EnvironmentObject private var model: VigilPhone
     @EnvironmentObject private var ghostty: Ghostty.App
-    @State private var adding = false
     @State private var settings = false
     /// The coordinate space preview rows report their frames in: the
     /// scroll view's own, so the visible area is its size at the origin.
@@ -59,7 +59,7 @@ struct HomeView: View {
             LazyVStack(alignment: .leading, spacing: 2) {
                 if tree.isEmpty {
                     ContentUnavailableView("No Macs yet", systemImage: "desktopcomputer",
-                                           description: Text("Add one with +, then enrol this phone's key (⚙︎)."))
+                                           description: Text("A Mac shows up here once it is paired with this iPhone and runs vigil. Pair it in Settings (⚙︎)."))
                         .padding(.top, 80)
                 }
                 ForEach(tree) { node in
@@ -76,15 +76,12 @@ struct HomeView: View {
         .navigationBarTitleDisplayMode(.large)
         .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref) }
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
+            ToolbarItem(placement: .topBarTrailing) {
                 Button { settings = true } label: { Image(systemName: "gearshape") }
-                Button { adding = true } label: { Image(systemName: "plus") }
             }
         }
-        .sheet(isPresented: $adding) { AddHostView() }
         .sheet(isPresented: $settings) { SettingsView() }
-        .refreshable { model.refreshAll() }
-        .onAppear { model.refreshAll() }
+        .refreshable { model.wake() }
     }
 }
 
@@ -350,7 +347,7 @@ struct PanePreview: View {
             guard let view = try await model.surface(for: ref, app: app, screen: false) else { denied = true; return }
             surfaceView = view
         } catch {
-            model.log("preview: \(ref.pane) failed: \(error.receipt)")
+            model.log("preview: \(ref.pane) failed: \("\(error)")")
         }
     }
 }
@@ -863,8 +860,8 @@ struct PaneScreen: View {
             surfaceView = view
         } catch {
             guard entryGeneration == generation, screenVisible else { return }
-            self.error = error.receipt
-            model.log("attach: \(ref.pane) failed: \(error.receipt)")
+            self.error = "\(error)"
+            model.log("attach: \(ref.pane) failed: \("\(error)")")
         }
     }
 
@@ -914,111 +911,56 @@ struct KeyboardButton: View {
 
 // MARK: - Sheets
 
-/// Add a Mac, or edit one (`editing`): the same form.
-struct AddHostView: View {
-    var editing: VigilPhone.Host? = nil
-    @EnvironmentObject private var model: VigilPhone
-    @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var hostname = ""
-    @State private var port = "22"
-    @State private var user = ""
-
-    init(editing: VigilPhone.Host? = nil) {
-        self.editing = editing
-        if let h = editing {
-            _name = State(initialValue: h.name)
-            _hostname = State(initialValue: h.hostname)
-            _port = State(initialValue: String(h.port))
-            _user = State(initialValue: h.user)
-        }
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                if !model.discovered.isEmpty {
-                    Section("On this network") {
-                        ForEach(model.discovered) { mac in
-                            Button {
-                                name = mac.name
-                                hostname = mac.hostname
-                            } label: {
-                                Label(mac.name, systemImage: "desktopcomputer")
-                            }
-                        }
-                    }
-                }
-                Section {
-                    TextField("Name", text: $name)
-                    TextField("Host or IP", text: $hostname).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    TextField("Port", text: $port).keyboardType(.numberPad)
-                    TextField("User", text: $user).textInputAutocapitalization(.never).autocorrectionDisabled()
-                } footer: {
-                    Text("A .local name follows the Mac onto any network you share with it. An IP is for a fixed address (your VPN).")
-                }
-            }
-            .navigationTitle(editing == nil ? "Add Mac" : "Edit Mac")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(editing == nil ? "Add" : "Save") {
-                        let host = VigilPhone.Host(id: editing?.id ?? UUID(),
-                                                   name: name.isEmpty ? hostname : name, hostname: hostname,
-                                                   port: Int(port) ?? 22, user: user)
-                        if let i = model.hosts.firstIndex(where: { $0.id == host.id }) {
-                            model.hosts[i] = host
-                        } else {
-                            model.hosts.append(host)
-                        }
-                        dismiss()
-                    }
-                    .disabled(hostname.isEmpty || user.isEmpty)
-                }
-            }
-        }
-    }
-}
-
-/// Macs (edit, forget host key, remove), this phone's key, receipts.
+/// The Macs on your Apple Account, each with what it does for this phone
+/// (its sessions here, its requests answered here), pairing for the ones
+/// not paired yet, and the receipts.
 struct SettingsView: View {
     @EnvironmentObject private var model: VigilPhone
+    @ObservedObject private var authz = VigilAuthz.shared.runtime
     @Environment(\.dismiss) private var dismiss
-    @State private var editing: VigilPhone.Host?
 
     var body: some View {
         NavigationStack {
             List {
-                Section("Macs") {
-                    ForEach(model.hosts) { host in
-                        Button { editing = host } label: {
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(host.name).font(.headline)
-                                    Text("\(host.user)@\(host.hostname):\(host.port)").font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: "pencil").foregroundStyle(.secondary)
+                Section {
+                    ForEach(authz.macs) { mac in
+                        HStack(spacing: 12) {
+                            Image(systemName: "laptopcomputer").font(.title3).foregroundStyle(.secondary).frame(width: 30)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(mac.name).font(.headline)
+                                Text(sessions(mac)).font(.caption).foregroundStyle(.secondary)
+                                Text(requests(mac)).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if mac.state == .onAccount {
+                                Button("Pair") { authz.pair(mac) }.buttonStyle(.borderedProminent)
+                            } else if mac.state == .pairing {
+                                ProgressView()
                             }
                         }
-                        .buttonStyle(.plain)
-                        .swipeActions {
-                            Button(role: .destructive) { model.hosts.removeAll { $0.id == host.id } } label: { Label("Remove", systemImage: "trash") }
-                            Button { model.forgetHostKey(host) } label: { Label("Forget key", systemImage: "key.slash") }
-                        }
                     }
-                }
-                Section {
-                    Text(model.publicKeyLine).font(.caption2.monospaced()).textSelection(.enabled)
-                    Button { UIPasteboard.general.string = model.publicKeyLine } label: { Label("Copy", systemImage: "doc.on.doc") }
-                } header: { Text("This phone's key") } footer: {
-                    Text("Append it to ~/.ssh/authorized_keys on each Mac. vigild must be on the Mac's PATH for ssh.")
+                } header: { Text("Macs") } footer: {
+                    Text("Pairing is approved on the Mac with Touch ID. A paired Mac running vigil shows its sessions here.")
                 }
                 ReceiptsSection(receipts: model.receipts)
             }
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .sheet(item: $editing) { host in AddHostView(editing: host) }
+        }
+    }
+
+    private func sessions(_ mac: EndpointRuntime.Mac) -> String {
+        if model.hosts.contains(where: { $0.id == mac.id }) { return "Sessions: shown here" }
+        return mac.state == .onAccount || mac.state == .pairing ? "Sessions: after pairing" : "Sessions: vigil is not running there"
+    }
+
+    private func requests(_ mac: EndpointRuntime.Mac) -> String {
+        switch mac.state {
+        case .onAccount, .pairing: "Requests: after pairing"
+        case .waiting: "Requests: allow vigil on the Mac"
+        case .answering: "Requests: answered here"
+        case .refused: "Requests: refused on the Mac"
+        case .unreachable(let why): "Unreachable: \(why)"
         }
     }
 }

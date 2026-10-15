@@ -223,7 +223,7 @@ extension Ghostty {
         /// any. Session capture preserves it so resurrection reattaches.
         private(set) var vigilAttachId: String?
 
-        /// Vigil: the ssh alias whose Mac owns the daemon; nil = local.
+        /// Vigil: the Mac that owns the daemon (its tether root); nil = local.
         private(set) var vigilHost: String?
 
         /// Vigil: the program this surface's daemon was born to run (a
@@ -290,17 +290,17 @@ extension Ghostty {
         }
 
         @objc func vigilConnectionDetails(_ sender: Any?) {
-            guard let surface, let alias = vigilHost, let pane = vigilAttachId else { return }
+            guard let surface, let device = vigilHost, let pane = vigilAttachId else { return }
             let status = ghostty_surface_vigil_transport_status(surface)
-            let host = VigilRemote.shared.host(alias)
+            let host = VigilRemote.shared.host(device)
             let truth = host?.directory?.panes[pane]
             let stream = status.state == 2 ? "Disconnected" : status.state == 1 ? "Open" : "Connecting"
             let details = """
-            Pane: \(alias)/\(pane)
+            Pane: \(host?.name ?? device)/\(pane)
             View: \(String(ghostty_surface_vigil_client_id(surface), radix: 16))
-            SSH stream: \(stream)
+            Stream (through this Mac's vigil-agent): \(stream)
             Outbound bytes waiting: \(status.pending_bytes)
-            Bytes handed to SSH: \(status.written_bytes)
+            Bytes handed to the stream: \(status.written_bytes)
             Directory: \(host?.error ?? (host?.directory == nil ? "Not received" : "Available"))
             Home daemon: \(truth.map { $0.alive ? "Alive" : "Not alive" } ?? "Unknown")
             Read-only: \(readonly); keyboard focus: \(window?.firstResponder === self)
@@ -310,7 +310,7 @@ extension Ghostty {
             """
             VigilSessionManager.shared.vlog("connection details: " + details.replacingOccurrences(of: "\n", with: " | "))
             let alert = NSAlert()
-            alert.messageText = "Connection to \(alias)"
+            alert.messageText = "Connection to \(device)"
             alert.informativeText = details
             alert.addButton(withTitle: "Done")
             alert.addButton(withTitle: "Copy details")

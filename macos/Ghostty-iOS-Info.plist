@@ -16,14 +16,20 @@
 			</array>
 		</dict>
 	</array>
-	<!-- Same-LAN discovery: macOS Remote Login advertises _ssh._tcp over
-	     Bonjour; the phone browses it to find Macs on any network it shares
-	     with them (hotel wifi, the phone's own hotspot). -->
+	<!-- tether's listeners (_tether._udp): the Macs' sessions (vigil/1) and
+	     their requests (authz) reach this phone directly on a shared
+	     network, through the relay otherwise. -->
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_ssh._tcp</string>
+		<string>_tether._udp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>vigil finds your Macs on the local network (Bonjour) and connects to them over ssh.</string>
+	<string>vigil reaches your Macs directly when you share a network with them.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Face ID confirms an answer before it is signed.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 </dict>
 </plist>

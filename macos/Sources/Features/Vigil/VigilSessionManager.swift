@@ -25,7 +25,7 @@ import GhosttyKit
 ///
 /// Identity is pointer-not-value: `name` is the stable key (a random
 /// adjective-noun; feeds VIGIL_SESSION and the wake registry), `label` is the
-/// human alias. Tabs and splits are structure INSIDE the session, never
+/// human device. Tabs and splits are structure INSIDE the session, never
 /// identities: a new tab joins its window's session, a dragged-out tab mints
 /// a new session (reconcileTabs).
 ///
@@ -161,7 +161,7 @@ class VigilSessionManager {
 
     func lastAck(_ pane: String) -> Date? {
         if let remote = VigilRemote.split(pane) {
-            return VigilRemote.shared.host(remote.alias)?.directory?.panes[remote.name]?.seen.map(Date.init(timeIntervalSince1970:))
+            return VigilRemote.shared.host(remote.device)?.directory?.panes[remote.name]?.seen.map(Date.init(timeIntervalSince1970:))
         }
         guard let state = facts.files["wake/state/\(pane).state"],
               facts.files["wake/state/\(pane).seen"]?.text.trimmingCharacters(in: .whitespacesAndNewlines) == state.revision
@@ -1231,8 +1231,8 @@ class VigilSessionManager {
             // is on the other Mac); a mirror that never claims would otherwise
             // paint the owner's narrow bytes into its own wide grid.
             let raw: String
-            if let alias = view.vigilHost {
-                raw = VigilRemote.shared.host(alias)?.directory?.panes[id]?.size ?? ""
+            if let device = view.vigilHost {
+                raw = VigilRemote.shared.host(device)?.directory?.panes[id]?.size ?? ""
             } else {
                 raw = facts.files["vigild/\(id).size"]?.text ?? ""
             }
@@ -1459,9 +1459,9 @@ class VigilSessionManager {
             guard let pane = view.vigilAttachId,
                   view.window === window,
                   !view.isHiddenOrHasHiddenAncestor else { continue }
-            if let alias = view.vigilHost {
+            if let device = view.vigilHost {
                 // A remote console under the eyes: the ack is ITS Mac's fact.
-                VigilRemote.shared.seen(alias: alias, pane: pane)
+                VigilRemote.shared.seen(device: device, pane: pane)
                 continue
             }
             if let s = paneAgentState(pane),
@@ -1608,8 +1608,8 @@ class VigilSessionManager {
                     let flavor = token.split(separator: " ").dropFirst().first.flatMap { BlockFlavor(rawValue: String($0)) }
                     let isMidTurn = state == .blocked && flavor?.midTurn == true
                     if let midTurn, midTurn != isMidTurn { continue }
-                    result.append(SummonCandidate(name: VigilRemote.compositeId(host.alias, session.name),
-                        pane: VigilRemote.compositeId(host.alias, pane), since: VigilRemote.shared.arrival(alias: host.alias, pane: pane, revision: revision)))
+                    result.append(SummonCandidate(name: VigilRemote.compositeId(host.device, session.name),
+                        pane: VigilRemote.compositeId(host.device, pane), since: VigilRemote.shared.arrival(device: host.device, pane: pane, revision: revision)))
                 }
             }
         }
@@ -1699,8 +1699,8 @@ class VigilSessionManager {
         }
         guard let controller = TerminalController.preferredParent,
               let name = mirroredSession(of: controller) ?? sessionName(of: controller) else { return }
-        if let alias = controller.focusedSurface?.vigilHost, let pane = controller.focusedSurface?.vigilAttachId {
-            float(name: name, landOn: VigilRemote.compositeId(alias, pane))
+        if let device = controller.focusedSurface?.vigilHost, let pane = controller.focusedSurface?.vigilAttachId {
+            float(name: name, landOn: VigilRemote.compositeId(device, pane))
         } else { float(name: name) }
     }
 
@@ -1718,11 +1718,11 @@ class VigilSessionManager {
         if let remote = VigilRemote.split(name), let pane,
            let target = VigilRemote.split(pane), let quick = quickController(create: true),
            let app = ghosttyApp?.app,
-           VigilRemote.shared.host(remote.alias)?.directory?.panes[target.name]?.alive == true {
+           VigilRemote.shared.host(remote.device)?.directory?.panes[target.name]?.alive == true {
             if mirror?.pane == pane { quick.animateIn(); return }
             if let current = floatingName { reclaim(current, from: quick, restoreStash: false) } else if mirror != nil { endMirror(restoreStash: false) } else if !quick.surfaceTree.isEmpty { stashedQuickTree = quick.surfaceTree }
             var config = Ghostty.SurfaceConfiguration()
-            config.vigilAttach = target.name; config.vigilHost = remote.alias
+            config.vigilAttach = target.name; config.vigilHost = remote.device
             config.vigilMirror = true; config.vigilExplicitClaim = true
             let view = Ghostty.SurfaceView(app, baseConfig: config)
             mirror = Mirror(name: name, pane: pane, view: view)
@@ -1973,14 +1973,14 @@ class VigilSessionManager {
     }
 
     /// A REMOTE session (another Mac, VigilRemote) in this viewport: the
-    /// same mirror viewport, its surfaces attached through
-    /// `ssh <alias> vigild proxy <pane>`. Nothing is spawned or owned
+    /// same mirror viewport, its surfaces attached through this Mac's hub
+    /// (`proxy` over tether, VigilRemote). Nothing is spawned or owned
     /// remotely; the remote's own app keeps every fact.
     @discardableResult
-    func openRemotePane(alias: String, pane: String) -> TerminalController? {
-        guard let directory = VigilRemote.shared.host(alias)?.directory,
+    func openRemotePane(device: String, pane: String) -> TerminalController? {
+        guard let directory = VigilRemote.shared.host(device)?.directory,
               let session = directory.sessions.first(where: { session in (session.tabs ?? []).contains { tabPaneIds($0).contains(pane) } }) else {
-            vlog("handoff: remote \(alias)/\(pane) refused; pane absent from directory")
+            vlog("handoff: remote \(device)/\(pane) refused; pane absent from directory")
             return nil
         }
         // A request panel may be key. The main/last-main terminal remains the
@@ -1992,9 +1992,9 @@ class VigilSessionManager {
         let viewport = candidates.compactMap { $0 }.first {
             !$0.surfaceTree.isEmpty && ($0.window?.isVisible == true || $0.window?.isMiniaturized == true)
         }
-        guard let controller = mountRemote(viewport, composite: VigilRemote.compositeId(alias, session.name),
-                                           anchor: VigilRemote.compositeId(alias, pane)) else { return nil }
-        vlog("handoff: remote \(alias)/\(pane) -> session \(session.name), window \(controller.window?.windowNumber ?? -1), \(viewport == nil ? "created" : "reused")")
+        guard let controller = mountRemote(viewport, composite: VigilRemote.compositeId(device, session.name),
+                                           anchor: VigilRemote.compositeId(device, pane)) else { return nil }
+        vlog("handoff: remote \(device)/\(pane) -> session \(session.name), window \(controller.window?.windowNumber ?? -1), \(viewport == nil ? "created" : "reused")")
         if controller.window?.isMiniaturized == true { controller.window?.deminiaturize(nil) }
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -2009,18 +2009,18 @@ class VigilSessionManager {
             return
         }
         guard let controller = view.window?.windowController as? TerminalController,
-              let composite = mirroredSession(of: controller), let alias = view.vigilHost,
+              let composite = mirroredSession(of: controller), let device = view.vigilHost,
               let pane = view.vigilAttachId,
               VigilRemote.shared.session(composite) != nil else { return }
         vlog("transport: reconnect viewport \(composite) from \(pane); home processes preserved")
         endMirrorViewport(controller)
-        mountRemote(controller, composite: composite, anchor: VigilRemote.compositeId(alias, pane))
+        mountRemote(controller, composite: composite, anchor: VigilRemote.compositeId(device, pane))
     }
 
     @discardableResult
     private func mountRemote(_ viewport: TerminalController?, composite: String, anchor: String?) -> TerminalController? {
         guard let ghostty = ghosttyApp, let app = ghostty.app,
-              let (alias, session) = VigilRemote.shared.session(composite) else {
+              let (device, session) = VigilRemote.shared.session(composite) else {
             vlog("remote: '\(composite)' unknown or unreachable - refused")
             return nil
         }
@@ -2029,8 +2029,8 @@ class VigilSessionManager {
         let tab = rawAnchor.flatMap { a in tabs.first { tabPaneIds($0).contains(a) } } ?? tabs.first
         guard let tab, !tab.panes.isEmpty else { return nil }
         // Already this viewport's mirror and the clicked pane is on screen:
-        // a click is a focus move, never a teardown and two fresh ssh
-        // proxies (four re-mounts in five seconds of clicking, 2026-09-14).
+        // a click is a focus move, never a teardown and two fresh proxy
+        // streams (four re-mounts in five seconds of clicking, 2026-09-14).
         if let controller = viewport, mirroredSession(of: controller) == composite,
            let shown = controller.surfaceTree.first(where: { $0.vigilAttachId == rawAnchor ?? "" }) ?? (rawAnchor == nil ? controller.surfaceTree.first : nil) {
             DispatchQueue.main.async {
@@ -2050,7 +2050,7 @@ class VigilSessionManager {
             var config = Ghostty.SurfaceConfiguration()
             config.workingDirectory = pane.cwd
             config.vigilAttach = pane.id
-            config.vigilHost = alias
+            config.vigilHost = device
             config.vigilMirror = true
             config.vigilExplicitClaim = true
             return config
@@ -2065,7 +2065,7 @@ class VigilSessionManager {
         remoteLayouts[ObjectIdentifier(controller)] = VigilSessionControl.revision([tab])
         materializeSplits(controller, tab: tab, configFor: configFor)
         land(controller, anchor: rawAnchor, fallback: view, takeSize: rawAnchor != nil)
-        vlog("remote: window -> viewport onto '\(composite)' via ssh \(alias) (\(tab.panes.count) panes)")
+        vlog("remote: window -> viewport onto '\(composite)' via the hub to \(VigilRemote.shared.host(device)?.name ?? device) (\(tab.panes.count) panes)")
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
         return controller
     }
@@ -4072,7 +4072,7 @@ class VigilSessionManager {
     func follow(_ name: String, in controller: TerminalController?) {
         if let remote = VigilRemote.split(name), let candidate = remoteAttention().first(where: { $0.name == name }),
            let pane = VigilRemote.split(candidate.pane) {
-            if let controller { mountRemote(controller, composite: name, anchor: candidate.pane) } else { openRemotePane(alias: remote.alias, pane: pane.name) }
+            if let controller { mountRemote(controller, composite: name, anchor: candidate.pane) } else { openRemotePane(device: remote.device, pane: pane.name) }
             return
         }
         if let pane = askingPane(name) {
@@ -4131,8 +4131,8 @@ class VigilSessionManager {
     func remoteSessionCommand(in base: BaseTerminalController, from view: Ghostty.SurfaceView? = nil,
                               operation: String, direction: String? = nil, expectedRevision: String? = nil) -> Bool {
         if !(base is TerminalController), let surface = view ?? base.focusedSurface,
-           let alias = surface.vigilHost, let pane = surface.vigilAttachId {
-            guard let controller = openRemotePane(alias: alias, pane: pane) else { return true }
+           let device = surface.vigilHost, let pane = surface.vigilAttachId {
+            guard let controller = openRemotePane(device: device, pane: pane) else { return true }
             dismissQuickTerminal()
             return remoteSessionCommand(in: controller, from: surface, operation: operation, direction: direction, expectedRevision: expectedRevision)
         }
@@ -4180,11 +4180,11 @@ class VigilSessionManager {
             session: split.name, revision: expectedRevision ?? revision,
             operation: operation, anchor: anchor, direction: direction)
         remoteEdits.insert(composite)
-        vlog("remote command: \(request.id) \(operation) -> \(split.alias)/\(split.name)/\(anchor)")
+        vlog("remote command: \(request.id) \(operation) -> \(split.device)/\(split.name)/\(anchor)")
         Task { [weak controller] in
             defer { remoteEdits.remove(composite) }
             do {
-                let reply = try await VigilRemote.shared.command(split.alias, request: request)
+                let reply = try await VigilRemote.shared.command(split.device, request: request)
                 guard reply.ok else {
                     if let controller { remoteCommandError(controller, reply.message) }
                     vlog("remote command: \(request.id) refused \(reply.code)")
@@ -4194,12 +4194,12 @@ class VigilSessionManager {
                 if let controller, mirroredSession(of: controller) == composite, let pane = reply.pane {
                     remoteLandings[ObjectIdentifier(controller)] = pane
                     if let name = reply.session, name != split.name {
-                        remoteDestinations[ObjectIdentifier(controller)] = VigilRemote.compositeId(split.alias, name)
+                        remoteDestinations[ObjectIdentifier(controller)] = VigilRemote.compositeId(split.device, name)
                     }
                 }
                 remoteEdits.remove(composite)
-                remoteDirectoryChanged(split.alias)
-                VigilRemote.shared.refresh(split.alias)
+                // The home committed it; its directory stream brings the result.
+                remoteDirectoryChanged(split.device)
             } catch {
                 vlog("remote command: \(request.id) outcome unknown: \(error.localizedDescription)")
                 if let controller {
@@ -4239,7 +4239,7 @@ class VigilSessionManager {
         confirmRemoteClose(in: controller, operation: "close_tab")
     }
 
-    func remoteDirectoryChanged(_ alias: String) {
+    func remoteDirectoryChanged(_ device: String) {
         for controller in mirrorViewports.keyEnumerator().allObjects.compactMap({ $0 as? TerminalController }) {
             if let destination = remoteDestinations[ObjectIdentifier(controller)],
                VigilRemote.shared.session(destination) != nil {
@@ -4247,11 +4247,11 @@ class VigilSessionManager {
                 remoteDestinations.removeValue(forKey: ObjectIdentifier(controller))
             }
             guard let composite = mirroredSession(of: controller),
-                  let identity = VigilRemote.split(composite), identity.alias == alias,
+                  let identity = VigilRemote.split(composite), identity.device == device,
                   !remoteEdits.contains(composite) else { continue }
             guard let (_, session) = VigilRemote.shared.session(composite) else {
                 // An unreachable host is not a deletion; keep its view.
-                guard VigilRemote.shared.host(alias)?.directory != nil else { continue }
+                guard VigilRemote.shared.host(device)?.directory != nil else { continue }
                 endMirrorViewport(controller)
                 swapTree(controller, SplitTree())
                 controller.window?.close()
@@ -4263,7 +4263,7 @@ class VigilSessionManager {
             guard let tab = selected ?? (session.tabs ?? []).first(where: { !ids.isDisjoint(with: tabPaneIds($0)) }) ?? session.tabs?.first else { continue }
             let revision = VigilSessionControl.revision([tab])
             guard remoteLayouts[ObjectIdentifier(controller)] != revision else { continue }
-            reconcileSessionTree(controller, tab: tab, host: alias, session: identity.name)
+            reconcileSessionTree(controller, tab: tab, host: device, session: identity.name)
             remoteLayouts[ObjectIdentifier(controller)] = revision
             if let pending, let landing = controller.surfaceTree.first(where: { $0.vigilAttachId == pending }) {
                 remoteLandings.removeValue(forKey: ObjectIdentifier(controller))
@@ -5260,13 +5260,6 @@ class VigilSessionManager {
         VigilVoice.trace = { [weak self] line in self?.vlog(line) }
         VigilCortex.trace = { [weak self] line in self?.vlog(line) }
         VigilRemote.trace = { [weak self] line in self?.vlog(line) }
-        // `vigil-hosts` is read at attach time and on every config reload.
-        NotificationCenter.default.addObserver(
-            forName: .ghosttyConfigDidChange, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self, let config = self.ghosttyApp?.config else { return }
-            VigilRemote.shared.configure(aliases: config.vigilHosts)
-        }
         // The warm tap's receipts (mic_warm/mic_cool) land beside the
         // gate's. ONE owner for the process-global sink, wired here with
         // the traces; consumers (dictation, the pump's prewarm, the ask's
@@ -5294,7 +5287,7 @@ class VigilSessionManager {
     /// First token only; trailing tokens tolerated (older files carried
     /// a "blocked input" flavor).
     func paneAgentState(_ pane: String) -> PaneState? {
-        if let remote = VigilRemote.split(pane), let truth = VigilRemote.shared.host(remote.alias)?.directory?.panes[remote.name],
+        if let remote = VigilRemote.split(pane), let truth = VigilRemote.shared.host(remote.device)?.directory?.panes[remote.name],
            let token = truth.state, let state = VigilRemote.agentState(token), let revision = truth.stateRevision {
             let flavor = token.split(separator: " ").dropFirst().first.flatMap { BlockFlavor(rawValue: String($0)) }
             return PaneState(state: state, flavor: flavor, since: Date(timeIntervalSince1970: truth.since ?? 0), revision: revision)
@@ -5439,7 +5432,7 @@ class VigilSessionManager {
     func liveView(attachId: String) -> Ghostty.SurfaceView? {
         if let remote = VigilRemote.split(attachId) {
             return Ghostty.SurfaceView.vigilAttachSurfaces.allObjects.first {
-                $0.vigilHost == remote.alias && $0.vigilAttachId == remote.name && $0.window?.isVisible == true && !$0.isHiddenOrHasHiddenAncestor
+                $0.vigilHost == remote.device && $0.vigilAttachId == remote.name && $0.window?.isVisible == true && !$0.isHiddenOrHasHiddenAncestor
             }
         }
         let matches = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
@@ -5691,7 +5684,7 @@ class VigilSessionManager {
         let tabs: [SidebarTab]
         /// A remote host's session (VigilRemote): the header text of the
         /// host group it sits under; nil = this Mac. Row ids of remote
-        /// sessions are `alias/name`.
+        /// sessions are `device/name`.
         var host: String? = nil
 
         /// The ONE tab whose row the tree elides: a lone tab that carries
@@ -5721,15 +5714,15 @@ class VigilSessionManager {
               let name = sessionName(of: front) ?? mirroredSession(of: front) else { return nil }
         let ids = Set(front.surfaceTree.compactMap(\.vigilAttachId)
             + (dockMap.object(forKey: front)?.views.compactMap(\.vigilAttachId) ?? []))
-        // A remote viewport: the chain's ids are alias-namespaced like the
+        // A remote viewport: the chain's ids are device-namespaced like the
         // remote rows'.
-        if let (alias, remote) = VigilRemote.shared.session(name) {
+        if let (device, remote) = VigilRemote.shared.session(name) {
             let tab = (remote.tabs ?? []).first { !Set(tabPaneIds($0)).isDisjoint(with: ids) }
             let anchor = tab.flatMap { $0.panes.first?.id ?? $0.dock?.panes.first?.id }
             return ActiveChain(
                 session: name,
-                tab: anchor.map { Self.tabRowId(name, anchor: VigilRemote.compositeId(alias, $0)) },
-                pane: front.focusedSurface?.vigilAttachId.map { VigilRemote.compositeId(alias, $0) })
+                tab: anchor.map { Self.tabRowId(name, anchor: VigilRemote.compositeId(device, $0)) },
+                pane: front.focusedSurface?.vigilAttachId.map { VigilRemote.compositeId(device, $0) })
         }
         guard let session = sessions[name] else { return nil }
         let tab = session.tabs.first { !Set(tabPaneIds($0)).isDisjoint(with: ids) }
@@ -6188,7 +6181,7 @@ class VigilSessionManager {
     /// adjective-noun (e.g. `brave-panda`) so we can refer to a session out
     /// loud; NOT derived from the cwd (that named everything in $HOME "adrian-N"
     /// and made real sessions look like cruft). The human label is a separate
-    /// alias. The daemon id is `vigil-<id>-<index>`, split on the LAST dash, so
+    /// device. The daemon id is `vigil-<id>-<index>`, split on the LAST dash, so
     /// the dash in the id is safe.
     private func newSessionId() -> String {
         func taken(_ s: String) -> Bool {

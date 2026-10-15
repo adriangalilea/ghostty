@@ -749,12 +749,13 @@ extension Ghostty {
         /// It owns nothing: not the pane, not the daemon, no registry row.
         var vigilMirror: Bool = false
 
-        /// Vigil: ssh alias of the Mac that owns `vigilAttach`'s daemon;
-        /// nil = this machine. A remote pane is a viewport, never an owner.
+        /// Vigil: the Mac that owns `vigilAttach`'s daemon, by its tether
+        /// root (reached through this Mac's vigil hub); nil = this machine.
+        /// A remote pane is a viewport, never an owner.
         var vigilHost: String?
 
         /// Vigil: an already-connected stream to the daemon, owned by the
-        /// app's transport (iOS: a socketpair end pumped to ssh); -1 = none.
+        /// app's transport (iOS: a socketpair end bridged to tether); -1 = none.
         var vigilFd: Int32 = -1
 
         /// Vigil: focus never claims the daemon's pty size; the app claims

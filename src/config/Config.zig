@@ -1166,24 +1166,16 @@ command: ?Command = null,
 /// through the embedding API, never in a config file.
 @"vigil-attach": ?[:0]const u8 = null,
 
-/// Vigil: the ssh alias of the Mac that owns `vigil-attach`'s daemon;
-/// empty = this machine. The surface then attaches through
-/// `ssh <alias> vigild proxy <id>` (the daemon is never spawned remotely).
-/// Set per-surface through the embedding API, never in a config file.
+/// Vigil: the Mac that owns `vigil-attach`'s daemon, by its tether root;
+/// empty = this machine. The surface then attaches through this Mac's vigil
+/// hub (vigil-agent's local socket, `proxy` over tether; the daemon is
+/// never spawned remotely). Set per-surface through the embedding API,
+/// never in a config file.
 @"vigil-host": ?[:0]const u8 = null,
 
-/// Vigil: other Macs whose sessions this app lists and can view, as a
-/// comma-separated list of ssh aliases (`vigil-hosts = m4,studio`). Each
-/// is read through `ssh <alias> vigild dir` and its panes attach through
-/// `ssh <alias> vigild proxy <id>`: everything about reachability, keys
-/// and the network is the user's ssh config, never vigil's. Lives in
-/// `$XDG_CONFIG_HOME/vigil/config`, never in the ghostty config: a vanilla
-/// Ghostty reading the shared file rejects the key as unknown.
-@"vigil-hosts": ?[:0]const u8 = null,
-
 /// Vigil: an already-connected stream to `vigil-attach`'s daemon, owned
-/// by the embedder's transport (a socketpair end on iOS, pumped to an ssh
-/// channel). -1 = none. Set per-surface through the embedding API only.
+/// by the embedder's transport (a socketpair end on iOS, bridged to a
+/// tether stream). -1 = none. Set per-surface through the embedding API only.
 @"vigil-fd": i32 = -1,
 
 /// Vigil: ownership policy for the daemon's pty size. `false` (default):

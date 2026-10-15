@@ -125,9 +125,9 @@ final class VigilHarnessCoordinator {
             manager.vlog("handoff: link -> local \(name)/\(pane)")
             return
         }
-        for host in VigilRemote.shared.hosts where !host.isSelf && host.directory?.panes[pane] != nil {
-            manager.vlog("handoff: link -> \(host.alias)/\(pane)")
-            manager.openRemotePane(alias: host.alias, pane: pane)
+        for host in VigilRemote.shared.hosts where host.directory?.panes[pane] != nil {
+            manager.vlog("handoff: link -> \(host.device)/\(pane)")
+            manager.openRemotePane(device: host.device, pane: pane)
             return
         }
         manager.vlog("handoff: link to \(pane), which no session here or on another Mac lists")
