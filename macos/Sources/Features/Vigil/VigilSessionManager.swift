@@ -1954,6 +1954,9 @@ class VigilSessionManager {
         } else {
             landing = fallback
         }
+        // A gesture landed here: this window takes the keyboard back from
+        // any floating panel holding key, so focus and title follow it.
+        if takeSize, NSApp.isActive, controller.window?.isKeyWindow == false { controller.window?.makeKey() }
         DispatchQueue.main.async { Ghostty.moveFocus(to: landing) }
         if takeSize { landing.vigilRequestSize(reason: "sidebar pane selected") }
         vlog("handoff: landed \(landing.vigilHost ?? "local")/\(landing.vigilAttachId ?? "unknown") in window \(controller.window?.windowNumber ?? -1)")

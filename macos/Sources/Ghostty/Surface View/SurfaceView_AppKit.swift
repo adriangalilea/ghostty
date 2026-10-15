@@ -388,7 +388,11 @@ extension Ghostty {
             if !own { vigilPendingSizeClaim = nil }
             guard vigilAttachId != nil, let surface, own != vigilWantsSize else { return }
             if own {
-                guard NSApp.isActive, window?.isKeyWindow == true,
+                // A passive claim follows the key window; a gesture's claim
+                // (pending) needs only a visible window: a floating panel
+                // holding key (the ask HUD) must not void a click.
+                let intent = vigilPendingSizeClaim != nil
+                guard NSApp.isActive, window?.isKeyWindow == true || (intent && window?.isVisible == true),
                       vigilViewportSize.width > 0, vigilViewportSize.height > 0 else {
                     if vigilPendingSizeClaim != nil {
                         VigilSessionManager.vlogSync("size control: \(vigilHost ?? "")/\(vigilAttachId ?? "?") claim waits (\(reason)): active=\(NSApp.isActive) key=\(window?.isKeyWindow == true) viewport=\(Int(vigilViewportSize.width))x\(Int(vigilViewportSize.height))")
