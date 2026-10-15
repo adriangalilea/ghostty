@@ -35,7 +35,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
                 VigilPhone.shared.wake()
             } else {
                 // Nothing reaches a Mac without the node: said, never blank.
-                VigilPhone.shared.log("tether: no node (\(runtime.status))")
+                VigilPhone.shared.unlinked(runtime.status)
             }
         }
         UIApplication.shared.registerForRemoteNotifications()

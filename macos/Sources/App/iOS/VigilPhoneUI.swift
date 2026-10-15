@@ -57,7 +57,11 @@ struct HomeView: View {
         let tree = model.tree()
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
-                if tree.isEmpty {
+                if let why = model.unlinked {
+                    ContentUnavailableView("Not connected", systemImage: "point.3.connected.trianglepath.dotted",
+                                           description: Text("vigil could not reach your devices: \(why)"))
+                        .padding(.top, 80)
+                } else if tree.isEmpty {
                     ContentUnavailableView("No Macs yet", systemImage: "desktopcomputer",
                                            description: Text("A Mac shows up here once it is paired with this iPhone and runs vigil. Pair it in Settings (⚙︎)."))
                         .padding(.top, 80)

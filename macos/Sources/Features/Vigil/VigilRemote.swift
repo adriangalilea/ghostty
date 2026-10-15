@@ -214,7 +214,7 @@ final class VigilRemote: ObservableObject {
     func command(_ device: String, request: VigilSessionControl.Request) async throws -> VigilSessionControl.Reply {
         let payload = try JSONEncoder().encode(request) + Data([10])
         let data = try await Task.detached(priority: .userInitiated) {
-            try Hub.call(device: device, .session, input: payload)
+            try Hub.call(device: device, .session(payload))
         }.value
         let reply = try JSONDecoder().decode(VigilSessionControl.Reply.self, from: data)
         guard reply.id == request.id else {
@@ -443,12 +443,10 @@ final class VigilRemote: ObservableObject {
         }
 
         /// A call: its output, or why it failed.
-        static func call(device: String, _ open: Open, input: Data = Data()) throws -> Data {
+        static func call(device: String, _ open: Open) throws -> Data {
             let fd = try connect()
             defer { close(fd) }
             guard WireIO.writeLine(fd, try JSONEncoder().encode(Local.Request.open(device: device, open))) else { throw Failure.unreachable("write") }
-            if !input.isEmpty { _ = WireIO.writeAll(fd, input) }
-            shutdown(fd, SHUT_WR)
             guard let line = WireIO.readLine(fd) else { throw Failure.unreachable("no answer") }
             guard let result = try? JSONDecoder().decode(CallResult.self, from: line) else { throw Failure.garbled }
             guard result.ok else { throw Failure.refused(result.error ?? "failed") }

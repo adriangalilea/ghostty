@@ -154,7 +154,9 @@ final class VigilPhone: ObservableObject {
     var trace: [String] { receipts.lines }
     /// vigil's tether node (the one its authz endpoint runs), once up.
     private var node: TetherNode?
-    private var connections: [String: TetherConnection] = [:]
+    /// Why vigil has no tether node (it could not start one): the home
+    /// screen says so instead of an empty list.
+    @Published private(set) var unlinked: String?
     /// Each Mac's directory stream, open, being dialed or pausing to dial again.
     private var watches: [String: Task<Void, Never>] = [:]
 
@@ -172,20 +174,21 @@ final class VigilPhone: ObservableObject {
         receipts.append("\(stamp) \(line)")
     }
 
-    // MARK: Macs (tether peers running vigil)
+    // MARK: Macs (paired devices serving vigil/1)
 
-    /// vigil's node is up (VigilAuthz started it): the Macs are its paired
-    /// peers running vigil, read again whenever tether says who is paired
-    /// or what a device runs changed.
+    /// vigil's node is up (VigilAuthz started it): the Macs are the paired
+    /// devices serving sessions (tether's offers), read again whenever
+    /// tether says who is paired or what a device serves changed.
     func attach(node: TetherNode) {
         guard self.node == nil else { return }
         self.node = node
+        unlinked = nil
         log("tether: node up (root \(node.root().prefix(10)))")
         readPeers()
         Task { [weak self] in
             for await event in node.events {
                 switch event {
-                case .paired, .revoked, .directoryUpdated: self?.readPeers()
+                case .paired, .revoked, .offersChanged: self?.readPeers()
                 default: break
                 }
             }
@@ -194,8 +197,7 @@ final class VigilPhone: ObservableObject {
 
     private func readPeers() {
         guard let node else { return }
-        let peers = ((try? node.peers()) ?? []).filter { $0.apps.contains(VigilWire.app) }
-        let next = peers.map { Host(id: $0.root, name: $0.name) }.sorted { $0.name < $1.name }
+        let next = VigilLink.macs(node).map { Host(id: $0.root, name: $0.name) }
         if next != hosts {
             hosts = next
             log("macs: \(next.map(\.name))")
@@ -216,23 +218,16 @@ final class VigilPhone: ObservableObject {
         readPeers()
     }
 
-    /// The held connection to a Mac, dialed on demand.
-    private func connection(_ host: Host) async throws -> TetherConnection {
-        if let held = connections[host.id] { return held }
-        guard let node else { throw WireError.refused("vigil is not connected to tether yet") }
-        let made = try await VigilLink.connect(node, device: host.id)
-        connections[host.id] = made
-        return made
+    /// vigil could not start its tether node: nothing reaches a Mac.
+    func unlinked(_ why: String) {
+        unlinked = why
+        log("tether: no node (\(why))")
     }
 
-    /// One attempt through the held connection, and one more through a
-    /// fresh one when it had died (the Mac restarted, the network moved).
-    private func withConnection<T>(_ host: Host, _ body: (TetherConnection) async throws -> T) async throws -> T {
-        let first = try await connection(host)
-        do { return try await body(first) } catch let refused as WireError { throw refused } catch {
-            if connections[host.id] === first { connections[host.id] = nil }
-            return try await body(connection(host))
-        }
+    /// vigil's node, or why there is none yet.
+    private func linked() throws -> TetherNode {
+        guard let node else { throw WireError.refused("vigil is not connected to tether yet") }
+        return node
     }
 
     // MARK: Directory (a stream per Mac: every change as it happens)
@@ -247,7 +242,7 @@ final class VigilPhone: ObservableObject {
             var pause: UInt64 = 1
             while !Task.isCancelled, let self, self.hosts.contains(host) {
                 do {
-                    let stream = try await self.withConnection(host) { try await VigilLink.stream($0, .dir) }
+                    let stream = try await VigilLink.stream(self.linked(), device: host.id, .dir)
                     self.errors[host.id] = nil
                     pause = 1
                     var buffer = Data()
@@ -266,9 +261,8 @@ final class VigilPhone: ObservableObject {
                     }
                     self.log("dir: \(host.name) stream ended")
                 } catch {
-                    self.errors[host.id] = "\(error)"
+                    self.errors[host.id] = VigilLink.reason(error)
                     self.log("dir: \(host.name): \(error)")
-                    if self.connections[host.id] != nil { self.connections[host.id] = nil }
                 }
                 try? await Task.sleep(for: .seconds(pause))
                 pause = min(pause * 2, 30)
@@ -460,7 +454,7 @@ final class VigilPhone: ObservableObject {
     /// A live stream to one pane (`proxy`), as an fd for the Attach backend:
     /// one end of a socketpair, the other bridged to the tether stream.
     func attach(_ host: Host, pane: String, preview: Bool = false) async throws -> Int32 {
-        let stream = try await withConnection(host) { try await VigilLink.stream($0, .proxy(pane)) }
+        let stream = try await VigilLink.stream(linked(), device: host.id, .proxy(pane))
         var fds: [Int32] = [-1, -1]
         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
             try? await stream.finish()
@@ -640,7 +634,7 @@ final class VigilPhone: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                _ = try await withConnection(ref.host) { try await VigilLink.call($0, .seen(ref.pane, revision: revision)) }
+                _ = try await VigilLink.call(linked(), device: ref.host.id, .seen(ref.pane, revision: revision))
                 log("seen: \(ref.pane) marked on \(ref.host.name)")
             } catch {
                 if directories[ref.host.id]?.panes[ref.pane]?.stateRevision == revision {
