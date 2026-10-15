@@ -409,10 +409,9 @@ pub fn focusGained(
     self.enqueueFrame('o', "");
 }
 
-/// The embedder's grid is real: send it, then any focus claim that
-/// arrived before it, then ask for the screen again. The replay every
-/// new connection gets was parsed into the placeholder grid, and
-/// cursor-addressed content wrapped there does not unwrap on resize.
+/// The embedder's grid is real: send it (the daemon answers a client's
+/// first size with its screen, so the replay lands in this grid), then
+/// any focus claim that arrived before it.
 pub fn vigilViewport(self: *Attach) void {
     if (self.viewport) return;
     self.viewport = true;
@@ -420,7 +419,6 @@ pub fn vigilViewport(self: *Attach) void {
     if (self.write_fd < 0) return;
     if (self.focus_pending) self.enqueueFrame('o', "");
     self.focus_pending = false;
-    self.enqueueFrame('q', "");
 }
 
 /// Explicit ownership: 'o' claims the pty size for this client, 'y'
@@ -429,14 +427,12 @@ pub fn vigilViewport(self: *Attach) void {
 /// the viewport too.
 pub fn vigilClaim(self: *Attach, claim: bool) void {
     if (self.write_fd < 0) return;
-    const first = claim and !self.viewport;
-    if (first) {
+    if (claim and !self.viewport) {
         self.viewport = true;
         self.focus_pending = false;
         self.sendResize();
     }
     self.enqueueFrame(if (claim) 'o' else 'y', if (claim) "intent" else "");
-    if (first) self.enqueueFrame('q', "");
 }
 
 test "Vigil remote focus cannot claim; only input intent can" {
@@ -487,7 +483,7 @@ test "Vigil local surface sends no size and claims nothing before its viewport" 
     // Layout lands: the real grid, then the claim focus asked for.
     try attach.resize(.{ .columns = 153, .rows = 53 }, undefined);
     attach.vigilViewport();
-    try std.testing.expectEqualSlices(u8, "r\x04\x00\x35\x00\x99\x00o\x00\x00q\x00\x00", attach.write_buf.items);
+    try std.testing.expectEqualSlices(u8, "r\x04\x00\x35\x00\x99\x00o\x00\x00", attach.write_buf.items);
 }
 
 test "Vigil focus lost before the viewport leaves no pending claim" {
@@ -499,7 +495,7 @@ test "Vigil focus lost before the viewport leaves no pending claim" {
     try attach.focusGained(&td, false);
     attach.vigilViewport();
     try std.testing.expectEqual(@as(u8, 'r'), attach.write_buf.items[0]);
-    try std.testing.expectEqualSlices(u8, "q\x00\x00", attach.write_buf.items[7..]);
+    try std.testing.expectEqual(@as(usize, 7), attach.write_buf.items.len);
 }
 
 test "Vigil transport receipts count queued and written frames without contents" {
@@ -815,14 +811,16 @@ fn specExists(self: *Attach) bool {
     return true;
 }
 
-/// `vigild restore`: every spec with no live daemon respawns, exactly what
-/// the login agent and the app's launch do. Under a running app nobody
-/// else respawns a daemon that died, so the surface that lost it does.
+/// `vigild restore <id>`: THIS pane respawns if its spec stands and no
+/// daemon holds its lock. Under a running app nobody else respawns a
+/// daemon that died, so the surface that lost it does, and only its own:
+/// vigild serializes restores and a pane's lock admits one daemon, however
+/// many surfaces ask at once.
 fn restoreDaemons(self: *Attach) void {
     const home = posix.getenv("HOME") orelse return;
     const bin = std.fmt.allocPrint(self.alloc, "{s}/.local/bin/vigild", .{home}) catch return;
     defer self.alloc.free(bin);
-    var child = std.process.Child.init(&.{ bin, "restore" }, self.alloc);
+    var child = std.process.Child.init(&.{ bin, "restore", self.id }, self.alloc);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;

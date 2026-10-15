@@ -548,6 +548,7 @@ pub const Surface = struct {
             if (cmd.len > 0) {
                 config.command = .{ .shell = cmd };
                 config.@"wait-after-command" = true;
+                config.@"vigil-command" = try config.arenaAlloc().dupeZ(u8, cmd);
             }
         }
 
