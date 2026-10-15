@@ -248,7 +248,13 @@ final class VigilHarnessCoordinator: ObservableObject {
                       (truth.seen ?? 0) < (truth.since ?? 0) else { return false }
                 return true
             }
-            model.onHush = { held in if held { Hush.claim("authz-endpoint") } else { Hush.release("authz-endpoint") } }
+            // Another device presenting this Mac's request asks it to hush.
+            // Asks off means this Mac never asks, and that includes pausing
+            // its media for someone else's ask (an unattended M4 cut the
+            // M5's audio for its own presentation, 2026-10-15).
+            model.onHush = { held in
+                if held, AskSettings.enabled, AskSettings.hushMedia { Hush.claim("authz-endpoint") } else { Hush.release("authz-endpoint") }
+            }
             model.onDictate = { [weak self] snapshot, finished in self?.dictate(snapshot, finished: finished) }
             model.onConnectionFailure = { [weak self] in self?.startServices() }
             // An uncertain application is a receipt, not an interruption: it

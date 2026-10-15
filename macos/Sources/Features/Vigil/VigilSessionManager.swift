@@ -5285,13 +5285,11 @@ class VigilSessionManager {
         MicTap.shared.voiceProcessingPolicy = { !AudioRoute.outputIsBluetooth }
         VigilWatchdog.trace = { Self.vlogSync($0) }
         VigilWatchdog.arm()
-        // The voice engine pays its cold costs (Kokoro's ~5s CoreML load)
-        // once per process; a long-lived app pays it HERE at startup,
-        // never inside the human's first ask.
+        // This app hosts asks; AskKit owns when its voice loads.
         Announcer.trace = { [weak self] line in
             Task { @MainActor in self?.vlog(line) }
         }
-        SpeechRouter.warmAll()
+        AskSettings.hostAsks()
         factsLoader.start()
     }
 
