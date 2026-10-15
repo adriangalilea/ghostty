@@ -4,6 +4,7 @@ import OSLog
 import SwiftUI
 import UIKit
 import UserNotifications
+import VigilWire
 
 private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "authz")
 
@@ -17,7 +18,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
 
     let runtime = EndpointRuntime(
         .init(
-            tetherApp: "vigil", keyGroup: "G387QW47LV.com.adriangalilea.vigil.keys",
+            tetherApp: VigilWire.app, keyGroup: "G387QW47LV.com.adriangalilea.vigil.keys",
             sealGroup: "G387QW47LV.com.adriangalilea.vigil.notify",
             name: "vigil on \(UIDevice.current.name)", relayApp: "vigil", presents: .claimed))
 
@@ -32,6 +33,9 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
             if let node = runtime.node {
                 VigilPhone.shared.attach(node: node)
                 VigilPhone.shared.wake()
+            } else {
+                // Nothing reaches a Mac without the node: said, never blank.
+                VigilPhone.shared.log("tether: no node (\(runtime.status))")
             }
         }
         UIApplication.shared.registerForRemoteNotifications()
