@@ -480,6 +480,20 @@ final class VigilSidebarModel: ObservableObject {
         return point.y > maxY
     }
 
+    /// The tap's receipt: the point, the row it resolved to (or none, with
+    /// the map's size) and the window's occupant. A click that "does
+    /// nothing" must say whether it missed the map or was refused later.
+    func tapped(at point: CGPoint) {
+        let manager = VigilSessionManager.shared
+        let occupant = hostController.map { manager.mirroredSession(of: $0) ?? manager.sessionName(of: $0) ?? "stray" } ?? "no window"
+        guard let row = row(at: point) else {
+            manager.vlog(String(format: "sidebar: tap (%.0f,%.0f) hit no row (%d rows mapped) in window of '%@'", point.x, point.y, hitRows.count, occupant))
+            return
+        }
+        manager.vlog(String(format: "sidebar: tap (%.0f,%.0f) -> %@ in window of '%@'", point.x, point.y, row.id, occupant))
+        clicked(row)
+    }
+
     /// Click dispatch by row kind (the tap gesture resolves the row and
     /// hands it here).
     func clicked(_ row: VigilHitRow) {

@@ -103,9 +103,7 @@ struct VigilSidebarView: View {
                             }
                         }
                         .gesture(SpatialTapGesture(coordinateSpace: .named("vigilTree"))
-                            .onEnded { value in
-                                if let row = model.row(at: value.location) { model.clicked(row) }
-                            })
+                            .onEnded { value in model.tapped(at: value.location) })
                         .onDrop(of: [UTType.text], delegate: VigilTreeDrop(model: model))
                     }
                     .onChange(of: model.selection) { selection in
