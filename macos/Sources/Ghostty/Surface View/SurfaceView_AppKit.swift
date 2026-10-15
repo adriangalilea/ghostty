@@ -359,12 +359,24 @@ extension Ghostty {
             if let reason = vigilPendingSizeClaim { vigilControlSize(true, reason: reason) }
         }
 
-        /// A pane created by an input gesture may not have a host frame yet.
-        /// Keep that gesture until layout supplies the real viewport size.
+        /// A pane created by an input gesture may not have a host frame yet,
+        /// and the click that chose it may be the one activating the app
+        /// (delivered before NSApp.isActive flips). Keep that gesture until
+        /// layout supplies the viewport and the app and window are active.
         func vigilRequestSize(reason: String) {
-            guard NSApp.isActive, !vigilWantsSize else { return }
+            guard !vigilWantsSize else { return }
             vigilPendingSizeClaim = reason
             vigilControlSize(true, reason: reason)
+        }
+
+        /// The app or this window became active: a gesture's claim that
+        /// was waiting for it lands now (the next turn, once key status
+        /// has settled).
+        func vigilResumePendingClaim() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let reason = self.vigilPendingSizeClaim else { return }
+                self.vigilControlSize(true, reason: reason)
+            }
         }
 
         func vigilLeaveActiveApp() {
@@ -377,7 +389,12 @@ extension Ghostty {
             guard vigilAttachId != nil, let surface, own != vigilWantsSize else { return }
             if own {
                 guard NSApp.isActive, window?.isKeyWindow == true,
-                      vigilViewportSize.width > 0, vigilViewportSize.height > 0 else { return }
+                      vigilViewportSize.width > 0, vigilViewportSize.height > 0 else {
+                    if vigilPendingSizeClaim != nil {
+                        VigilSessionManager.vlogSync("size control: \(vigilHost ?? "")/\(vigilAttachId ?? "?") claim waits (\(reason)): active=\(NSApp.isActive) key=\(window?.isKeyWindow == true) viewport=\(Int(vigilViewportSize.width))x\(Int(vigilViewportSize.height))")
+                    }
+                    return
+                }
                 vigilPendingSizeClaim = nil
                 if Self.vigilPointerView !== self {
                     Self.vigilPointerView = self

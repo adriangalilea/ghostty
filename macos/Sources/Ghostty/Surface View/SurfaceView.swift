@@ -290,6 +290,12 @@ extension Ghostty {
             .onReceive(center.publisher(for: NSApplication.willResignActiveNotification)) { _ in
                 surfaceView.vigilLeaveActiveApp()
             }
+            .onReceive(center.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                surfaceView.vigilResumePendingClaim()
+            }
+            .onReceive(center.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+                if (note.object as? NSWindow) === surfaceView.window { surfaceView.vigilResumePendingClaim() }
+            }
             #endif
         }
     }
