@@ -552,12 +552,12 @@ class VigilSessionManager {
         }
         startEventWatcher()
         startStateDirWatcher()
-        // The ask gate pumps at the same chokepoints the summon does: any
-        // state change may mean a pane just blocked on permission.
+        // The broker runs on every Mac and the screen's context follows
+        // focus (VigilHarnessCoordinator observes its own chokepoints).
+        VigilHarnessCoordinator.shared.start()
         NotificationCenter.default.addObserver(
             forName: Self.stateDidChange, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.pumpAskGate()
             self?.syncLocalMirrorLayouts()
         }
         // The summon engine subscribes to the same chokepoints; next tick,
@@ -817,6 +817,13 @@ class VigilSessionManager {
     /// Every daemon id a tab lists (panes + dock).
     func tabPaneIds(_ tab: Tab) -> [String] {
         (tab.panes + (tab.dock?.panes ?? [])).map(\.id)
+    }
+
+    /// The live session that owns a pane (never a burial): where a link to
+    /// the pane lands.
+    func owner(ofPane id: String) -> String? {
+        guard let found = locate(id), !found.buried else { return nil }
+        return found.owner
     }
 
     /// Where a pane lives right now: a session or a burial, and its tab.
@@ -5247,19 +5254,7 @@ class VigilSessionManager {
             .appendingPathComponent(".local/state/wake/state")
     }
 
-    // MARK: Structured harness requests
-
-    func pumpAskGate() {
-        VigilHarnessCoordinator.shared.pump(
-            preferredPane: VigilSummon.shared.currentAskPane ?? activeChain()?.pane)
-    }
-
     private func startStateDirWatcher() {
-        // Content-free input diagnostics join request identity to AskKit
-        // timing/channel receipts here. Opt-in raw captures stay in senses;
-        // accepted decisions and provider delivery have their own ledgers.
-        VigilAsk.trace = { [weak self] line in self?.vlog(line) }
-        VigilAsk.watchRoute()
         VigilVoice.trace = { [weak self] line in self?.vlog(line) }
         VigilCortex.trace = { [weak self] line in self?.vlog(line) }
         VigilRemote.trace = { [weak self] line in self?.vlog(line) }
@@ -5285,11 +5280,11 @@ class VigilSessionManager {
         MicTap.shared.voiceProcessingPolicy = { !AudioRoute.outputIsBluetooth }
         VigilWatchdog.trace = { Self.vlogSync($0) }
         VigilWatchdog.arm()
-        // This app hosts asks; AskKit owns when its voice loads.
+        // Asks are Authz.app's: this app hosts no narration voice (no Kokoro
+        // resident here), only dictation's recognizers.
         Announcer.trace = { [weak self] line in
             Task { @MainActor in self?.vlog(line) }
         }
-        AskSettings.hostAsks()
         factsLoader.start()
     }
 

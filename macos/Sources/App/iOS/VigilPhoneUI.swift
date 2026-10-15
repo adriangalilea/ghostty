@@ -23,32 +23,28 @@ import GhosttyKit
 ///    (pinch, two-finger pan, the loupe sets `zoomScale`); one finger
 ///    stays the terminal's own scroll.
 struct VigilPhoneRoot: View {
-    @State private var authorization = false
     @EnvironmentObject private var ghostty: Ghostty.App
     @StateObject private var model = VigilPhone.shared
     @State private var path: [PaneRef] = []
 
     var body: some View {
         NavigationStack(path: $path) {
-            HomeView(authorization: $authorization)
+            HomeView()
         }
         .environmentObject(model)
         // vigil://<host>/<session>/<pane>: an alert's landing.
         .onOpenURL { url in
-            if url.scheme == "vigil", url.host == "requests" { authorization = true; return }
             Task { @MainActor in
-                if let ref = await model.resolve(url: url) { authorization = false; path = [ref] }
+                if let ref = await model.resolve(url: url) { path = [ref] }
             }
         }
         .onAppear { model.startDiscovery() }
-        .sheet(isPresented: $authorization) { VigilAuthorizationView().environmentObject(model) }
     }
 }
 
 // MARK: - Home: the tree
 
 struct HomeView: View {
-    @Binding var authorization: Bool
     @EnvironmentObject private var model: VigilPhone
     @EnvironmentObject private var ghostty: Ghostty.App
     @State private var adding = false
@@ -81,10 +77,6 @@ struct HomeView: View {
         .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref) }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button { authorization = true } label: {
-                    Image("AskMark").renderingMode(.template).resizable().scaledToFit().frame(width: 24, height: 24)
-                }
-                .accessibilityLabel("Requests · authz.space")
                 Button { settings = true } label: { Image(systemName: "gearshape") }
                 Button { adding = true } label: { Image(systemName: "plus") }
             }

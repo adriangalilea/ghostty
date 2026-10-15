@@ -1,5 +1,4 @@
 import Foundation
-import AuthzClient
 import SystemConfiguration
 
 /// Other Macs' sessions, read through ssh. ONE source: `ssh <alias> vigild
@@ -108,7 +107,6 @@ final class VigilRemote: ObservableObject {
         for alias in aliases where !known.contains(alias) {
             hosts.append(Host(alias: alias))
         }
-        VigilHarnessCoordinator.shared.configureRemoteHomes()
         guard !aliases.isEmpty else { return }
         Self.trace?("remote: hosts \(aliases)")
         // The streams wait for self-resolution: a stream from this Mac's

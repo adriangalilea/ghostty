@@ -95,9 +95,6 @@ enum VigilVoice {
             return
         }
         activePane = pane
-        // Recognition is shared; submission is not. Terminal dictation must
-        // not simultaneously answer the authorization prompt it interrupted.
-        VigilHarnessCoordinator.shared.pauseForTerminalDictation()
         generation += 1
         let gen = generation
         onStateChange?()
@@ -111,10 +108,6 @@ enum VigilVoice {
 
         Task {
             do {
-                while VigilAsk.inFlight {
-                    try await Task.sleep(for: .milliseconds(50))
-                    guard generation == gen, activePane == pane else { return }
-                }
                 // The grant precedes everything: an unauthorized engine
                 // "runs" delivering zeros and MicCapture.start throws.
                 // Generation-guarded teardown: a stale denial that raced a
@@ -245,9 +238,6 @@ enum VigilVoice {
             Task { await session.finish() }
         }
         onStateChange?()
-        // The ask gate defers while dictation owns the voice channel;
-        // stopping IS its re-arm event (the gate polls nothing).
-        VigilSessionManager.shared.pumpAskGate()
     }
 
     /// One finalized phrase -> raw keystrokes, trailing space so the next

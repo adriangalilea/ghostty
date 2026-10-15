@@ -271,8 +271,6 @@
 				Helpers/TabGroupCloseCoordinator.swift,
 				Helpers/TabTitleEditor.swift,
 				Helpers/VibrantLayer.m,
-				Features/Vigil/VigilAsk.swift,
-				Features/Vigil/VigilAskHUD.swift,
 				Features/Vigil/VigilHarnessCoordinator.swift,
 				Features/Vigil/VigilBars.swift,
 				Features/Vigil/VigilCortex.swift,

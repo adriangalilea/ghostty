@@ -185,7 +185,7 @@ final class VigilSummon {
             // (2026-09-16). Not marked chimed: an ask that times out
             // unanswered leaves the pane blocked with nothing carrying it,
             // and THEN the chime does its job.
-            if ask.pane == VigilAsk.askingPane || VigilHarnessCoordinator.shared.carries(pane: ask.pane) { continue }
+            if VigilHarnessCoordinator.shared.carries(pane: ask.pane) { continue }
             chimed[ask.pane] = ask.since
             fresh = true
         }

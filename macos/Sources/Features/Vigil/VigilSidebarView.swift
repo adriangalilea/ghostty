@@ -231,25 +231,8 @@ struct VigilSidebarView: View {
                 .fixedSize()
             }
             .help("off: asks stay in the queue (keycap, badge, ⌘⇧J). summon: a permission prompt or question mid-turn pulls the quick terminal in on the asking pane; answering advances in place. window: this window shapeshifts to any unseen ask.")
-            // Everything below `follow` is ask's, and reads as one product:
-            // the plate is Face's (mark, wordmark, health, level), the rows
-            // are the suite's switches (the MicButton contract: the suite
-            // owns the controls and the keys, vigil only says which rows
-            // this hardware can honor), the rail is this Mac's dictation.
-            AskPanel(
-                health: VigilHarnessCoordinator.shared.plateHealth,
-                tint: VigilHarnessCoordinator.shared.plateTint,
-                pending: VigilHarnessCoordinator.shared.pendingCount,
-                enrolled: VigilHarnessCoordinator.shared.enrolled,
-                inbox: { VigilHarnessCoordinator.shared.showInbox() },
-                settings: { VigilHarnessCoordinator.shared.showEnrollment() },
-                rows: {
-                    AskToggles(
-                        hush: true,
-                        nod: VigilAsk.nodAvailable,
-                        voice: VigilAsk.voiceAvailable)
-                },
-                rail: {
+            // Asks are Authz's (its menu bar item, its settings); the rail
+            // below is this Mac's dictation into the focused pane.
                     if VigilVoice.available {
                         HStack(spacing: 5) {
                             MicButton(
@@ -287,7 +270,6 @@ struct VigilSidebarView: View {
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
                     }
-                })
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 6)

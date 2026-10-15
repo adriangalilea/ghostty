@@ -17,7 +17,7 @@ struct SettingsView: View {
                      "use Open Configuration to edit Vigil settings, then Reload Configuration.")
                 .multilineTextAlignment(.leading)
                 .lineLimit(nil)
-                Button("Authorization devices…") { VigilHarnessCoordinator.shared.showEnrollment() }
+                Button("Dictation languages…") { VigilVoiceSettings.show() }
             }
         }
         .padding()
