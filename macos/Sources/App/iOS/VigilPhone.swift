@@ -1,6 +1,5 @@
 import Foundation
 import GhosttyKit
-import Network
 import OSLog
 import TetherKit
 import VigilActivity
@@ -130,15 +129,6 @@ final class VigilPhone: ObservableObject {
         log("tether: node up (root \(node.root().prefix(10)))")
         VigilFollow.adopt(followed: followed)
         readPeers()
-        path.pathUpdateHandler = { [weak self] update in
-            guard update.status == .satisfied else { return }
-            Task { @MainActor [weak self] in
-                guard let self, self.errors.isEmpty == false else { return }
-                self.log("network changed: dialing the Macs that are down")
-                self.redialFailed()
-            }
-        }
-        path.start(queue: .global(qos: .utility))
         Task { [weak self] in
             for await event in node.events {
                 switch event {
@@ -158,29 +148,13 @@ final class VigilPhone: ObservableObject {
             let ids = Set(next.map(\.id))
             directories = directories.filter { ids.contains($0.key) }
             errors = errors.filter { ids.contains($0.key) }
+            for (id, task) in watches where !ids.contains(id) {
+                task.cancel()
+                watches[id] = nil
+            }
         }
         for host in hosts { watch(host) }
     }
-
-    /// Back on screen: every Mac whose stream is down is dialed now, not
-    /// at the end of its pause.
-    func wake() {
-        redialFailed()
-        renewClaims()
-    }
-
-    /// Every Mac whose stream is down is dialed now, not at the end of its
-    /// pause: on screen again, or the phone's network changed (a Mac out of
-    /// reach announces nothing when it comes back; this is the event that
-    /// says "try now").
-    private func redialFailed() {
-        for (id, task) in watches where errors[id] != nil {
-            task.cancel()
-            watches[id] = nil
-        }
-        readPeers()
-    }
-    private let path = NWPathMonitor()
 
     /// vigil could not start its tether node: nothing reaches a Mac.
     func unlinked(_ why: String) {
@@ -194,42 +168,34 @@ final class VigilPhone: ObservableObject {
         return node
     }
 
-    // MARK: Directory (a stream per Mac: every change as it happens)
+    // MARK: Directory (followed per Mac: every change as it happens)
 
-    /// Opens a Mac's directory stream unless one is open: each NDJSON line
-    /// is the Mac's whole directory. A stream that ends is dialed again
-    /// after a pause that doubles to half a minute (a Mac asleep, out of
-    /// reach), and at once when the app comes back on screen.
+    /// Follows a Mac's directory (`VigilLink.directory`: kept alive by
+    /// tether, reopened the moment the Mac may be back or the app returns
+    /// to the screen); each document is the Mac's whole directory.
     private func watch(_ host: Host) {
-        guard watches[host.id] == nil else { return }
+        guard watches[host.id] == nil, let node else { return }
+        let steps = VigilLink.directory(node, device: host.id)
         watches[host.id] = Task { [weak self] in
-            var pause: UInt64 = 1
-            while !Task.isCancelled, let self, self.hosts.contains(host) {
-                do {
-                    let stream = try await VigilLink.stream(self.linked(), device: host.id, .dir)
+            for await step in steps {
+                guard let self else { return }
+                switch step.step {
+                case .open:
                     self.errors[host.id] = nil
-                    pause = 1
-                    var lines = Lines()
-                    while let chunk = try await stream.recv() {
-                        for line in try lines.append(chunk) {
-                            let dir = try JSONDecoder().decode(Directory.self, from: line)
-                            if self.directories[host.id] == nil {
-                                self.log("dir: \(host.name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
-                            }
-                            self.directories[host.id] = dir
-                        }
+                    self.log("dir: \(host.name) following")
+                case .directory:
+                    guard let dir = step.directory else { continue }
+                    if self.directories[host.id] == nil {
+                        self.log("dir: \(host.name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
                     }
-                    self.log("dir: \(host.name) stream ended")
-                } catch {
-                    self.errors[host.id] = VigilLink.reason(error)
-                    self.log("dir: \(host.name): \(error)")
+                    self.errors[host.id] = nil
+                    self.directories[host.id] = dir
+                case .waiting:
+                    let why = step.reason ?? "out of reach"
+                    if self.errors[host.id] != why { self.log("dir: \(host.name): \(why)") }
+                    self.errors[host.id] = why
                 }
-                try? await Task.sleep(for: .seconds(pause))
-                pause = min(pause * 2, 30)
             }
-            // A Mac no longer paired ends its watch; a cancelled one was
-            // already replaced by `wake`.
-            if !Task.isCancelled { self?.watches[host.id] = nil }
         }
     }
 

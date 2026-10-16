@@ -94,7 +94,6 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $settings) { SettingsView() }
-        .refreshable { model.wake() }
     }
 }
 

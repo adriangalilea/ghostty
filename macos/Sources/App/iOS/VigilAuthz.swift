@@ -33,7 +33,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
             authzLog.notice("authz: \(self.runtime.status, privacy: .public)")
             if let node = runtime.node {
                 VigilPhone.shared.attach(node: node)
-                VigilPhone.shared.wake()
+                VigilPhone.shared.renewClaims()
             } else {
                 // Nothing reaches a Mac without the node: said, never blank.
                 VigilPhone.shared.unlinked(runtime.status)

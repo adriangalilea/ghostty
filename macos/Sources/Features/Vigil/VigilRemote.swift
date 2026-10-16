@@ -1,13 +1,13 @@
 import Foundation
-import Network
 import VigilHarness
 import VigilWire
 
 /// Other Macs' sessions, through this Mac's vigil hub (vigil-agent: the one
 /// tether node of app `vigil` here, VigilWire). The Macs are the paired
 /// devices running vigil, streamed by the hub as they change; each one's
-/// `Directory` (its registry plus per-pane facts) arrives as a `dir`
-/// stream, one document per change. Surfaces attach through the same hub
+/// `Directory` (its registry plus per-pane facts) is followed by the hub
+/// (`Local` `directory`: a document per change, kept alive across the Mac
+/// being out of reach, every step said). Surfaces attach through the same hub
 /// (the Zig attach opens `proxy` itself). Structural intent is a `session`
 /// call: the home app commits it and the directory stream projects it
 /// here. This Mac never writes the home registry. Who may reach whom is
@@ -32,9 +32,10 @@ final class VigilRemote: ObservableObject {
     private nonisolated static let hub = Local.Client(socket: HarnessPaths.hub)
     private var started = false
     private var stopped = false
-    /// The open directory stream per Mac (its socket to the hub).
-    private var streams: [String: FileHandle] = [:]
-    private var lines: [String: Lines] = [:]
+    /// Each Mac's directory, followed by the hub (its socket to the hub):
+    /// the hub keeps it alive across the Mac going out of reach, so the
+    /// socket ends only with the hub itself.
+    private var following: [String: Int32] = [:]
     private var arrivals: [String: (revision: String, at: Date)] = [:]
     func arrival(device: String, pane: String, revision: String) -> Date {
         let id = Self.compositeId(device, pane)
@@ -53,39 +54,25 @@ final class VigilRemote: ObservableObject {
     }
 
     /// Follows the hub's list of Macs for the app's life: each new Mac's
-    /// directory stream opens, a Mac gone takes its rows with it. A hub
-    /// not answering (vigil-agent restarting) is asked again after 5s.
+    /// directory is followed (by the hub, which outlives the Mac being out
+    /// of reach), a Mac gone takes its rows with it. The hub itself
+    /// restarting (vigil-agent deployed) ends every socket: everything is
+    /// followed again once it answers, asked every 5 s until then.
     func start() {
         guard !started else { return }
         started = true
         followPeers()
-        // A Mac out of reach announces nothing when it comes back; this
-        // Mac's own network changing is the event that says "try now". The
-        // 15 s re-dial stays as the floor for a peer that wakes on its own.
-        path.pathUpdateHandler = { [weak self] update in
-            guard update.status == .satisfied else { return }
-            Task { @MainActor [weak self] in self?.redialAll("network changed") }
-        }
-        path.start(queue: .global(qos: .utility))
     }
-    private let path = NWPathMonitor()
-
-    /// Every Mac whose stream is down is dialed now.
-    private func redialAll(_ why: String) {
-        let down = hosts.filter { streams[$0.device] == nil && !dialing.contains($0.device) }
-        guard !down.isEmpty else { return }
-        Self.trace?("remote: \(why): dialing \(down.map(\.name)) now")
-        for host in down { stream(host.device) }
-    }
-    private var dialing = Set<String>()
 
     func stop() {
         stopped = true
-        path.cancel()
-        for handle in streams.values { try? handle.close() }
-        streams.removeAll()
-        lines.removeAll()
-        Self.trace?("remote: directory streams stopped")
+        unfollowAll()
+        Self.trace?("remote: directories no longer followed")
+    }
+
+    private func unfollowAll() {
+        for fd in following.values { shutdown(fd, SHUT_RDWR) }
+        following.removeAll()
     }
 
     private func followPeers() {
@@ -105,16 +92,19 @@ final class VigilRemote: ObservableObject {
                 why = "hub: \(error)"
             }
             Task { @MainActor [weak self] in
+                guard let self else { return }
                 Self.trace?("remote: \(why); asking again in 5s")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { MainActor.assumeIsolated { self?.followPeers() } }
+                self.unfollowAll()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { MainActor.assumeIsolated { self.followPeers() } }
             }
         }
     }
 
     private func peers(_ peers: [Local.Peer]) {
         let wanted = Set(peers.map(\.id))
-        for (device, handle) in streams where !wanted.contains(device) {
-            streams[device] = nil; lines[device] = nil; try? handle.close()
+        for (device, fd) in following where !wanted.contains(device) {
+            following[device] = nil
+            shutdown(fd, SHUT_RDWR)
         }
         hosts.removeAll { !wanted.contains($0.device) }
         arrivals = arrivals.filter { Self.split($0.key).map { wanted.contains($0.device) } ?? false }
@@ -123,72 +113,53 @@ final class VigilRemote: ObservableObject {
                 hosts[index].name = peer.name
             } else {
                 hosts.append(Host(device: peer.id, name: peer.name))
-                stream(peer.id)
             }
+            follow(peer.id)
         }
         Self.trace?("remote: Macs \(peers.map(\.name))")
         NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
     }
 
-    /// A Mac's directory stream, through the hub. A stream that ends is
-    /// dialed again after 15s while the Mac is still paired.
-    private func stream(_ device: String) {
-        guard !stopped, streams[device] == nil, !dialing.contains(device), host(device) != nil else { return }
-        dialing.insert(device)
+    /// A Mac's directory, followed through the hub: each step a line.
+    private func follow(_ device: String) {
+        guard !stopped, following[device] == nil, host(device) != nil else { return }
+        let fd: Int32
+        do { fd = try Self.hub.request(.directory(of: device)) } catch {
+            return failed(device, "\(error)")
+        }
+        following[device] = fd
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let result = Result { try Self.hub.request(.open(device: device, .dir)) }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.dialing.remove(device)
-                switch result {
-                case .failure(let error):
-                    self.ended(device, "\(error)")
-                case .success(let fd):
-                    guard self.host(device) != nil, !self.stopped else { close(fd); return }
-                    let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-                    handle.readabilityHandler = { [weak self] handle in
-                        let data = handle.availableData
-                        Task { @MainActor [weak self] in
-                            guard let self, self.streams[device] === handle else { return }
-                            if data.isEmpty {
-                                handle.readabilityHandler = nil
-                                self.streams[device] = nil
-                                self.lines[device] = nil
-                                self.ended(device, "stream ended")
-                            } else {
-                                self.streamed(device, data)
-                            }
-                        }
-                    }
-                    self.streams[device] = handle
-                    self.lines[device] = Lines()
-                    Self.trace?("remote: \(self.host(device)?.name ?? device) stream opened")
+            let reader = Lines.Reader(fd: fd)
+            do {
+                while let line = try reader.next() {
+                    let step = try JSONDecoder().decode(Local.Following.self, from: line)
+                    Task { @MainActor [weak self] in self?.stepped(device, step) }
                 }
+            } catch {
+                Task { @MainActor [weak self] in self?.failed(device, "unreadable directory: \(error)") }
+            }
+            close(fd)
+            Task { @MainActor [weak self] in
+                guard let self, self.following[device] == fd else { return }
+                self.following[device] = nil
+                self.failed(device, "this Mac's vigil-agent stopped")
             }
         }
     }
 
-    private func ended(_ device: String, _ why: String) {
-        guard let index = hosts.firstIndex(where: { $0.device == device }) else { return }
-        if hosts[index].error != why {
-            Self.trace?("remote: \(hosts[index].name) \(why); dialing again in 15s")
-            hosts[index].error = why
-            NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
-            MainActor.assumeIsolated { self?.stream(device) }
+    private func stepped(_ device: String, _ step: Local.Following) {
+        switch step.step {
+        case .open: Self.trace?("remote: \(host(device)?.name ?? device) following")
+        case .directory: if let directory = step.directory { apply(device, directory) }
+        case .waiting: failed(device, step.reason ?? "out of reach")
         }
     }
 
-    /// Bytes off the stream: each whole line is a directory document.
-    private func streamed(_ device: String, _ data: Data) {
-        do {
-            for line in try lines[device, default: Lines()].append(data) {
-                apply(device, Result { try JSONDecoder().decode(Directory.self, from: line) })
-            }
-        } catch {
-            apply(device, .failure(error))
-        }
+    private func failed(_ device: String, _ why: String) {
+        guard let index = hosts.firstIndex(where: { $0.device == device }), hosts[index].error != why else { return }
+        Self.trace?("remote: \(hosts[index].name): \(why)")
+        hosts[index].error = why
+        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
     }
 
     func host(_ device: String) -> Host? { hosts.first { $0.device == device } }
@@ -216,36 +187,26 @@ final class VigilRemote: ObservableObject {
 
     /// One directory landed: the Mac's rows follow, with a receipt only
     /// when something changed.
-    private func apply(_ device: String, _ result: Result<Directory, Error>) {
+    private func apply(_ device: String, _ received: Directory) {
         guard let index = hosts.firstIndex(where: { $0.device == device }) else { return }
-        switch result {
-        case .success(let received):
-            let dir = received.projected
-            guard hosts[index].directory != dir || hosts[index].error != nil else { return }
-            // A receipt per SHAPE change (a session or pane came or went),
-            // not per state flip: the stream delivers every flip and a busy
-            // fleet would write the log a few times a second.
-            let shape = (dir.sessions.count, dir.panes.count)
-            let before = hosts[index].directory.map { ($0.sessions.count, $0.panes.count) }
-            arrivals = arrivals.filter { entry in
-                guard let split = Self.split(entry.key), split.device == device else { return true }
-                return dir.panes[split.name] != nil
-            }
-            hosts[index].directory = dir
-            VigilSessionManager.shared.remoteDirectoryChanged(device)
-            hosts[index].error = nil
-            if before.map({ $0 != shape }) ?? true {
-                Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
-            }
-            NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
-        case .failure(let error):
-            let msg = "unreadable directory: \(error)"
-            if hosts[index].error != msg {
-                Self.trace?("!! remote: \(hosts[index].name) \(msg)")
-                hosts[index].error = msg
-                NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
-            }
+        let dir = received.projected
+        guard hosts[index].directory != dir || hosts[index].error != nil else { return }
+        // A receipt per SHAPE change (a session or pane came or went), not
+        // per state flip: the stream delivers every flip and a busy fleet
+        // would write the log a few times a second.
+        let shape = (dir.sessions.count, dir.panes.count)
+        let before = hosts[index].directory.map { ($0.sessions.count, $0.panes.count) }
+        arrivals = arrivals.filter { entry in
+            guard let split = Self.split(entry.key), split.device == device else { return true }
+            return dir.panes[split.name] != nil
         }
+        hosts[index].directory = dir
+        VigilSessionManager.shared.remoteDirectoryChanged(device)
+        hosts[index].error = nil
+        if before.map({ $0 != shape }) ?? true {
+            Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
+        }
+        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
     }
 
     /// The sidebar's rows for every remote Mac, built like the local
