@@ -104,20 +104,81 @@ extension VigilWorkspaces {
 
     /// The sidebar's burial tray rows: lightweight, equatable, countdown
     /// baked in so the tray re-renders as the grace runs out.
+    /// Every Mac's burials in one tray: this Mac's from its graveyard,
+    /// another's from the directory it streams (vigil.json lists burials
+    /// with their deadline and origin). Undo and "end now" go to the
+    /// burial's home, which alone holds it.
     struct SidebarBurial: Identifiable, Equatable {
+        /// The burial's name here; `<device>/<name>` for another Mac's.
         let id: String
+        let name: String
         let emoji: String?
         let label: String
         let remaining: Int
+        /// Where it stood ("finances › tab 3"); nil for a killed workspace.
+        let from: String?
+        /// The other Mac holding it (its tether root and name); nil here.
+        let device: String?
+        let mac: String?
     }
 
     func sidebarBurials() -> [SidebarBurial] {
-        burials().map {
-            SidebarBurial(
-                id: $0.name,
-                emoji: $0.emoji,
-                label: $0.label,
-                remaining: max(0, Int($0.deadline.timeIntervalSinceNow)))
+        func from(_ origin: Registry.Origin?, _ label: (String) -> String?) -> String? {
+            origin.map { "\(label($0.workspace) ?? $0.workspace) › tab \($0.tab + 1)" }
+        }
+        let here = graveyard.values.compactMap { burial -> SidebarBurial? in
+            guard let deadline = graveyardDeadlines[burial.name] else { return nil }
+            return SidebarBurial(
+                id: burial.name, name: burial.name, emoji: burial.emoji, label: burial.label,
+                remaining: max(0, Int(deadline.timeIntervalSinceNow)),
+                from: from(burial.buriedFrom) { workspaces[$0]?.label }, device: nil, mac: nil)
+        }
+        let elsewhere = VigilRemote.shared.hosts.flatMap { host -> [SidebarBurial] in
+            let listed = host.directory?.workspaces ?? []
+            return listed.compactMap { burial in
+                guard let until = burial.buriedUntil, until > Date() else { return nil }
+                return SidebarBurial(
+                    id: VigilRemote.compositeId(host.device, burial.name), name: burial.name, emoji: burial.emoji,
+                    label: burial.label, remaining: max(0, Int(until.timeIntervalSinceNow)),
+                    from: from(burial.buriedFrom) { name in listed.first { $0.name == name }?.label },
+                    device: host.device, mac: host.name)
+            }
+        }
+        return (here + elsewhere).sorted { $0.remaining < $1.remaining }
+    }
+
+    /// Undo from the tray: here, or on the Mac that holds it.
+    func undoBurial(_ burial: SidebarBurial) {
+        guard let device = burial.device else { exhume(burial.name); return }
+        sendToBurialHome(device, burial, operation: "exhume")
+    }
+
+    /// End it now from the tray: here, or on the Mac that holds it.
+    func endBurial(_ burial: SidebarBurial) {
+        guard let device = burial.device else { reapNow(burial.name); return }
+        sendToBurialHome(device, burial, operation: "reap")
+    }
+
+    private func sendToBurialHome(_ device: String, _ burial: SidebarBurial, operation: String) {
+        let request = VigilSessionControl.Request(
+            version: 1, id: UUID(), issuedAt: Date().timeIntervalSince1970, session: burial.name, revision: "",
+            operation: operation, anchor: "", direction: nil)
+        vlog("remote command: \(request.id) \(operation) -> \(device)/\(burial.name)")
+        Task {
+            do {
+                let reply = try await VigilRemote.shared.command(device, request: request)
+                vlog("remote command: \(request.id) \(reply.ok ? "committed" : "refused \(reply.code)")")
+                guard reply.ok else {
+                    let alert = NSAlert()
+                    alert.messageText = operation == "exhume" ? "It could not be brought back" : "It could not be ended now"
+                    alert.informativeText = reply.message
+                    alert.runModal()
+                    return
+                }
+                remoteDirectoryChanged(device)
+            } catch {
+                vlog("remote command: \(request.id) outcome unknown: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -196,15 +257,54 @@ extension VigilWorkspaces {
         if alert.runModal() == .alertFirstButtonReturn { doKill() }
     }
 
-    /// Undo of a kill: back from the graveyard as a full session (identity
-    /// included), everything still running.
-    func exhume(_ name: String) {
-        guard var session = graveyard.removeValue(forKey: name) else { return }
-        session.layoutShape = "" // undo is a new revision, even for the same shape
+    /// Undo of a close or a kill, the one undo (⌘⇧T, the tray, a command
+    /// from another Mac), everything still running. A closed tab or pane
+    /// goes back where it stood (`buriedFrom`): the pane beside the pane it
+    /// sat next to (a dock tenant back into the dock) while that tab
+    /// exists, else a tab at its old position; every view of the workspace
+    /// updates by pane id. A killed workspace, or a burial whose workspace
+    /// is gone too, comes back as itself. Returns the workspace it is in.
+    @discardableResult
+    func exhume(_ name: String) -> String? {
+        guard var burial = graveyard.removeValue(forKey: name) else { return nil }
         graveyardDeadlines[name] = nil
-        workspaces[name] = session
+        try? FileManager.default.removeItem(at: dumpsDir(name))
+        if let origin = burial.buriedFrom, var home = workspaces[origin.workspace] {
+            for tab in burial.tabs {
+                if let beside = origin.beside, let at = home.tabs.firstIndex(where: { $0.paneIds.contains(beside) }) {
+                    var target = home.tabs[at]
+                    if origin.dock == true {
+                        var dock = target.dock ?? Registry.Dock(panes: [], active: 0, width: 340, collapsed: false)
+                        dock.panes += tab.panes
+                        target.dock = dock
+                    } else {
+                        var layout = Self.completeLayout(target)
+                        for offset in tab.panes.indices { layout = .h(0.5, layout, .leaf(target.panes.count + offset)) }
+                        target.panes += tab.panes
+                        target.layout = layout
+                    }
+                    home.tabs[at] = target
+                } else {
+                    home.tabs.insert(tab, at: min(origin.tab, home.tabs.count))
+                }
+                for id in tab.paneIds { chown(id, to: origin.workspace) }
+            }
+            // A tab buried warm comes back warm: a click adopts its views.
+            home.held += burial.held
+            home.layoutShape = "" // a new revision, even for a shape seen before
+            workspaces[origin.workspace] = home
+            reconcileViews(of: origin.workspace)
+            persist()
+            vlog("exhume: '\(name)' back into '\(origin.workspace)' (tab \(origin.tab)\(origin.beside.map { ", beside \($0)" } ?? ""))")
+            return origin.workspace
+        }
+        burial.buriedFrom = nil
+        burial.layoutShape = ""
+        workspaces[name] = burial
         persist()
         open(name: name)
+        vlog("exhume: '\(name)' back as itself")
+        return name
     }
 
     /// A window that slipped past registration (safety net) gets the same

@@ -293,6 +293,9 @@ class VigilWorkspaces {
         /// never make a stale command current again.
         var layoutRevision = UUID().uuidString
         var layoutShape = ""
+        /// A burial of a closed tab or pane: where it stood (undo returns
+        /// it there). nil for a live workspace and a killed one.
+        var buriedFrom: Registry.Origin?
 
         var paneCount: Int { tabs.reduce(0) { $0 + $1.panes.count } }
     }
@@ -646,7 +649,7 @@ class VigilWorkspaces {
     func handleEmptiedTree(_ controller: TerminalController) -> Bool {
         guard let name = workspaceName(of: controller) else { return false }
         for id in controller.surfaceTree.compactMap(\.vigilAttachId) where locate(id)?.owner == name {
-            if let taken = takePane(id) { buryPane(taken.pane, from: name) }
+            if let taken = takePane(id) { buryPane(taken.pane, from: name, origin: taken.origin) }
         }
         memberships.removeObject(forKey: controller)
         dockMap.object(forKey: controller)?.unmount()
@@ -670,17 +673,10 @@ class VigilWorkspaces {
             return c
         }
         guard !targets.isEmpty else { return true }
-        let busy = busyPrograms(panes: targets.flatMap { $0.surfaceTree.compactMap(\.vigilAttachId) })
-        let proceed = { [weak self] in
+        confirmClose(onlyRight ? "Tabs on the Right" : "Other Tabs",
+                     busy: busyPrograms(panes: targets.flatMap { $0.surfaceTree.compactMap(\.vigilAttachId) }),
+                     in: controller) { [weak self] in
             for target in targets { self?.closeTabStructurally(target) }
-        }
-        if busy.isEmpty {
-            proceed()
-        } else {
-            controller.confirmClose(
-                messageText: onlyRight ? "Close Tabs on the Right?" : "Close Other Tabs?",
-                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tabs kills it (undo keeps them for \(Int(Self.killGrace))s)."
-            ) { proceed() }
         }
         return true
     }
@@ -813,15 +809,17 @@ class VigilWorkspaces {
     /// dying with the husk); an emptied burial is dropped; a held runtime
     /// releases the pane's view so no two trees ever hold one daemon. The
     /// one primitive under every move and every re-claim.
-    func takePane(_ id: String) -> (pane: Registry.Pane, tabLabel: String?, tabEmoji: String?)? {
+    func takePane(_ id: String) -> (pane: Registry.Pane, tabLabel: String?, tabEmoji: String?, origin: Registry.Origin?)? {
         guard let at = locate(id) else { return nil }
         var session = (at.buried ? graveyard[at.owner] : workspaces[at.owner])!
         var tab = session.tabs[at.tab]
         var pane: Registry.Pane?
+        var fromDock = false
         if let index = tab.panes.firstIndex(where: { $0.id == id }) {
             pane = tab.panes.remove(at: index)
             tab.layout = nil
         } else if var dock = tab.dock, let index = dock.panes.firstIndex(where: { $0.id == id }) {
+            fromDock = true
             pane = dock.panes.remove(at: index)
             dock.active = min(dock.active, max(dock.panes.count - 1, 0))
             tab.dock = dock.panes.isEmpty ? nil : dock
@@ -869,7 +867,11 @@ class VigilWorkspaces {
         } else {
             workspaces[at.owner] = session
         }
-        return (pane, emptied ? tab.label : nil, emptied ? tab.emoji : nil)
+        // Where it stood, for a burial's undo: beside a pane that stays in its
+        // tab, or (the tab emptied) at the tab's position.
+        let origin = at.buried ? nil : Registry.Origin(
+            workspace: at.owner, tab: at.tab, beside: emptied ? nil : tab.panes.first?.id, dock: fromDock ? true : nil)
+        return (pane, emptied ? tab.label : nil, emptied ? tab.emoji : nil, origin)
     }
 
     /// One live view as a registry pane, carrying the remembered facts of
@@ -990,14 +992,17 @@ class VigilWorkspaces {
             session.tabs.append(Registry.Tab(panes: panes, layout: layout, label: inheritedLabel, emoji: inheritedEmoji))
         }
         workspaces[name] = session
-        for pane in closed { buryPane(pane, from: name) }
+        // Beside a pane the tab keeps; at the tab's place when it emptied.
+        let origin = index.map { Registry.Origin(workspace: name, tab: $0, beside: panes.first?.id) }
+        for pane in closed { buryPane(pane, from: name, origin: origin) }
         persist()
     }
 
     /// A closed pane (split ⌘W, process exit, dock tenant close, captured
-    /// close) rests in the graveyard as its own one-pane session: same
-    /// 120s grace, same undo, same reap as every other death.
-    func buryPane(_ pane: Registry.Pane, from owner: String) {
+    /// close) rests in the graveyard as its own one-pane burial: same 120s
+    /// grace, same undo, same reap as every other death. `origin` is where
+    /// it stood, so undo puts it back there.
+    func buryPane(_ pane: Registry.Pane, from owner: String, origin: Registry.Origin?) {
         var buried = Workspace(
             name: newWorkspaceId(),
             label: pane.label ?? pane.title ?? paneProgram(pane.id)
@@ -1005,7 +1010,27 @@ class VigilWorkspaces {
             emoji: pane.emoji,
             cwd: pane.cwd)
         buried.tabs = [Registry.Tab(panes: [pane], layout: nil)]
+        buried.buriedFrom = origin
         vlog("close: pane '\(pane.id)' leaves '\(owner)' -> buried as '\(buried.name)'")
+        bury(buried)
+    }
+
+    /// A closed tab rests in the graveyard whole (its panes, layout, dock
+    /// and name, and its running views when it had them): the one burial
+    /// for a tab, whoever closed it, here or from another Mac. `index` is
+    /// its position in `owner`, where undo puts it back.
+    func buryTab(_ tab: Registry.Tab, held: [TabRuntime], thumbnail: NSImage?, from owner: String, at index: Int) {
+        let cwd = tab.panes.first?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
+        var buried = Workspace(
+            name: newWorkspaceId(),
+            label: tab.label ?? tab.panes.first.flatMap { $0.label ?? $0.title } ?? (cwd as NSString).lastPathComponent,
+            emoji: tab.emoji,
+            cwd: cwd,
+            held: held)
+        buried.tabs = [tab]
+        buried.thumbnail = thumbnail
+        buried.buriedFrom = Registry.Origin(workspace: owner, tab: index, beside: nil)
+        vlog("close: tab \(tab.paneIds) leaves '\(owner)' -> buried as '\(buried.name)'")
         bury(buried)
     }
 
@@ -1129,7 +1154,7 @@ class VigilWorkspaces {
             Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
         }
         entries += graveyard.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom)
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
@@ -1441,6 +1466,7 @@ class VigilWorkspaces {
             if let deadline = entry.buriedUntil {
                 // Buried across a relaunch: honor the remaining grace (the
                 // daemons are still out there), reap immediately if spent.
+                session.buriedFrom = entry.buriedFrom
                 graveyard[entry.name] = session
                 graveyardDeadlines[entry.name] = deadline
                 let wait = max(deadline.timeIntervalSinceNow, 0) + 1

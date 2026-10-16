@@ -664,15 +664,7 @@ extension VigilWorkspaces {
             return false
         }
         guard withConfirmation, workspaceName(of: controller) != nil else { return false }
-        let busy = busyPrograms(panes: node.compactMap(\.vigilAttachId))
-        guard !busy.isEmpty else {
-            controller.closeSurface(node, withConfirmation: false)
-            return true
-        }
-        controller.confirmClose(
-            messageText: "Close Pane?",
-            informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it (undo keeps it for \(Int(Self.killGrace))s)."
-        ) { [weak controller] in
+        confirmClose("Pane", busy: busyPrograms(panes: node.compactMap(\.vigilAttachId)), in: controller) { [weak controller] in
             controller?.closeSurface(node, withConfirmation: false)
         }
         return true
@@ -712,29 +704,20 @@ extension VigilWorkspaces {
         let ids = Set(tree.compactMap(\.vigilAttachId) + (dock?.views.compactMap(\.vigilAttachId) ?? []))
         var session = workspaces[name]!
         let tab: Registry.Tab
-        if let index = session.tabs.firstIndex(where: { !Set($0.paneIds).isDisjoint(with: ids) }) {
-            tab = session.tabs.remove(at: index)
+        let index: Int
+        if let found = session.tabs.firstIndex(where: { !Set($0.paneIds).isDisjoint(with: ids) }) {
+            index = found
+            tab = session.tabs.remove(at: found)
         } else {
             vlog("!! buryTab: '\(name)' tab \(ids) was not in its registry")
             let (panes, layout) = capture(tree, carrying: [])
             tab = Registry.Tab(panes: panes, layout: layout, dock: dock.flatMap { captureDock($0, carrying: []) })
+            index = session.tabs.count
         }
         workspaces[name] = session
         let surface = tree.root?.leftmostLeaf()
-        let cwd = surface?.pwd ?? tab.panes.first?.cwd
-            ?? FileManager.default.homeDirectoryForCurrentUser.path
-        var buried = Workspace(
-            name: newWorkspaceId(),
-            label: tab.label ?? surface.flatMap { capturedTitle(of: $0) }
-                ?? (cwd as NSString).lastPathComponent,
-            emoji: tab.emoji,
-            cwd: cwd,
-            held: [TabRuntime(tree: tree, dock: dock)])
-        buried.tabs = [tab]
-        buried.thumbnail = surface?.asImage
         dock?.unmount()
-        vlog("close: tab \(ids.sorted()) leaves '\(name)' -> buried as '\(buried.name)'")
-        bury(buried)
+        buryTab(tab, held: [TabRuntime(tree: tree, dock: dock)], thumbnail: surface?.asImage, from: name, at: index)
     }
 
     /// One-gesture detach for the front window (⌘⇧U): keep running in the

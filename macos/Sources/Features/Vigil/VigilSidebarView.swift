@@ -284,7 +284,7 @@ struct VigilSidebarView: View {
                 Image(systemName: "trash")
                     .font(.system(size: 8 * scale))
                     .foregroundColor(.secondary)
-                Text("recently killed")
+                Text("recently closed")
                     .font(.system(size: 9 * scale, weight: .medium))
                     .foregroundColor(.secondary)
                 Spacer()
@@ -309,17 +309,26 @@ struct VigilSidebarView: View {
             Text(face(burial.emoji))
                 .font(.system(size: 12 * scale))
                 .frame(width: Grid.icon)
-            Text(burial.label)
-                .font(.system(size: 11 * scale))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(burial.label)
+                    .font(.system(size: 11 * scale))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                // Where it goes back to, and on which Mac it waits.
+                if burial.from != nil || burial.mac != nil {
+                    Text([burial.from, burial.mac.map { "on \($0)" }].compactMap { $0 }.joined(separator: " · "))
+                        .font(.system(size: 9 * scale))
+                        .foregroundColor(.secondary.opacity(0.7))
+                        .lineLimit(1)
+                }
+            }
             Spacer(minLength: 4)
             Text("\(burial.remaining)s")
                 .font(.system(size: 9 * scale))
                 .monospacedDigit()
                 .foregroundColor(.secondary)
             Button {
-                VigilWorkspaces.shared.reapNow(burial.id)
+                VigilWorkspaces.shared.endBurial(burial)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 7 * scale, weight: .bold))
@@ -330,14 +339,14 @@ struct VigilSidebarView: View {
             .buttonStyle(.plain)
             .help("Let it die now (skips the remaining grace).")
         }
-        .frame(height: 22 * scale)
+        .frame(height: (burial.from != nil || burial.mac != nil ? 30 : 22) * scale)
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(id: id, hovered: hovered == id))
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
-        .onTapGesture { VigilWorkspaces.shared.exhume(burial.id) }
-        .help("Killed; dies for real in \(burial.remaining)s. Click to recover it whole (⌘⇧T also exhumes).")
+        .onTapGesture { VigilWorkspaces.shared.undoBurial(burial) }
+        .help("Closed; dies for real in \(burial.remaining)s. Click to bring it back where it was\(burial.mac.map { " on \($0)" } ?? " (⌘⇧T too)").")
     }
 
     // MARK: Remote host header (one per other Mac)

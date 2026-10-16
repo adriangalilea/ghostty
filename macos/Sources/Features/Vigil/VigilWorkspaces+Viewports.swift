@@ -969,15 +969,7 @@ extension VigilWorkspaces {
                 guard let self, let controller else { return }
                 self.buryMountedTab(thenMount: next, name: name, in: controller)
             }
-            let busy = busyPrograms(in: controller)
-            if !busy.isEmpty {
-                controller.confirmClose(
-                    messageText: "Close Tab?",
-                    informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tab kills it (undo keeps it for \(Int(Self.killGrace))s).")
-                { proceed() }
-            } else {
-                proceed()
-            }
+            confirmClose("Tab", busy: busyPrograms(in: controller), in: controller, proceed)
             return true
         }
 
@@ -1007,17 +999,10 @@ extension VigilWorkspaces {
     ) -> Bool {
         guard let runtime = dockMap.object(forKey: controller),
               let index = runtime.views.firstIndex(where: { $0 === view }) else { return false }
-        let busy = busyPrograms(panes: [view.vigilAttachId].compactMap { $0 })
-        if withConfirmation, !busy.isEmpty {
-            controller.confirmClose(
-                messageText: "Close Dock Pane?",
-                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it."
-            ) { [weak self, weak controller] in
-                guard let self, let controller else { return }
-                self.closeDockTenant(controller, index: index)
-            }
-        } else {
-            closeDockTenant(controller, index: index)
+        let busy = withConfirmation ? busyPrograms(panes: [view.vigilAttachId].compactMap { $0 }) : []
+        confirmClose("Dock Pane", busy: busy, in: controller) { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            self.closeDockTenant(controller, index: index)
         }
         return true
     }
@@ -1035,36 +1020,18 @@ extension VigilWorkspaces {
             return
         }
         guard let tab = workspaces[name]!.tabs.first(where: { $0.paneIds.contains(anchor) }) else { return }
-        let busy = busyPrograms(panes: tab.paneIds)
-        let proceed = { [weak self] in
-            guard let self else { return }
-            self.buryColdTab(tab, from: name)
-        }
-        if !busy.isEmpty, let host {
-            host.confirmClose(
-                messageText: "Close Tab?",
-                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tab kills it (undo keeps it for \(Int(Self.killGrace))s).")
-            { proceed() }
-        } else {
-            proceed()
+        confirmClose("Tab", busy: busyPrograms(panes: tab.paneIds), in: host) { [weak self] in
+            self?.buryColdTab(tab, from: name)
         }
     }
 
     private func buryColdTab(_ tab: Registry.Tab, from name: String) {
         let ids = tab.paneIds
-        workspaces[name]?.tabs.removeAll { $0.paneIds == ids }
-        let cwd = tab.panes.first?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-        var buried = Workspace(
-            name: newWorkspaceId(),
-            label: tab.label ?? tab.panes.first?.title ?? (cwd as NSString).lastPathComponent,
-            emoji: tab.emoji,
-            cwd: cwd)
-        buried.tabs = [tab]
+        guard let index = workspaces[name]?.tabs.firstIndex(where: { $0.paneIds == ids }) else { return }
+        workspaces[name]?.tabs.remove(at: index)
         // A warm tab is buried warm: undo brings back the running surfaces,
         // and the reap destroys exactly them.
-        buried.held = takeWarm(tab, from: name)
-        bury(buried)
-        vlog("close: captured tab \(ids) leaves '\(name)' -> buried as '\(buried.name)'")
+        buryTab(tab, held: takeWarm(tab, from: name), thumbnail: nil, from: name, at: index)
         persist()
     }
 
@@ -1095,18 +1062,8 @@ extension VigilWorkspaces {
             // A held runtime's tenant (background/floating session): the
             // registry edit is the close, the runtime releases the view.
             if locate(paneId) != nil {
-                let busy = busyPrograms(panes: [paneId])
-                let proceed = { [weak self] in
-                    guard let self else { return }
-                    self.removeCapturedPane(name: name, paneId: paneId)
-                }
-                if !busy.isEmpty, let host {
-                    host.confirmClose(
-                        messageText: "Close Dock Pane?",
-                        informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it (undo keeps it for \(Int(Self.killGrace))s).")
-                    { proceed() }
-                } else {
-                    proceed()
+                confirmClose("Dock Pane", busy: busyPrograms(panes: [paneId]), in: host) { [weak self] in
+                    self?.removeCapturedPane(name: name, paneId: paneId)
                 }
                 return
             }
@@ -1114,18 +1071,8 @@ extension VigilWorkspaces {
             return
         }
         guard workspaces[name] != nil else { return }
-        let busy = busyPrograms(panes: [paneId])
-        let proceed = { [weak self] in
-            guard let self else { return }
-            self.removeCapturedPane(name: name, paneId: paneId)
-        }
-        if !busy.isEmpty, let host {
-            host.confirmClose(
-                messageText: "Close Pane?",
-                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the pane kills it (undo keeps it for \(Int(Self.killGrace))s).")
-            { proceed() }
-        } else {
-            proceed()
+        confirmClose("Pane", busy: busyPrograms(panes: [paneId]), in: host) { [weak self] in
+            self?.removeCapturedPane(name: name, paneId: paneId)
         }
     }
 
@@ -1133,7 +1080,7 @@ extension VigilWorkspaces {
     /// (takePane releases any held view; the daemon runs until reap).
     private func removeCapturedPane(name: String, paneId: String) {
         guard let taken = takePane(paneId) else { return }
-        buryPane(taken.pane, from: name)
+        buryPane(taken.pane, from: name, origin: taken.origin)
         persist()
     }
 

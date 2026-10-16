@@ -80,7 +80,7 @@ extension VigilWorkspaces {
         if runtime.views.isEmpty { dockMap.removeObject(forKey: controller) }
         VigilBars.shared.sync(controller)
         if let id = view.vigilAttachId, let taken = takePane(id) {
-            buryPane(taken.pane, from: name)
+            buryPane(taken.pane, from: name, origin: taken.origin)
         }
         persist()
     }

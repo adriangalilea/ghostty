@@ -102,6 +102,24 @@ extension VigilWorkspaces {
         if let window = controller.window { alert.beginSheetModal(for: window) }
     }
 
+    /// The one close question, wherever the close is clicked and wherever
+    /// the pane lives: asked only when something runs (`busy`: the tty's
+    /// foreground program, never a shell at its prompt; the same rule on
+    /// every Mac, `Facts.busy`), naming it; nothing running, nothing asked.
+    /// `mac`: where it lives, when that is not this Mac.
+    func confirmClose(_ what: String, busy: [String], mac: String? = nil, in host: TerminalController?,
+                      _ proceed: @escaping () -> Void) {
+        guard !busy.isEmpty, let host else { proceed(); return }
+        host.confirmClose(
+            messageText: "Close \(what)?",
+            informativeText: "\(busy.joined(separator: ", ")) still running\(mac.map { " on \($0)" } ?? ""). Closing the \(what.lowercased()) kills it (undo keeps it for \(Int(Self.killGrace))s).")
+        { proceed() }
+    }
+
+    /// A close in a viewport showing a workspace that lives elsewhere
+    /// (another Mac, or another window here): sent to its home as a
+    /// command, after the same question a local close asks, answered from
+    /// the home's own facts (its directory).
     func confirmRemoteClose(in controller: TerminalController, view: Ghostty.SurfaceView? = nil,
                                     operation: String, confirm: Bool = true) -> Bool {
         guard let composite = mirroredWorkspace(of: controller) else { return false }
@@ -112,19 +130,19 @@ extension VigilWorkspaces {
             guard let controller, self.mirroredWorkspace(of: controller) == composite else { return }
             self.remoteSessionCommand(in: controller, from: target, operation: operation, expectedRevision: revision)
         }
-        if confirm {
-            // Named as the sidebar names them: the session's face and label,
-            // the Mac it lives on (never the composite id, a tether key).
-            let remote = VigilRemote.shared.session(composite)
-            let local = workspaces[composite]
-            let label = [remote?.session.emoji ?? local?.emoji, remote?.session.label ?? local?.label]
-                .compactMap { $0 }.joined(separator: " ")
-            let mac = remote.flatMap { VigilRemote.shared.host($0.device)?.name } ?? "its Mac"
-            let what = operation == "close_tab" ? "tab" : "pane"
-            controller.confirmClose(messageText: "Close this \(what) of \(label.isEmpty ? "the workspace" : label)?",
-                informativeText: "It closes on \(mac), in every window showing it. For \(Int(Self.killGrace / 60)) minutes it can come back on \(mac) with ⌘⇧T.",
-                completion: proceed)
-        } else { proceed() }
+        guard confirm, let anchor = target?.vigilAttachId else { proceed(); return true }
+        let what = operation == "close_tab" ? "Tab" : "Pane"
+        if let remote = VigilRemote.shared.session(composite) {
+            let facts = VigilRemote.shared.host(remote.device)?.directory?.panes ?? [:]
+            let tab = (remote.session.tabs ?? []).first { $0.paneIds.contains(anchor) }
+            let panes = operation == "close_tab" ? tab?.paneIds ?? [anchor] : [anchor]
+            confirmClose(what, busy: panes.compactMap { facts[$0]?.busy },
+                         mac: VigilRemote.shared.host(remote.device)?.name, in: controller, proceed)
+        } else {
+            let tab = workspaces[composite]?.tabs.first { $0.paneIds.contains(anchor) }
+            confirmClose(what, busy: busyPrograms(panes: operation == "close_tab" ? tab?.paneIds ?? [anchor] : [anchor]),
+                         in: controller, proceed)
+        }
         return true
     }
 
@@ -185,11 +203,62 @@ extension VigilWorkspaces {
         }
     }
 
+    /// Every view of `name` on this Mac (its windows and the local mirrors
+    /// of it) brought to its registry, matched by pane id: a view keeps the
+    /// tab it shows, gains or loses panes, and a view whose tab is gone
+    /// closes. The one step after any edit made outside the views (a
+    /// command from another Mac, an undo).
+    func reconcileViews(of name: String) {
+        let tabs = workspaces[name]?.tabs ?? []
+        for controller in members(of: name) {
+            let oldIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
+            if let target = tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? tabs.first {
+                reconcileWorkspaceTree(controller, tab: target, host: nil, session: name)
+            } else {
+                memberships.removeObject(forKey: controller)
+                if let dock = dockMap.object(forKey: controller) {
+                    for view in dock.views { view.vigilDestroySurface() }
+                    dock.unmount()
+                    dockMap.removeObject(forKey: controller)
+                }
+                swapTree(controller, SplitTree())
+                controller.window?.close()
+            }
+        }
+        for controller in mirrorViewports.keyEnumerator().allObjects.compactMap({ $0 as? TerminalController })
+            where mirroredWorkspace(of: controller) == name {
+            let oldIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
+            if let target = tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? tabs.first {
+                reconcileWorkspaceTree(controller, tab: target, host: nil, session: name)
+            } else {
+                endMirrorViewport(controller)
+                swapTree(controller, SplitTree())
+                controller.window?.close()
+            }
+        }
+    }
+
     /// The home app's serialized session transaction. Remote callers supply
     /// identities and intent, never a replacement registry or local cwd.
     func applySessionCommand(_ request: VigilSessionControl.Request) -> VigilSessionControl.Reply {
         typealias Reply = VigilSessionControl.Reply
         refreshWorkspaceRevisions()
+        // A burial, by its name: undone (back where it stood) or ended now.
+        // The tray of every Mac sends these to the burial's home.
+        if request.operation == "exhume" || request.operation == "reap" {
+            guard graveyard[request.session] != nil else {
+                return .failure(request, "not_found", "It is no longer waiting: its time ran out or it was already undone.")
+            }
+            if request.operation == "reap" {
+                reapNow(request.session)
+                vlog("session command: \(request.id) reap \(request.session) committed")
+                return Reply(id: request.id, ok: true, code: "committed", message: "Ended on its Mac.", revision: nil, session: request.session)
+            }
+            let back = exhume(request.session)
+            vlog("session command: \(request.id) exhume \(request.session) committed -> \(back ?? "?")")
+            return Reply(id: request.id, ok: true, code: "committed", message: "Back on its Mac.",
+                         revision: back.flatMap { workspaces[$0]?.layoutRevision }, session: back)
+        }
         guard var session = workspaces[request.session] else {
             return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
         }
@@ -209,6 +278,10 @@ extension VigilWorkspaces {
         var tab = session.tabs[index]
         var created: Registry.Pane?
         var removed: [Registry.Pane] = []
+        /// A whole tab closed: buried as one, where it stood.
+        var closedTab: Registry.Tab?
+        /// The closed pane was a dock tenant (it goes back into the dock).
+        var closedFromDock = false
         switch request.operation {
         case "new_session":
             let cwd = liveView(attachId: request.anchor)?.pwd
@@ -268,10 +341,14 @@ extension VigilWorkspaces {
                 tab.panes.append(pane)
                 session.tabs[index] = tab
             }
-        case "close_pane", "close_tab":
-            removed = request.operation == "close_tab"
-                ? tab.panes + (tab.dock?.panes ?? [])
-                : (tab.panes + (tab.dock?.panes ?? [])).filter { $0.id == request.anchor }
+        case "close_tab":
+            closedTab = session.tabs.remove(at: index)
+        case "close_pane" where tab.panes.map(\.id) == [request.anchor]:
+            // Its tab's last pane: closing it closes the tab, dock and all.
+            closedTab = session.tabs.remove(at: index)
+        case "close_pane":
+            closedFromDock = !tab.panes.contains { $0.id == request.anchor }
+            removed = (tab.panes + (tab.dock?.panes ?? [])).filter { $0.id == request.anchor }
             let ids = Set(removed.map(\.id))
             let previous = tab.panes
             tab.panes.removeAll { ids.contains($0.id) }
@@ -297,11 +374,7 @@ extension VigilWorkspaces {
                 dock.active = min(dock.active, max(0, dock.panes.count - 1))
                 tab.dock = dock.panes.isEmpty ? nil : dock
             }
-            if tab.panes.isEmpty {
-                // A tab cannot consist only of its dock.
-                removed += tab.dock?.panes ?? []
-                session.tabs.remove(at: index)
-            } else { session.tabs[index] = tab }
+            session.tabs[index] = tab
         default:
             return .failure(request, "unsupported_operation", "vigil on that Mac can't do this; update it.")
         }
@@ -310,33 +383,17 @@ extension VigilWorkspaces {
         // below, so unchanged panes keep their clients and terminal state.
         session.held = []
         workspaces[request.session] = session
-        for controller in members(of: request.session) {
-            let oldIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
-            if let target = session.tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? session.tabs.first {
-                reconcileWorkspaceTree(controller, tab: target, host: nil, session: request.session)
-            } else {
-                memberships.removeObject(forKey: controller)
-                if let dock = dockMap.object(forKey: controller) {
-                    for view in dock.views { view.vigilDestroySurface() }
-                    dock.unmount()
-                    dockMap.removeObject(forKey: controller)
-                }
-                swapTree(controller, SplitTree())
-                controller.window?.close()
-            }
+        reconcileViews(of: request.session)
+        if let closedTab {
+            buryTab(closedTab, held: [], thumbnail: nil, from: request.session, at: index)
         }
-        for controller in mirrorViewports.keyEnumerator().allObjects.compactMap({ $0 as? TerminalController })
-            where mirroredWorkspace(of: controller) == request.session {
-            let oldIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
-            if let target = session.tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? session.tabs.first {
-                reconcileWorkspaceTree(controller, tab: target, host: nil, session: request.session)
-            } else {
-                endMirrorViewport(controller)
-                swapTree(controller, SplitTree())
-                controller.window?.close()
-            }
+        // A closed pane rests beside a pane its tab keeps (a dock tenant
+        // goes back into the dock).
+        for pane in removed {
+            buryPane(pane, from: request.session, origin: Registry.Origin(
+                workspace: request.session, tab: index, beside: session.tabs[index].panes.first?.id,
+                dock: closedFromDock ? true : nil))
         }
-        for pane in removed { buryPane(pane, from: request.session) }
         if session.tabs.isEmpty { workspaces.removeValue(forKey: request.session) }
         persist()
         // Success is the committed registry, not merely a spawned process.
@@ -351,7 +408,7 @@ extension VigilWorkspaces {
                      revision: workspaces[request.session]?.layoutRevision, pane: created?.id)
     }
 
-    private static func completeLayout(_ tab: Registry.Tab) -> Registry.Layout {
+    static func completeLayout(_ tab: Registry.Tab) -> Registry.Layout {
         if let layout = tab.layout { return layout }
         let last = max(0, tab.panes.count - 1)
         return (0..<last).reversed().reduce(Registry.Layout.leaf(last)) { .h(0.5, .leaf($1), $0) }
