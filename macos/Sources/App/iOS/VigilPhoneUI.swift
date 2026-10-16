@@ -827,7 +827,7 @@ struct PaneScreen: View {
                 } label: { Image(systemName: "rectangle.stack") }
             }
         }
-        .task { screenVisible = true; await enter(current) }
+        .task { screenVisible = true; await enter(current, claim: true) }
         // Opened by an activity's Reply while this pane already shows.
         .onChange(of: model.typeInto) { _, ref in
             guard let ref, ref == current, let surfaceView else { return }
@@ -843,13 +843,15 @@ struct PaneScreen: View {
             guard screenVisible, phase == .active else { return }
             guard surfaceView?.surface == nil else { return }
             model.log("pane: \(current.pane) stream died on screen, re-dialing")
+            // A reconnect is no act of yours: the size stays whose it was.
+            let held = ownSize
             leave()
             error = nil
-            Task { await enter(current) }
+            Task { await enter(current, claim: held) }
         }
         .onDisappear { screenVisible = false; leave(); model.present(nil) }
-        // Leaving the active scene ends the gesture's authority. Returning
-        // refreshes the picture; only another button press can claim again.
+        // Leaving the active scene yields (nobody looks at the phone).
+        // Bringing the app back on this pane is opening it again: it claims.
         .onChange(of: phase) { _, now in
             switch now {
             case .background, .inactive:
@@ -865,15 +867,22 @@ struct PaneScreen: View {
                 if let view = surfaceView, view.surface != nil {
                     view.attended = true
                     view.refreshFromDaemon()
+                    setOwnSize(true)
                 } else {
-                    Task { await enter(current) }
+                    Task { await enter(current, claim: true) }
                 }
             @unknown default: break
             }
         }
     }
 
-    private func enter(_ ref: PaneRef) async {
+    /// Shows `ref`. `claim`: you brought it on screen (opened it from the
+    /// list, switched to it, brought the app back on it), so the phone takes
+    /// the pane's size. Who owns the size moves only on a person's act: the
+    /// phone claims when you open a pane, the Mac takes it back when you work
+    /// in that pane there (and the phone then shows the Mac's grid, without
+    /// taking it back on its own), the size button switches either way.
+    private func enter(_ ref: PaneRef, claim: Bool) async {
         guard screenVisible, phase == .active else { return }
         let generation = UUID()
         entryGeneration = generation
@@ -889,12 +898,8 @@ struct PaneScreen: View {
             }
             view.accessory = makeAccessory(for: view)
             view.attended = true
-            // A missing directory grid is not a request to own the pty.
             surfaceView = view
-            // The phone is the terminal: a pane opens at the phone's shape
-            // (the pane reflows to it, the Mac takes its size back when the
-            // phone leaves). The Mac's grid as a picture is the button's.
-            setOwnSize(true)
+            if claim { setOwnSize(true) }
             // Opened by an activity's Reply: the terminal's own keyboard comes up.
             if model.typeInto == ref { model.typeInto = nil; view.keyboardWanted = true }
         } catch {
@@ -919,7 +924,7 @@ struct PaneScreen: View {
         leave()
         current = other
         fitZoom = 1
-        Task { await enter(other) }
+        Task { await enter(other, claim: true) }
     }
 
     private func setOwnSize(_ own: Bool) {

@@ -206,14 +206,13 @@ extension Ghostty {
         func claimSize(_ claim: Bool) -> Bool {
             guard let surface else { return false }
             if claim {
-                guard attended, UIApplication.shared.applicationState == .active,
-                      window?.windowScene?.activationState == .foregroundActive else {
-                    receipt("claim refused: viewport not attended in an active scene")
-                    return false
-                }
+                // The request is the intent only. Whether it may be sent
+                // (attended, laid out by the own-size host, in an active
+                // scene) is decided where it is sent, in `layoutSubviews`:
+                // checked here, a pane reopened from the list (its surface
+                // not yet re-hosted, no window) was refused and opened at
+                // the Mac's grid (2026-10-16).
                 sizeClaimRequested = true
-                // The new own-size host will lay out before sending o. A
-                // request must not claim the old fit/preview framebuffer.
                 setNeedsLayout()
                 return true
             }
@@ -239,7 +238,8 @@ extension Ghostty {
 
         @objc private func appWillResignActive() {
             // This also covers an async attach finishing after the screen's
-            // phase callback. Coming back active never restores a claim.
+            // phase callback. Coming back active, the pane screen decides
+            // (bringing the app back on a pane is opening it again).
             claimSize(false)
             attended = false
             keyboardWanted = false
