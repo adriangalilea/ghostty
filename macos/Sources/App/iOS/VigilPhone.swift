@@ -87,6 +87,34 @@ final class VigilPhone: ObservableObject {
         didSet {
             rebuildTree()
             checkScreens()
+            let waiting = directoryWaiters
+            directoryWaiters = []
+            waiting.forEach { $0.resume() }
+        }
+    }
+    private var directoryWaiters: [Waiter] = []
+
+    /// Returns when the next directory arrives, or after `seconds` (a link
+    /// to a pane born a moment ago waits for the document that lists it).
+    private func nextDirectory(within seconds: TimeInterval) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let waiter = Waiter(continuation)
+            directoryWaiters.append(waiter)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(seconds))
+                self?.directoryWaiters.removeAll { $0 === waiter }
+                waiter.resume()
+            }
+        }
+    }
+
+    /// A continuation resumed once, by whichever comes first.
+    private final class Waiter {
+        private var continuation: CheckedContinuation<Void, Never>?
+        init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
+        func resume() {
+            continuation?.resume()
+            continuation = nil
         }
     }
 
