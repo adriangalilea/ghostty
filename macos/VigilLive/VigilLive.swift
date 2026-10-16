@@ -123,11 +123,11 @@ private struct StateContent: View {
                         Text(question.title).font(.subheadline.weight(.semibold)).lineLimit(2)
                     }
                     HStack(spacing: 8) {
-                        if let deny = question.deny, let allow = question.allow {
-                            AnswerButton(title: "Deny", symbol: "xmark", tint: .red,
-                                         intent: AnswerIntent(device: context.attributes.device, request: question.request, action: deny, shown: question.title))
-                            AnswerButton(title: "Allow", symbol: "checkmark", tint: .green,
-                                         intent: AnswerIntent(device: context.attributes.device, request: question.request, action: allow, shown: question.title))
+                        if let answers = question.answers {
+                            AnswerButton(title: answers.denyLabel, symbol: AnswerLook.symbol(.reject), tint: AnswerLook.refuse,
+                                         intent: AnswerIntent(device: context.attributes.device, request: question.request, action: answers.deny, shown: question.title))
+                            AnswerButton(title: answers.allowLabel, symbol: AnswerLook.symbol(.approveOnce), tint: AnswerLook.approve,
+                                         intent: AnswerIntent(device: context.attributes.device, request: question.request, action: answers.allow, shown: question.title))
                         } else {
                             if let pane = detail?.pane {
                                 Pill(title: "Answer in vigil", symbol: "arrow.up.forward.app", intent: OpenPaneIntent(pane: pane, keyboard: false), wide: true)
@@ -351,7 +351,8 @@ private struct Pill: View {
     }
 }
 
-/// Allow or Deny, wide and tinted, answered in the app's process.
+/// Allow or Deny, wide, in the answer hues every surface uses (authz's
+/// `AnswerLook`), answered in the app's process.
 private struct AnswerButton: View {
     let title: String
     let symbol: String
@@ -361,11 +362,8 @@ private struct AnswerButton: View {
         Button(intent: intent) {
             Label(title, systemImage: symbol)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 7)
-                .background(tint.opacity(0.85), in: Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(AnswerButtonStyle(tint: tint))
     }
 }
