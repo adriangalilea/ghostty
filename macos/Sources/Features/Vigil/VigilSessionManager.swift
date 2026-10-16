@@ -298,7 +298,11 @@ class VigilSessionManager {
         var paneCount: Int { tabs.reduce(0) { $0 + $1.panes.count } }
     }
 
-    private(set) var sessions: [String: Session] = [:]
+    /// Every edit is saved: an edit schedules one save a tick later, so a
+    /// path that forgets `persist()` can no longer leave vigil.json behind
+    /// the registry (a ⌘T tab lived only in memory, invisible to the other
+    /// Mac, and the next launch killed its daemon as an orphan).
+    private(set) var sessions: [String: Session] = [:] { didSet { savePending() } }
 
     /// Live membership: which session each tab-controller belongs to. Weak
     /// keys: a controller that dies simply leaves the map. The tabGroup
@@ -323,8 +327,8 @@ class VigilSessionManager {
     /// daemons never linger (config key candidate if it feels wrong).
     /// EVERY close rests here - a session, a tab, a split pane, a dock
     /// tenant - one death path, one undo.
-    private var graveyard: [String: Session] = [:]
-    private var graveyardDeadlines: [String: Date] = [:]
+    private var graveyard: [String: Session] = [:] { didSet { savePending() } }
+    private var graveyardDeadlines: [String: Date] = [:] { didSet { savePending() } }
     static let killGrace: TimeInterval = 120
 
     /// Most recently active sessions, newest first: the successor order
@@ -570,10 +574,6 @@ class VigilSessionManager {
             sessions[name]!.tabs.append(tab)
         }
         vlog("register: '\(name)' += tab \(ids) (\(carried.count) claimed)")
-        // A ⌘T has no caller that persists: unsaved, the tab is invisible to
-        // every other Mac and its daemon an orphan at the next launch. A tick
-        // later, so a mount or regroup in progress finishes first.
-        DispatchQueue.main.async { [weak self] in self?.persist() }
     }
 
     /// A session window's tree EMPTIED by ghostty (its only pane dragged
@@ -6351,9 +6351,29 @@ class VigilSessionManager {
         }
     }
 
-    private func persist(publish: Bool = true) {
+    private var saveScheduled = false
+    private var persisting = false
+    private var lastSaved: Data?
+
+    /// One save per runloop turn however many edits it held; a save's own
+    /// bookkeeping (refreshLiveFacts) never schedules another.
+    private func savePending() {
+        guard !saveScheduled, !persisting else { return }
+        saveScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.saveScheduled = false
+            self.persist(publish: true, onlyIfChanged: true)
+        }
+    }
+
+    /// `onlyIfChanged`: the scheduled save, which writes and publishes
+    /// nothing when the registry encodes to the bytes already on disk.
+    private func persist(publish: Bool = true, onlyIfChanged: Bool = false) {
+        persisting = true
         if publish { refreshLiveFacts() }
         refreshSessionRevisions()
+        persisting = false
         var entries = sessions.values.map {
             Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
         }
@@ -6365,6 +6385,7 @@ class VigilSessionManager {
             vlog("persist: failed to encode session registry")
             return
         }
+        if onlyIfChanged, data == lastSaved { return }
         try? FileManager.default.createDirectory(
             at: persistURL.deletingLastPathComponent(),
             withIntermediateDirectories: true)
@@ -6382,6 +6403,7 @@ class VigilSessionManager {
             vlog("persist: failed to save session registry: \(error.localizedDescription)")
             return
         }
+        lastSaved = data
         if publish {
             syncWindowMarks()
             NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
