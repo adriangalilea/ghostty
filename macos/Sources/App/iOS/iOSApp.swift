@@ -29,7 +29,11 @@ struct VigilPhoneApp: App {
                 // iPhone for the sessions you follow. Back on screen, both
                 // pick up where they were.
                 .onChange(of: phase, initial: true) { _, phase in
-                    if phase == .active { VigilAuthz.shared.start() }
+                    switch phase {
+                    case .active: VigilAuthz.shared.start()
+                    case .background: VigilAuthz.shared.leave()
+                    default: break
+                    }
                     VigilPhone.shared.scene(active: phase == .active)
                 }
         }

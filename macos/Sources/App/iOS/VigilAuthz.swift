@@ -42,6 +42,19 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
         UIApplication.shared.registerForRemoteNotifications()
     }
 
+    /// The app leaves the screen and iOS suspends it: every connection is
+    /// closed now (Authz for iPhone does the same). Held across the
+    /// suspension, one looks open on return while the network under it is
+    /// gone, and everything waits on it until QUIC's idle timeout; closed,
+    /// the return dials fresh (the directories follow again, an open pane
+    /// re-dials), on whatever network the phone is on by then.
+    func leave() {
+        Task {
+            await runtime.leave()
+            VigilPhone.shared.log("scene: background, connections closed")
+        }
+    }
+
     /// Allow or Deny under a question's notification: answered by the
     /// runtime; what happened is a receipt (an answer that failed becomes a
     /// notification saying so).

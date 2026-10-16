@@ -16,6 +16,39 @@ final class VigilReceipts: ObservableObject {
     }
 }
 
+/// The receipts on disk, appended off the main thread in order: a megabyte,
+/// then the file becomes `.1` (the one before is dropped) and starts over.
+final class ReceiptFile: @unchecked Sendable {
+    static let shared = ReceiptFile()
+    private let queue = DispatchQueue(label: "vigil.receipts")
+    private let url: URL
+    private var handle: FileHandle?
+
+    private init() {
+        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("Logs")
+        try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        url = logs.appendingPathComponent("vigil-receipts.log")
+    }
+
+    func append(_ line: String) {
+        queue.async { [self] in
+            if handle == nil {
+                if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
+                handle = try? FileHandle(forWritingTo: url)
+                _ = try? handle?.seekToEnd()
+            }
+            handle?.write(Data(line.utf8))
+            if let size = try? handle?.offset(), size > 1_000_000 {
+                try? handle?.close()
+                handle = nil
+                let previous = url.appendingPathExtension("1")
+                try? FileManager.default.removeItem(at: previous)
+                try? FileManager.default.moveItem(at: url, to: previous)
+            }
+        }
+    }
+}
+
 /// A pane on a Mac, the navigation value the tree hands to the pane screen.
 struct PaneRef: Hashable {
     let host: VigilPhone.Host
@@ -91,7 +124,15 @@ final class VigilPhone: ObservableObject {
             }
         }
     }
-    private(set) var errors: [String: String] = [:] { didSet { rebuildTree() } }
+    /// A Mac this phone is not following right now: since when, why, and
+    /// how many attempts failed. What is on screen for it is that old, and
+    /// its row says so.
+    struct Down: Equatable {
+        var since: Date
+        var reason: String
+        var attempts: Int
+    }
+    private(set) var down: [String: Down] = [:] { didSet { rebuildTree() } }
     @Published private(set) var nodes: [Node] = []
     let receipts = VigilReceipts()
     var trace: [String] { receipts.lines }
@@ -107,14 +148,18 @@ final class VigilPhone: ObservableObject {
         Ghostty.SurfaceView.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
     }
 
-    /// Every receipt goes three ways: the in-app list, os_log (Console /
-    /// `log stream`), and stderr (`devicectl … launch --console` over the
-    /// cable). Nothing happens in this app without a line here.
+    /// Every receipt goes four ways: the in-app list, os_log (Console /
+    /// `log stream`), stderr (`devicectl … launch --console` over the
+    /// cable), and a file in the app's container that outlives the process
+    /// (`Library/Logs/vigil-receipts.log`, the previous megabyte kept as
+    /// `.1`; `devicectl device copy from --domain-type appDataContainer`).
+    /// Nothing happens in this app without a line here.
     func log(_ line: String) {
         let stamp = Date().formatted(date: .omitted, time: .standard)
         Self.logger.notice("\(line, privacy: .public)")
         FileHandle.standardError.write(Data("vigil: \(line)\n".utf8))
         receipts.append("\(stamp) \(line)")
+        ReceiptFile.shared.append("\(Date().ISO8601Format()) \(line)\n")
     }
 
     // MARK: Macs (paired devices serving vigil/1)
@@ -133,6 +178,12 @@ final class VigilPhone: ObservableObject {
             for await event in node.events {
                 switch event {
                 case .paired, .revoked, .offersChanged: self?.readPeers()
+                // How this phone reaches anything: its network, its relay,
+                // each connection's start, end and path. The night the phone
+                // left home Wi-Fi and reached nothing for hours, none of
+                // this was on the phone.
+                case .network, .relay, .localNetwork, .connected, .disconnected, .path, .lagged:
+                    self?.log("tether: \(event)")
                 default: break
                 }
             }
@@ -141,13 +192,18 @@ final class VigilPhone: ObservableObject {
 
     private func readPeers() {
         guard let node else { return }
-        let next = VigilLink.macs(node).map { Host(id: $0.root, name: $0.name) }
+        let next: [Host]
+        do { next = try VigilLink.macs(node).map { Host(id: $0.root, name: $0.name) } } catch {
+            // Who the Macs are could not be read: the list stays as it was
+            // and says why, never an empty "no Macs".
+            return log("!! macs: paired devices not readable: \(error)")
+        }
         if next != hosts {
             hosts = next
             log("macs: \(next.map(\.name))")
             let ids = Set(next.map(\.id))
             directories = directories.filter { ids.contains($0.key) }
-            errors = errors.filter { ids.contains($0.key) }
+            down = down.filter { ids.contains($0.key) }
             for (id, task) in watches where !ids.contains(id) {
                 task.cancel()
                 watches[id] = nil
@@ -190,23 +246,39 @@ final class VigilPhone: ObservableObject {
                 guard let self else { return }
                 switch step.step {
                 case .open:
-                    self.errors[host.id] = nil
-                    self.log("dir: \(host.name) following")
+                    if let was = self.down[host.id] {
+                        self.log("dir: \(host.name) following again after \(was.attempts) failed attempt(s), out of reach since \(Self.clock(was.since))")
+                    } else {
+                        self.log("dir: \(host.name) following")
+                    }
+                    self.down[host.id] = nil
                 case .directory:
                     guard let dir = step.directory else { continue }
                     if self.directories[host.id] == nil {
                         self.log("dir: \(host.name) = \(dir.host), \(dir.workspaces.count) workspaces, \(dir.panes.count) panes")
                     }
-                    self.errors[host.id] = nil
+                    self.down[host.id] = nil
                     self.directories[host.id] = dir
                 case .waiting:
+                    // Every attempt is a receipt: a repeat is evidence (how
+                    // long, how often), never noise to fold away.
                     let why = step.reason ?? "out of reach"
-                    if self.errors[host.id] != why { self.log("dir: \(host.name): \(why)") }
-                    self.errors[host.id] = why
+                    var now = self.down[host.id] ?? Down(since: Date(), reason: why, attempts: 0)
+                    now.attempts += 1
+                    now.reason = why
+                    self.down[host.id] = now
+                    self.log("dir: \(host.name) attempt \(now.attempts) failed: \(why) (out of reach since \(Self.clock(now.since)))")
                 }
             }
+            // Only the node closing ends a follow: said, and the Mac followed
+            // afresh the next time its peers are read.
+            guard !Task.isCancelled, let self else { return }
+            self.log("dir: \(host.name) follow ended")
+            self.watches[host.id] = nil
         }
     }
+
+    static func clock(_ date: Date) -> String { date.formatted(date: .omitted, time: .shortened) }
 
     /// Returns when the next directory arrives, or after `seconds`.
     private func nextDirectory(within seconds: TimeInterval) async {
@@ -389,9 +461,15 @@ final class VigilPhone: ObservableObject {
     private func deriveTree() -> [Node] {
         hosts.map { host in
             let dir = directories[host.id]
+            // Out of reach with a directory on screen: that directory is as
+            // old as the outage, and the row says from when.
+            let subtitle: String? = down[host.id].map { d in
+                let attempt = "attempt \(d.attempts)"
+                return dir == nil ? "\(d.reason) · \(attempt)" : "as of \(Self.clock(d.since)) · \(d.reason) · \(attempt)"
+            } ?? (dir == nil ? "connecting…" : nil)
             var node = Node(id: "host:\(host.id)", kind: .host,
                             title: dir?.host ?? host.name,
-                            subtitle: errors[host.id] ?? (dir == nil ? "connecting…" : nil))
+                            subtitle: subtitle)
             guard let dir else { return node }
             node.children = dir.ordered.map { s in
                 let tabs = s.tabs ?? []
@@ -495,9 +573,10 @@ final class VigilPhone: ObservableObject {
         }
         for fd in fds { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
         let ours = fds[1]
-        Task.detached {
-            await VigilLink.bridge(stream, read: ours, write: ours)
+        Task.detached { [weak self] in
+            let how = await VigilLink.bridge(stream, read: ours, write: ours)
             close(ours)
+            await self?.log("stream: \(host.name) \(pane) ended: \(how)")
         }
         log("\(preview ? "preview" : "attach"): \(host.name) \(pane) fd \(fds[0])")
         return fds[0]
@@ -660,6 +739,7 @@ final class VigilPhone: ObservableObject {
     func scene(active: Bool) {
         guard self.active != active else { return }
         self.active = active
+        log("scene: \(active ? "active" : "not active")")
         reportShown()
     }
 

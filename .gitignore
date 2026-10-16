@@ -30,3 +30,5 @@ glad.zip
 vgcore.*
 
 macos/build-ios/
+# Rendered by bin/vigil-ios from swift-senses' Earcon, never committed.
+macos/Sources/App/iOS/Sounds/
