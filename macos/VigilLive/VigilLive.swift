@@ -128,7 +128,7 @@ private struct StateContent: View {
                                          intent: AnswerIntent(device: context.attributes.device, request: question.request, action: allow, shown: question.title))
                         } else {
                             if let pane = detail?.pane {
-                                Pill(title: "Answer in vigil", symbol: "arrow.up.forward.app", intent: OpenPaneIntent(pane: pane, reply: false), wide: true)
+                                Pill(title: "Answer in vigil", symbol: "arrow.up.forward.app", intent: OpenPaneIntent(pane: pane, keyboard: false), wide: true)
                             }
                         }
                     }
@@ -141,8 +141,8 @@ private struct StateContent: View {
                     if let now = detail?.now { Now(text: now, tint: state.tint) } else { Facts(detail: detail) }
                     Spacer(minLength: 4)
                     if let pane = detail?.pane {
-                        Pill(title: nil, symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: pane, reply: true), wide: false)
-                        Pill(title: nil, symbol: "terminal.fill", intent: OpenPaneIntent(pane: pane, reply: false), wide: false)
+                        Pill(title: nil, symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: pane, keyboard: true), wide: false)
+                        Pill(title: nil, symbol: "terminal.fill", intent: OpenPaneIntent(pane: pane, keyboard: false), wide: false)
                     }
                 }
                 if let tail = detail?.tail, !tail.isEmpty, !(compact && detail?.now != nil) {
@@ -214,8 +214,8 @@ private struct Actions: View {
             if facts { Facts(detail: detail) }
             Spacer(minLength: 4)
             if let pane = detail?.pane {
-                Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: pane, reply: true), wide: false)
-                Pill(title: "Open", symbol: "terminal.fill", intent: OpenPaneIntent(pane: pane, reply: false), wide: false)
+                Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: pane, keyboard: true), wide: false)
+                Pill(title: "Open", symbol: "terminal.fill", intent: OpenPaneIntent(pane: pane, keyboard: false), wide: false)
             }
         }
     }

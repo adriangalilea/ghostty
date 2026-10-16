@@ -585,11 +585,15 @@ final class VigilPhone: ObservableObject {
     /// it and clears it.
     @Published var opening: PaneRef?
 
-    /// `compose`: with its composer up (an activity's Reply).
-    func openPane(_ id: String, compose: Bool = false) {
+    /// A pane to open with the terminal's keyboard up (an activity's
+    /// Reply): the pane screen takes it once it shows that pane.
+    @Published var typeInto: PaneRef?
+
+    /// `keyboard`: with the terminal's own keyboard up (an activity's Reply).
+    func openPane(_ id: String, keyboard: Bool = false) {
         Task {
             guard let url = URL(string: "vigil://pane/\(id)"), let ref = await resolve(url: url) else { return }
-            if compose { composeOn = ref }
+            if keyboard { typeInto = ref }
             opening = ref
         }
     }
@@ -787,27 +791,6 @@ final class VigilPhone: ObservableObject {
                 }
                 log("seen: \(ref.pane) on \(ref.host.name) FAILED: \(error)")
             }
-        }
-    }
-
-    // MARK: Reply (a line typed into a pane, from a followed activity)
-
-    /// A pane to open with its composer up (an activity's Reply): the pane
-    /// screen takes it once it shows that pane.
-    @Published var composeOn: PaneRef?
-
-    /// Types `text` into the pane and submits it, as its Mac's hub does for
-    /// a person at the keyboard; true once the Mac took it.
-    func reply(_ ref: PaneRef, _ text: String) async -> Bool {
-        let line = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
-        guard Open.validReply(line) else { log("reply: nothing to send"); return false }
-        do {
-            _ = try await VigilLink.call(linked(), device: ref.host.id, .reply(ref.pane, text: line))
-            log("reply: \(line.count) characters to \(ref.pane) on \(ref.host.name)")
-            return true
-        } catch {
-            log("reply: \(ref.pane) on \(ref.host.name) FAILED: \(VigilLink.reason(error))")
-            return false
         }
     }
 

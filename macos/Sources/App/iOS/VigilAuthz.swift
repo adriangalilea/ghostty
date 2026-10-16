@@ -107,7 +107,7 @@ final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         AnswerIntent.answer = { device, request, action, shown in
             await VigilAuthz.shared.answer(device: device, request: request, action: action, shown: shown)
         }
-        OpenPaneIntent.open = { pane, reply in VigilPhone.shared.openPane(pane, compose: reply) }
+        OpenPaneIntent.open = { pane, keyboard in VigilPhone.shared.openPane(pane, keyboard: keyboard) }
         return true
     }
 

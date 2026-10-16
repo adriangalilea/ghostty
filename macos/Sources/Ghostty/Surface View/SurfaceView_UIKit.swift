@@ -645,8 +645,12 @@ extension Ghostty {
             }
             let changed = lastReport.map { $0.w != px.w || $0.h != px.h || $0.scale != scale } ?? true
             if changed {
+                let first = lastReport == nil
                 ghostty_surface_set_size(surface, px.w, px.h)
                 lastReport = (px.w, px.h, scale)
+                // The grid is real now (the presentation's, laid out): the
+                // attach may speak, and the daemon's replay lands in it.
+                if first { ghostty_surface_vigil_viewport(surface); receipt("viewport declared") }
                 let s = ghostty_surface_size(surface)
                 let mode = presentation.grid.map { "fit \($0.rows)x\($0.cols)" } ?? "own"
                 receipt("size \(px.w)x\(px.h)px @\(scale) \(mode) x\(presentation.scale) -> core \(s.rows)x\(s.columns)")

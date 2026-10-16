@@ -86,9 +86,11 @@ grid_size: renderer.GridSize = .{ .columns = 80, .rows = 24 },
 /// at birth, 49x17 cells): sent to the daemon and claimed on focus, it
 /// resized a live TUI to that guess on every mount and the program
 /// reflowed its transcript into 49 columns. A size is never sent and focus
-/// never claims before this. Explicit-claim viewports start true: they
-/// never adopt or claim passively, and claim only with a laid-out grid.
-viewport: bool,
+/// never claims before this, for every kind of viewport: the daemon replays
+/// its screen on a client's first size, so a size sent before layout (the
+/// phone's, born explicit-claim, once did) paints the screen into a guessed
+/// grid whose wrapped lines never unwrap.
+viewport: bool = false,
 
 /// Focus arrived before the viewport: the passive claim waits for it.
 focus_pending: bool = false,
@@ -144,7 +146,6 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .host = if (cfg.host) |v| if (v.len > 0) try alloc.dupe(u8, v) else null else null,
         .given_fd = cfg.fd,
         .explicit_claim = explicit_claim,
-        .viewport = explicit_claim,
         .client_id = std.crypto.random.int(u64),
     };
 }
@@ -453,9 +454,23 @@ test "Vigil remote focus cannot claim; only input intent can" {
     var td: termio.Termio.ThreadData = undefined;
     try attach.focusGained(&td, true);
     try std.testing.expectEqual(@as(usize, 0), attach.write_buf.items.len);
+    // A claim declares the viewport: its size first, then the claim.
     attach.vigilClaim(true);
     attach.vigilClaim(false);
-    try std.testing.expectEqualSlices(u8, "o\x06\x00intenty\x00\x00", attach.write_buf.items);
+    try std.testing.expectEqualSlices(u8, "r\x04\x00\x18\x00\x50\x00o\x06\x00intenty\x00\x00", attach.write_buf.items);
+}
+
+test "Vigil phone mirror sends no size before its viewport is laid out" {
+    var attach = try Attach.init(std.testing.allocator, .{ .id = "test", .fd = 1, .explicit_claim = true });
+    defer attach.deinit();
+    attach.write_fd = 1;
+    // Born in a placeholder frame: its guessed grid is never sent (the
+    // daemon would replay the screen into it).
+    try attach.resize(.{ .columns = 49, .rows = 17 }, undefined);
+    try std.testing.expectEqual(@as(usize, 0), attach.write_buf.items.len);
+    try attach.resize(.{ .columns = 120, .rows = 40 }, undefined);
+    attach.vigilViewport();
+    try std.testing.expectEqualSlices(u8, "r\x04\x00\x28\x00\x78\x00", attach.write_buf.items);
 }
 
 test "Vigil phone focus cannot claim and hello identifies a mirror" {
