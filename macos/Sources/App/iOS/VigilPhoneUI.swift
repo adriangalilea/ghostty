@@ -891,6 +891,10 @@ struct PaneScreen: View {
             view.attended = true
             // A missing directory grid is not a request to own the pty.
             surfaceView = view
+            // The phone is the terminal: a pane opens at the phone's shape
+            // (the pane reflows to it, the Mac takes its size back when the
+            // phone leaves). The Mac's grid as a picture is the button's.
+            setOwnSize(true)
             // Opened by an activity's Reply: the terminal's own keyboard comes up.
             if model.typeInto == ref { model.typeInto = nil; view.keyboardWanted = true }
         } catch {
