@@ -1,5 +1,6 @@
 import AppKit
 import AskKit
+import Earcon
 
 /// Follow has three modes, one control (two toggles that both move focus
 /// would fight; a mode selector cannot):

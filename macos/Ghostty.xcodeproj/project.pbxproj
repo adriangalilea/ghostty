@@ -26,8 +26,7 @@
 		0DAA111100000000000000A5 /* NodSignal in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000A3 /* NodSignal */; };
 		0DAA111100000000000000B5 /* AskKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B2 /* AskKit */; };
 		0DAA111100000000000000E5 /* Face in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000E2 /* Face */; };
-		0DAA111100000000000000B6 /* AskNod in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B3 /* AskNod */; };
-		0DAA111100000000000000B7 /* AskListen in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B4 /* AskListen */; };
+		0DAA111100000000000000B6 /* Earcon in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000B3 /* Earcon */; };
 		0DAA111100000000000000D3 /* Listen in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000D2 /* Listen */; };
 		0DAA111100000000000000D5 /* Say in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000D4 /* Say */; };
 		0DAA111100000000000000C3 /* Ink in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000C2 /* Ink */; };
@@ -403,8 +402,7 @@
 				0DAA111100000000000002B3 /* AuthzClient */,
 				0DAA111100000000000000B5 /* AskKit in Frameworks */,
 				0DAA111100000000000000E5 /* Face in Frameworks */,
-				0DAA111100000000000000B6 /* AskNod in Frameworks */,
-				0DAA111100000000000000B7 /* AskListen in Frameworks */,
+				0DAA111100000000000000B6 /* Earcon in Frameworks */,
 				0DAA111100000000000000D3 /* Listen in Frameworks */,
 				0DAA111100000000000000D5 /* Say in Frameworks */,
 				0DAA111100000000000000C3 /* Ink in Frameworks */,
@@ -605,8 +603,7 @@
 				0DAA111100000000000002B2 /* AuthzClient */,
 				0DAA111100000000000000B2 /* AskKit */,
 				0DAA111100000000000000E2 /* Face */,
-				0DAA111100000000000000B3 /* AskNod */,
-				0DAA111100000000000000B4 /* AskListen */,
+				0DAA111100000000000000B3 /* Earcon */,
 				0DAA111100000000000000D2 /* Listen */,
 				0DAA111100000000000000D4 /* Say */,
 				0DAA111100000000000000C2 /* Ink */,
@@ -1888,7 +1885,7 @@
 		};
 		0DAA111100000000000000B2 /* AskKit */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */;
+			package = 0DAA111100000000000002A1;
 			productName = AskKit;
 		};
 		0DAA111100000000000000E2 /* Face */ = {
@@ -1896,15 +1893,10 @@
 			package = 0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */;
 			productName = Face;
 		};
-		0DAA111100000000000000B3 /* AskNod */ = {
+		0DAA111100000000000000B3 /* Earcon */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */;
-			productName = AskNod;
-		};
-		0DAA111100000000000000B4 /* AskListen */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */;
-			productName = AskListen;
+			productName = Earcon;
 		};
 		0DAA111100000000000000D2 /* Listen */ = {
 			isa = XCSwiftPackageProductDependency;
