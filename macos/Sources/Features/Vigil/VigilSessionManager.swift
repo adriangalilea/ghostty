@@ -4228,8 +4228,16 @@ class VigilSessionManager {
             self.remoteSessionCommand(in: controller, from: target, operation: operation, expectedRevision: revision)
         }
         if confirm {
-            controller.confirmClose(messageText: operation == "close_tab" ? "Close Shared Tab?" : "Close Shared Pane?",
-                informativeText: "This closes it in \(composite) for every viewport. Its processes remain in the home Mac's undo grace for \(Int(Self.killGrace)) seconds.",
+            // Named as the sidebar names them: the session's face and label,
+            // the Mac it lives on (never the composite id, a tether key).
+            let remote = VigilRemote.shared.session(composite)
+            let local = sessions[composite]
+            let label = [remote?.session.emoji ?? local?.emoji, remote?.session.label ?? local?.label]
+                .compactMap { $0 }.joined(separator: " ")
+            let mac = remote.flatMap { VigilRemote.shared.host($0.device)?.name } ?? "its Mac"
+            let what = operation == "close_tab" ? "tab" : "pane"
+            controller.confirmClose(messageText: "Close this \(what) of \(label.isEmpty ? "the session" : label)?",
+                informativeText: "It closes on \(mac), in every window showing it. For \(Int(Self.killGrace / 60)) minutes it can come back on \(mac) with ⌘⇧T.",
                 completion: proceed)
         } else { proceed() }
         return true
