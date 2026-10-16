@@ -57,7 +57,8 @@ final class VigilRemote: ObservableObject {
     /// directory is followed (by the hub, which outlives the Mac being out
     /// of reach), a Mac gone takes its rows with it. The hub itself
     /// restarting (vigil-agent deployed) ends every socket: everything is
-    /// followed again once it answers, asked every 5 s until then.
+    /// followed again when its socket appears again (the hub's directory
+    /// is watched; the socket is listening by the time it appears).
     func start() {
         guard !started else { return }
         started = true
@@ -66,6 +67,8 @@ final class VigilRemote: ObservableObject {
 
     func stop() {
         stopped = true
+        hubWatch?.cancel()
+        hubWatch = nil
         unfollowAll()
         Self.trace?("remote: directories no longer followed")
     }
@@ -93,11 +96,37 @@ final class VigilRemote: ObservableObject {
             }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                Self.trace?("remote: \(why); asking again in 5s")
+                Self.trace?("remote: \(why); asking again when the hub's socket changes")
                 self.unfollowAll()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { MainActor.assumeIsolated { self.followPeers() } }
+                self.awaitHub()
             }
         }
+    }
+
+    /// The hub's directory, watched until its socket changes (a hub coming
+    /// up renames a listening socket into place): then the Macs are asked
+    /// for again. One watch at a time.
+    private var hubWatch: DispatchSourceFileSystemObject?
+    private func awaitHub() {
+        guard !stopped, hubWatch == nil else { return }
+        let dir = (HarnessPaths.hub as NSString).deletingLastPathComponent
+        let fd = open(dir, O_EVTONLY)
+        guard fd >= 0 else {
+            Self.trace?("!! remote: cannot watch \(dir) (errno \(errno)); the other Macs stay out of reach until relaunch")
+            return
+        }
+        let watch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
+        watch.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.hubWatch?.cancel()
+                self.hubWatch = nil
+                self.followPeers()
+            }
+        }
+        watch.setCancelHandler { close(fd) }
+        hubWatch = watch
+        watch.resume()
     }
 
     private func peers(_ peers: [Local.Peer]) {
