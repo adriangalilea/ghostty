@@ -287,22 +287,22 @@ final class VigilPhone: ObservableObject {
         nodes.flatMap(\.all).filter { $0.followKey.map(followed.contains) == true }
     }
 
-    /// How long a claim lives (authz's limit): renewed on every foreground
-    /// and whenever a followed scope gains a pane; vigil unopened for
-    /// longer hands its questions back to Authz.
-    static let claimSpan: TimeInterval = 8 * 3600
+    /// How long vigil owns a followed pane (authz's limit, `Engine.ownLimit`):
+    /// renewed on every foreground and whenever a followed scope gains a
+    /// pane; vigil unopened for longer hands its questions back to Authz.
+    static let ownSpan: TimeInterval = 8 * 3600
 
-    /// Follows a session, tab or pane (or stops): its panes are claimed
-    /// with their Mac's authz, so their questions come to this app and
-    /// Authz for iPhone stays quiet for them, and it rides the Lock Screen
-    /// as a Live Activity; stopping releases both (a pane another follow
-    /// still covers stays claimed).
+    /// Follows a session, tab or pane (or stops): its panes are owned with
+    /// their Mac's authz, so their questions come to this app and Authz for
+    /// iPhone stays quiet for them, and it rides the Lock Screen as a Live
+    /// Activity; stopping lets go of both (a pane another follow still
+    /// covers stays owned).
     func follow(_ node: Node, _ on: Bool) {
         guard let key = node.followKey, let scope = node.scope else { return }
         if on { followed.insert(key) } else { followed.remove(key) }
         log("follow: \(node.title) \(on ? "followed" : "no longer followed")")
         if on {
-            claim(node, panes: livePanes(node), until: Date().addingTimeInterval(Self.claimSpan))
+            own(node, panes: livePanes(node), until: Date().addingTimeInterval(Self.ownSpan))
             guard let mac = hosts.first(where: { $0.id == node.root }),
                   let session = nodes.flatMap(\.children).first(where: { $0.scope?.session == scope.session && $0.kind == .session })
             else { return }
@@ -312,24 +312,24 @@ final class VigilPhone: ObservableObject {
                               state: lead.state, since: lead.since)
         } else {
             let kept = Set(followedNodes.flatMap(livePanes))
-            claim(node, panes: livePanes(node).filter { !kept.contains($0) }, until: Date())
+            own(node, panes: livePanes(node).filter { !kept.contains($0) }, until: Date())
             VigilFollow.end(key)
         }
     }
 
-    /// Every follow's panes, claimed again for a full span.
-    func renewClaims() {
-        let until = Date().addingTimeInterval(Self.claimSpan)
-        for node in followedNodes { claim(node, panes: livePanes(node), until: until) }
+    /// Every follow's panes, owned again for a full span.
+    func renewOwnership() {
+        let until = Date().addingTimeInterval(Self.ownSpan)
+        for node in followedNodes { own(node, panes: livePanes(node), until: until) }
     }
 
-    /// The panes of the follows, as last claimed: a pane that joins one is
-    /// claimed when it appears.
-    private var claimedPanes: Set<String> = []
+    /// The panes of the follows, as last owned: a pane that joins one is
+    /// owned when it appears.
+    private var ownedPanes: Set<String> = []
 
     private func livePanes(_ node: Node) -> [String] { node.leaves.compactMap(\.pane?.pane) }
 
-    private func claim(_ node: Node, panes: [String], until: Date) {
+    private func own(_ node: Node, panes: [String], until: Date) {
         let runtime = VigilAuthz.shared.runtime
         guard let home = runtime.macs.first(where: { $0.id == node.root }).flatMap({ mac -> String? in
             if case .answering(let homeID, _) = mac.state { homeID } else { nil }
@@ -337,8 +337,8 @@ final class VigilPhone: ObservableObject {
             return log("follow: \(node.title): its Mac does not let vigil answer yet; its questions stay with Authz")
         }
         for pane in panes {
-            if until > Date() { claimedPanes.insert(pane) } else { claimedPanes.remove(pane) }
-            Task { await runtime.claim(context: pane, home: home, until: until) }
+            if until > Date() { ownedPanes.insert(pane) } else { ownedPanes.remove(pane) }
+            Task { await runtime.own(context: pane, home: home, until: until) }
         }
     }
 
@@ -350,14 +350,14 @@ final class VigilPhone: ObservableObject {
         return (lead.state, lead.since ?? Date().timeIntervalSince1970)
     }
 
-    /// The tree moved: a follow that gained a pane claims it, and every
+    /// The tree moved: a follow that gained a pane owns it, and every
     /// follow's activity shows the state now (vigil is open; the Mac's
     /// pushes carry it while it is not).
     private func followTree() {
-        let until = Date().addingTimeInterval(Self.claimSpan)
+        let until = Date().addingTimeInterval(Self.ownSpan)
         for node in followedNodes {
             let panes = livePanes(node)
-            if !Set(panes).isSubset(of: claimedPanes) { claim(node, panes: panes, until: until) }
+            if !Set(panes).isSubset(of: ownedPanes) { own(node, panes: panes, until: until) }
             if let key = node.followKey {
                 let lead = lead(node)
                 VigilFollow.update(key, state: lead.state, since: lead.since)

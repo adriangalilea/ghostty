@@ -10,10 +10,10 @@ import VigilWire
 private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "authz")
 
 /// vigil for iPhone as an authz endpoint ("vigil on <phone>"), beside Authz
-/// for iPhone on the same device. It presents only what it claims: the
+/// for iPhone on the same device. It presents only what it owns: the
 /// panes of what you follow (a session, a tab, a pane), whose questions it
 /// shows in their Live Activity and answers through authz. Everything else stays
-/// Authz's (authz.space README "Context claims: one presenter per device").
+/// Authz's (authz.space README "Owned contexts: one presenter per device").
 @MainActor final class VigilAuthz {
     static let shared = VigilAuthz()
 
@@ -21,19 +21,19 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
         .init(
             tetherApp: VigilWire.app, keyGroup: "G387QW47LV.com.adriangalilea.vigil.keys",
             sealGroup: "G387QW47LV.com.adriangalilea.vigil.notify",
-            name: "vigil on \(UIDevice.current.name)", presents: .claimed))
+            name: "vigil on \(UIDevice.current.name)", presents: .owned))
 
     /// Starts (or, back on screen, resumes) the app's tether node: it joins
     /// the homes, and the phone model reaches the Macs' sessions through
-    /// it. Asks APNs for this app's push address: a claim counts only
-    /// while its holder can be reached.
+    /// it. Asks APNs for this app's push address: owning a context counts
+    /// only while its owner can be reached.
     func start() {
         Task {
             await runtime.start()
             authzLog.notice("authz: \(self.runtime.status, privacy: .public)")
             if let node = runtime.node {
                 VigilPhone.shared.attach(node: node)
-                VigilPhone.shared.renewClaims()
+                VigilPhone.shared.renewOwnership()
             } else {
                 // Nothing reaches a Mac without the node: said, never blank.
                 VigilPhone.shared.unlinked(runtime.status)
