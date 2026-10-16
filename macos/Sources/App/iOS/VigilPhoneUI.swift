@@ -39,11 +39,9 @@ struct VigilPhoneRoot: View {
         .onOpenURL { url in
             Task { @MainActor in
                 guard let ref = await model.resolve(url: url) else { return }
-                if url.host == "reply" { model.replying = ref } else { path = [ref] }
+                if url.host == "reply" { model.composeOn = ref }
+                path = [ref]
             }
-        }
-        .sheet(item: Binding(get: { model.replying.map(ReplyTarget.init) }, set: { model.replying = $0?.ref })) { target in
-            ReplySheet(ref: target.ref).environmentObject(model)
         }
         // A tapped question's pane.
         .onChange(of: model.opening) { _, ref in
@@ -749,6 +747,10 @@ struct PaneScreen: View {
     @State private var fitZoom: CGFloat = 1
     @State private var screenVisible = false
     @State private var entryGeneration = UUID()
+    /// The composer is up (a message written whole, `Composer`), and its
+    /// measured height: the terminal gives it that much.
+    @State private var composing = false
+    @State private var composerHeight: CGFloat = 0
 
     init(ref: PaneRef) {
         self.ref = ref
@@ -765,28 +767,37 @@ struct PaneScreen: View {
 
     var body: some View {
         GeometryReader { geo in
-            ZStack(alignment: .topLeading) {
-                Color(ghostty.config.backgroundColor)
-                if let surfaceView {
-                    if let grid, fits {
-                        FitCanvas(view: surfaceView, grid: grid, zoom: $fitZoom)
+            // The terminal area is the window minus the keyboard and the
+            // composer, applied as facts (no SwiftUI keyboard avoidance, no
+            // animation race).
+            let terminal = max(0, geo.size.height - keyboard.inset - (composing ? composerHeight : 0))
+            VStack(spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    Color(ghostty.config.backgroundColor)
+                    if let surfaceView {
+                        if let grid, fits {
+                            FitCanvas(view: surfaceView, grid: grid, zoom: $fitZoom)
+                        } else {
+                            SurfaceHost(view: surfaceView, purpose: "own screen", interactive: true, visible: true) { _, _ in .own }
+                        }
+                    } else if let error {
+                        Text(error).foregroundStyle(.orange).padding()
                     } else {
-                        SurfaceHost(view: surfaceView, purpose: "own screen", interactive: true, visible: true) { _, _ in .own }
+                        ProgressView("attaching…")
                     }
-                } else if let error {
-                    Text(error).foregroundStyle(.orange).padding()
-                } else {
-                    ProgressView("attaching…")
+                    if let surfaceView {
+                        ArrowStick(surface: surfaceView, area: CGSize(width: geo.size.width, height: terminal))
+                    }
                 }
-                if let surfaceView {
-                    ArrowStick(
-                        surface: surfaceView,
-                        area: CGSize(width: geo.size.width, height: max(0, geo.size.height - keyboard.inset)))
+                .frame(width: geo.size.width, height: terminal, alignment: .topLeading)
+                if composing {
+                    Composer(ref: current) { composing = false }
+                        .padding(.bottom, keyboard.inset > 0 ? 0 : geo.safeAreaInsets.bottom)
+                        .background(Color(ghostty.config.backgroundColor))
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerHeight = $0 }
                 }
             }
-            // The terminal area is the window minus the keyboard, applied
-            // as a fact (no SwiftUI keyboard avoidance, no animation race).
-            .frame(width: geo.size.width, height: max(0, geo.size.height - keyboard.inset), alignment: .topLeading)
+            .frame(width: geo.size.width, height: max(0, geo.size.height - keyboard.inset), alignment: .top)
         }
         .ignoresSafeArea(.container, edges: [.top, .bottom])
         .ignoresSafeArea(.keyboard)
@@ -809,6 +820,9 @@ struct PaneScreen: View {
                 .glassEffect(.regular, in: Capsule())
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { compose(!composing) } label: {
+                    Image(systemName: composing ? "square.and.pencil.circle.fill" : "square.and.pencil")
+                }
                 if let surfaceView { KeyboardButton(surface: surfaceView) }
                 if surfaceView != nil {
                     // MIRROR: a picture of the Mac's grid, the Mac untouched.
@@ -831,7 +845,17 @@ struct PaneScreen: View {
                 } label: { Image(systemName: "rectangle.stack") }
             }
         }
-        .task { screenVisible = true; await enter(current) }
+        .task {
+            screenVisible = true
+            // Opened by an activity's Reply: the composer comes up with it.
+            if model.composeOn == current { model.composeOn = nil; compose(true) }
+            await enter(current)
+        }
+        .onChange(of: model.composeOn) { _, ref in
+            guard let ref, ref == current else { return }
+            model.composeOn = nil
+            compose(true)
+        }
         .onChange(of: node?.sizeOwner) { _, owner in
             guard let view = surfaceView, grid != nil else { return }
             view.updateSizeOwner(owner ?? "")
@@ -912,6 +936,13 @@ struct PaneScreen: View {
         current = other
         fitZoom = 1
         Task { await enter(other) }
+    }
+
+    /// The composer and the terminal's own keyboard are two ways to type;
+    /// one at a time (the composer's field takes the keyboard).
+    private func compose(_ on: Bool) {
+        if on { surfaceView?.keyboardWanted = false }
+        composing = on
     }
 
     private func setOwnSize(_ own: Bool) {
@@ -1007,61 +1038,64 @@ struct ReceiptsSection: View {
     }
 }
 
-// MARK: - Reply (from a followed activity)
+// MARK: - Composer (a line to the pane, written on the phone)
 
-struct ReplyTarget: Identifiable {
+/// A message to the pane, written whole and sent as one line (`reply`: the
+/// Mac types it into the pane and submits it), docked above the keyboard
+/// under the live terminal. Phone typing key by key into a remote pty is
+/// for the terminal's own keys; words are better written here. Nothing is
+/// sent without the tap; a failure keeps the text.
+struct Composer: View {
     let ref: PaneRef
-    var id: String { "\(ref.host.id)/\(ref.pane)" }
-}
-
-/// A line to a pane, written on the phone: what the pane last said above
-/// it (the live preview), the field focused at once, Send types it into
-/// the pane and submits it. Nothing is sent without the tap.
-struct ReplySheet: View {
-    let ref: PaneRef
+    let close: () -> Void
     @EnvironmentObject private var model: VigilPhone
-    @Environment(\.dismiss) private var dismiss
     @State private var text = ""
     @State private var sending = false
     @State private var failed = false
     @FocusState private var focused: Bool
 
+    private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
     var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                if let node = model.paneNodes[ref], node.rows > 0, node.cols > 0 {
-                    PanePreview(ref: ref, grid: .init(rows: node.rows, cols: node.cols))
-                        .frame(maxHeight: 260)
+        VStack(alignment: .leading, spacing: 6) {
+            if failed {
+                Label("Not sent: its Mac did not take it. Try again.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).padding(.horizontal, 6)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                Button(action: close) {
+                    Image(systemName: "xmark").font(.body.weight(.semibold)).frame(width: 40, height: 40)
                 }
-                TextField("Reply to \(ref.title)", text: $text, axis: .vertical)
+                .glassEffect(.regular.interactive(), in: Circle())
+                TextField("Message \(model.sessionTitle(for: ref))", text: $text, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($focused)
-                    .submitLabel(.send)
-                    .onSubmit(send)
-                    .padding(12)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-                if failed { Text("Not sent. Its Mac did not take it.").font(.footnote).foregroundStyle(.orange) }
-                Spacer()
-            }
-            .padding()
-            .navigationTitle(ref.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Send", action: send).disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20))
+                Button(action: send) {
+                    Group {
+                        if sending { ProgressView() } else { Image(systemName: "arrow.up").font(.body.weight(.bold)) }
+                    }
+                    .frame(width: 40, height: 40)
+                    .foregroundStyle(empty ? Color.secondary : Color.white)
                 }
+                .glassEffect(empty ? .regular : .regular.tint(.accentColor).interactive(), in: Circle())
+                .disabled(empty || sending)
             }
-            .onAppear { focused = true }
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .onAppear { focused = true }
     }
 
     private func send() {
         sending = true
+        failed = false
         Task {
             let taken = await model.reply(ref, text)
             sending = false
-            if taken { dismiss() } else { failed = true }
+            if taken { text = "" } else { failed = true }
         }
     }
 }

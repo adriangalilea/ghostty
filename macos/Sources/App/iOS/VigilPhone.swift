@@ -777,8 +777,9 @@ final class VigilPhone: ObservableObject {
 
     // MARK: Reply (a line typed into a pane, from a followed activity)
 
-    /// The pane a reply is being written to (the reply sheet shows while set).
-    @Published var replying: PaneRef?
+    /// A pane to open with its composer up (an activity's Reply): the pane
+    /// screen takes it once it shows that pane.
+    @Published var composeOn: PaneRef?
 
     /// Types `text` into the pane and submits it, as its Mac's hub does for
     /// a person at the keyboard; true once the Mac took it.
