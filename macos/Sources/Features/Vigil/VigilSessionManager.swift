@@ -1389,31 +1389,29 @@ class VigilSessionManager {
         }
     }
 
-    /// The head of the attention FIFO: input beats done, oldest first
-    /// within a rank.
+    /// The head of the attention FIFO: what it asks (`Need`, the one
+    /// ranking the phone's board orders by too), oldest first within it.
     private struct AttentionEntry {
         let candidate: SummonCandidate
-        let rank: Int
+        let need: Need
     }
-    /// One queue across homes: urgency first, then this endpoint's arrival
+    /// One queue across homes: the need first, then this endpoint's arrival
     /// order. Home timestamps never compete with a different machine's clock.
     private func attentionQueue() -> [AttentionEntry] {
         var entries: [AttentionEntry] = []
         for session in sessions.values {
             for pane in ownedPaneIds(session) {
-                guard let state = paneAgentState(pane), state.state == .blocked || state.state == .done,
+                guard let state = paneAgentState(pane), let need = Need(state.state, flavor: state.flavor),
                       (lastAck(pane) ?? .distantPast) < state.since else { continue }
-                let rank = state.state == .done ? 1 : (state.flavor?.midTurn == true ? 3 : 2)
-                entries.append(AttentionEntry(candidate: SummonCandidate(name: session.name, pane: pane, since: state.since), rank: rank))
+                entries.append(AttentionEntry(candidate: SummonCandidate(name: session.name, pane: pane, since: state.since), need: need))
             }
         }
         for candidate in remoteAttention() {
-            guard let state = paneAgentState(candidate.pane) else { continue }
-            let rank = state.state == .done ? 1 : (state.flavor?.midTurn == true ? 3 : 2)
-            entries.append(AttentionEntry(candidate: candidate, rank: rank))
+            guard let state = paneAgentState(candidate.pane), let need = Need(state.state, flavor: state.flavor) else { continue }
+            entries.append(AttentionEntry(candidate: candidate, need: need))
         }
         return entries.sorted {
-            $0.rank != $1.rank ? $0.rank > $1.rank : $0.candidate.since < $1.candidate.since
+            $0.need != $1.need ? $0.need > $1.need : $0.candidate.since < $1.candidate.since
         }
     }
 
@@ -4007,7 +4005,7 @@ class VigilSessionManager {
     /// re-yank (clicking away is respected); they stay reachable through
     /// ⌘⇧J.
     var followTarget: String? {
-        attentionQueue().first(where: { $0.rank >= 2 })?.candidate.name
+        attentionQueue().first(where: { $0.need >= .asked })?.candidate.name
     }
 
     // MARK: Sidebar navigation (rows resolve through shapeshift)

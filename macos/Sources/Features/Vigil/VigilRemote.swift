@@ -233,7 +233,7 @@ final class VigilRemote: ObservableObject {
         VigilSessionManager.shared.remoteDirectoryChanged(device)
         hosts[index].error = nil
         if before.map({ $0 != shape }) ?? true {
-            Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.workspaces.count) sessions, \(dir.panes.count) panes")
+            Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.workspaces.count) workspaces, \(dir.panes.count) panes")
         }
         NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
     }
