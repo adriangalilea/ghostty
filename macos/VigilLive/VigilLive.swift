@@ -30,7 +30,7 @@ struct SessionActivityWidget: Widget {
         ActivityConfiguration(for: SessionActivity.self) { context in
             LockScreen(context: context, detail: context.state.opened)
                 .padding(.horizontal, 16)
-                .padding(.vertical, 14)
+                .padding(.vertical, 11)
                 .activityBackgroundTint(Color(white: 0.06).opacity(0.82))
                 .activitySystemActionForegroundColor(.white)
                 .widgetURL(context.attributes.url)
@@ -80,9 +80,9 @@ private struct LockScreen: View {
 
     var body: some View {
         let state = context.state.state
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 10) {
-                Badge(attributes: context.attributes, state: state, size: 38)
+                Badge(attributes: context.attributes, state: state, size: 34)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(context.attributes.label).font(.headline).lineLimit(1)
                     Subtitle(attributes: context.attributes, state: state, detail: detail).font(.caption)
@@ -100,7 +100,9 @@ private struct LockScreen: View {
 // MARK: - What the state needs
 
 /// The body under the header, on the Lock Screen and in the expanded
-/// island alike (`compact` trims it for the island).
+/// island alike (`compact` trims it for the island). Every state is budgeted
+/// to Apple's 160 pt Lock Screen limit with the header: past it the system
+/// draws nothing at all (a 175 pt layout showed a black activity).
 private struct StateContent: View {
     let context: ActivityViewContext<SessionActivity>
     let detail: Detail?
@@ -108,12 +110,17 @@ private struct StateContent: View {
 
     var body: some View {
         let state = context.state.state
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             switch state {
             case .blocked:
                 if let question = detail?.question {
-                    Text(question.title).font(.subheadline.weight(.semibold)).lineLimit(compact ? 1 : 2)
-                    if let body = question.body, !body.isEmpty { Well(text: body, lines: compact ? 2 : 3) }
+                    // The evidence is the question (the command, the edit);
+                    // the title stands in only when there is none.
+                    if let body = question.body, !body.isEmpty {
+                        Well(text: body, lines: 2)
+                    } else {
+                        Text(question.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                    }
                     HStack(spacing: 8) {
                         if let deny = question.deny, let allow = question.allow {
                             AnswerButton(title: "Deny", symbol: "xmark", tint: .red,
@@ -129,17 +136,24 @@ private struct StateContent: View {
                     Actions(detail: detail, facts: false)
                 }
             case .working:
-                if let now = detail?.now { Now(text: now, tint: state.tint) }
+                HStack(spacing: 6) {
+                    if let now = detail?.now { Now(text: now, tint: state.tint) } else { Facts(detail: detail) }
+                    Spacer(minLength: 4)
+                    if let pane = detail?.pane {
+                        Pill(title: nil, symbol: "arrowshape.turn.up.left.fill", url: ActivityLink.reply(pane), wide: false)
+                        Pill(title: nil, symbol: "terminal.fill", url: ActivityLink.pane(pane), wide: false)
+                    }
+                }
                 if let tail = detail?.tail, !tail.isEmpty, !(compact && detail?.now != nil) {
                     Well(text: tail.joined(separator: "\n"), lines: 2)
                 }
-                Actions(detail: detail, facts: true)
             case .done, .idle:
                 if let said = detail?.said, !said.isEmpty {
                     Text(said)
                         .font(.footnote)
                         .foregroundStyle(state == .idle ? .secondary : .primary)
                         .lineLimit(compact ? 2 : 3)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else if let tail = detail?.tail, !tail.isEmpty {
                     Well(text: tail.joined(separator: "\n"), lines: 2)
                 }
@@ -154,8 +168,8 @@ private struct StateContent: View {
 }
 
 /// What it does now: the status line's verb in the state's color, its
-/// facts ("↓ 9.4k tokens", "thinking") as chips; a tool line ("$ bun
-/// test") whole, monospaced when it is a command.
+/// first fact ("↓ 9.4k tokens") as a chip, and the context; a tool line
+/// ("$ bun test") whole, monospaced when it is a command.
 private struct Now: View {
     let text: String
     let tint: Color
@@ -175,28 +189,36 @@ private struct Now: View {
     }
 }
 
-/// Context, how many panes work, then Reply and Open.
-private struct Actions: View {
+/// Context and how many panes work, as chips.
+private struct Facts: View {
     let detail: Detail?
-    let facts: Bool
-
     var body: some View {
         HStack(spacing: 6) {
-            if facts {
-                if let context = detail?.context { Chip(text: "\(Self.tokens(context)) ctx", symbol: "brain") }
-                if let detail, detail.panes > 1 { Chip(text: "\(detail.working)/\(detail.panes) working", symbol: "square.stack") }
-            }
-            Spacer(minLength: 4)
-            if let pane = detail?.pane {
-                Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", url: ActivityLink.reply(pane), wide: false)
-                Pill(title: "Open", symbol: "terminal.fill", url: ActivityLink.pane(pane), wide: false)
-            }
+            if let context = detail?.context { Chip(text: "\(Self.tokens(context)) ctx", symbol: "brain") }
+            if let detail, detail.panes > 1 { Chip(text: "\(detail.working)/\(detail.panes) working", symbol: "square.stack") }
         }
     }
 
     static func tokens(_ count: Int) -> String {
         count >= 1_000_000 ? String(format: "%.1fM", Double(count) / 1_000_000)
             : count >= 1000 ? "\(count / 1000)k" : "\(count)"
+    }
+}
+
+/// Context, then Reply and Open.
+private struct Actions: View {
+    let detail: Detail?
+    let facts: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if facts { Facts(detail: detail) }
+            Spacer(minLength: 4)
+            if let pane = detail?.pane {
+                Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", url: ActivityLink.reply(pane), wide: false)
+                Pill(title: "Open", symbol: "terminal.fill", url: ActivityLink.pane(pane), wide: false)
+            }
+        }
     }
 }
 
@@ -265,7 +287,7 @@ private struct Well: View {
             .truncationMode(.tail)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.vertical, 5)
             .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.08), lineWidth: 1))
     }
@@ -287,20 +309,22 @@ private struct Chip: View {
     }
 }
 
-/// A link into the app, as a pill.
+/// A link into the app, as a pill (its symbol alone when it has no title).
 private struct Pill: View {
-    let title: String
+    let title: String?
     let symbol: String
     let url: URL
     let wide: Bool
     var body: some View {
         Link(destination: url) {
-            Label(title, systemImage: symbol)
+            Group {
+                if let title { Label(title, systemImage: symbol) } else { Image(systemName: symbol) }
+            }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
                 .frame(maxWidth: wide ? .infinity : nil)
                 .padding(.horizontal, 12)
-                .padding(.vertical, 7)
+                .padding(.vertical, 5)
                 .background(.white.opacity(0.16), in: Capsule())
         }
     }
@@ -318,7 +342,7 @@ private struct AnswerButton: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
+                .padding(.vertical, 7)
                 .background(tint.opacity(0.85), in: Capsule())
         }
         .buttonStyle(.plain)
