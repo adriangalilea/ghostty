@@ -20,8 +20,8 @@ enum VigilAgents {
     private static var tokens: [String: (token: String, born: Double)] = [:]
     /// What each Mac was last told, so a route goes once per change.
     private static var told: [String: AgentsRoute] = [:]
-    /// The Macs to tell, and what is followed on each.
-    private static var macs: [String: [Follow.Scope]] = [:]
+    /// The Macs to tell, and the panes followed on each.
+    private static var macs: [String: [String]] = [:]
     private static var observed = Set<String>()
 
     /// At launch: the push-to-start token as iOS gives it, every activity
@@ -44,7 +44,7 @@ enum VigilAgents {
     /// each is told where this phone's activity is reached (once per change)
     /// and what it follows (every time: the Mac keeps them, sending again
     /// changes nothing).
-    static func macs(_ next: [String: [Follow.Scope]]) {
+    static func macs(_ next: [String: [String]]) {
         let fresh = next.keys.filter { macs[$0] == nil }
         macs = next
         // A Mac newly in reach is told again even when nothing changed: its
@@ -53,17 +53,17 @@ enum VigilAgents {
         for mac in fresh { Task { await tell(mac, force: true) } }
     }
 
-    /// Follows something on a Mac, or stops. Following shows the Mac's
+    /// Follows a pane on a Mac, or stops. Following shows the Mac's
     /// activity at once (started here when none runs, with what the phone's
     /// directory already says); the Mac draws it from there.
-    static func follow(_ scope: Follow.Scope, on mac: String, _ on: Bool, state: AgentState, since: Double) {
+    static func follow(pane: String, on mac: String, _ on: Bool, state: AgentState, since: Double) {
         if on {
-            macs[mac, default: []].append(scope)
+            macs[mac, default: []].append(pane)
             if activity(of: mac) == nil { start(mac, state: state, since: since) }
         } else {
-            macs[mac]?.removeAll { $0 == scope }
+            macs[mac]?.removeAll { $0 == pane }
         }
-        Task { await call(mac, on ? .follow(Follow(scope: scope)) : .unfollow(Follow(scope: scope))) }
+        Task { await call(mac, on ? .follow(Follow(pane: pane)) : .unfollow(Follow(pane: pane))) }
     }
 
     private static func activity(of mac: String) -> Activity<AgentsActivity>? {
@@ -139,11 +139,11 @@ enum VigilAgents {
         guard force || told[mac] != route, let output = await call(mac, .agents(route)) else { return }
         told[mac] = route
         // The Mac's board is the record of what is followed there.
-        guard let scopes = try? JSONDecoder().decode([Follow.Scope].self, from: output) else {
+        guard let panes = try? JSONDecoder().decode([String].self, from: output) else {
             return VigilPhone.shared.log("agents: \(mac.prefix(10))'s follows did not parse")
         }
-        macs[mac] = scopes
-        VigilPhone.shared.followed(scopes, on: mac)
+        macs[mac] = panes
+        VigilPhone.shared.followed(panes, on: mac)
     }
 
     @discardableResult

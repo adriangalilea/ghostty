@@ -263,9 +263,6 @@ class VigilSessionManager {
         /// anywhere). Per window, never global: toggling one window must
         /// not repaint another.
         var sidebar: Bool? = nil
-        /// How loudly it asks (`Registry.Priority`; nil = normal): the
-        /// urgency of its authz requests, its order on the phone. Persisted.
-        var priority: Registry.Priority? = nil
         /// Loaded intent: this session had a WINDOW when the app last
         /// recorded it (crash or shutdown), so launch restores it as one.
         /// Detached-in-background sessions load with this false and stay
@@ -811,7 +808,8 @@ class VigilSessionManager {
             title: capturedTitle(of: view) ?? previous?.title,
             label: previous?.label,
             emoji: previous?.emoji,
-            command: view.vigilCommand ?? previous?.command)
+            command: view.vigilCommand ?? previous?.command,
+            priority: previous?.priority)
     }
 
     /// A live tree as registry panes (DFS leaf order) + split shape.
@@ -5705,18 +5703,48 @@ class VigilSessionManager {
         persist()
     }
 
-    /// A session's priority (nil = normal): persisted, read by the broker
-    /// for every request it files from then on.
-    func setPriority(name: String, _ priority: Registry.Priority) {
-        guard sessions[name] != nil else { return }
-        sessions[name]!.priority = priority == .normal ? nil : priority
-        vlog("priority: \(name) \(priority.rawValue)")
+    /// A pane's priority (nil = normal), stored on the pane (it moves with
+    /// it): read by the broker for every request it files from then on and
+    /// by the hub's board for how loudly a followed pane rings.
+    func setPriority(pane: String, _ priority: Registry.Priority) {
+        var landed = false
+        for (name, session) in sessions {
+            var tabs = session.tabs
+            var hit = false
+            for index in tabs.indices {
+                for pindex in tabs[index].panes.indices where tabs[index].panes[pindex].id == pane {
+                    tabs[index].panes[pindex].priority = priority == .normal ? nil : priority
+                    hit = true
+                }
+                if var dock = tabs[index].dock {
+                    for dindex in dock.panes.indices where dock.panes[dindex].id == pane {
+                        dock.panes[dindex].priority = priority == .normal ? nil : priority
+                        hit = true
+                    }
+                    tabs[index].dock = dock
+                }
+            }
+            // Evaluate fully, THEN assign (the exclusivity rule).
+            if hit {
+                sessions[name]?.tabs = tabs
+                landed = true
+            }
+        }
+        guard landed else { return vlog("!! priority: nothing owns \(pane); not stored") }
+        vlog("priority: \(pane) \(priority.rawValue)")
         persist()
     }
 
-    func priority(of name: String) -> Registry.Priority { sessions[name]?.priority ?? .normal }
+    func priority(ofPane pane: String) -> Registry.Priority {
+        for session in sessions.values {
+            for tab in session.tabs {
+                if let found = tab.members.first(where: { $0.id == pane }) { return found.priority ?? .normal }
+            }
+        }
+        return .normal
+    }
 
-    /// What the phones registered here follow (scope keys), as the hub's
+    /// The panes the phones registered here follow, as the hub's
     /// board records it (`board-status.json`, its one writer): read off main
     /// whenever the harness directory changes, so the sidebar's "Follow on
     /// iPhone" says what is true, whichever side followed.
@@ -5741,17 +5769,17 @@ class VigilSessionManager {
         DispatchQueue.global(qos: .utility).async(execute: read)
     }
 
-    /// Follows (or stops) the session, a tab or a pane on every phone
-    /// registered with this Mac's hub: it rides the top of the phone's
-    /// agents activity, and the phone learns it as its own follow. The
-    /// hub's board is the record; a blocking local call, off main.
-    nonisolated func followOnPhones(_ scope: Follow.Scope, _ on: Bool) {
+    /// Follows (or stops) a pane on every phone registered with this Mac's
+    /// hub: it rides the top of the phone's agents activity, and the phone
+    /// learns it as its own follow. The hub's board is the record; a
+    /// blocking local call, off main.
+    nonisolated func followOnPhones(pane: String, _ on: Bool) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let phones = try Local.Client(socket: HarnessPaths.hub).follow(scope, on)
-                Self.vlogSync("follow: \(scope.key) \(on ? "followed" : "no longer followed") on \(phones.joined(separator: ", "))")
+                let phones = try Local.Client(socket: HarnessPaths.hub).follow(pane: pane, on)
+                Self.vlogSync("follow: \(pane) \(on ? "followed" : "no longer followed") on \(phones.joined(separator: ", "))")
             } catch {
-                Self.vlogSync("!! follow: \(scope.key) not \(on ? "followed" : "unfollowed") on the phones (\(error))")
+                Self.vlogSync("!! follow: \(pane) not \(on ? "followed" : "unfollowed") on the phones (\(error))")
             }
         }
     }
@@ -6297,10 +6325,10 @@ class VigilSessionManager {
         if publish { refreshLiveFacts() }
         refreshSessionRevisions()
         var entries = sessions.values.map {
-            Registry.Session(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, priority: $0.priority)
+            Registry.Session(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
         }
         entries += graveyard.values.map {
-            Registry.Session(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, priority: $0.priority)
+            Registry.Session(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
@@ -6605,7 +6633,6 @@ class VigilSessionManager {
             session.layoutShape = VigilSessionControl.revision(session.tabs)
             session.pinned = entry.pinned ?? false
             session.sidebar = entry.sidebar
-            session.priority = entry.priority
             session.foreground = entry.foreground ?? false
             session.thumbnail = NSImage(
                 contentsOfFile: dumpsDir(entry.name).appendingPathComponent("thumb.png").path)

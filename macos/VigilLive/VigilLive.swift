@@ -175,6 +175,21 @@ private struct Needs: View {
         let detail = row.detail
         VStack(alignment: .leading, spacing: 6) {
             switch row.state {
+            case _ where !row.agent:
+                // A pane with no agent: what runs (or ran), its terminal's
+                // last lines, and Open.
+                HStack(alignment: .center, spacing: 8) {
+                    if let line = row.commandLine {
+                        Text("$ \(line)").font(.subheadline.monospaced().weight(.medium)).foregroundStyle(row.tint).lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Spacer(minLength: 0)
+                    }
+                    Pill(title: nil, symbol: "terminal.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: false), wide: false)
+                }
+                if let tail = detail?.tail, !tail.isEmpty, !compact {
+                    Well(text: tail.suffix(1).joined(), lines: 1)
+                }
             case .blocked where row.flavor == .ask:
                 // Its turn ended on a question: the question, and Reply.
                 HStack(alignment: .top, spacing: 8) {
@@ -242,10 +257,11 @@ private struct OneLine: View {
     var body: some View {
         Button(intent: OpenPaneIntent(pane: row.pane, keyboard: false)) {
             HStack(spacing: 6) {
-                Circle().fill(row.state.tint).frame(width: 7, height: 7)
+                Circle().fill(row.tint).frame(width: 7, height: 7)
                 if let emoji = row.emoji { Text(emoji).font(.caption) }
                 Text(row.label).font(.caption.weight(.semibold)).lineLimit(1).layoutPriority(1)
-                Text(row.line ?? row.state.words).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(row.line ?? row.commandWords.map { [$0, row.commandLine].compactMap { $0 }.joined(separator: " · ") } ?? row.state.words)
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 4)
                 Text(Date(timeIntervalSince1970: row.since), style: .relative)
                     .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary).lineLimit(1)
@@ -348,17 +364,27 @@ private struct Subtitle: View {
     let mac: String?
 
     var body: some View {
-        let words = row.state == .blocked && row.flavor == .ask ? "Asked you" : row.state.words
-        let what = row.detail?.name ?? row.detail?.agent.map(\.capitalized)
+        let words = row.commandWords ?? (row.state == .blocked && row.flavor == .ask ? "Asked you" : row.state.words)
+        let what = row.agent ? row.detail?.name ?? row.detail?.agent.map(\.capitalized) : nil
         HStack(spacing: 4) {
             if row.pinned { Image(systemName: "pin.fill").foregroundStyle(.secondary) }
-            Text(words).foregroundStyle(row.state.tint).fontWeight(.semibold)
-            Clock(row: row).fontWeight(.semibold)
+            Text(words).foregroundStyle(row.tint).fontWeight(.semibold)
+            if let ran = row.ran {
+                // A finished command: how long it ran, a fact, never ticking.
+                Text(ran).monospacedDigit().foregroundStyle(row.tint).fontWeight(.semibold)
+            } else {
+                Clock(row: row).fontWeight(.semibold)
+            }
             Text([what, mac].compactMap { $0 }.map { "·  \($0)" }.joined(separator: "  ")).foregroundStyle(.secondary)
                 .lineLimit(1)
         }
         .lineLimit(1)
     }
+}
+
+extension Agents.Row {
+    /// Its state's color; a failed command wears the refusal hue.
+    var tint: Color { failed ? AnswerLook.refuse : state.tint }
 }
 
 /// How long the state has held: working, this turn (since your last
@@ -376,11 +402,15 @@ private struct Subtitle: View {
 private struct Clock: View {
     let row: Agents.Row
     static let lifetime: TimeInterval = 12 * 3600
-    /// Working: the turn's own start, or nothing (a turn that began before
-    /// vigil saw it has no clock, never a guessed one). Otherwise: when the
-    /// state began, as its pane's Mac recorded it.
+    /// An agent working: the turn's own start, or nothing (a turn that
+    /// began before vigil saw it has no clock, never a guessed one). A
+    /// running command: its start, as the shell marked it. A pane at its
+    /// prompt: nothing. Otherwise: when the state began, as its pane's Mac
+    /// recorded it.
     private var since: Date? {
-        let start = row.state == .working ? row.detail?.turn : row.since
+        let start: Double? =
+            !row.agent ? (row.command == nil ? nil : row.since)
+            : row.state == .working ? row.detail?.turn : row.since
         return start.map { Date(timeIntervalSince1970: $0) }
     }
     var body: some View {

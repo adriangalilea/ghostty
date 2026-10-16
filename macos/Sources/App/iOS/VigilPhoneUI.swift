@@ -183,7 +183,7 @@ struct TreeNodeView: View {
             }
         }
         .contextMenu {
-            if node.scope != nil {
+            if node.followPane != nil {
                 Button { model.follow(node, !following) } label: {
                     Label(following ? "Stop following" : "Follow on this iPhone", systemImage: following ? "bell.slash" : "bell")
                 }

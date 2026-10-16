@@ -473,18 +473,6 @@ struct VigilSidebarView: View {
         }
         .contextMenu {
             Button("Rename…") { VigilIdentity.editModal(name: id) }
-            let scope = Follow.Scope(session: id, kind: .session)
-            let following = VigilSessionManager.shared.phoneFollows.contains(scope.key)
-            Button(following ? "Stop Following on iPhone" : "Follow on iPhone") {
-                VigilSessionManager.shared.followOnPhones(scope, !following)
-            }
-            Menu("Priority") {
-                ForEach(Registry.Priority.allCases, id: \.self) { priority in
-                    Toggle(priority.rawValue.capitalized, isOn: Binding(
-                        get: { VigilSessionManager.shared.priority(of: id) == priority },
-                        set: { if $0 { VigilSessionManager.shared.setPriority(name: id, priority) } }))
-                }
-            }
             if model.rows.count > 1 {
                 Menu("Merge Into") {
                     ForEach(model.rows.filter { $0.id != id }) { other in
@@ -706,6 +694,19 @@ struct VigilSidebarView: View {
                     ) { label, emoji in
                         VigilSessionManager.shared.setCustomIdentity(
                             key: paneId, label: label, emoji: emoji)
+                    }
+                }
+                // Any pane, whatever runs in it: an agent's stall or a
+                // command's end rings on the phone, as loud as its priority.
+                let following = VigilSessionManager.shared.phoneFollows.contains(paneId)
+                Button(following ? "Stop Following on iPhone" : "Follow on iPhone") {
+                    VigilSessionManager.shared.followOnPhones(pane: paneId, !following)
+                }
+                Menu("Priority") {
+                    ForEach(Registry.Priority.allCases, id: \.self) { priority in
+                        Toggle(priority.rawValue.capitalized, isOn: Binding(
+                            get: { VigilSessionManager.shared.priority(ofPane: paneId) == priority },
+                            set: { if $0 { VigilSessionManager.shared.setPriority(pane: paneId, priority) } }))
                     }
                 }
             }

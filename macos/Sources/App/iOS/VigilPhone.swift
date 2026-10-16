@@ -157,9 +157,10 @@ final class VigilPhone: ObservableObject {
         // Each Mac learns where this phone's agents activity is reached and
         // what is followed there.
         VigilAgents.macs(Dictionary(uniqueKeysWithValues: hosts.map { host in
-            (host.id, followed.compactMap { key -> Follow.Scope? in
+            (host.id, followed.compactMap { key -> String? in
                 guard key.hasPrefix(host.id + "/") else { return nil }
-                return Follow.Scope(key: String(key.dropFirst(host.id.count + 1)))
+                let pane = String(key.dropFirst(host.id.count + 1))
+                return Open.validPane(pane) ? pane : nil
             })
         }))
     }
@@ -249,18 +250,15 @@ final class VigilPhone: ObservableObject {
         var rows: Int = 0
         var cols: Int = 0
         var sizeOwner: String = ""
-        /// What following this row follows (nil for a Mac).
-        var scope: Follow.Scope? = nil
-        /// How a followed tab or pane is named on the Lock Screen: its own
-        /// label, else the title its program set (Claude names it after the
-        /// conversation), never a process name.
-        var caption: String? = nil
+        /// The pane following this row follows (pane rows only: a follow is
+        /// a pane, whatever runs in it).
+        var followPane: String? = nil
         var children: [Node] = []
 
         /// The Mac's tether root (every id below a Mac starts with it).
         var root: String { String(id.prefix { $0 != "/" }) }
-        /// This row's follow id: `<Mac root>/<scope key>`, the activity's key.
-        var followKey: String? { scope.map { "\(root)/\($0.key)" } }
+        /// This row's follow id: `<Mac root>/<pane>`.
+        var followKey: String? { followPane.map { "\(root)/\($0)" } }
         /// This node and every node under it.
         var all: [Node] { [self] + children.flatMap(\.all) }
 
@@ -283,9 +281,9 @@ final class VigilPhone: ObservableObject {
 
     func tree() -> [Node] { nodes }
 
-    // MARK: Following: a session, tab or pane on the Lock Screen
+    // MARK: Following: a pane on the Lock Screen
 
-    /// Follows, by key (`<Mac root>/<scope key>`, `Node.followKey`).
+    /// Follows, by key (`<Mac root>/<pane>`, `Node.followKey`).
     @Published private(set) var followed: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vigil.followed") ?? []) {
         didSet { UserDefaults.standard.set(Array(followed), forKey: "vigil.followed") }
     }
@@ -296,17 +294,16 @@ final class VigilPhone: ObservableObject {
     }
 
     /// How long vigil owns a followed pane (authz's limit, `Engine.ownLimit`):
-    /// renewed on every foreground and whenever a followed scope gains a
-    /// pane; vigil unopened for longer hands its questions back to Authz.
+    /// renewed on every foreground and whenever a followed pane comes
+    /// alive; vigil unopened for longer hands its questions back to Authz.
     static let ownSpan: TimeInterval = 8 * 3600
 
-    /// Follows a session, tab or pane (or stops): its panes are owned with
-    /// their Mac's authz, so their questions come to this app and Authz for
-    /// iPhone stays quiet for them, and it rides the top of its Mac's agents
-    /// activity whatever its state (`VigilAgents`); stopping lets go of both
-    /// (a pane another follow still covers stays owned).
+    /// Follows a pane (or stops): it is owned with its Mac's authz, so its
+    /// questions come to this app and Authz for iPhone stays quiet for it,
+    /// and it rides the top of its Mac's agents activity whatever its state
+    /// (`VigilAgents`); stopping lets go of both.
     func follow(_ node: Node, _ on: Bool) {
-        guard let key = node.followKey, let scope = node.scope else { return }
+        guard let key = node.followKey, let pane = node.followPane else { return }
         if on { followed.insert(key) } else { followed.remove(key) }
         log("follow: \(node.title) \(on ? "followed" : "no longer followed")")
         let lead = lead(node)
@@ -316,14 +313,14 @@ final class VigilPhone: ObservableObject {
             let kept = Set(followedNodes.flatMap(livePanes))
             own(node, panes: livePanes(node).filter { !kept.contains($0) }, until: Date())
         }
-        VigilAgents.follow(scope, on: node.root, on, state: lead.state, since: lead.since)
+        VigilAgents.follow(pane: pane, on: node.root, on, state: lead.state, since: lead.since)
     }
 
     /// What a Mac's board says is followed there (its record: a follow made
     /// from the Mac's own sidebar arrives this way): the Mac's keys here
     /// become exactly those, newly followed panes owned, dropped ones let go.
-    func followed(_ scopes: [Follow.Scope], on mac: String) {
-        let keys = Set(scopes.map { "\(mac)/\($0.key)" })
+    func followed(_ panes: [String], on mac: String) {
+        let keys = Set(panes.map { "\(mac)/\($0)" })
         let mine = followed.filter { $0.hasPrefix(mac + "/") }
         guard keys != mine else { return }
         let dropped = nodes.flatMap(\.all).filter { $0.followKey.map { mine.contains($0) && !keys.contains($0) } == true }
@@ -363,7 +360,7 @@ final class VigilPhone: ObservableObject {
     /// Mac's directory the way the Mac reads it (`AgentState.lead`).
     private func lead(_ node: Node) -> (state: AgentState, since: Double) {
         let panes = directories[node.root]?.panes ?? [:]
-        let lead = AgentState.lead(node.leaves.compactMap(\.scope?.pane).map { (panes[$0]?.shown ?? .idle, panes[$0]?.since) })
+        let lead = AgentState.lead(node.leaves.compactMap(\.followPane).map { (panes[$0]?.shown ?? .idle, panes[$0]?.since) })
         return (lead.state, lead.since ?? Date().timeIntervalSince1970)
     }
 
@@ -399,8 +396,7 @@ final class VigilPhone: ObservableObject {
             node.children = dir.ordered.map { s in
                 let tabs = s.tabs ?? []
                 let sid = "\(host.id)/\(s.name)"
-                var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji,
-                                scope: Follow.Scope(session: s.name, kind: .session))
+                var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji)
                 func paneNode(_ p: Registry.Pane) -> Node {
                     let truth = dir.panes[p.id]
                     let program = truth?.program
@@ -413,17 +409,14 @@ final class VigilPhone: ObservableObject {
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
                                 sizeOwner: truth?.owner ?? "",
-                                scope: Follow.Scope(session: s.name, kind: .pane, pane: p.id),
-                                caption: p.label ?? Self.caption(p.title))
+                                followPane: p.id)
                 }
                 for (ti, t) in tabs.enumerated() {
                     let all = t.members
                     let showTab = tabs.count > 1 || t.label != nil || t.emoji != nil
                     if showTab {
                         let name = t.label ?? URL(fileURLWithPath: t.panes.first?.cwd ?? "").lastPathComponent
-                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji,
-                                       scope: all.first.map { Follow.Scope(session: s.name, kind: .tab, pane: $0.id) },
-                                       caption: t.label ?? Self.caption(t.panes.first?.title))
+                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji)
                         tab.children = all.map(paneNode)
                         sess.children.append(tab)
                     } else {
@@ -434,15 +427,6 @@ final class VigilPhone: ObservableObject {
             }
             return node
         }
-    }
-
-    /// A terminal title as a name: the program's status glyph (Claude's
-    /// braille spinner, its idle ✳) dropped; nothing left is no name.
-    nonisolated static func caption(_ title: String?) -> String? {
-        guard let title else { return nil }
-        let name = String(title.unicodeScalars.drop { !$0.properties.isAlphabetic && !("0"..."9").contains($0) })
-            .trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? nil : name
     }
 
     // MARK: URLs (vigil://pane/<id>)
