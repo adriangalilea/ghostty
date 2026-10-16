@@ -319,6 +319,21 @@ final class VigilPhone: ObservableObject {
         VigilAgents.follow(scope, on: node.root, on, state: lead.state, since: lead.since)
     }
 
+    /// What a Mac's board says is followed there (its record: a follow made
+    /// from the Mac's own sidebar arrives this way): the Mac's keys here
+    /// become exactly those, newly followed panes owned, dropped ones let go.
+    func followed(_ scopes: [Follow.Scope], on mac: String) {
+        let keys = Set(scopes.map { "\(mac)/\($0.key)" })
+        let mine = followed.filter { $0.hasPrefix(mac + "/") }
+        guard keys != mine else { return }
+        let dropped = nodes.flatMap(\.all).filter { $0.followKey.map { mine.contains($0) && !keys.contains($0) } == true }
+        followed = followed.subtracting(mine).union(keys)
+        log("follow: \(mac.prefix(10)) follows \(keys.count) there (its board's record)")
+        let kept = Set(followedNodes.flatMap(livePanes))
+        for node in dropped { own(node, panes: livePanes(node).filter { !kept.contains($0) }, until: Date()) }
+        renewOwnership()
+    }
+
     /// Every follow's panes, owned again for a full span.
     func renewOwnership() {
         let until = Date().addingTimeInterval(Self.ownSpan)
@@ -647,11 +662,46 @@ final class VigilPhone: ObservableObject {
             view.visible = ref == nil || pane == ref?.pane
         }
         if let ref { markSeen(ref) }
+        reportShown()
         // Back on the tree: rows re-report their frames within a frame
         // (the stack's pop lays the list out after this); a surface no
         // visible row wants by then ends. Deferred, never at the pop
         // itself, so a return never re-dials what the rows still show.
         if ref == nil { sweepUnwanted(after: 0.5) }
+    }
+
+    /// The app is in front (its scene active): what it presents is in front
+    /// of you.
+    private var active = false
+    func scene(active: Bool) {
+        guard self.active != active else { return }
+        self.active = active
+        reportShown()
+    }
+
+    /// What its Mac's authz was last told this phone shows: (home, pane).
+    private var shownAt: (home: String, pane: String)?
+
+    /// The pane presented while the app is in front is in front of you:
+    /// its Mac's authz is told (`Presence.showing`), so its questions are
+    /// answered at the pane here, nothing pops up elsewhere and no phone
+    /// rings for them; leaving it (the tree, another pane, the app) says so.
+    private func reportShown() {
+        let runtime = VigilAuthz.shared.runtime
+        let now: (home: String, pane: String)? = presenting.flatMap { ref in
+            guard active, let home = runtime.macs.first(where: { $0.id == ref.host.id }).flatMap({ mac -> String? in
+                if case .answering(let homeID, _) = mac.state { homeID } else { nil }
+            }) else { return nil }
+            return (home, ref.pane)
+        }
+        guard now?.home != shownAt?.home || now?.pane != shownAt?.pane else { return }
+        let before = shownAt
+        shownAt = now
+        Task {
+            if let before, before.home != now?.home { await runtime.shows(context: nil, home: before.home) }
+            if let now { await runtime.shows(context: now.pane, home: now.home) }
+        }
+        log("shows: \(now.map { "\($0.pane) to its Mac's authz" } ?? "nothing")")
     }
 
     /// A pane shown full screen here was seen: the fact belongs to ITS Mac

@@ -16,8 +16,8 @@ import VigilWire
 enum VigilAgents {
     /// The app's push-to-start token (iOS gives one per app; it rotates).
     private static var startToken: String?
-    /// Each running activity's own token, by Mac.
-    private static var tokens: [String: String] = [:]
+    /// Each running activity's own token and when it started, by Mac.
+    private static var tokens: [String: (token: String, born: Double)] = [:]
     /// What each Mac was last told, so a route goes once per change.
     private static var told: [String: AgentsRoute] = [:]
     /// The Macs to tell, and what is followed on each.
@@ -45,14 +45,12 @@ enum VigilAgents {
     /// and what it follows (every time: the Mac keeps them, sending again
     /// changes nothing).
     static func macs(_ next: [String: [Follow.Scope]]) {
-        let changed = next.filter { macs[$0.key] != $0.value }
+        let fresh = next.keys.filter { macs[$0] == nil }
         macs = next
-        for (mac, scopes) in changed {
-            Task {
-                await tell(mac)
-                for scope in scopes { await call(mac, .follow(Follow(scope: scope))) }
-            }
-        }
+        // A Mac newly in reach is told again even when nothing changed: its
+        // answer is what is followed there (one followed from the Mac's own
+        // sidebar included).
+        for mac in fresh { Task { await tell(mac, force: true) } }
     }
 
     /// Follows something on a Mac, or stops. Following shows the Mac's
@@ -78,7 +76,7 @@ enum VigilAgents {
         }
         do {
             let activity = try Activity.request(
-                attributes: AgentsActivity(mac: mac),
+                attributes: AgentsActivity(mac: mac, born: Date().timeIntervalSince1970),
                 content: ActivityContent(state: AgentsActivity.ContentState(state: state, since: since), staleDate: nil),
                 pushType: .token)
             VigilPhone.shared.log("agents: \(mac.prefix(10))'s activity started here (\(activity.id.prefix(8)))")
@@ -98,7 +96,7 @@ enum VigilAgents {
         guard observed.insert(activity.id).inserted else { return }
         Task {
             for await data in activity.pushTokenUpdates {
-                tokens[mac] = data.map { String(format: "%02x", $0) }.joined()
+                tokens[mac] = (data.map { String(format: "%02x", $0) }.joined(), activity.attributes.born)
                 await tell(mac)
             }
         }
@@ -120,36 +118,42 @@ enum VigilAgents {
     /// Tells a Mac where this phone's activity is reached, after whatever
     /// it was told before, from the facts as they are when it goes (only
     /// when that changed since it was last told).
-    private static func tell(_ mac: String) async {
+    private static func tell(_ mac: String, force: Bool = false) async {
         let previous = chains[mac]
         let telling = Task { @MainActor in
             await previous?.value
-            await send(mac)
+            await send(mac, force: force)
         }
         chains[mac] = telling
         await telling.value
     }
 
-    private static func send(_ mac: String) async {
+    private static func send(_ mac: String, force: Bool) async {
         let route: AgentsRoute
         do {
-            route = AgentsRoute(start: startToken, token: tokens[mac], environment: VigilAuthz.apns.rawValue, key: try AgentsActivity.routeKey())
+            route = AgentsRoute(start: startToken, token: tokens[mac]?.token, born: tokens[mac]?.born,
+                                environment: VigilAuthz.apns.rawValue, key: try AgentsActivity.routeKey())
         } catch {
             return VigilPhone.shared.log("agents: no key to give \(mac.prefix(10)) (\(error))")
         }
-        guard told[mac] != route else { return }
-        if await call(mac, .agents(route)) { told[mac] = route }
+        guard force || told[mac] != route, let output = await call(mac, .agents(route)) else { return }
+        told[mac] = route
+        // The Mac's board is the record of what is followed there.
+        guard let scopes = try? JSONDecoder().decode([Follow.Scope].self, from: output) else {
+            return VigilPhone.shared.log("agents: \(mac.prefix(10))'s follows did not parse")
+        }
+        macs[mac] = scopes
+        VigilPhone.shared.followed(scopes, on: mac)
     }
 
     @discardableResult
-    private static func call(_ mac: String, _ open: Open) async -> Bool {
+    private static func call(_ mac: String, _ open: Open) async -> Data? {
         do {
             guard let node = VigilAuthz.shared.runtime.node else { throw WireError.refused("vigil is not connected to tether yet") }
-            _ = try await VigilLink.call(node, device: mac, open)
-            return true
+            return try await VigilLink.call(node, device: mac, open)
         } catch {
             VigilPhone.shared.log("agents: \(mac.prefix(10)) not told \(open.op.rawValue): \(VigilLink.reason(error))")
-            return false
+            return nil
         }
     }
 }

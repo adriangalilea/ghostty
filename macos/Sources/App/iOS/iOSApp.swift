@@ -30,6 +30,7 @@ struct VigilPhoneApp: App {
                 // pick up where they were.
                 .onChange(of: phase, initial: true) { _, phase in
                     if phase == .active { VigilAuthz.shared.start() }
+                    VigilPhone.shared.scene(active: phase == .active)
                 }
         }
     }
