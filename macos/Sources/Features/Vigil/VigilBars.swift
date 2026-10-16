@@ -31,8 +31,8 @@ final class VigilBars {
             MainActor.assumeIsolated { VigilBars.shared.scheduleAutoFollow() }
         }
         // Heartbeat: a session that has been SITTING blocked emits no new
-        // event (observed 2026-08-03: follow never fired); evaluate on a
-        // slow tick too, not only on changes.
+        // event, so follow would never fire for it; evaluate on a slow
+        // tick too, not only on changes.
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { VigilBars.shared.scheduleAutoFollow() }

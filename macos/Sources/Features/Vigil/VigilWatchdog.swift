@@ -2,10 +2,10 @@ import AppKit
 import Darwin
 import Foundation
 
-/// The main thread's own witness. Two facts the log could not state on
-/// 2026-08-28, when a 6s main-thread stall inside an audio-engine start
-/// ended in an uncaught NSException and vigil.log showed NOTHING between
-/// the hook line and the relaunch:
+/// The main thread's own witness: two facts a log cannot otherwise state
+/// when a main-thread stall inside an audio-engine start ends in an
+/// uncaught NSException and nothing is written between the last line and
+/// the relaunch:
 ///
 /// 1. WHERE main is stuck: a stall past `stallFloor` logs `!! main stalled`
 ///    with a BACKTRACE of the main thread taken from the watchdog thread
@@ -15,9 +15,9 @@ import Foundation
 ///    even if the stall ends in death; a second backtrace at `stallDeep`
 ///    tells one blocking call from a runaway loop; recovery logs the
 ///    measured length. `mark(_:_:)` adds scoped context ("ask gate:
-///    prewarm") to the line; the backtrace is the fact, the mark a label -
-///    a label that outlived its call once attributed a stall to the wrong
-///    code, so it is scoped, never sticky.
+///    prewarm") to the line; the backtrace is the fact, the mark a label,
+///    scoped, never sticky (a label that outlives its call attributes a
+///    stall to the wrong code).
 /// 2. The uncaught-exception handler: AVFoundation, AppKit and friends
 ///    assert by NSException, which Swift cannot catch and breakpad does
 ///    not record (no signal, no minidump, no .ips). The last act of a

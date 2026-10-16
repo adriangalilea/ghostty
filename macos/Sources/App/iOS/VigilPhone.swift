@@ -48,8 +48,8 @@ final class VigilPhone: ObservableObject {
     @Published private(set) var hosts: [Host] = [] { didSet { rebuildTree() } }
     /// Directories and errors publish; the TREE is derived once per change
     /// (never in a body), and receipts live in their own object so a log
-    /// line can never re-render the tree (every receipt re-rendered every
-    /// row and taps died mid-update, 2026-08-28).
+    /// line can never re-render the tree (a receipt re-rendering every row
+    /// kills taps mid-update).
     private(set) var directories: [String: Directory] = [:] {
         didSet {
             rebuildTree()

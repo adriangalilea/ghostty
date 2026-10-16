@@ -147,11 +147,10 @@ final class VigilSidebarHost: NSVisualEffectView {
 
 /// Collapse state: ONE app-wide store, observed by every sidebar. Every
 /// window (native tabs included - each tab IS a window) hosts its own
-/// sidebar instance; per-model copies of this state diverged (each model
-/// read UserDefaults once at ITS init, didSet wrote the whole set back,
-/// last writer clobbered the rest), so landing in a sibling tab-window
-/// swapped in a sidebar with a different idea of what was collapsed -
-/// "a random session collapsed" on an unrelated click (2026-08-05).
+/// sidebar instance; per-model copies of this state diverge (each model
+/// reading UserDefaults at ITS init and writing the whole set back, last
+/// writer clobbering the rest), and landing in a sibling tab-window then
+/// swaps in a sidebar with a different idea of what is collapsed.
 @MainActor
 final class VigilSidebarCollapse: ObservableObject {
     static let shared = VigilSidebarCollapse()
@@ -229,9 +228,9 @@ final class VigilSidebarModel: ObservableObject {
 
     /// Coalesced + throttled: any number of triggers (ticker, state
     /// notifications, bar syncs) collapse into at most ~4 snapshots/s.
-    /// The snapshot reads per-pane files; an unthrottled storm once
-    /// saturated the main thread and starved the runloop so hard that
-    /// launch restore never ran (2026-08-01). `immediate` bypasses the
+    /// The snapshot reads per-pane files; an unthrottled storm saturates
+    /// the main thread and starves the runloop so hard that launch restore
+    /// never runs. `immediate` bypasses the
     /// throttle for human-rate triggers (a key-window or focus change):
     /// the tree must repaint with the click, never a tick later.
     func refresh(immediate: Bool = false, reason: String = "action") {
@@ -265,7 +264,7 @@ final class VigilSidebarModel: ObservableObject {
         // Focus re-derives under the same gate: the INSTANT focus channel
         // is refresh(immediate:) from focusDidChange/didBecomeKey; the
         // throttled path must not re-walk windows 20×/s under a rename
-        // storm (2026-09-06).
+        // storm.
         refreshFocus()
         // A live drag owns the row order; a snapshot would clobber the
         // preview. Staleness guard: a drag cancelled OUTSIDE the bar (no
@@ -455,8 +454,8 @@ final class VigilSidebarModel: ObservableObject {
 
     /// SwiftUI does not order a dying twin's onDisappear against the
     /// incoming same-id view's first geometry report, so an unconditional
-    /// drop could deregister a LIVE row forever (review, 2026-09-06):
-    /// defer one tick and keep any row re-reported since.
+    /// drop could deregister a LIVE row forever: defer one tick and keep
+    /// any row re-reported since.
     func dropHit(_ id: String) {
         let at = Date()
         DispatchQueue.main.async { [weak self] in
@@ -738,7 +737,7 @@ final class VigilSidebarModel: ObservableObject {
         onLeaveControl?() // landing hands the keyboard back
     }
 
-    /// Tab-row click, idempotent toward VISIBILITY (Adrian 2026-08-04):
+    /// Tab-row click, idempotent toward VISIBILITY:
     /// activate, and expand if collapsed - one click always ends with the
     /// tab focused and its panes showing. Only a click on an already-
     /// active, already-expanded tab collapses it (a toggle on the active

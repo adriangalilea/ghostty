@@ -13,11 +13,10 @@
 //! is queued and a dedicated writer thread absorbs the backpressure
 //! (blocking on POLLOUT until the daemon drains, severing on any
 //! unrecoverable error so the reader sees EOF). Blocking the io thread
-//! on a slow drain wedged the ENTIRE APP for 100s: a claude-code scroll
-//! storm (mouse-mode reports) outran the ~8KB sndbuf while claude redrew
-//! slowly, the io mailbox filled behind the stuck thread, and the main
-//! thread blocked pushing a focus message (Lulzx's hang report,
-//! 2026-08-05).
+//! on a slow drain wedges the ENTIRE APP: a scroll storm (mouse-mode
+//! reports) outruns the ~8KB sndbuf while the program redraws slowly,
+//! the io mailbox fills behind the stuck thread, and the main thread
+//! blocks pushing a focus message.
 const Attach = @This();
 
 const std = @import("std");
@@ -810,8 +809,8 @@ fn readThreadMain(
         // the spec before the socket goes, a machine-death class end (a
         // logout's SIGTERM, a crash, a kill by hand) leaves it, and then the
         // daemon comes back under the same id: reattach in place, never
-        // paint the exit overlay (the sentinel's view was lost to it,
-        // 2026-09-15). The quit pipe stays armed throughout, so a teardown
+        // paint the exit overlay over a live program. The quit pipe stays
+        // armed throughout, so a teardown
         // mid-reconnect returns at the next check.
         current_fd = self.reconnect(closing) orelse break;
     }
@@ -819,7 +818,7 @@ fn readThreadMain(
     // a .forever push parks this thread exactly when threadExit is about
     // to join it — reader waits on the mailbox futex, the io thread waits
     // on the reader, the main thread waits on the io thread: the whole
-    // app wedges (sampled live 2026-08-03). A dropped child_exited on a
+    // app wedges. A dropped child_exited on a
     // dying surface costs nothing; a live surface's mailbox has room.
     const pushed = io.surface_mailbox.push(.{
         .child_exited = .{

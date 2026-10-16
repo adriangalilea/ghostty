@@ -114,7 +114,7 @@ final class VigilSummon {
     /// Everything after the snooze gate and the current summon.
     private func queue() -> [VigilSessionManager.SummonCandidate] {
         // Every drop is LOGGED with its reason: "no float appeared" must be
-        // answerable from the log alone (2026-08-24, three rounds of guessing).
+        // answerable from the log alone.
         let manager = VigilSessionManager.shared
         return manager.summonQueue().filter { c in
             if c.since <= snoozeDate {
@@ -125,9 +125,7 @@ final class VigilSummon {
             if manager.paneOnAnyScreen(c.pane) {
                 // The full visibility breakdown rides the log line: "it said
                 // in-place but I could not see it" must be decidable from
-                // this receipt alone (2026-08-25, hollow prompts narrated
-                // with no float and the old text blamed occlusion, which
-                // this path stopped consulting a day earlier).
+                // this receipt alone.
                 manager.vlog("summon: in-place \(c.pane) (\(manager.paneOnScreenReceipt(c.pane)))")
                 return false
             }
@@ -136,9 +134,8 @@ final class VigilSummon {
     }
 
     /// One chime per (pane, block): every mid-turn blocker DINGS, visible
-    /// or hidden, windowed or not — noise is the contract; presence only
-    /// decides whether anything moves (Adrian 2026-08-23: prompts passing
-    /// in silence, "it did not even make a noise").
+    /// or hidden, windowed or not — noise is the contract (a prompt never
+    /// passes in silence); presence only decides whether anything moves.
     private var chimed: [String: Date] = [:]
     /// One soft ding per (pane, turn end): a turn that ended — finished
     /// or asking — is NEWS, not an interruption; different sound, no
@@ -146,8 +143,8 @@ final class VigilSummon {
     private var chimedDone: [String: Date] = [:]
 
     /// The waiting cue, the earcon family's own (two notes rising): only
-    /// for a blocker nothing narrates. Glass was a system alert on top of
-    /// the ask's voice and annoyed even alone (Adrian, 2026-09-16).
+    /// for a blocker nothing narrates. No system sound: the machine's own
+    /// voice is the earcon family.
     static func chime() {
         if !Earcon.waiting.play() {
             VigilSessionManager.shared.vlog("summon: waiting cue SILENT - output player refused")
@@ -155,7 +152,7 @@ final class VigilSummon {
     }
 
     /// The attention pair's falling half: an agent finished on a pane you
-    /// cannot see. Pop rang on every message across the fleet (2026-09-16).
+    /// cannot see (a visible ending is seen; news is what you cannot see).
     static func doneChime() {
         if !Earcon.ended.play() {
             VigilSessionManager.shared.vlog("summon: ended cue SILENT - output player refused")
@@ -181,9 +178,9 @@ final class VigilSummon {
             // ONE cue per moment, owned by the layer that owns it. A blocker
             // the ask lane carries (narrated now, or queued in the inbox to
             // be narrated next) gets the ask's own cues - narration, the
-            // ears-open earcon, accepted/unheard - and a Glass on top was
-            // a second sound for the same permission on every command
-            // (2026-09-16). Not marked chimed: an ask that times out
+            // ears-open earcon, accepted/unheard - and a chime on top would
+            // be a second sound for the same permission on every command.
+            // Not marked chimed: an ask that times out
             // unanswered leaves the pane blocked with nothing carrying it,
             // and THEN the chime does its job.
             if VigilHarnessCoordinator.shared.carries(pane: ask.pane) { continue }
@@ -194,9 +191,9 @@ final class VigilSummon {
             manager.vlog("summon: waiting cue")
             Self.chime()
         }
-        // Ended turns ding softer — news, not interruption — and news is
-        // what you cannot see: a turn ending on screen is seen, and a Pop
-        // for every visible message was a sound per message.
+        // Ended turns ring softer — news, not interruption — and news is
+        // what you cannot see: a turn ending on screen is seen, and a cue
+        // for every visible message would be a sound per message.
         let done = manager.turnEnds()
         let openDone = Set(done.map(\.pane))
         chimedDone = chimedDone.filter { openDone.contains($0.key) }
@@ -215,7 +212,7 @@ final class VigilSummon {
     private func evaluate() {
         // The chimes are the noise contract and ring in every follow mode;
         // only the glass moving is the summon's own business (a follow
-        // mode of `off` once silenced every blocker for four days).
+        // mode of `off` must never silence every blocker).
         announce()
         guard VigilFollowMode.current == .summon else { return }
         let manager = VigilSessionManager.shared
@@ -253,9 +250,9 @@ final class VigilSummon {
         if NSApp.isActive, let key = NSApp.keyWindow {
             // Veto only an answer IN PROGRESS: the FOCUSED pane is
             // blocked — typing there IS answering. Anything wider mutes
-            // the summon: session-level (any raw block) muted hidden-tab
-            // asks, visible-level (any on-screen block) let one lingering
-            // unanswered prompt mute the whole fleet (both 2026-08-23).
+            // the summon: session-level (any raw block) mutes hidden-tab
+            // asks, visible-level (any on-screen block) lets one lingering
+            // unanswered prompt mute the whole fleet.
             // Queue discipline falls out: answer the prompt under your
             // fingers, THEN the next one summons.
             if let controller = key.windowController as? TerminalController,
@@ -324,8 +321,7 @@ final class VigilSummon {
             // few seconds apart, and out-then-in is the slowest possible
             // rendering of "next question". Hold the panel; an ask arriving
             // inside the window retargets the viewport in place, and only a
-            // quiet linger actually dismisses (Adrian 2026-08-24: "the whole
-            // routine vanishes, then reappears like 10s later").
+            // quiet linger actually dismisses.
             let w = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 self.lingerWork = nil

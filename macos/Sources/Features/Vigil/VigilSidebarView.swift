@@ -35,9 +35,8 @@ struct VigilSidebarView: View {
     /// The stale-healer, 10s: facts derived from LIVE TERMINAL TITLES
     /// have no filesystem event at all — claude's ✳ idle corrective after
     /// an esc-interrupt, OSC-only row titles, a rewritten lease note —
-    /// and deleting the 2s ticker left them unbounded-stale on a quiet
-    /// machine (review, 2026-09-06). 10s of a cached snapshot is noise;
-    /// an eternal yellow dot is a lie.
+    /// and without this they stay stale forever on a quiet machine. 10s of
+    /// a cached snapshot is noise; an eternal yellow dot is a lie.
     private let staleHealer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
     private enum Grid {
@@ -57,15 +56,13 @@ struct VigilSidebarView: View {
                         // every row reports its frame into the "vigilTree"
                         // space, one resolver answers "what is under this
                         // point" for all three, so what highlights IS what
-                        // a click activates and what a drop targets. The
-                        // per-row tracking-area/gesture/delegate zoo let
-                        // those disagree (hover activating outside its
-                        // row, dead bands inside rows, drops cancelling in
-                        // gaps): one disease, cured structurally
-                        // (2026-08-05). Plain VStack on purpose - lazy
-                        // row realization is where stale hit geometry
-                        // lived, and this list is dozens of rows, not
-                        // thousands.
+                        // a click activates and what a drop targets. Per-row
+                        // tracking areas, gestures and delegates would let
+                        // those disagree (hover activating outside its row,
+                        // dead bands inside rows, drops cancelling in
+                        // gaps). Plain VStack on purpose - lazy row
+                        // realization is where stale hit geometry lives,
+                        // and this list is dozens of rows, not thousands.
                         VStack(spacing: 0) {
                             VStack(alignment: .leading, spacing: 5) {
                                 ForEach(Array(model.rows.enumerated()), id: \.element.id) { index, row in
@@ -133,11 +130,10 @@ struct VigilSidebarView: View {
     }
 
     /// A row's report into the shared geometry map: a DIRECT write on
-    /// layout change, never a PreferenceKey. The preference reduce ran
-    /// across the whole tree inside every SwiftUI render pass and was the
-    /// bulk of the 500-750ms main-thread stalls (199 of 518 on 2026-09-05
-    /// sat in updatePreferences); a plain callback into non-observed model
-    /// storage costs the render graph nothing. onDisappear is the prune:
+    /// layout change, never a PreferenceKey. A preference reduce runs
+    /// across the whole tree inside every SwiftUI render pass (half-second
+    /// main-thread stalls in updatePreferences); a plain callback into
+    /// non-observed model storage costs the render graph nothing. onDisappear is the prune:
     /// a collapsed or removed row withdraws its frame, so a ghost row can
     /// never swallow a click.
     private func reportHit(id: String, kind: VigilHitRow.Kind) -> some View {
@@ -894,12 +890,12 @@ struct VigilSidebarView: View {
 /// changes never move layout.
 ///
 /// The motion lives in CORE ANIMATION, never SwiftUI: `repeatForever`
-/// SwiftUI animations invalidated the hosting view's render loop every
-/// frame, and with one working claude visible the sidebar re-rendered
-/// continuously on the main thread - the terminal's scroll stutter,
-/// measured by sample 2026-08-06 (SwiftUI renderDisplayList dominating
-/// main during a pure Metal scroll). CABasicAnimation runs in the render
-/// server: zero app-side work per frame.
+/// SwiftUI animations invalidate the hosting view's render loop every
+/// frame, and with one working claude visible the sidebar re-renders
+/// continuously on the main thread (SwiftUI renderDisplayList dominating
+/// main during a pure Metal scroll: the terminal stutters).
+/// CABasicAnimation runs in the render server: zero app-side work per
+/// frame.
 struct VigilStateDot: View {
     let state: AgentState?
 

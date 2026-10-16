@@ -376,20 +376,17 @@ class VigilSessionManager {
     /// TWO vigil instances sharing the state dir is corruption waiting
     /// (both restore the same daemons, both persist vigil.json). The
     /// script-side kill-then-launch cannot be trusted alone: macOS
-    /// relaunched the app on its own after a `pkill -9` straggler shot
-    /// (2026-08-04, two instances born the same second). First instance
-    /// wins the flock; a duplicate activates the holder and exits before
-    /// touching anything.
+    /// relaunches an app on its own after a `pkill -9`, so two instances
+    /// can be born the same second. First instance wins the flock; a
+    /// duplicate activates the holder and exits before touching anything.
     private func acquireInstanceLock() {
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/wake")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // O_CLOEXEC or every spawned vigild inherits the fd and HOLDS THE
-        // FLOCK after the app dies (locked out of our own lock by a
-        // daemon, 2026-08-04 - the attach-socket FD_CLOEXEC lesson again;
+        // FLOCK after the app dies, locking the app out of its own lock:
         // flock rides the file description, which fork shares and only
-        // exec+CLOEXEC severs). Path is app.flock because the original
-        // app.lock is still held by daemons born before this fix.
+        // exec+CLOEXEC severs.
         let fd = Darwin.open(dir.appendingPathComponent("app.flock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard fd >= 0 else { return } // no lock support beats a bricked app
         if flock(fd, LOCK_EX | LOCK_NB) != 0 {
@@ -423,13 +420,12 @@ class VigilSessionManager {
         sessionControlSource = VigilSessionControl.start()
         // A logout/restart/shutdown is starting. THE signal, and the only
         // reliable one: the AppleEvent probe in applicationShouldTerminate
-        // (kAEShutDown/kAERestart) does not arrive on macOS 26, so every
-        // restart ran the ⌘Q intercept instead, which CANCELS termination
-        // into service mode — the app refused to quit, macOS waited on it,
-        // and the machine looked wedged until Adrian cut the power (twice,
-        // 2026-08-08, both with a shutdown_stall report). Freeze the
-        // workspace here, while the windows still show, and from now on
-        // termination can never be cancelled.
+        // (kAEShutDown/kAERestart) does not arrive on macOS 26, and without
+        // this a restart runs the ⌘Q intercept, which CANCELS termination
+        // into service mode: the app refuses to quit, macOS waits on it and
+        // the machine wedges (a shutdown_stall). Freeze the workspace here,
+        // while the windows still show, and from now on termination can
+        // never be cancelled.
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
         ) { _ in
@@ -455,10 +451,10 @@ class VigilSessionManager {
         // never re-entrant with this init.
         DispatchQueue.main.async { _ = VigilSummon.shared }
         // SIGTERM means DIE (vigil-dev restarts, system tooling). Without
-        // this, AppKit routed it into the ⌘Q intercept, which CANCELS
-        // termination into menu-bar service mode while sessions exist:
-        // three invisible survivors once stacked up behind pkill + open -n
-        // (2026-08-01). Freeze foreground truth, persist, really terminate.
+        // this, AppKit routes it into the ⌘Q intercept, which CANCELS
+        // termination into menu-bar service mode while sessions exist, and
+        // invisible survivors stack up behind pkill + open -n. Freeze
+        // foreground truth, persist, really terminate.
         signal(SIGTERM, SIG_IGN)
         sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         sigtermSource?.setEventHandler {
@@ -1103,9 +1099,9 @@ class VigilSessionManager {
     /// A surface whose pane's pty is OWNED by another client (the phone
     /// in OWN) renders that client's grid letterboxed. `<pane>.size` is
     /// "rows cols <owner hello>", the daemon's fact; this app's own
-    /// surfaces hello as `ghostty:<pid>`. (Inferring ownership from a
-    /// grid difference flipped every second once the surface framed
-    /// itself at the owner's grid, 2026-08-29.)
+    /// surfaces hello as `ghostty:<pid>`. Ownership is never inferred from
+    /// a grid difference: a surface framed at the owner's grid would flip
+    /// it every second.
     private func syncOwnerGrids() {
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
             guard let id = view.vigilAttachId, view.surface != nil else { continue }
@@ -1138,7 +1134,7 @@ class VigilSessionManager {
                 view.vigilOwnerGrid = grid
                 // An ownership change is a legitimate resync window: the
                 // content receipt starts over (strikes counted across a
-                // takeover silenced the pane it exists for, 2026-08-29).
+                // takeover would silence the pane it exists for).
                 view.vigilScreenStrikes = -3
                 view.vigilScreenResyncs = 0
                 vlog("owner grid: \(id) \(grid.map { "\($0.rows)x\($0.cols) owned by '\(owner)'; letterboxed" } ?? "own")")
@@ -1395,8 +1391,8 @@ class VigilSessionManager {
         }
     }
 
-    /// The attention FIFO: open the most urgent session. IDEMPOTENT
-    /// (Adrian 2026-08-04): with the FIFO drained, fall back to STATE
+    /// The attention FIFO: open the most urgent session. IDEMPOTENT:
+    /// with the FIFO drained, fall back to STATE
     /// truth - any session still asking (even one already seen/acked)
     /// stays reachable, rotating past the current one so repeated
     /// presses walk every open ask.
@@ -1428,32 +1424,28 @@ class VigilSessionManager {
     /// app restart).
     /// Eligibility is ATTENDED-truth alone: unseen per the ack ledger
     /// (key-window visibility, the one presence chokepoint). "Some pixels
-    /// of the prompt exist on some monitor" is not attention — an
-    /// occlusion-based on-screen suppressor ate a real ask while Adrian
-    /// watched a video with the vigil window standing beside Safari
-    /// (2026-08-23, "just heard the bell, had to go to the terminal").
+    /// of the prompt exist on some monitor" is not attention: a vigil window
+    /// standing beside a video in Safari is visible and unattended.
     /// On ANY screen, not just the key window: a pane whose console is
     /// visibly on a display is answerable in place (the ask gate speaks it,
     /// eyes and keyboard are already there if wanted). Ripping its tab into
     /// the floating panel takes glass Adrian can SEE and moves it somewhere
-    /// else (2026-08-24, second-screen pane floated: "nonsense, why switch
-    /// pane"). Distinct from the seen-rule on purpose: presence/acks stay
+    /// else. Distinct from the seen-rule on purpose: presence/acks stay
     /// key-window (attention must not be forgiven sight-unseen); this gates
     /// only whether the summon MOVES glass. Chime, eye, gate all still fire.
     func paneOnAnyScreen(_ pane: String) -> Bool {
         // Ghostty frontmost + pane visible = Adrian can see it: answer in
         // place. Ghostty NOT frontmost = float, ALWAYS - summoning over other
-        // apps is the point. occlusionState was tried and LIES (reported a
-        // Telegram-covered window as visible, 2026-08-24 19:22 log); NSApp
-        // activity is the only honest signal for "is the terminal his view".
+        // apps is the point. occlusionState LIES (it reports a window
+        // covered by another app as visible); NSApp activity is the only
+        // honest signal for "is the terminal his view".
         guard NSApp.isActive else { return false }
         guard let view = liveView(attachId: pane), let window = view.window,
               window.isVisible, !window.isMiniaturized else { return false }
         // A background NATIVE TAB's window still reports isVisible and its
         // views un-hidden (it is "part of the visible tab group") - but the
         // pane is behind another tab and Adrian cannot see it. Not the
-        // selected tab = not on screen (2026-08-25, hollow's prompt refused
-        // a float with frontTab=false on the receipt).
+        // selected tab = not on screen.
         if let group = window.tabGroup, group.selectedWindow !== window { return false }
         return !view.isHiddenOrHasHiddenAncestor
     }
@@ -1508,10 +1500,10 @@ class VigilSessionManager {
     /// Panes whose TURN ENDED, any session: the soft-chime feed. Both
     /// endings count — done, and a turn-end question (blocked/ask) —
     /// because the sound answers "is claude waiting on me", and the
-    /// vocabulary is the interruption axis, not the state name: Glass =
-    /// stalled MID-work, Pop = your turn. A turn end dings softer, lights
-    /// the eye and stays summonable (⌘⇧H), but never moves glass; only
-    /// mid-turn blockers float (Adrian 2026-08-23).
+    /// vocabulary is the interruption axis, not the state name: `waiting`
+    /// = stalled MID-work, `ended` = your turn. A turn end rings softer,
+    /// lights the eye and stays summonable (⌘⇧H), but never moves glass;
+    /// only mid-turn blockers float.
     func turnEnds() -> [SummonCandidate] {
         var out: [SummonCandidate] = remoteAttention(midTurn: false)
         for session in sessions.values {
@@ -1775,9 +1767,9 @@ class VigilSessionManager {
     private(set) var mirror: Mirror?
 
     /// MIRROR VIEWPORTS: windows showing a second view of a session that
-    /// is windowed elsewhere (a sidebar click on it from another window,
-    /// Adrian 2026-08-28: "it should just open it in this window, even
-    /// if already opened in another"). The same problem as the phone,
+    /// is windowed elsewhere (a sidebar click on it from another window
+    /// opens it in this window, even if already opened in another). The
+    /// same problem as the phone,
     /// local: two clients on one daemon. The viewport is NOT a member:
     /// its views are mirrors (own nothing, never captured, never counted
     /// as the pane's live view), the size follows whichever client is
@@ -1908,7 +1900,7 @@ class VigilSessionManager {
         guard let tab, !tab.panes.isEmpty else { return nil }
         // Already this viewport's mirror and the clicked pane is on screen:
         // a click is a focus move, never a teardown and two fresh proxy
-        // streams (four re-mounts in five seconds of clicking, 2026-09-14).
+        // streams.
         if let controller = viewport, mirroredSession(of: controller) == composite,
            let shown = controller.surfaceTree.first(where: { $0.vigilAttachId == rawAnchor ?? "" }) ?? (rawAnchor == nil ? controller.surfaceTree.first : nil) {
             DispatchQueue.main.async {
@@ -2095,8 +2087,8 @@ class VigilSessionManager {
         guard !tab.panes.isEmpty else { return }
         let firstIndex = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
         let anchorPane = tab.panes[firstIndex]
-        // Adopt-or-mint, like every other cold materialization (review,
-        // 2026-09-06): the float must never twin a leaked view's socket.
+        // Adopt-or-mint, like every other cold materialization: the float
+        // must never twin a leaked view's socket.
         let anchor = adoptable(anchorPane.id)
             ?? Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: name, pane: anchorPane))
 
@@ -2374,9 +2366,9 @@ class VigilSessionManager {
             // Freeze the visual: the overview shows what the workspace
             // looked like at the moment it was released. Rate-limited to
             // one capture per 30s per session: windowSnapshot is a render
-            // capture worth ~a couple hundred ms and it sat inside EVERY
-            // sidebar session click (the constant ~295ms, 2026-09-06);
-            // the overview's face is ornament, bounded staleness is fine.
+            // capture worth ~a couple hundred ms, and a release happens on
+            // every sidebar session click; the overview's face is
+            // ornament, bounded staleness is fine.
             if Date().timeIntervalSince(thumbStamp[name] ?? .distantPast) > 30 {
                 // The focused surface's asImage (its Metal layer's own
                 // contents), never a windowSnapshot: cacheDisplay is a
@@ -2416,11 +2408,8 @@ class VigilSessionManager {
         }
         for stray in pool {
             vlog("!! vacate: '\(name)' member tree \(stray.surfaceTree.compactMap(\.vigilAttachId)) missing from its registry (appended + registered)")
-            // Register the stray's capture too: sidebar mode DROPS held
-            // runtimes at the next mount, and a pane no registry lists is
-            // a daemon collectOrphans kills at the next launch — the old
-            // screaming-but-recoverable state became a silent death
-            // (review, 2026-09-06).
+            // Register the stray's capture too: a pane no registry lists is
+            // a daemon collectOrphans kills at the next launch, silently.
             let (strayPanes, strayLayout) = capture(stray.surfaceTree, carrying: [])
             if !strayPanes.isEmpty {
                 let tab = Registry.Tab(panes: strayPanes, layout: strayLayout)
@@ -2539,9 +2528,8 @@ class VigilSessionManager {
 
     /// The full window content composited (every split), not a single pane.
     /// A full window capture is a ~280ms MAIN-THREAD re-render
-    /// (cacheDisplay walks the hierarchy, Metal readback included — the
-    /// constant click tax the staged shapeshift receipts convicted
-    /// 2026-09-06), and the cheap alternatives are gone: the window-server
+    /// (cacheDisplay walks the hierarchy, Metal readback included), and
+    /// the cheap alternatives are gone: the window-server
     /// copy (CGWindowListCreateImage) is unavailable in the macOS 26 SDK
     /// and ScreenCaptureKit costs a Screen Recording grant. So this runs
     /// ONLY where the human is deliberately looking (the overview);
@@ -2693,8 +2681,8 @@ class VigilSessionManager {
               let app = ghosttyApp?.app else { return }
         let views = capture.panes.map { pane in
             // Adopt-or-mint per tenant: a dropped dock runtime can leak
-            // its views as live socket clients (2026-08-24 class), and a
-            // second mint interleaves the replay into garbage.
+            // its views as live socket clients, and a second mint
+            // interleaves the replay into garbage.
             adoptable(pane.id) ?? Ghostty.SurfaceView(app, baseConfig: configFor(pane))
         }
         let runtime = VigilDockRuntime(
@@ -2777,9 +2765,8 @@ class VigilSessionManager {
 
     /// Closing a session's WINDOW (red button, ⌘⇧W) puts the session away:
     /// it detaches, everything keeps running, no confirm, nothing dies
-    /// (Adrian 2026-08-22: the red button and ⌘Q never kill; only ⌘W
-    /// does). Returns true when handled (the close must be swallowed by
-    /// the caller).
+    /// (the red button and ⌘Q never kill; only ⌘W does). Returns true when
+    /// handled (the close must be swallowed by the caller).
     func handleWindowClose(controller: TerminalController) -> Bool {
         guard let name = sessionName(of: controller) else {
             vlog("handleWindowClose: controller has NO session -> not handled (window closes plain)")
@@ -3053,7 +3040,7 @@ class VigilSessionManager {
         }
         persist()
         // The click's latency receipt, staged: "not snappy" must be a
-        // number with a culprit in the log, never a feeling (2026-09-06).
+        // number with a culprit in the log, never a feeling.
         let now = Date()
         vlog(String(
             format: "shapeshift: '%@' mounted in %.0fms (release %.0f, mount %.0f, persist %.0f)",
@@ -3070,11 +3057,10 @@ class VigilSessionManager {
     /// Rendering follows VISIBILITY, not liveness. Upstream pauses a
     /// surface's renderer via its WINDOW's occlusion notifications - a
     /// surface released to the held cache has no window, so nothing ever
-    /// tells it to stop: every held tree kept drawing at display refresh
-    /// forever (~15 invisible renderers ticking at 120Hz = the scroll
-    /// stutter vanilla doesn't have, sampled 2026-08-06). Detach/bury
-    /// occlude; mount un-occludes (the window's own notifications take
-    /// over from there).
+    /// tells it to stop: every held tree would draw at display refresh
+    /// forever (a dozen invisible renderers at 120Hz stutter every
+    /// scroll). Detach/bury occlude; mount un-occludes (the window's own
+    /// notifications take over from there).
     private func setOcclusion(_ visible: Bool, _ runtimes: [TabRuntime]) {
         for runtime in runtimes {
             setOcclusion(visible, views: Array(runtime.tree) + (runtime.dock?.views ?? []))
@@ -3124,10 +3110,10 @@ class VigilSessionManager {
 
     /// Mount a background session INTO an existing window as ONE
     /// synchronous tree swap: its first tab REPLACES the window's tree and
-    /// every other tab stays COLD (registry + running daemons; the sidebar
-    /// lists them and a click mounts them the same way). No window is ever
-    /// created or closed here: a shapeshift must be instant, not a
-    /// shuffle (Adrian 2026-08-01). The tree lands BEFORE membership:
+    /// every other tab stays where it is, warm in the held cache or
+    /// captured (the sidebar lists them and a click mounts them the same
+    /// way). No window is ever created or closed here: a shapeshift must
+    /// be instant, not a shuffle. The tree lands BEFORE membership:
     /// registerMember reads the controller's tree, and the old occupant's
     /// tree must never be claimed for the newcomer.
     private func mount(
@@ -3141,8 +3127,8 @@ class VigilSessionManager {
             // Refusing is correct (the session is displayed elsewhere)
             // but it must SCREAM: a caller that mounts blind leaves this
             // window stray with the old tree still on screen, and the
-            // next release mints that tree as a duplicate session (the
-            // 2026-08-04 "Evaluate FFmpeg" twins). Callers route
+            // next release mints that tree as a duplicate session sharing
+            // the original's panes. Callers route
             // displayed targets to their home window or pick a background
             // session.
             vlog("mount REFUSED: '\(name)' is \(placeTag(name)) - window left as-is")
@@ -3364,8 +3350,7 @@ class VigilSessionManager {
 
     // MARK: Viewport ⌘W (the tab closes; the window NEVER does while a session remains)
 
-    /// Adrian 2026-08-03: "cmd+w always closes the TAB, never the window."
-    /// The mounted tab buries (structural edit, undo grace, confirm when a
+    /// ⌘W always closes the TAB, never the window. The mounted tab buries (structural edit, undo grace, confirm when a
     /// process runs) and the session's next tab takes the viewport; the
     /// LAST tab is the session's death (Kill/Cancel when something runs,
     /// then the undo grace) and the last active session takes the
@@ -3712,7 +3697,7 @@ class VigilSessionManager {
         // The registry entry: from the vacated tab (already lifted out of
         // the source), else taken from wherever it lives. An emptied tab's
         // NAME AND FACE travel with its only pane instead of dying with the
-        // husk (a ♠️ typed onto a tab evaporated here, 2026-08-10).
+        // husk.
         var pane: Registry.Pane?
         var inheritedLabel: String?
         var inheritedEmoji: String?
@@ -3913,7 +3898,7 @@ class VigilSessionManager {
         }
     }
 
-    /// The attention QUEUE's eligibility, ONE rule (Adrian 2026-08-06):
+    /// The attention QUEUE's eligibility, ONE rule:
     /// something happened here that has NOT BEEN SEEN - a pane finished
     /// (done) or asked (blocked) after its console was last on screen.
     /// Seen sessions are never queue material, however blocked they look
@@ -3944,9 +3929,8 @@ class VigilSessionManager {
     /// Attention-driven landing, ONE primitive for every path that grabs
     /// focus because a session asked (auto-follow, ⌘⇧J, the sidebar's ;):
     /// land on the ASKING PANE (its tab mounts, it takes focus), not the
-    /// session. A session-level landing mounted the anchored/first tab:
-    /// with the ask in tab 4 you arrived at tab 1's console (Adrian
-    /// 2026-08-04, "often leads me to the wrong console").
+    /// session: a session-level landing mounts the anchored tab, and an ask
+    /// in tab 4 would arrive at tab 1's console.
     func follow(_ name: String, in controller: TerminalController?) {
         if let remote = VigilRemote.split(name), let candidate = remoteAttention().first(where: { $0.name == name }),
            let pane = VigilRemote.split(candidate.pane) {
@@ -3980,7 +3964,7 @@ class VigilSessionManager {
     /// next asking session relative to the key window) WITHOUT executing:
     /// the sidebar renders it as the ⌘⇧J affordance when auto-follow is
     /// off, and visiting the head re-derives the next - the hint IS the
-    /// queue, one head at a time (Adrian 2026-08-04).
+    /// queue, one head at a time.
     func nextAskHint() -> AskHint? {
         let controller = NSApp.keyWindow?.windowController as? TerminalController
         let current = controller.flatMap { mirroredSession(of: $0) ?? sessionName(of: $0) }
@@ -3995,8 +3979,8 @@ class VigilSessionManager {
 
     /// Auto-follow's target: the attention FIFO's input head, else the
     /// first session (overview order) asking AND unseen. Seen asks never
-    /// re-yank (Adrian 2026-08-04: "if I already clicked away allow me
-    /// to"); they stay reachable through ⌘⇧J.
+    /// re-yank (clicking away is respected); they stay reachable through
+    /// ⌘⇧J.
     var followTarget: String? {
         attentionQueue().first(where: { $0.rank >= 2 })?.candidate.name
     }
@@ -4814,10 +4798,9 @@ class VigilSessionManager {
     /// `vigild restore` at every launch, not only at login. A spec with no
     /// live daemon can only mean a machine-death-class event: a deliberate
     /// kill unlinks the spec BEFORE signaling, so respawning from a spec is
-    /// never wrong. The login agent alone missed a whole fleet (2026-09-15:
-    /// a logout started at 01:40, SIGTERM reached every daemon, the logout
-    /// was interrupted, and launchd left the restore spawn "pending" with
-    /// no login to follow; 17 specs sat dead for ten hours). Synchronous
+    /// never wrong. The login agent alone is not enough: an interrupted
+    /// logout SIGTERMs every daemon and leaves launchd's restore spawn
+    /// "pending" with no login to follow. Synchronous
     /// and before collectOrphans, so a restored daemon is never read as
     /// an orphan of a session the registry still lists.
     private func respawnMachineKilledDaemons() {
@@ -5023,9 +5006,8 @@ class VigilSessionManager {
     /// What a close would actually destroy, and the ONLY test any close
     /// confirm may use. Ghostty's `needsConfirmQuit` is meaningless here:
     /// every surface is daemon-backed, so its child shell always reads as a
-    /// running process and EVERY close asked, including a bare shell no
-    /// vanilla ghostty would ever ask about (Adrian 2026-08-08, correctly
-    /// smelling two philosophies in one app). Vigil owns process truth (the
+    /// running process and EVERY close would ask, including a bare shell no
+    /// vanilla ghostty would ever ask about. Vigil owns process truth (the
     /// daemon's pidfile line 3 = the deep foreground pid): a pane is busy
     /// only while a real program holds the tty, never a shell at its prompt.
     func busyPrograms(panes: [String]) -> [String] {
@@ -5069,9 +5051,8 @@ class VigilSessionManager {
     /// agent isn't working - the view applies that; a PLAIN pane is quiet
     /// only when the shell itself holds the tty. A foreground TUI's own
     /// subprocess churn (lazygit's git calls) is the program working, not
-    /// a sentry - antenna semantics, not process accounting (Adrian
-    /// 2026-08-07). Declared leases are never gated: the watcher said why
-    /// it watches.
+    /// a sentry - antenna semantics, not process accounting. Declared
+    /// leases are never gated: the watcher said why it watches.
     func paneWatchers(_ pane: String) -> [String] {
         if paneAgentState(pane) == nil, paneForegroundLabel(pane) != nil { return [] }
         let program = paneProgram(pane)
@@ -5120,8 +5101,8 @@ class VigilSessionManager {
         // No voice processor on a Bluetooth output: it builds an aggregate
         // over mic + output and forces the earbuds into SCO for the warm
         // window (a system-wide route flip per ask, a 1.2s stream timeout
-        // on every start, and the 2026-08-28 crash when the flap ran
-        // long). In-ear narration is inaudible to the Mac's mic, so the
+        // on every start, and a crash when the flap runs long). In-ear
+        // narration is inaudible to the Mac's mic, so the
         // half-duplex fallback is echo-free there by construction - the
         // same fact `selfNarrating()` already relies on.
         MicTap.shared.voiceProcessingPolicy = { !AudioRoute.outputIsBluetooth }
@@ -5225,11 +5206,11 @@ class VigilSessionManager {
         return child == fg
     }
 
-    /// The surface attached to a pane's daemon. `.first` over an UNORDERED
-    /// weak set once returned whichever twin the hash table happened to
-    /// yield, so focus, float and move all aimed at a WINDOWLESS view and
-    /// silently did nothing (2026-08-24, "I can't focus this session").
-    /// The windowed one is the answer; a second match is a leak to report.
+    /// The surface attached to a pane's daemon. Never `.first` over the
+    /// UNORDERED weak set: it yields whichever twin the hash table holds,
+    /// and focus, float and move then aim at a WINDOWLESS view and silently
+    /// do nothing. The windowed one is the answer; a second match is a
+    /// leak to report.
     /// What `vigil doctor` asks the app: its views by kind and its memory
     /// as the kernel counts it (phys_footprint is Activity Monitor's
     /// "Memory"; heap in use is every malloc zone's live bytes).
@@ -5312,10 +5293,9 @@ class VigilSessionManager {
     /// ONE daemon, ONE view. A surface that exists for this pane but sits
     /// in no placement (released from a tree, still attached to its
     /// daemon socket) is ADOPTED by the next mount instead of minting a
-    /// second client on the same socket — the twin manufacturer behind
-    /// unfocusable panes (2026-08-24: captured tabs measured holding two live
-    /// clients each, one per round trip through the sidebar). Minting is
-    /// for panes with no surface at all.
+    /// second client on the same socket (each round trip through the
+    /// sidebar would add one, and the twins make panes unfocusable).
+    /// Minting is for panes with no surface at all.
     /// A WARM view (its tab held by its session while another tab or session
     /// is on screen) is the first answer: the mount takes the whole held tab
     /// out of the cache, so every leaf of it adopts the exact surfaces that
@@ -5426,9 +5406,9 @@ class VigilSessionManager {
     /// shown) does not reliably reach `windowWillClose`, so the
     /// contentView<->window cycle ghostty breaks there stays intact and
     /// the whole NSWindow (titlebar accessories, tab bar, SwiftUI hosting
-    /// views, 40 CALayers) lives forever in NSApp.windows. 547 shapeshifts
-    /// left 1108 dead terminal windows resident, 1.9 GB and a quarter of a
-    /// core idle, WindowServer compositing corpses (2026-08-18). Undo is
+    /// views, 40 CALayers) lives forever in NSApp.windows: hundreds of
+    /// shapeshifts leave a thousand dead windows resident, gigabytes and a
+    /// quarter of a core idle, WindowServer compositing corpses. Undo is
     /// disabled around the exit: this is structure moving, nothing a ⌘⇧T
     /// should bring back (burials own their own undo).
     func killController(_ controller: TerminalController) {
@@ -5527,9 +5507,9 @@ class VigilSessionManager {
 
     /// Where you ARE in one window: its session, mounted tab row, focused
     /// pane. PER WINDOW: a sidebar asks for its own host, never the key
-    /// window (every bar painted the key window's chain, so focusing a
-    /// pane in one window relit the same rows in every other, Adrian
-    /// 2026-08-28). Its own channel, read on every key-window and focus
+    /// window (every bar would paint the key window's chain, and focusing a
+    /// pane in one window would relight the same rows in every other). Its
+    /// own channel, read on every key-window and focus
     /// change without the snapshot's throttle: the chain must repaint the
     /// instant a tab is clicked, never a tick later.
     struct ActiveChain: Equatable {
@@ -5764,8 +5744,7 @@ class VigilSessionManager {
         // Freeze foreground truth NOW: the detach cascade below closes the
         // windows, and a termination that proceeds to death (vigil-dev
         // pkill, SIGTERM) must record them as OPEN or the next launch
-        // restores nothing (observed 2026-08-01: every dev restart came up
-        // windowless). Cleared a tick later so service-mode persists go
+        // restores nothing. Cleared a tick later so service-mode persists go
         // back to live truth.
         var frozen: [String: Bool] = [:]
         for (name, session) in sessions { frozen[name] = isForeground(session) }
@@ -5792,8 +5771,8 @@ class VigilSessionManager {
             window.close()
         }
         // Policy switch deferred a tick: flipping to accessory in the same
-        // runloop pass as the window teardown left the status item deaf
-        // (observed 2026-07-17, AppKit event routing quirk).
+        // runloop pass as the window teardown leaves the status item deaf
+        // (an AppKit event routing quirk).
         DispatchQueue.main.async {
             NSApp.setActivationPolicy(.accessory)
         }
@@ -5922,8 +5901,7 @@ class VigilSessionManager {
         // session or a burial lists its pane). A windowed one that is not
         // was stranded by a move; a WINDOWLESS one is a leak: some UI
         // object retains a view whose pane already died (the dock strip,
-        // a stale focusedSurface, a titlebar closure once kept daemons
-        // immortal this way when liveness was ownership, 2026-08-22).
+        // a stale focusedSurface, a titlebar closure).
         var owned = Set<String>()
         for session in sessions.values { owned.formUnion(ownedPaneIds(session)) }
         for session in graveyard.values { owned.formUnion(ownedPaneIds(session)) }
@@ -5949,10 +5927,10 @@ class VigilSessionManager {
         // One daemon = ONE live pane: twin surfaces on one socket replay
         // interleaved frames into garbage (the duplicated-lazygit
         // corruption).
-        // Counted REGARDLESS of window: the twin that wedged panes for
-        // weeks was one windowed view plus one released-but-still-attached
-        // one, so a `window != nil` filter made the very thing this check
-        // exists for invisible (2026-08-24).
+        // Counted REGARDLESS of window: the twin that wedges panes is one
+        // windowed view plus one released-but-still-attached one, so a
+        // `window != nil` filter makes the very thing this check exists
+        // for invisible.
         // A MIRROR is the sanctioned second client (the panel's viewport
         // onto a windowed pane): sized to the home grid, gone with the
         // panel. It is not a twin.
@@ -6304,9 +6282,10 @@ class VigilSessionManager {
     /// `.preferred` biases grouping; the bar itself is forced via the tab
     /// group's public visibility. NEVER while a regroup is in flight:
     /// toggleTabBar during the same transition AppKit uses to install the
-    /// group's own bar leaves TWO bars stacked on one titlebar (AX-verified
-    /// 2026-08-05: a stale solo bar occluding the real tabs, misrouting
-    /// every click on the strip by a few pixels). Existing duplicates heal
+    /// group's own bar leaves TWO bars stacked on one titlebar (a stale
+    /// solo bar occluding the real tabs, misrouting every click on the
+    /// strip by a few pixels; the accessibility tree shows both). Existing
+    /// duplicates heal
     /// here - keep the newest, strip the rest, scream in the log - so a
     /// race that slips through self-corrects at the next sync.
     private func enforceTabBar(_ window: NSWindow) {
@@ -6321,8 +6300,8 @@ class VigilSessionManager {
         if bars.count > 1 {
             // A forced toggle raced that staged install: TWO bars stack
             // on one titlebar, the stale solo bar occluding the real
-            // tabs - no hover feedback, dead clicks on the whole strip
-            // (AX-verified 2026-08-05). Keep the newest (add order),
+            // tabs - no hover feedback, dead clicks on the whole strip.
+            // Keep the newest (add order),
             // strip the rest; re-sync next tick re-forces if needed.
             vlog("enforceTabBar: \(bars.count) tab bars stacked on one titlebar - healing")
             for (index, _) in bars.dropLast().reversed() {
@@ -6391,13 +6370,12 @@ class VigilSessionManager {
         }
     }
 
-    /// Tab presentation. "sidebar" (the DEFAULT since 2026-09-06, Adrian:
-    /// "i dont use tabs at the top"): the sidebar IS the tab UI — a mount
-    /// places only the anchored tab, sibling tabs stay captured (cold,
-    /// daemons running; a sidebar row click mounts them), no native tab
-    /// bar, so a session switch is ONE tree swap with zero window churn
-    /// (the old regroup destroyed and created a window per sibling tab on
-    /// every click). "native" restores ghostty's regular tab windows and
+    /// Tab presentation. "sidebar" (the default): the sidebar IS the tab
+    /// UI — a mount places only the anchored tab, sibling tabs stay warm in
+    /// the held cache or captured (a sidebar row click mounts them), no
+    /// native tab bar, so a session switch is ONE tree swap with zero
+    /// window churn (a regroup creates and destroys a window per sibling
+    /// tab on every click). "native" restores ghostty's regular tab windows and
     /// the forced bar: `defaults write com.mitchellh.ghostty.debug
     /// vigil.tabs native`.
     var nativeTabs: Bool {
@@ -6416,11 +6394,11 @@ class VigilSessionManager {
     /// as their sessions re-mount in sidebar mode).
     private func retireTabBar(_ window: NSWindow) {
         window.tabbingMode = .automatic
-        // The scars enforceTabBar earned apply here too (2026-08-05):
-        // never toggle mid-regroup, and decide from the ACCESSORY (the
-        // staged install's truth), never the group flag alone, which lags
-        // it — a toggle in that gap is how stacked corpse bars are born,
-        // and sidebar mode never runs the healer (review, 2026-09-06).
+        // enforceTabBar's rules apply here too: never toggle mid-regroup,
+        // and decide from the ACCESSORY (the staged install's truth), never
+        // the group flag alone, which lags it — a toggle in that gap is how
+        // stacked corpse bars are born, and sidebar mode never runs the
+        // healer.
         guard regroupsInFlight == 0,
               let group = window.tabGroup, group.windows.count == 1,
               let tw = window as? TerminalWindow else { return }
@@ -6449,7 +6427,7 @@ class VigilSessionManager {
                 .first { $0.element is VigilTitlebarAccessory }
 
             // native mode: the bar is ALWAYS visible (one height
-            // everywhere, Adrian 2026-08-03). sidebar mode: no bar at
+            // everywhere). sidebar mode: no bar at
             // all — equally uniform, and the sidebar carries the tabs.
             if nativeTabs { enforceTabBar(window) } else { retireTabBar(window) }
 
@@ -6557,9 +6535,9 @@ class VigilSessionManager {
             }
             // The counter must clear every index this session has ever
             // used: a mint that reuses an index inherits a dead pane's
-            // resume pointer (rapid-lynx-4 typed `claude --resume` of a
-            // long-dead conversation into itself, 2026-08-09). The floor
-            // covers every index the STATE DIR has ever seen.
+            // resume pointer and resumes a long-dead conversation in a
+            // fresh pane. The floor covers every index the STATE DIR has
+            // ever seen.
             var maxIndex = Self.maxPaneIndexOnDisk(session: entry.name)
             for id in ownedPaneIds(session) {
                 if let n = id.split(separator: "-").last.flatMap({ Int($0) }) {
@@ -6608,8 +6586,7 @@ extension TerminalController {
             // SILENT append: the tab joins the group's bar without
             // showWindow - ordering a tabbed window front SELECTS its
             // tab, and a batch regroup that shows each joiner flashes
-            // every terminal in sequence before the anchored one wins
-            // (the mount "layout-shift festival", Adrian 2026-08-04).
+            // every terminal in sequence before the anchored one wins.
             // The anchored tab stays selected throughout; a silent tab
             // renders when first selected.
             anchorWindow.addTabbedWindowSafely(window, ordered: ordered)

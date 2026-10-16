@@ -120,8 +120,7 @@ enum VigilVoice {
                 // Only a language whose model is on disk can listen: a
                 // chosen one without its model is skipped with a receipt,
                 // never handed to a session that would fail at its first
-                // word (a recipient's dictation "initiated then stopped"
-                // on a Spanish model his Mac never had, 2026-09-15).
+                // word (dictation that "initiates then stops").
                 var locales: [Locale] = []
                 for locale in wanted {
                     if let ready = try? await AssetStore.resolveInstalled(locale) {

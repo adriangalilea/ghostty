@@ -282,8 +282,8 @@ struct SurfaceHost: UIViewRepresentable {
 
     func updateUIView(_ container: SurfaceHostView, context: Context) {
         // A host that is not the presenter keeps its hands off: a tree
-        // refresh re-ran a row's update while the pane screen showed the
-        // view and the row stole it back (the gray OWN screen, 2026-08-29).
+        // refresh re-runs a row's update while the pane screen shows the
+        // view, and the row would steal it back (a gray screen).
         guard visible else { return }
         container.host(view)
         container.presentation = presentation
@@ -482,7 +482,7 @@ struct FitCanvas: UIViewRepresentable {
 
     /// The fit is computed in ITS layout pass (the bounds are a fact
     /// there; in `updateUIView` they are 0 on the first pass and nothing
-    /// re-runs it, the blank fit screen of 2026-08-29).
+    /// re-runs it: a blank fit screen).
     final class ZoomView: UIScrollView {
         let content = SurfaceHostView(purpose: "fit screen")
         var grid: Ghostty.SurfaceView.Grid?
