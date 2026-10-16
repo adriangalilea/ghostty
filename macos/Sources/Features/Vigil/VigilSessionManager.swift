@@ -570,6 +570,10 @@ class VigilSessionManager {
             sessions[name]!.tabs.append(tab)
         }
         vlog("register: '\(name)' += tab \(ids) (\(carried.count) claimed)")
+        // A ⌘T has no caller that persists: unsaved, the tab is invisible to
+        // every other Mac and its daemon an orphan at the next launch. A tick
+        // later, so a mount or regroup in progress finishes first.
+        DispatchQueue.main.async { [weak self] in self?.persist() }
     }
 
     /// A session window's tree EMPTIED by ghostty (its only pane dragged
