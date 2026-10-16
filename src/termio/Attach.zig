@@ -39,7 +39,7 @@ id: []const u8,
 /// Working directory for the daemon's command when we create it.
 cwd: ?[]const u8,
 
-/// VIGIL_SESSION value for the daemon's environment on create.
+/// VIGIL_WORKSPACE value for the daemon's environment on create.
 session: ?[]const u8,
 
 /// The program the daemon runs as its child on create (a session API
@@ -168,7 +168,7 @@ pub fn initTerminal(self: *Attach, term: *terminal.Terminal) void {
 
 fn sockPath(self: *Attach, buf: []u8) ![]const u8 {
     const home = posix.getenv("HOME") orelse return error.NoHome;
-    return std.fmt.bufPrint(buf, "{s}/.local/state/vigild/{s}.sock", .{ home, self.id });
+    return std.fmt.bufPrint(buf, "{s}/.local/state/vigil/panes/{s}.sock", .{ home, self.id });
 }
 
 fn connectSock(self: *Attach) !posix.fd_t {
@@ -196,10 +196,10 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
     for (self.id) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return error.InvalidPane;
 
     var path_buf: [512]u8 = undefined;
-    const path = if (posix.getenv("VIGIL_HARNESS_STATE")) |root|
+    const path = if (posix.getenv("VIGIL_AGENT_STATE")) |root|
         try std.fmt.bufPrint(&path_buf, "{s}/hub.sock", .{root})
     else
-        try std.fmt.bufPrint(&path_buf, "{s}/.local/state/vigil-harness/hub.sock", .{posix.getenv("HOME") orelse return error.NoHome});
+        try std.fmt.bufPrint(&path_buf, "{s}/.local/state/vigil/agent/hub.sock", .{posix.getenv("HOME") orelse return error.NoHome});
     const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
     errdefer posix.close(fd);
     _ = try posix.fcntl(fd, posix.F.SETFD, posix.FD_CLOEXEC);
@@ -250,7 +250,7 @@ fn sendHello(self: *Attach, kind: []const u8) void {
 /// command = the daemon's login shell; a command is the daemon's CHILD
 /// (`<login shell> -lc` for a shell string, verbatim for `direct:` argv),
 /// so the spec records it and `vigild restore` respawns it after a reboot.
-/// Env carries VIGIL_SESSION so claude hooks feed the attention queue
+/// Env carries VIGIL_WORKSPACE so claude hooks feed the attention queue
 /// from birth.
 fn spawnDaemon(self: *Attach) !void {
     var env = try internal_os.getEnvMap(self.alloc);
@@ -259,7 +259,7 @@ fn spawnDaemon(self: *Attach) !void {
     // APP's environment): anything the daemon must inherit is plumbed
     // explicitly. Program-state resurrection is NOT plumbed: the daemon
     // reads its own `<id>.resume`, so it works on every spawn path.
-    if (self.session) |s| try env.put("VIGIL_SESSION", s);
+    if (self.session) |s| try env.put("VIGIL_WORKSPACE", s);
 
     const home = posix.getenv("HOME") orelse return error.NoHome;
     const bin = try std.fmt.allocPrint(self.alloc, "{s}/.local/bin/vigild", .{home});
@@ -764,7 +764,7 @@ pub fn getProcessInfo(self: *Attach, comptime info: ProcessInfo) ?ProcessInfo.Ty
 fn readPidfile(self: *Attach) ?[]u8 {
     const home = posix.getenv("HOME") orelse return null;
     var buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/.local/state/vigild/{s}.pid", .{ home, self.id }) catch return null;
+    const path = std.fmt.bufPrint(&buf, "{s}/.local/state/vigil/panes/{s}.pid", .{ home, self.id }) catch return null;
     return std.fs.cwd().readFileAlloc(self.alloc, path, 256) catch null;
 }
 
@@ -832,7 +832,7 @@ fn readThreadMain(
 fn specExists(self: *Attach) bool {
     const home = posix.getenv("HOME") orelse return false;
     var buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/.local/state/vigild/{s}.spec", .{ home, self.id }) catch return false;
+    const path = std.fmt.bufPrint(&buf, "{s}/.local/state/vigil/panes/{s}.spec", .{ home, self.id }) catch return false;
     std.fs.cwd().access(path, .{}) catch return false;
     return true;
 }

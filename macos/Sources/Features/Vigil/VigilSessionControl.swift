@@ -69,9 +69,9 @@ enum VigilSessionControl {
     static let maxBytes = 65536
     static let lifetime: TimeInterval = 86400
     static var directory: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/wake")
+        VigilPaths.root
     }
-    static var socketPath: String { directory.appendingPathComponent("session-control.sock").path }
+    static var socketPath: String { directory.appendingPathComponent("workspace-control.sock").path }
 
     @MainActor
     static func revision(_ tabs: [Registry.Tab]) -> String {
@@ -191,7 +191,7 @@ enum VigilSessionControl {
             return .init(id: request.id, ok: true, code: "ok", message: "App status.", status: VigilSessionManager.shared.status())
         }
         if request.operation == "describe" { return VigilSessionManager.shared.applySessionCommand(request) }
-        let receipts = directory.appendingPathComponent("session-receipts")
+        let receipts = directory.appendingPathComponent("workspace-receipts")
         let file = receipts.appendingPathComponent(request.id.uuidString + ".json")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

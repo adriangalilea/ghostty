@@ -25,7 +25,7 @@
       <responds-to command="new surface configuration">
         <cocoa method="handleNewSurfaceConfigurationScriptCommand:"/>
       </responds-to>
-      <responds-to command="new session">
+      <responds-to command="new workspace">
         <cocoa method="handleNewSessionScriptCommand:"/>
       </responds-to>
       <responds-to command="quit">
@@ -176,12 +176,12 @@
       <result type="window" description="The newly created window."/>
     </command>
 
-    <record-type name="session" code="GSsn" description="A vigil session identity: the opaque id and its human label.">
-      <property name="name" code="GSsN" type="text" description="The session id (random adjective-noun, the identity)."/>
+    <record-type name="workspace" code="GSsn" description="A vigil workspace identity: the opaque id and its human label.">
+      <property name="name" code="GSsN" type="text" description="The workspace id (random adjective-noun, the identity)."/>
       <property name="label" code="GSsL" type="text" description="The human label."/>
     </record-type>
 
-    <command name="new session" code="GhstNSes" description="Create a vigil session: it exists AND runs from this moment — its daemon-backed pane spawns at birth and survives window close, quit and reboot. The command, if any, is the pane's process, never typed.">
+    <command name="new workspace" code="GhstNSes" description="Create a vigil workspace: it exists AND runs from this moment — its daemon-backed pane spawns at birth and survives window close, quit and reboot. The command, if any, is the pane's process, never typed.">
       <parameter name="label" code="GSlb" type="text" optional="yes" description="Human label (the id stays the identity).">
         <cocoa key="label"/>
       </parameter>
@@ -191,10 +191,10 @@
       <parameter name="command" code="GScm" type="text" optional="yes" description="Program to run as the pane's process instead of the login shell.">
         <cocoa key="command"/>
       </parameter>
-      <parameter name="open window" code="GSow" type="boolean" optional="yes" description="true opens a new window on it; default false — the session appears in every sidebar and its processes run regardless.">
+      <parameter name="open window" code="GSow" type="boolean" optional="yes" description="true opens a new window on it; default false — the workspace appears in every sidebar and its processes run regardless.">
         <cocoa key="openWindow"/>
       </parameter>
-      <result type="session" description="The minted session."/>
+      <result type="workspace" description="The minted workspace."/>
     </command>
 
     <command name="new tab" code="GhstNTab" description="Create a new Ghostty tab.">

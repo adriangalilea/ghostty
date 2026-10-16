@@ -195,7 +195,7 @@ final class VigilPhone: ObservableObject {
                 case .directory:
                     guard let dir = step.directory else { continue }
                     if self.directories[host.id] == nil {
-                        self.log("dir: \(host.name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
+                        self.log("dir: \(host.name) = \(dir.host), \(dir.workspaces.count) workspaces, \(dir.panes.count) panes")
                     }
                     self.errors[host.id] = nil
                     self.directories[host.id] = dir

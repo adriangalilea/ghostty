@@ -26,7 +26,7 @@ import VigilWire
 ///              undisplayed so re-display is instant), never a state.
 ///
 /// Identity is pointer-not-value: `name` is the stable key (a random
-/// adjective-noun; feeds VIGIL_SESSION and the wake registry), `label` is the
+/// adjective-noun; feeds VIGIL_WORKSPACE and the registry), `label` is the
 /// human device. Tabs and splits are structure INSIDE the session, never
 /// identities: a new tab joins its window's session, a dragged-out tab mints
 /// a new session (reconcileTabs).
@@ -45,8 +45,12 @@ import VigilWire
 /// graveyard (120s undo), and a reap kills daemons deterministically and
 /// verifies they died. Daemon lifetime never depends on ARC.
 ///
-/// Durable state lives in the wake registry (~/.local/state/wake), maintained
+/// Durable state lives in vigil's one folder (`VigilPaths`), maintained
 /// event-driven by agent adapters.
+// PURGE(after W): this manager's own identifiers still say "session"
+// (VigilSessionManager, Session, sessions, the files' names) for a
+// workspace; they are renamed when it is split into the workspace store,
+// viewports, graveyard and attention.
 @MainActor
 class VigilSessionManager {
     static let shared = VigilSessionManager()
@@ -124,15 +128,15 @@ class VigilSessionManager {
     /// The home stores the exact observed state revision. File timestamps are
     /// presentation clocks, never authority to acknowledge a later state.
     private func stateRevision(_ pane: String) -> String? {
-        facts.files["wake/state/\(pane).state"]?.revision
+        facts.files["state/\(pane).state"]?.revision
     }
 
     func lastAck(_ pane: String) -> Date? {
         if let remote = VigilRemote.split(pane) {
             return VigilRemote.shared.host(remote.device)?.directory?.panes[remote.name]?.seen.map(Date.init(timeIntervalSince1970:))
         }
-        guard let state = facts.files["wake/state/\(pane).state"],
-              facts.files["wake/state/\(pane).seen"]?.text.trimmingCharacters(in: .whitespacesAndNewlines) == state.revision
+        guard let state = facts.files["state/\(pane).state"],
+              facts.files["state/\(pane).seen"]?.text.trimmingCharacters(in: .whitespacesAndNewlines) == state.revision
         else { return nil }
         return state.since
     }
@@ -360,8 +364,7 @@ class VigilSessionManager {
     }
 
     private var persistURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/vigil.json")
+        VigilPaths.registry
     }
 
     /// The last good workspace, kept beside the live one. Loaded only when
@@ -381,8 +384,7 @@ class VigilSessionManager {
     /// can be born the same second. First instance wins the flock; a
     /// duplicate activates the holder and exits before touching anything.
     private func acquireInstanceLock() {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake")
+        let dir = VigilPaths.root
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // O_CLOEXEC or every spawned vigild inherits the fd and HOLDS THE
         // FLOCK after the app dies, locking the app out of its own lock:
@@ -935,7 +937,7 @@ class VigilSessionManager {
     }
 
     /// The reboot mirror of ownership: the daemon's spec carries its
-    /// owner (VIGIL_SESSION for `vigild restore`), rewritten at every
+    /// owner (VIGIL_WORKSPACE for `vigild restore`), rewritten at every
     /// claim. Write-only from here; never read back to second-guess the
     /// registry.
     private func chown(_ id: String, to owner: String) {
@@ -944,8 +946,7 @@ class VigilSessionManager {
 
     /// THE vigild path: every spawn (chown, sendraw, restore) and
     /// VigilVoice's inject derive it here, nowhere else.
-    static let vigildBin = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".local/bin/vigild").path
+    static let vigildBin = VigilPaths.vigild.path
 
     // MARK: Recency (the successor order when the session you are in dies)
 
@@ -972,8 +973,7 @@ class VigilSessionManager {
     // MARK: Attention (fed by agent adapters through the wake events log)
 
     private var eventsURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/events.jsonl")
+        VigilPaths.events
     }
 
     private var eventsOffset: UInt64 = 0
@@ -984,8 +984,7 @@ class VigilSessionManager {
     /// daemon) is exactly the attention a relaunch must surface. Only ancient
     /// history (pre-truncation) is not pending.
     private var eventsOffsetURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/events.offset")
+        VigilPaths.root.appendingPathComponent("events.offset")
     }
 
     private struct WakeEvent: Decodable {
@@ -1002,7 +1001,7 @@ class VigilSessionManager {
         /// spoken ask for a prompt answered hours ago is a ghost.
         let ts: String?
         /// The vigild pane daemon the agent lives in. Ground truth for
-        /// ownership: VIGIL_SESSION in the process env is stamped at birth
+        /// ownership: VIGIL_WORKSPACE in the process env is stamped at birth
         /// and goes stale when a tab is dragged into another session.
         let pane: String?
     }
@@ -1117,7 +1116,7 @@ class VigilSessionManager {
             if let device = view.vigilHost {
                 raw = VigilRemote.shared.host(device)?.directory?.panes[id]?.size ?? ""
             } else {
-                raw = facts.files["vigild/\(id).size"]?.text ?? ""
+                raw = facts.files["panes/\(id).size"]?.text ?? ""
             }
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             let parts = line.split(separator: " ", maxSplits: 2)
@@ -1166,7 +1165,7 @@ class VigilSessionManager {
     /// first agreement per surface logs once, proving the mechanism.
     private func checkScreen(_ view: Ghostty.SurfaceView, id: String) {
         guard let surface = view.surface,
-              let daemon = facts.files["vigild/\(id).screen"]?.text
+              let daemon = facts.files["panes/\(id).screen"]?.text
                 .trimmingCharacters(in: .whitespacesAndNewlines), !daemon.isEmpty else { return }
         let stable = daemon == view.vigilScreenSeen
         view.vigilScreenSeen = daemon
@@ -1191,7 +1190,7 @@ class VigilSessionManager {
             } else if view.vigilScreenResyncs == 3 {
                 // Leave the evidence: this view's text on disk, the
                 // daemon's one command away.
-                let out = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/wake/dumps/\(id).view.txt")
+                let out = VigilPaths.dumps.appendingPathComponent("\(id).view.txt")
                 var s = ghostty_surface_vigil_screen_text(surface)
                 if let p = s.ptr { try? String(cString: p).write(to: out, atomically: true, encoding: .utf8) }
                 ghostty_string_free(s)
@@ -1852,7 +1851,7 @@ class VigilSessionManager {
     @discardableResult
     func openRemotePane(device: String, pane: String) -> TerminalController? {
         guard let directory = VigilRemote.shared.host(device)?.directory,
-              let session = directory.sessions.first(where: { session in (session.tabs ?? []).contains { $0.paneIds.contains(pane) } }) else {
+              let session = directory.workspaces.first(where: { session in (session.tabs ?? []).contains { $0.paneIds.contains(pane) } }) else {
             vlog("handoff: remote \(device)/\(pane) refused; pane absent from directory")
             return nil
         }
@@ -2147,8 +2146,8 @@ class VigilSessionManager {
     // MARK: Lifecycle
 
     /// Stamp a fresh window's config so it is daemon-backed from birth (a
-    /// vigild attach id + VIGIL_SESSION). Returns nil when the config already
-    /// carries vigil identity (attach id or VIGIL_SESSION: create,
+    /// vigild attach id + VIGIL_WORKSPACE). Returns nil when the config already
+    /// carries vigil identity (attach id or VIGIL_WORKSPACE: create,
     /// resurrection and tab paths handled it), so this only augments plain
     /// windows (⌘N, the startup window, dock reopen). Pair with
     /// registerSession once the controller exists.
@@ -2156,14 +2155,14 @@ class VigilSessionManager {
         base: Ghostty.SurfaceConfiguration?
     ) -> (config: Ghostty.SurfaceConfiguration, name: String, cwd: String)? {
         if base?.vigilAttach != nil { return nil }
-        if base?.environmentVariables["VIGIL_SESSION"] != nil { return nil }
+        if base?.environmentVariables["VIGIL_WORKSPACE"] != nil { return nil }
         let cwd = base?.workingDirectory
             ?? TerminalController.preferredParent?.focusedSurface?.pwd
             ?? FileManager.default.homeDirectoryForCurrentUser.path
         let name = newSessionId()
         var config = base ?? Ghostty.SurfaceConfiguration()
         config.workingDirectory = cwd
-        config.environmentVariables["VIGIL_SESSION"] = name
+        config.environmentVariables["VIGIL_WORKSPACE"] = name
         config.vigilAttach = "vigil-\(name)-0"
         return (config, name, cwd)
     }
@@ -2215,7 +2214,7 @@ class VigilSessionManager {
 
     /// Start a pane's daemon headless (`vigild new <id> [-c cmd]`): the
     /// process half of creation. The app's own environment flows (plus
-    /// VIGIL_SESSION), the same contract as the attach backend's spawn;
+    /// VIGIL_WORKSPACE), the same contract as the attach backend's spawn;
     /// vigild scrubs agent ancestry itself. Failure screams — a created
     /// session that is not running is the lie this call exists to kill.
     @discardableResult
@@ -2236,7 +2235,7 @@ class VigilSessionManager {
         proc.arguments = args
         proc.currentDirectoryURL = URL(fileURLWithPath: pane.cwd)
         var env = ProcessInfo.processInfo.environment
-        env["VIGIL_SESSION"] = session
+        env["VIGIL_WORKSPACE"] = session
         proc.environment = env
         do {
             try proc.run()
@@ -2285,14 +2284,14 @@ class VigilSessionManager {
         base: Ghostty.SurfaceConfiguration?
     ) -> (config: Ghostty.SurfaceConfiguration, name: String)? {
         if base?.vigilAttach != nil { return nil }
-        if base?.environmentVariables["VIGIL_SESSION"] != nil { return nil }
+        if base?.environmentVariables["VIGIL_WORKSPACE"] != nil { return nil }
         guard let name = sessionName(of: parent) else { return nil }
         var config = base ?? Ghostty.SurfaceConfiguration()
         if config.workingDirectory == nil {
             config.workingDirectory = parent.focusedSurface?.pwd
                 ?? FileManager.default.homeDirectoryForCurrentUser.path
         }
-        config.environmentVariables["VIGIL_SESSION"] = name
+        config.environmentVariables["VIGIL_WORKSPACE"] = name
         config.vigilAttach = "vigil-\(name)-\(nextPaneIndex(name: name))"
         return (config, name)
     }
@@ -2312,7 +2311,7 @@ class VigilSessionManager {
         guard config.vigilAttach == nil else { return config }
 
         config.vigilAttach = "vigil-\(name)-\(nextPaneIndex(name: name))"
-        config.environmentVariables["VIGIL_SESSION"] = name
+        config.environmentVariables["VIGIL_WORKSPACE"] = name
         if config.workingDirectory == nil {
             config.workingDirectory = oldView.pwd
         }
@@ -2457,8 +2456,7 @@ class VigilSessionManager {
 
     /// Per-session state directory: VT dumps + frozen thumbnail.
     private func dumpsDir(_ name: String) -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/dumps/\(name)")
+        VigilPaths.dumps.appendingPathComponent(name)
     }
 
     /// The name to REMEMBER for a live pane: its terminal title, which is
@@ -2666,7 +2664,7 @@ class VigilSessionManager {
     private func resurrectConfig(name: String, pane: Registry.Pane) -> Ghostty.SurfaceConfiguration {
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = pane.cwd
-        config.environmentVariables["VIGIL_SESSION"] = name
+        config.environmentVariables["VIGIL_WORKSPACE"] = name
         config.vigilAttach = pane.id
         config.command = pane.command
         return config
@@ -4201,7 +4199,7 @@ class VigilSessionManager {
             }
             persist()
             guard let data = try? Data(contentsOf: persistURL),
-                  let saved = try? JSONDecoder().decode([Registry.Session].self, from: data),
+                  let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
                   saved.contains(where: { $0.name == name && $0.tabs?.first?.panes.first?.id == pane.id }) else {
                 return .failure(request, "commit_failed", "The new workspace could not be confirmed on its Mac.")
             }
@@ -4321,7 +4319,7 @@ class VigilSessionManager {
         persist()
         // Success is the committed registry, not merely a spawned process.
         guard let data = try? Data(contentsOf: persistURL),
-              let saved = try? JSONDecoder().decode([Registry.Session].self, from: data),
+              let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
               VigilSessionControl.revision(saved.first { $0.name == request.session && $0.buriedUntil == nil }?.tabs ?? [])
                 == VigilSessionControl.revision(session.tabs) else {
             return .failure(request, "commit_failed", "The change could not be confirmed on its Mac. Check the workspace there before retrying.")
@@ -4893,7 +4891,7 @@ class VigilSessionManager {
     }
 
     /// Spawn a new dock tenant: an ordinary daemon-backed pane (own vigild
-    /// daemon, VIGIL_SESSION stamped) rooted in the tab's cwd, registered
+    /// daemon, VIGIL_WORKSPACE stamped) rooted in the tab's cwd, registered
     /// in the tab's dock the moment it is born.
     @discardableResult
     func addDockTenant(_ controller: TerminalController) -> Ghostty.SurfaceView? {
@@ -4905,7 +4903,7 @@ class VigilSessionManager {
         let id = "vigil-\(name)-\(nextPaneIndex(name: name))"
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = cwd
-        config.environmentVariables["VIGIL_SESSION"] = name
+        config.environmentVariables["VIGIL_WORKSPACE"] = name
         config.vigilAttach = id
         let view = Ghostty.SurfaceView(app, baseConfig: config)
         let runtime = dockMap.object(forKey: controller) ?? {
@@ -4965,16 +4963,14 @@ class VigilSessionManager {
     // MARK: Process truth (the daemons' tree/died files, surfaced)
 
     private var vigildStateDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/vigild")
+        VigilPaths.panes
     }
 
     /// A pane's daemon is alive exactly while it holds `<id>.lock`
     /// (vigild's liveness, PROTOCOL.md). A pidfile is a receipt for
     /// viewers and outlives a SIGKILL, so it never answers this.
     nonisolated static func daemonAlive(_ id: String) -> Bool {
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/vigild/\(id).lock").path
+        let path = VigilPaths.panes.appendingPathComponent("\(id).lock").path
         let fd = Darwin.open(path, O_RDONLY | O_CLOEXEC)
         guard fd >= 0 else { return false }
         defer { Darwin.close(fd) }
@@ -4990,7 +4986,7 @@ class VigilSessionManager {
         let revision: String
     }
     private func paneFileLines(_ pane: String, _ ext: String) -> [String] {
-        facts.files["vigild/\(pane).\(ext)"]?.lines ?? []
+        facts.files["panes/\(pane).\(ext)"]?.lines ?? []
     }
 
     /// argv column of a tree/died file. Line 1 is the daemon's child: a
@@ -5088,8 +5084,7 @@ class VigilSessionManager {
     }
 
     private var agentStateDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/state")
+        VigilPaths.state
     }
 
     private func startStateDirWatcher() {
@@ -5127,7 +5122,7 @@ class VigilSessionManager {
                   let token = truth.token, let revision = truth.stateRevision else { return nil }
             return PaneState(state: token.state, flavor: token.flavor, since: Date(timeIntervalSince1970: truth.since ?? 0), revision: revision)
         }
-        guard let file = facts.files["wake/state/\(pane).state"] else { return nil }
+        guard let file = facts.files["state/\(pane).state"] else { return nil }
         guard let token = StateToken(file.text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             vlog("!! state: \(pane).state reads '\(file.text)', not a state")
             return nil
@@ -5762,12 +5757,12 @@ class VigilSessionManager {
     private var boardWatch: DispatchSourceFileSystemObject?
 
     private func watchPhoneFollows() {
-        let fd = Darwin.open(HarnessPaths.root.path, O_EVTONLY)
-        guard fd >= 0 else { return vlog("!! follow: cannot watch \(HarnessPaths.root.path) (errno \(errno))") }
+        let fd = Darwin.open(VigilPaths.agent.path, O_EVTONLY)
+        guard fd >= 0 else { return vlog("!! follow: cannot watch \(VigilPaths.agent.path) (errno \(errno))") }
         let watch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .global(qos: .utility))
         let read: @Sendable () -> Void = {
             struct Phone: Decodable { var follows: [String] }
-            let follows = (try? Data(contentsOf: HarnessPaths.root.appendingPathComponent("board-status.json")))
+            let follows = (try? Data(contentsOf: VigilPaths.agent.appendingPathComponent("board-status.json")))
                 .flatMap { try? JSONDecoder().decode([Phone].self, from: $0) }
                 .map { Set($0.flatMap(\.follows)) } ?? []
             DispatchQueue.main.async { VigilSessionManager.shared.phoneFollows = follows }
@@ -5786,7 +5781,7 @@ class VigilSessionManager {
     nonisolated func followOnPhones(pane: String, _ on: Bool) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let phones = try Local.Client(socket: HarnessPaths.hub).follow(pane: pane, on)
+                let phones = try Local.Client(socket: VigilPaths.hub).follow(pane: pane, on)
                 Self.vlogSync("follow: \(pane) \(on ? "followed" : "no longer followed") on \(phones.joined(separator: ", "))")
             } catch {
                 Self.vlogSync("!! follow: \(pane) not \(on ? "followed" : "unfollowed") on the phones (\(error))")
@@ -5927,7 +5922,7 @@ class VigilSessionManager {
 
     // MARK: Instrumentation
 
-    /// Append-only lifecycle trace at ~/.local/state/wake/vigil.log. Every
+    /// Append-only lifecycle trace at vigil.log in vigil's folder. Every
     /// session transition is recorded so an impossible state is caught the
     /// moment it appears instead of being guessed at from a screenshot.
     /// Dev builds only: a public (Release) build writes nothing to disk.
@@ -5947,12 +5942,12 @@ class VigilSessionManager {
         let line = "\(stamp) \(msg)\n"
         // Bounded like every append-only log: past 16 MB the file becomes
         // vigil.1.log (one generation) and a fresh one opens.
-        let path = NSHomeDirectory() + "/.local/state/wake/vigil.log"
+        let path = VigilPaths.root.appendingPathComponent("vigil.log").path
         var fd = Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
         var info = stat()
         if fd >= 0, fstat(fd, &info) == 0, info.st_size > 16 << 20 {
             close(fd)
-            _ = Darwin.rename(path, NSHomeDirectory() + "/.local/state/wake/vigil.1.log")
+            _ = Darwin.rename(path, VigilPaths.root.appendingPathComponent("vigil.1.log").path)
             fd = Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
         }
         if fd >= 0 {
@@ -6191,8 +6186,7 @@ class VigilSessionManager {
     /// bounded cache from their stable prompt hook, so Vigil never depends on
     /// an agent vendor's private transcript schema.
     private func agentAsks(ofPane pane: String, limit: Int) -> [String] {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/wake/sessions")
+        let dir = VigilPaths.conversations
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
         else { return [] }
         for entry in entries where entry.hasSuffix("--\(pane).json") {
@@ -6335,10 +6329,10 @@ class VigilSessionManager {
         if publish { refreshLiveFacts() }
         refreshSessionRevisions()
         var entries = sessions.values.map {
-            Registry.Session(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
         }
         entries += graveyard.values.map {
-            Registry.Session(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
@@ -6582,8 +6576,7 @@ class VigilSessionManager {
     /// The highest pane index any state file on disk records for a session:
     /// pidfiles, specs, resume pointers, trees, mail, tombstones alike.
     private static func maxPaneIndexOnDisk(session: String) -> Int {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/vigild")
+        let dir = VigilPaths.panes
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
         else { return -1 }
         let prefix = "vigil-\(session)-"
@@ -6602,10 +6595,10 @@ class VigilSessionManager {
         // is the workspace. A live file that decodes always wins, even if
         // the backup is newer, because the backup IS an older live file.
         var payload = try? Data(contentsOf: persistURL)
-        var decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Session].self, from: $0) }
+        var decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Workspace].self, from: $0) }
         if decoded == nil {
             payload = try? Data(contentsOf: persistBackupURL)
-            decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Session].self, from: $0) }
+            decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Workspace].self, from: $0) }
             if decoded != nil {
                 vlog("!! load: vigil.json unreadable, recovered the workspace from vigil.json.bak")
             }

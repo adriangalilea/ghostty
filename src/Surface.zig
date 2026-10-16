@@ -654,7 +654,7 @@ pub fn init(
                 break :backend .{ .attach = try termio.Attach.init(alloc, .{
                     .id = attach_id,
                     .cwd = if (config.@"working-directory") |wd| wd.value() else null,
-                    .session = config.env.map.get("VIGIL_SESSION"),
+                    .session = config.env.map.get("VIGIL_WORKSPACE"),
                     .command = if (config.@"vigil-command") |c| .{ .shell = c } else null,
                     .host = config.@"vigil-host",
                     .fd = if (config.@"vigil-fd" >= 0) @intCast(config.@"vigil-fd") else null,

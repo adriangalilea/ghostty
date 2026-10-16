@@ -29,7 +29,7 @@ final class VigilRemote: ObservableObject {
     @Published private(set) var hosts: [Host] = []
     static var trace: ((String) -> Void)?
 
-    private nonisolated static let hub = Local.Client(socket: HarnessPaths.hub)
+    private nonisolated static let hub = Local.Client(socket: VigilPaths.hub)
     private var started = false
     private var stopped = false
     /// Each Mac's directory, followed by the hub (its socket to the hub):
@@ -109,7 +109,7 @@ final class VigilRemote: ObservableObject {
     private var hubWatch: DispatchSourceFileSystemObject?
     private func awaitHub() {
         guard !stopped, hubWatch == nil else { return }
-        let dir = (HarnessPaths.hub as NSString).deletingLastPathComponent
+        let dir = (VigilPaths.hub as NSString).deletingLastPathComponent
         let fd = open(dir, O_EVTONLY)
         guard fd >= 0 else {
             Self.trace?("!! remote: cannot watch \(dir) (errno \(errno)); the other Macs stay out of reach until relaunch")
@@ -207,7 +207,7 @@ final class VigilRemote: ObservableObject {
         return reply
     }
 
-    func session(_ composite: String) -> (device: String, session: Registry.Session)? {
+    func session(_ composite: String) -> (device: String, session: Registry.Workspace)? {
         guard let (device, name) = Self.split(composite),
               let session = host(device)?.directory?.live.first(where: { $0.name == name })
         else { return nil }
@@ -223,8 +223,8 @@ final class VigilRemote: ObservableObject {
         // A receipt per SHAPE change (a session or pane came or went), not
         // per state flip: the stream delivers every flip and a busy fleet
         // would write the log a few times a second.
-        let shape = (dir.sessions.count, dir.panes.count)
-        let before = hosts[index].directory.map { ($0.sessions.count, $0.panes.count) }
+        let shape = (dir.workspaces.count, dir.panes.count)
+        let before = hosts[index].directory.map { ($0.workspaces.count, $0.panes.count) }
         arrivals = arrivals.filter { entry in
             guard let split = Self.split(entry.key), split.device == device else { return true }
             return dir.panes[split.name] != nil
@@ -233,7 +233,7 @@ final class VigilRemote: ObservableObject {
         VigilSessionManager.shared.remoteDirectoryChanged(device)
         hosts[index].error = nil
         if before.map({ $0 != shape }) ?? true {
-            Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
+            Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.workspaces.count) sessions, \(dir.panes.count) panes")
         }
         NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
     }

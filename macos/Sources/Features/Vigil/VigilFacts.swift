@@ -36,9 +36,11 @@ final class VigilFacts: @unchecked Sendable {
     private var processes: [Int32: DispatchSourceProcess] = [:]
     private var pending = false
     private var stopped = false
-    private static let folders = ["vigild", "wake/state", "wake/leases"]
+    /// Under vigil's one folder (VigilPaths): each pane's daemon files, its
+    /// agent state and seen mark, the watch leases.
+    private static let folders = ["panes", "state", "leases"]
 
-    init(root: String = NSHomeDirectory() + "/.local/state",
+    init(root: String = NSHomeDirectory() + "/.local/state/vigil",
          beforeRead: @escaping @Sendable () -> Void = {},
          trace: @escaping @Sendable (String) -> Void,
          deliver: @escaping @Sendable (Snapshot) -> Void) {
@@ -64,7 +66,7 @@ final class VigilFacts: @unchecked Sendable {
         guard !pane.isEmpty, !pane.contains("/"), !pane.hasPrefix(".") else { return }
         queue.async {
             guard !self.stopped else { return }
-            let path = self.root + "/wake/state/" + pane
+            let path = self.root + "/state/" + pane
             guard Self.read(path + ".state")?.revision == revision else { return }
             if Self.read(path + ".seen")?.text.trimmingCharacters(in: .whitespacesAndNewlines) == revision { return }
             do {
@@ -116,15 +118,15 @@ final class VigilFacts: @unchecked Sendable {
             let names = (try? FileManager.default.contentsOfDirectory(atPath: root + "/" + folder)) ?? []
             for name in names {
                 let ext = name.split(separator: ".").last.map(String.init) ?? ""
-                let wanted = folder == "vigild" ? ["pid", "tree", "died", "size", "screen", "viewers"].contains(ext)
-                    : folder == "wake/state" ? ["state", "seen"].contains(ext) : ext == "json"
+                let wanted = folder == "panes" ? ["pid", "tree", "died", "size", "screen", "viewers"].contains(ext)
+                    : folder == "state" ? ["state", "seen"].contains(ext) : ext == "json"
                 guard wanted else { continue }
                 let key = folder + "/" + name
                 if let file = Self.read(root + "/" + key, previous: current.files[key]) { files[key] = file }
             }
         }
         var leases: [Lease] = []
-        for (key, file) in files where key.hasPrefix("wake/leases/") {
+        for (key, file) in files where key.hasPrefix("leases/") {
             guard let lease = try? JSONDecoder().decode(Lease.self, from: file.data) else { continue }
             if kill(lease.pid, 0) == 0 { leases.append(lease) } else {
                 try? FileManager.default.removeItem(atPath: root + "/" + key)
@@ -164,7 +166,7 @@ final class VigilFacts: @unchecked Sendable {
     }
 
     private static func sidebarKey(_ key: String) -> Bool {
-        !(key.hasPrefix("vigild/") && (key.hasSuffix(".size") || key.hasSuffix(".screen")))
+        !(key.hasPrefix("panes/") && (key.hasSuffix(".size") || key.hasSuffix(".screen")))
     }
 
     private static func read(_ path: String, previous: File? = nil) -> File? {
