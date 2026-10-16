@@ -15,7 +15,8 @@ import WidgetKit
 ///   Allow / Deny when one tap may answer it (through authz, unlocked);
 /// - done and idle: its last words.
 ///
-/// Reply (a line typed into the pane) and Open are always one tap away.
+/// Reply (the pane opens with its keyboard up) and Open are always one tap
+/// away.
 /// Every word beyond the state arrives sealed to this phone (`Detail`) and
 /// is opened here with the app's key; without it the activity shows the
 /// state alone. Within Apple's limits: 160 pt tall on the Lock Screen,
@@ -172,7 +173,7 @@ private struct StateContent: View {
 }
 
 /// What it does now: the status line's verb in the state's color, its
-/// first fact ("↓ 9.4k tokens") as a chip, and the context; a tool line
+/// facts ("↓ 9.4k tokens", "thinking"; two at most) as chips; a tool line
 /// ("$ bun test") whole, monospaced when it is a command.
 private struct Now: View {
     let text: String

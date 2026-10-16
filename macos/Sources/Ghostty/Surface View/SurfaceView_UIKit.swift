@@ -33,8 +33,6 @@ extension Ghostty {
 
         @Published var title: String = "👻"
         @Published var bell: Bool = false
-        /// The stream ended (EOF from the daemon or the transport).
-        @Published private(set) var ended: (exitCode: Int, runtimeMs: Int)?
 
         private(set) var _surface: ghostty_surface_t?
         override var surface: ghostty_surface_t? { _surface }
@@ -163,15 +161,6 @@ extension Ghostty {
             guard let px = framebuffer(scale: scale) else { return nil }
             return CGSize(width: CGFloat(px.w) / scale * presentation.scale,
                           height: CGFloat(px.h) / scale * presentation.scale)
-        }
-
-        /// The cell size in POINTS at the applied scale, synchronously from
-        /// the core.
-        var liveCell: CGSize {
-            guard let surface else { return .zero }
-            let s = ghostty_surface_size(surface)
-            guard s.cell_width_px > 0, s.cell_height_px > 0 else { return .zero }
-            return CGSize(width: CGFloat(s.cell_width_px) / appliedScale, height: CGFloat(s.cell_height_px) / appliedScale)
         }
 
         // MARK: Facts set by the screen
@@ -606,7 +595,6 @@ extension Ghostty {
         var onStreamEnd: (() -> Void)?
 
         func streamDidEnd(exitCode: Int, runtimeMs: Int) {
-            ended = (exitCode, runtimeMs)
             receipt("stream ended exit \(exitCode) after \(runtimeMs)ms")
             onStreamEnd?()
         }

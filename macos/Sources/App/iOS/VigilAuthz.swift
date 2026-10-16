@@ -2,7 +2,6 @@ import AuthzEndpoint
 import AuthzGlance
 import AuthzProtocol
 import OSLog
-import SwiftUI
 import UIKit
 import UserNotifications
 import VigilActivity
@@ -12,10 +11,10 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
 
 /// vigil for iPhone as an authz endpoint ("vigil on <phone>"), beside Authz
 /// for iPhone on the same device. It presents only what it claims: the
-/// panes of the sessions you follow, whose questions it shows in their own
-/// session Live Activity and answers through authz. Everything else stays
+/// panes of what you follow (a session, a tab, a pane), whose questions it
+/// shows in their Live Activity and answers through authz. Everything else stays
 /// Authz's (authz.space README "Context claims: one presenter per device").
-@MainActor final class VigilAuthz: ObservableObject {
+@MainActor final class VigilAuthz {
     static let shared = VigilAuthz()
 
     let runtime = EndpointRuntime(

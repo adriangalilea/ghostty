@@ -161,8 +161,8 @@ final class VigilSidebarCollapse: ObservableObject {
     @Published var tabs: Set<String> {
         didSet { UserDefaults.standard.set(Array(tabs), forKey: "vigil.sidebar.collapsedTabs") }
     }
-    /// Remote host groups (VigilRemote), keyed by ssh alias: a whole other
-    /// Mac folds under its header.
+    /// Remote host groups (VigilRemote), keyed by the Mac's tether root: a
+    /// whole other Mac folds under its header.
     @Published var hosts: Set<String> {
         didSet { UserDefaults.standard.set(Array(hosts), forKey: "vigil.sidebar.collapsedHosts") }
     }

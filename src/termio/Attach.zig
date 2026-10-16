@@ -448,7 +448,7 @@ pub fn vigilClaim(self: *Attach, claim: bool) void {
 }
 
 test "Vigil remote focus cannot claim; only input intent can" {
-    var attach = try Attach.init(std.testing.allocator, .{ .id = "test", .host = "m4" });
+    var attach = try Attach.init(std.testing.allocator, .{ .id = "test", .host = "19a204d11b9198077eb1feb2eae429bf81d6d269df9b790ed38bdcc4035fcaa5" });
     defer attach.deinit();
     attach.write_fd = 1; // Inspect the queue; no writer is started.
     var td: termio.Termio.ThreadData = undefined;
@@ -528,7 +528,7 @@ test "Vigil transport receipts count queued and written frames without contents"
     const pipe = try posix.pipe();
     defer posix.close(pipe[0]);
     defer posix.close(pipe[1]);
-    var attach = try Attach.init(std.testing.allocator, .{ .id = "test", .host = "m4" });
+    var attach = try Attach.init(std.testing.allocator, .{ .id = "test", .host = "19a204d11b9198077eb1feb2eae429bf81d6d269df9b790ed38bdcc4035fcaa5" });
     defer attach.deinit();
     attach.write_fd = pipe[1];
     attach.enqueueFrame('d', "abc");
@@ -799,8 +799,9 @@ fn readThreadMain(
         termio.Exec.ReadThread.threadMainPosix(current_fd, io, quit_dup);
         if (closing.load(.acquire)) return;
         self.transport_state.store(2, .release);
-        // SSH EOF says nothing about the home process. Keep its last screen;
-        // the Mac viewport shows connection loss and offers an explicit reconnect.
+        // A remote stream's EOF (the hub, over tether) says nothing about
+        // the home process. Keep its last screen; the Mac viewport shows
+        // connection loss and offers an explicit reconnect.
         if (self.host != null) return;
         // The phone's stream is the embedder's; it reconnects on its own.
         if (self.given_fd != null) break;

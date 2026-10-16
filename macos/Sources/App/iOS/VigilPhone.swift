@@ -80,13 +80,14 @@ final class VigilPhone: ObservableObject {
         var since: Double?
         var seen: Double?
         /// What a row shows, the ONE reading every viewport gives the
-        /// directory: `working unknown` is the harness's uncertainty, not
-        /// work; done/blocked already seen anywhere (seen >= since) is idle.
+        /// directory: `working unknown` / `working interrupting` are the
+        /// harness's uncertainty, not work; done/blocked already seen
+        /// anywhere (seen >= since) is idle.
         var displayState: String? {
             guard let state else { return nil }
             let parts = state.split(separator: " ").map(String.init)
             guard let first = parts.first else { return nil }
-            if first == "working", parts.count > 1, parts[1] == "unknown" { return "unknown" }
+            if first == "working", parts.count > 1, parts[1] == "unknown" || parts[1] == "interrupting" { return "unknown" }
             if first == "done" || first == "blocked", let seen, let since, seen >= since { return "idle" }
             return first
         }
