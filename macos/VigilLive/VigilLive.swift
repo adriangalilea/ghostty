@@ -376,16 +376,24 @@ private struct Subtitle: View {
 private struct Clock: View {
     let row: Agents.Row
     static let lifetime: TimeInterval = 12 * 3600
+    /// Working: the turn's own start, or nothing (a turn that began before
+    /// vigil saw it has no clock, never a guessed one). Otherwise: when the
+    /// state began, as its pane's Mac recorded it.
+    private var since: Date? {
+        let start = row.state == .working ? row.detail?.turn : row.since
+        return start.map { Date(timeIntervalSince1970: $0) }
+    }
     var body: some View {
-        let since = Date(timeIntervalSince1970: row.state == .working ? row.detail?.turn ?? row.since : row.since)
-        Text("0:00:00")
-            .monospacedDigit()
-            .hidden()
-            .overlay(alignment: .leading) {
-                Text(timerInterval: since...since.addingTimeInterval(Self.lifetime), countsDown: false)
-                    .monospacedDigit()
-                    .foregroundStyle(row.state.tint)
-            }
+        if let since {
+            Text("0:00:00")
+                .monospacedDigit()
+                .hidden()
+                .overlay(alignment: .leading) {
+                    Text(timerInterval: since...since.addingTimeInterval(Self.lifetime), countsDown: false)
+                        .monospacedDigit()
+                        .foregroundStyle(row.state.tint)
+                }
+        }
     }
 }
 
