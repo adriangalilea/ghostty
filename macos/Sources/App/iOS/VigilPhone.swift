@@ -446,7 +446,58 @@ final class VigilPhone: ObservableObject {
         }
     }
 
+    /// A closed tab, pane or workspace resting on its Mac (vigil.json lists
+    /// it with its deadline and where it stood): Undo puts it back there,
+    /// End lets it die now, both sent to that Mac.
+    struct Burial: Identifiable, Equatable {
+        var id: String { host.id + "/" + name }
+        let host: Host
+        let name: String
+        let label: String
+        let emoji: String?
+        /// Where it goes back ("finances › tab 3"); nil for a workspace.
+        let from: String?
+        let until: Date
+    }
+    @Published private(set) var burials: [Burial] = []
+
+    private func deriveBurials() -> [Burial] {
+        let now = Date()
+        return hosts.flatMap { host -> [Burial] in
+            let listed = directories[host.id]?.workspaces ?? []
+            return listed.compactMap { workspace in
+                guard let until = workspace.buriedUntil, until > now else { return nil }
+                let from = workspace.buriedFrom.map { origin in
+                    "\(listed.first { $0.name == origin.workspace }?.label ?? origin.workspace) › tab \(origin.tab + 1)"
+                }
+                return Burial(host: host, name: workspace.name, label: workspace.label, emoji: workspace.emoji, from: from, until: until)
+            }
+        }
+        .sorted { $0.until < $1.until }
+    }
+
+    /// Undo (`exhume`) or End (`reap`) on the burial's Mac; what happened
+    /// is a receipt, and a refusal is said on the row's section.
+    func settle(_ burial: Burial, undo: Bool) {
+        let operation = undo ? "exhume" : "reap"
+        Task {
+            do {
+                let request = WorkspaceCommand.Request.burial(burial.name, operation)
+                let data = try await VigilLink.call(linked(), device: burial.host.id, .session(try request.line))
+                let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+                log("burial: \(operation) \(burial.host.name)/\(burial.name) \(outcome.ok ? "committed" : "refused: \(outcome.message)")")
+                burialError = outcome.ok ? nil : outcome.message
+            } catch {
+                log("burial: \(operation) \(burial.host.name)/\(burial.name) failed: \(VigilLink.reason(error))")
+                burialError = VigilLink.reason(error)
+            }
+        }
+    }
+    @Published private(set) var burialError: String?
+
     private func rebuildTree() {
+        let closed = deriveBurials()
+        if closed != burials { burials = closed }
         let fresh = deriveTree()
         guard fresh != nodes else { return }
         nodes = fresh

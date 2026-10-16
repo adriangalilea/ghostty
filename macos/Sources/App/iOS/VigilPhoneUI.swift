@@ -78,6 +78,7 @@ struct HomeView: View {
                 ForEach(tree) { node in
                     TreeNodeView(node: node, depth: 0)
                 }
+                if !model.burials.isEmpty { BurialTray() }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -94,6 +95,47 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $settings) { SettingsView() }
+    }
+}
+
+/// What was closed on any Mac and still waits out its grace, as on the
+/// Mac's sidebar: tap a row to bring it back where it was, × to let it
+/// die now. The countdown runs on its own (no timer of ours).
+struct BurialTray: View {
+    @EnvironmentObject private var model: VigilPhone
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("Recently closed", systemImage: "trash").font(.caption).foregroundStyle(.secondary)
+            if let error = model.burialError {
+                Text(error).font(.caption2).foregroundStyle(.orange)
+            }
+            ForEach(model.burials) { burial in
+                HStack(spacing: 8) {
+                    Text(burial.emoji ?? "").frame(width: 18)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(burial.label).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                        Text([burial.from, "on \(burial.host.name)"].compactMap { $0 }.joined(separator: " · "))
+                            .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    Text(timerInterval: Date()...burial.until, countsDown: true)
+                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
+                    Button { model.settle(burial, undo: false) } label: {
+                        Image(systemName: "xmark").font(.caption2.weight(.bold)).frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .accessibilityLabel("End it now")
+                }
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+                .onTapGesture { model.settle(burial, undo: true) }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Brings it back where it was")
+            }
+        }
+        .padding(.top, 16)
+        .padding(.horizontal, 8)
     }
 }
 

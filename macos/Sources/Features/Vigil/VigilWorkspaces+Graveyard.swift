@@ -160,9 +160,7 @@ extension VigilWorkspaces {
     }
 
     private func sendToBurialHome(_ device: String, _ burial: SidebarBurial, operation: String) {
-        let request = VigilSessionControl.Request(
-            version: 1, id: UUID(), issuedAt: Date().timeIntervalSince1970, session: burial.name, revision: "",
-            operation: operation, anchor: "", direction: nil)
+        let request = WorkspaceCommand.Request.burial(burial.name, operation)
         vlog("remote command: \(request.id) \(operation) -> \(device)/\(burial.name)")
         Task {
             do {

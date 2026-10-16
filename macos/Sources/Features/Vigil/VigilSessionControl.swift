@@ -8,16 +8,7 @@ import VigilWire
 /// an authenticated-user command channel, separate from terminal bytes and
 /// from the authorization broker's decision protocol.
 enum VigilSessionControl {
-    struct Request: Codable, Sendable {
-        let version: Int
-        let id: UUID
-        let issuedAt: TimeInterval
-        let session: String
-        let revision: String
-        let operation: String
-        let anchor: String
-        let direction: String?
-    }
+    typealias Request = WorkspaceCommand.Request
 
     struct InputDiagnostic: Codable, Sendable {
         let pane: String
