@@ -970,6 +970,7 @@ typedef enum {
   GHOSTTY_ACTION_VIGIL_NEXT_FLOATING,
   GHOSTTY_ACTION_VIGIL_KILL,
   GHOSTTY_ACTION_VIGIL_FLOAT,
+  GHOSTTY_ACTION_VIGIL_TRANSPORT,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1148,6 +1149,7 @@ typedef struct {
   uint8_t state; // 0 connecting, 1 stream open, 2 disconnected
   uint64_t pending_bytes;
   uint64_t written_bytes;
+  bool stalled; // the writer waits on the peer to drain: input not delivered yet
 } ghostty_vigil_transport_status_s;
 GHOSTTY_API ghostty_vigil_transport_status_s ghostty_surface_vigil_transport_status(ghostty_surface_t);
 GHOSTTY_API uint64_t ghostty_surface_vigil_screen_hash(ghostty_surface_t);

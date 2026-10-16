@@ -41,15 +41,13 @@ enum VigilAgents {
     }
 
     /// The Macs as tether now knows them, each with what is followed there:
-    /// each is told where this phone's activity is reached (once per change)
-    /// and what it follows (every time: the Mac keeps them, sending again
-    /// changes nothing).
+    /// each is told where this phone's activity is reached (once per change;
+    /// what is followed there arrives on its `follows` stream).
     static func macs(_ next: [String: [String]]) {
         let fresh = next.keys.filter { macs[$0] == nil }
         macs = next
-        // A Mac newly in reach is told again even when nothing changed: its
-        // answer is what is followed there (one followed from the Mac's own
-        // sidebar included).
+        // A Mac newly listed is told even when nothing changed here: its hub
+        // may have restarted without this phone's route.
         for mac in fresh { Task { await tell(mac, force: true) } }
     }
 
@@ -136,14 +134,15 @@ enum VigilAgents {
         } catch {
             return VigilPhone.shared.log("agents: no key to give \(mac.prefix(10)) (\(error))")
         }
-        guard force || told[mac] != route, let output = await call(mac, .agents(route)) else { return }
+        guard force || told[mac] != route, await call(mac, .agents(route)) != nil else { return }
         told[mac] = route
-        // The Mac's board is the record of what is followed there.
-        guard let panes = try? JSONDecoder().decode([String].self, from: output) else {
-            return VigilPhone.shared.log("agents: \(mac.prefix(10))'s follows did not parse")
-        }
+    }
+
+    /// What a Mac's board says is followed there, as it changes (its
+    /// `follows` stream: a follow made in the Mac's sidebar included).
+    static func followed(_ panes: [String], on mac: String) {
+        guard macs[mac] != nil else { return }
         macs[mac] = panes
-        VigilPhone.shared.followed(panes, on: mac)
     }
 
     @discardableResult

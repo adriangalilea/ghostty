@@ -87,12 +87,8 @@ final class VigilPhone: ObservableObject {
         didSet {
             rebuildTree()
             checkScreens()
-            let waiting = directoryWaiters
-            directoryWaiters = []
-            waiting.forEach { $0.resume() }
         }
     }
-    private var directoryWaiters: [Waiter] = []
 
     /// The content receipt (the Mac's `checkScreen`, same rule): every
     /// live surface hashes its viewport like the daemon does; a difference
@@ -143,6 +139,8 @@ final class VigilPhone: ObservableObject {
     @Published private(set) var unlinked: String?
     /// Each Mac's directory stream, open, being dialed or pausing to dial again.
     private var watches: [String: Task<Void, Never>] = [:]
+    /// Each Mac's `follows` stream: what this phone follows there, as it changes.
+    private var followWatches: [String: Task<Void, Never>] = [:]
 
     private init() {
         Ghostty.SurfaceView.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
@@ -178,11 +176,15 @@ final class VigilPhone: ObservableObject {
             for await event in node.events {
                 switch event {
                 case .paired, .revoked, .offersChanged: self?.readPeers()
+                // Events were missed: any of them may have changed the Macs.
+                case .lagged:
+                    self?.log("tether: \(event); reading the Macs again")
+                    self?.readPeers()
                 // How this phone reaches anything: its network, its relay,
-                // each connection's start, end and path. The night the phone
-                // left home Wi-Fi and reached nothing for hours, none of
-                // this was on the phone.
-                case .network, .relay, .localNetwork, .connected, .disconnected, .path, .lagged:
+                // each connection's start, end and path, each Mac met. The
+                // night the phone left home Wi-Fi and reached nothing for
+                // hours, none of this was on the phone.
+                case .network, .relay, .localNetwork, .connected, .disconnected, .path, .met:
                     self?.log("tether: \(event)")
                 default: break
                 }
@@ -207,6 +209,10 @@ final class VigilPhone: ObservableObject {
             for (id, task) in watches where !ids.contains(id) {
                 task.cancel()
                 watches[id] = nil
+            }
+            for (id, task) in followWatches where !ids.contains(id) {
+                task.cancel()
+                followWatches[id] = nil
             }
         }
         for host in hosts { watch(host) }
@@ -239,6 +245,17 @@ final class VigilPhone: ObservableObject {
     /// tether, reopened the moment the Mac may be back or the app returns
     /// to the screen); each document is the Mac's whole directory.
     private func watch(_ host: Host) {
+        if followWatches[host.id] == nil, let node {
+            let follows = VigilLink.follows(node, device: host.id)
+            followWatches[host.id] = Task { [weak self] in
+                for await panes in follows {
+                    VigilAgents.followed(panes, on: host.id)
+                    self?.followed(panes, on: host.id)
+                }
+                guard !Task.isCancelled else { return }
+                self?.followWatches[host.id] = nil
+            }
+        }
         guard watches[host.id] == nil, let node else { return }
         let steps = VigilLink.directory(node, device: host.id)
         watches[host.id] = Task { [weak self] in
@@ -279,29 +296,6 @@ final class VigilPhone: ObservableObject {
     }
 
     static func clock(_ date: Date) -> String { date.formatted(date: .omitted, time: .shortened) }
-
-    /// Returns when the next directory arrives, or after `seconds`.
-    private func nextDirectory(within seconds: TimeInterval) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let waiter = Waiter(continuation)
-            directoryWaiters.append(waiter)
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(seconds))
-                self?.directoryWaiters.removeAll { $0 === waiter }
-                waiter.resume()
-            }
-        }
-    }
-
-    /// A continuation resumed once, by whichever comes first.
-    private final class Waiter {
-        private var continuation: CheckedContinuation<Void, Never>?
-        init(_ continuation: CheckedContinuation<Void, Never>) { self.continuation = continuation }
-        func resume() {
-            continuation?.resume()
-            continuation = nil
-        }
-    }
 
     /// The home tree: hosts → sessions → tabs → panes, one collapsible
     /// tree with the sidebar's rollup semantics (a collapsed node wears

@@ -231,6 +231,7 @@ final class VigilRemote: ObservableObject {
         }
         hosts[index].directory = dir
         VigilWorkspaces.shared.remoteDirectoryChanged(device)
+        VigilWorkspaces.shared.syncOwnerGrids()
         hosts[index].error = nil
         if before.map({ $0 != shape }) ?? true {
             Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.workspaces.count) workspaces, \(dir.panes.count) panes")

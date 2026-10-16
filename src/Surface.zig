@@ -1167,6 +1167,10 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
 
         .child_exited => |v| self.childExited(v),
 
+        .vigil_transport => _ = self.rt_app.performAction(.{ .surface = self }, .vigil_transport, {}) catch |err| {
+            log.warn("apprt failed to report the vigil transport err={}", .{err});
+        },
+
         .desktop_notification => |notification| {
             if (!self.config.desktop_notifications) {
                 log.info("application attempted to display a desktop notification, but 'desktop-notifications' is disabled", .{});

@@ -167,19 +167,7 @@ extension VigilWorkspaces {
             return base.isEmpty ? fallback : base
         }
 
-        /// A LIVE title, cleaned: claude's braille-spinner / idle-marker
-        /// prefix strips (it ticks several times a second and would
-        /// flicker the row), ghost/empty titles yield nil.
-        func liveTabTitle(_ raw: String?) -> String? {
-            guard var t = raw?.trimmingCharacters(in: .whitespaces),
-                  !t.isEmpty, t != "👻" else { return nil }
-            while let first = t.unicodeScalars.first,
-                  (0x2800...0x28FF).contains(first.value) || first == "✳" || first == "·" {
-                t = String(String.UnicodeScalarView(t.unicodeScalars.dropFirst()))
-                    .trimmingCharacters(in: .whitespaces)
-            }
-            return t.isEmpty ? nil : t
-        }
+        func liveTabTitle(_ raw: String?) -> String? { raw.flatMap(Self.name(ofTitle:)) }
 
         var rows: [SidebarWorkspaceRow] = []
         let ordered = workspaces.values.sorted { ($0.order, $0.label) < ($1.order, $1.label) }

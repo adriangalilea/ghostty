@@ -372,6 +372,10 @@ pub const Action = union(Key) {
     /// vigil: toggle the front window floating on top.
     vigil_float,
 
+    /// vigil: the surface's attach transport changed (stream open or lost,
+    /// input queued or drained); the embedder reads its status again.
+    vigil_transport,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -448,6 +452,7 @@ pub const Action = union(Key) {
         vigil_next_floating,
         vigil_kill,
         vigil_float,
+        vigil_transport,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");

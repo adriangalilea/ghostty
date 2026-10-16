@@ -117,17 +117,10 @@ extension VigilWorkspaces {
         eventsOffset = truncated ? 0 : min(saved ?? size, size)
         drainEvents()
         watchEvents()
-        // The presence pulse: "still looking" is a fact with no event of its
-        // own, and the owner-grid receipt reads in-place files no directory
-        // kqueue reports. One tick a second, nothing else rides it.
-        eventsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    VigilWorkspaces.shared.ackVisiblePanes()
-                    VigilWorkspaces.shared.syncOwnerGrids()
-                }
-            }
-        }
+        // Seen = a pane's newest state under the eyes: re-checked whenever a
+        // state lands or what is in front of the human changes, never on a
+        // clock. Owner grids follow the facts and the remote directories.
+        Self.onPresenceInputs { VigilWorkspaces.shared.ackVisiblePanes() }
     }
 
     /// The attention log is append-only and every writer appends a whole
@@ -160,11 +153,12 @@ extension VigilWorkspaces {
     /// "rows cols <owner hello>", the daemon's fact; this app's own
     /// surfaces hello as `ghostty:<pid>`. Ownership is never inferred from
     /// a grid difference: a surface framed at the owner's grid would flip
-    /// it every second.
-    private func syncOwnerGrids() {
+    /// it on every layout. Runs when its inputs change: the local facts
+    /// (`<pane>.size`, `<pane>.screen`, renamed into place by vigild), a
+    /// remote directory, a surface's stream opening or ending.
+    func syncOwnerGrids() {
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
             guard let id = view.vigilAttachId, view.surface != nil else { continue }
-            view.vigilRefreshTransportStatus()
             if view.vigilHost != nil, view.vigilTransportState == 2 { continue }
             // A remote pane's size fact rides the host's directory (the file
             // is on the other Mac); a mirror that never claims would otherwise
@@ -220,6 +214,22 @@ extension VigilWorkspaces {
     /// held still across two ticks (a spinning TUI is not a desync); two
     /// strikes log `!! screen mismatch` and re-sync from the daemon. The
     /// first agreement per surface logs once, proving the mechanism.
+    /// One look at `id`'s content receipt a second from now (replacing any
+    /// pending one): a hash that held still that long is a verdict.
+    private func settleScreen(_ view: Ghostty.SurfaceView, id: String) {
+        screenSettle[id]?.cancel()
+        let work = DispatchWorkItem { [weak self, weak view] in
+            MainActor.assumeIsolated {
+                guard let self, let view else { return }
+                self.screenSettle[id] = nil
+                guard view.surface != nil, view.vigilAttachId == id, view.vigilHost == nil else { return }
+                self.checkScreen(view, id: id)
+            }
+        }
+        screenSettle[id] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
     private func checkScreen(_ view: Ghostty.SurfaceView, id: String) {
         guard let surface = view.surface,
               let daemon = facts.files["panes/\(id).screen"]?.text
@@ -227,10 +237,14 @@ extension VigilWorkspaces {
         let stable = daemon == view.vigilScreenSeen
         view.vigilScreenSeen = daemon
         // A moving daemon hash is a moving screen: no verdict is possible, so
-        // no viewport hash is computed. A hash already proven equal and still
-        // published has nothing to re-prove. An idle fleet hashes nothing.
-        guard stable else { return }
+        // no viewport hash is computed; it is judged once it held still for a
+        // second (the settle check below). A hash already proven equal and
+        // still published has nothing to re-prove. An idle fleet hashes nothing.
+        guard stable else { return settleScreen(view, id: id) }
         if view.vigilScreenStrikes == 0, view.vigilScreenProvenHash == daemon { return }
+        // A verdict still pending (a strike, the grace after a re-sync) is
+        // looked at again a second later, until proven or silenced.
+        defer { if view.vigilScreenStrikes != 0, view.vigilScreenResyncs < 3 { settleScreen(view, id: id) } }
         let mine = String(ghostty_surface_vigil_screen_hash(surface), radix: 16)
         if mine == daemon {
             view.vigilScreenStrikes = 0

@@ -107,11 +107,21 @@ write_thread: ?std.Thread = null,
 transport_state: std.atomic.Value(u8) = .init(0),
 pending_bytes: std.atomic.Value(u64) = .init(0),
 written_bytes: std.atomic.Value(u64) = .init(0),
+/// The writer is waiting on the peer to drain (a write would block), until
+/// the queue is empty again: input typed is not reaching the program yet.
+stalled: std.atomic.Value(bool) = .init(false),
+
+/// The surface's mailbox while its io thread runs: every transport change
+/// (stream open or lost, a stall begun or cleared) is pushed to it as
+/// `vigil_transport`, and the embedder reads `transportStatus` then.
+/// Deliberate teardown reports nothing.
+mailbox: ?@FieldType(termio.Termio, "surface_mailbox") = null,
 
 pub const TransportStatus = extern struct {
     state: u8, // 0 connecting, 1 stream open, 2 disconnected
     pending_bytes: u64,
     written_bytes: u64,
+    stalled: bool,
 };
 
 pub fn transportStatus(self: *const Attach) TransportStatus {
@@ -119,7 +129,24 @@ pub fn transportStatus(self: *const Attach) TransportStatus {
         .state = self.transport_state.load(.acquire),
         .pending_bytes = self.pending_bytes.load(.monotonic),
         .written_bytes = self.written_bytes.load(.monotonic),
+        .stalled = self.stalled.load(.acquire),
     };
+}
+
+fn setTransport(self: *Attach, state: u8) void {
+    if (self.transport_state.swap(state, .acq_rel) != state) self.reportTransport();
+}
+
+fn setStalled(self: *Attach, stalled: bool) void {
+    if (self.stalled.swap(stalled, .acq_rel) != stalled) self.reportTransport();
+}
+
+/// Never blocks (the mailbox drops rather than park a worker thread).
+fn reportTransport(self: *Attach) void {
+    // Tests run on apprt `none`, whose app has no mailbox wakeup to compile against.
+    if (comptime builtin.is_test) return;
+    const mailbox = self.mailbox orelse return;
+    _ = mailbox.push(.{ .vigil_transport = {} }, .{ .instant = {} });
 }
 
 pub const Config = struct {
@@ -233,7 +260,7 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
 
 /// Cut the stream so the reader sees EOF.
 fn sever(self: *Attach) void {
-    self.transport_state.store(2, .release);
+    self.setTransport(2);
     if (self.sock_fd >= 0) posix.shutdown(self.sock_fd, .both) catch {};
 }
 
@@ -298,7 +325,9 @@ pub fn threadEnter(
     td: *termio.Termio.ThreadData,
 ) !void {
     _ = alloc;
-    errdefer self.transport_state.store(2, .release);
+    // Set before any thread that reports is born; never changes after.
+    self.mailbox = io.surface_mailbox;
+    errdefer self.setTransport(2);
 
     // Attach: locally, creating the daemon on first contact; remotely,
     // through this Mac's hub (never creating anything).
@@ -357,7 +386,7 @@ pub fn threadEnter(
         .{ self, fd, io, pipe[0], closing, std.time.milliTimestamp() },
     );
     read_thread.setName("io-reader") catch {};
-    _ = self.transport_state.cmpxchgStrong(0, 1, .release, .monotonic);
+    if (self.transport_state.cmpxchgStrong(0, 1, .release, .monotonic) == null) self.reportTransport();
 
     td.backend = .{ .attach = .{
         .sock_fd = fd,
@@ -557,6 +586,7 @@ fn writeAll(self: *Attach, data: []const u8) bool {
     while (off < data.len) {
         const n = posix.write(fd, data[off..]) catch |err| switch (err) {
             error.WouldBlock => {
+                self.setStalled(true);
                 // A drain stall is survivable for as long as the queue
                 // holds (a TUI chewing a storm reads slowly, not never).
                 // A full 10s with ZERO progress means the stream is dead
@@ -585,7 +615,7 @@ fn writeAll(self: *Attach, data: []const u8) bool {
             return false;
         }
         _ = self.written_bytes.fetchAdd(n, .monotonic);
-        _ = self.pending_bytes.fetchSub(n, .monotonic);
+        if (self.pending_bytes.fetchSub(n, .monotonic) == n) self.setStalled(false);
         off += n;
     }
     return true;
@@ -797,7 +827,7 @@ fn readThreadMain(
         };
         termio.Exec.ReadThread.threadMainPosix(current_fd, io, quit_dup);
         if (closing.load(.acquire)) return;
-        self.transport_state.store(2, .release);
+        self.setTransport(2);
         // A remote stream's EOF (the hub, over tether) says nothing about
         // the home process. Keep its last screen; the Mac viewport shows
         // connection loss and offers an explicit reconnect.
@@ -861,7 +891,7 @@ fn restoreDaemons(self: *Attach) void {
 fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
     if (!self.specExists()) return null;
     log.warn("attach: {s} stream ended with its spec on disk; reconnecting", .{self.id});
-    self.transport_state.store(0, .release);
+    self.setTransport(0);
     // Retire the writer (it may have severed itself on the dead socket
     // already) before the descriptor closes; a new one is born per socket.
     self.write_mutex.lock();
@@ -898,7 +928,7 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
             self.write_fd = nfd;
             self.sendHello("surface");
             self.sendResize();
-            self.transport_state.store(1, .release);
+            self.setTransport(1);
             // warn, not info: the receipt must reach the unified log in a
             // release build; "I saw no overlay" is not a fact.
             log.warn("attach: {s} reattached in place after {d}ms", .{ self.id, std.time.milliTimestamp() - began });

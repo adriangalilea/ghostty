@@ -24,20 +24,10 @@ final class VigilBars {
         ) { event in
             MainActor.assumeIsolated { VigilBars.shared.route(event) }
         }
-        NotificationCenter.default.addObserver(
-            forName: VigilWorkspaces.stateDidChange,
-            object: nil, queue: .main
-        ) { _ in
-            MainActor.assumeIsolated { VigilBars.shared.scheduleAutoFollow() }
-        }
-        // Heartbeat: a session that has been SITTING blocked emits no new
-        // event, so follow would never fire for it; evaluate on a slow
-        // tick too, not only on changes.
-        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { VigilBars.shared.scheduleAutoFollow() }
-            }
-        }
+        // A workspace sitting blocked is followed as soon as its vetoes
+        // lift (the app active, another key window, control mode left),
+        // and each of those is one of these events.
+        VigilWorkspaces.onPresenceInputs { VigilBars.shared.scheduleAutoFollow() }
     }
 
     // MARK: Auto-follow (the viewport chases the attention queue)
@@ -172,6 +162,7 @@ final class VigilBars {
         guard let host = container.subviews.compactMap({ $0 as? VigilSidebarHost }).first else { return }
         controlHost = host
         controlMode = true
+        NotificationCenter.default.post(name: VigilWorkspaces.modeDidChange, object: nil)
         host.setControlActive(true)
         window.makeFirstResponder(host)
         host.model.ensureSelection()
@@ -182,6 +173,7 @@ final class VigilBars {
     func exitControlMode() {
         guard controlMode else { return }
         controlMode = false
+        NotificationCenter.default.post(name: VigilWorkspaces.modeDidChange, object: nil)
         controlHost?.model.onLeaveControl = nil
         controlHost?.model.exitHintMode()
         controlHost?.setControlActive(false)

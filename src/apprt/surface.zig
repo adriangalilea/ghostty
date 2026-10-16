@@ -51,6 +51,10 @@ pub const Message = union(enum) {
     /// command are given in the `ChildExited` struct.
     child_exited: ChildExited,
 
+    /// vigil: the attach transport changed (see `termio.Attach`); forwarded
+    /// to the embedder as `vigil_transport`.
+    vigil_transport: void,
+
     /// Show a desktop notification.
     desktop_notification: struct {
         /// Desktop notification title.

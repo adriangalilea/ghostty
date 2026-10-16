@@ -325,19 +325,23 @@ extension VigilWorkspaces {
     /// "adrian"). Ghostty's own default (a bare "👻") and an empty title
     /// are noise, never worth persisting over a real remembered name.
     func capturedTitle(of view: Ghostty.SurfaceView) -> String? {
-        // Claude prefixes its title with a live STATE marker: a braille
-        // spinner while working, `✳` when idle. That is a status light, not
-        // part of the name, and freezing it into stored state would pin a
-        // stale spinner onto a captured pane forever.
-        var title = view.title.trimmingCharacters(in: .whitespaces)
-        while let first = title.unicodeScalars.first,
+        Self.name(ofTitle: view.title) ?? view.vigilAttachId.flatMap { capturedTitle(ofPane: $0) }
+    }
+
+    /// The name a terminal title gives its pane, nil when it gives none.
+    /// Claude prefixes its title with a live STATE marker: a braille
+    /// spinner while working, `✳` when idle. That is a status light, not
+    /// part of the name: freezing it into stored state would pin a stale
+    /// spinner onto a captured pane forever, and a row showing it would
+    /// flicker several times a second. Ghostty's default (a bare "👻") and
+    /// an empty title name nothing.
+    nonisolated static func name(ofTitle raw: String) -> String? {
+        var t = raw.trimmingCharacters(in: .whitespaces)
+        while let first = t.unicodeScalars.first,
               (0x2800...0x28FF).contains(first.value) || first == "✳" || first == "·" {
-            title = String(title.dropFirst()).trimmingCharacters(in: .whitespaces)
+            t = String(String.UnicodeScalarView(t.unicodeScalars.dropFirst())).trimmingCharacters(in: .whitespaces)
         }
-        guard !title.isEmpty, title != "👻" else {
-            return view.vigilAttachId.flatMap { capturedTitle(ofPane: $0) }
-        }
-        return title
+        return t.isEmpty || t == "👻" ? nil : t
     }
 
     /// A pane's remembered name, from its registry entry.

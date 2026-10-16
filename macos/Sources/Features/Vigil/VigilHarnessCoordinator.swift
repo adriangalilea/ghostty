@@ -31,14 +31,9 @@ final class VigilHarnessCoordinator {
         guard !started else { return }
         started = true
         launch("vigil-agent", ["ensure"])
-        let center = NotificationCenter.default
-        for name in [VigilWorkspaces.focusDidChange, VigilWorkspaces.stateDidChange,
-                     NSWindow.didBecomeKeyNotification, NSApplication.didBecomeActiveNotification,
-                     NSApplication.didResignActiveNotification] {
-            center.addObserver(forName: name, object: nil, queue: .main) { _ in
-                MainActor.assumeIsolated { VigilHarnessCoordinator.shared.report() }
-            }
-        }
+        // Read a turn later: a window posts these as it starts to change (a
+        // close, a resign before the cover lands); the turn after is the fact.
+        VigilWorkspaces.onPresenceInputs { VigilHarnessCoordinator.shared.scheduleReport() }
         // A context lives 90 s at authzd. Renewed while this app runs, so a
         // closed app's context lapses on its own (nobody else renews it).
         renewal = Timer.scheduledTimer(withTimeInterval: 45, repeats: true) { _ in
@@ -80,6 +75,20 @@ final class VigilHarnessCoordinator {
     /// What each other Mac was last told (cleared there with an empty view
     /// the moment its panes leave the screen here).
     private var reportedRemote: [String: Open.Screen] = [:]
+
+    private var reportPending = false
+
+    /// One report on the next turn for any burst of screen events.
+    func scheduleReport() {
+        guard !reportPending else { return }
+        reportPending = true
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                VigilHarnessCoordinator.shared.reportPending = false
+                VigilHarnessCoordinator.shared.report()
+            }
+        }
+    }
 
     func report(renew: Bool = false) {
         var homes = screen()

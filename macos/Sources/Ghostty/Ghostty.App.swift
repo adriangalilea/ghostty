@@ -305,7 +305,7 @@ extension Ghostty {
             case GHOSTTY_ACTION_MOUSE_SHAPE, GHOSTTY_ACTION_MOUSE_VISIBILITY, GHOSTTY_ACTION_MOUSE_OVER_LINK,
                  GHOSTTY_ACTION_RING_BELL, GHOSTTY_ACTION_SIZE_LIMIT, GHOSTTY_ACTION_INITIAL_SIZE,
                  GHOSTTY_ACTION_PROGRESS_REPORT, GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_CONFIG_CHANGE,
-                 GHOSTTY_ACTION_SELECTION_CHANGED, GHOSTTY_ACTION_SCROLLBAR:
+                 GHOSTTY_ACTION_SELECTION_CHANGED, GHOSTTY_ACTION_SCROLLBAR, GHOSTTY_ACTION_VIGIL_TRANSPORT:
                 return false
             default:
                 Ghostty.logger.notice("phone: action refused \(action.tag.rawValue, privacy: .public)")
@@ -659,6 +659,11 @@ extension Ghostty {
 
             case GHOSTTY_ACTION_VIGIL_FLOAT:
                 MainActor.assumeIsolated { VigilWorkspaces.shared.togglePinFront() }
+
+            case GHOSTTY_ACTION_VIGIL_TRANSPORT:
+                guard target.tag == GHOSTTY_TARGET_SURFACE, let surface = target.target.surface,
+                      let view = self.surfaceView(from: surface) else { return false }
+                MainActor.assumeIsolated { view.vigilRefreshTransportStatus() }
 
             case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
                 toggleVisibility(app, target: target)

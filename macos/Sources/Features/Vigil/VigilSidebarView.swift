@@ -32,13 +32,6 @@ struct VigilSidebarView: View {
     /// (stateDidChange, fed by the state-dir and vigild-dir watchers).
     private let burialCountdown = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    /// The stale-healer, 10s: facts derived from LIVE TERMINAL TITLES
-    /// have no filesystem event at all — claude's ✳ idle corrective after
-    /// an esc-interrupt, OSC-only row titles, a rewritten lease note —
-    /// and without this they stay stale forever on a quiet machine. 10s of
-    /// a cached snapshot is noise; an eternal yellow dot is a lie.
-    private let staleHealer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
-
     private enum Grid {
         static let chevron: CGFloat = 18
         static let icon: CGFloat = 20
@@ -120,7 +113,8 @@ struct VigilSidebarView: View {
             }
             footer
         }
-        .onReceive(staleHealer) { _ in model.refresh(reason: "stale labels") }
+        .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.titleDidChange)
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "titles") }
         .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.stateDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "facts") }
         .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.focusDidChange)
@@ -226,6 +220,9 @@ struct VigilSidebarView: View {
                 .pickerStyle(.segmented)
                 .controlSize(.mini)
                 .labelsHidden()
+                .onChange(of: followModeRaw) { _, _ in
+                    NotificationCenter.default.post(name: VigilWorkspaces.modeDidChange, object: nil)
+                }
             }
             .help("Do nothing: it waits in the queue (the orange keycap, the badge, ⌘⇧J). Summon it: a permission prompt or a question mid-turn brings the floating terminal in on that pane; answering moves to the next. Jump to it: this window switches to anything waiting that you haven't seen.")
             // Asks are Authz's, switched in its menu bar and Settings alone.

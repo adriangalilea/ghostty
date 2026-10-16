@@ -16,6 +16,12 @@ extension Ghostty {
                     titleFallbackTimer?.invalidate()
                     titleFallbackTimer = nil
                 }
+                // vigil: a pane's row is named by its title; a change of name
+                // (never a spinner frame) re-draws the sidebar.
+                if vigilAttachId != nil,
+                   VigilWorkspaces.name(ofTitle: title) != VigilWorkspaces.name(ofTitle: oldValue) {
+                    NotificationCenter.default.post(name: VigilWorkspaces.titleDidChange, object: self)
+                }
             }
         }
 
@@ -239,7 +245,7 @@ extension Ghostty {
 
         /// Vigil: the pty's grid when ANOTHER client owns the size (the
         /// phone in OWN). nil = this surface's own grid is the pty's. Set
-        /// on the presence tick from `<pane>.size`; the wrapper then
+        /// whenever `<pane>.size` changes (`syncOwnerGrids`); the wrapper then
         /// renders the owner's grid letterboxed in a tint, so what
         /// accommodates what is visible. Points for that grid come from
         /// the core (`vigilPoints`).
@@ -271,14 +277,22 @@ extension Ghostty {
                          writtenBytes: status?.written_bytes)
         }
 
+        /// Read on every `vigil_transport` the attach pushes (the stream
+        /// opened or was lost, a write began or stopped waiting on the peer).
         func vigilRefreshTransportStatus() {
-            guard vigilHost != nil, let surface else { return }
+            guard let surface else { return }
             let status = ghostty_surface_vigil_transport_status(surface)
             if vigilTransportState != status.state {
                 vigilTransportState = status.state
-                VigilWorkspaces.shared.vlog("transport: \(vigilHost ?? "")/\(vigilAttachId ?? "") state=\(status.state) queued=\(status.pending_bytes) written=\(status.written_bytes)")
+                if vigilHost != nil {
+                    VigilWorkspaces.shared.vlog("transport: \(vigilHost ?? "")/\(vigilAttachId ?? "") state=\(status.state) queued=\(status.pending_bytes) written=\(status.written_bytes)")
+                }
+                // A stream opened (a new view, a reconnect) or lost: its size
+                // receipt applies now.
+                VigilWorkspaces.shared.syncOwnerGrids()
             }
-            let pending = status.pending_bytes > 0 && status.state != 2
+            guard vigilHost != nil else { return }
+            let pending = status.stalled && status.state != 2
             if vigilInputPending != pending {
                 vigilInputPending = pending
                 VigilWorkspaces.shared.vlog("transport: \(vigilHost ?? "")/\(vigilAttachId ?? "") queued=\(status.pending_bytes) written=\(status.written_bytes)")

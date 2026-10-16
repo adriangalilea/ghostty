@@ -57,18 +57,9 @@ final class VigilSummon {
     private var engaged = false
 
     private init() {
-        NotificationCenter.default.addObserver(
-            forName: VigilWorkspaces.stateDidChange, object: nil, queue: .main
-        ) { _ in
-            MainActor.assumeIsolated { VigilSummon.shared.schedule() }
-        }
-        // Heartbeat, same reason as auto-follow's: a pane SITTING blocked
-        // emits no new event.
-        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { VigilSummon.shared.schedule() }
-            }
-        }
+        // A pane sitting blocked needs no re-check by itself: only what
+        // vetoes its summon changes, and every such change is one of these.
+        VigilWorkspaces.onPresenceInputs { VigilSummon.shared.schedule() }
         NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .keyDown]) { event in
             MainActor.assumeIsolated {
                 let summon = VigilSummon.shared

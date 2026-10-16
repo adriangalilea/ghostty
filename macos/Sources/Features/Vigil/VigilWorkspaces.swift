@@ -60,6 +60,8 @@ class VigilWorkspaces {
             let sidebarChanged = snapshot.sidebarRevision != self.facts.sidebarRevision
             let ended = self.facts.revision == 0 ? [] : Self.commandsEnded(from: self.facts, to: snapshot)
             self.facts = snapshot
+            // Owner grids and the content receipt read these facts.
+            self.syncOwnerGrids()
             // A long command that just ended is news, the same as an
             // agent's turn ending: one attention path for both.
             if !ended.isEmpty {
@@ -124,6 +126,37 @@ class VigilWorkspaces {
     /// syncFocusToSurfaceTree): the sidebar re-derives its active chain
     /// the moment keystroke destiny moves, instead of waiting for a tick.
     static let focusDidChange = Notification.Name("vigilFocusDidChange")
+    /// Posted when vigil's own modes change what may move the glass:
+    /// control mode entered or left, the follow mode switched.
+    static let modeDidChange = Notification.Name("vigilModeDidChange")
+    /// A live pane's name (its terminal title, status light stripped)
+    /// changed; the object is the surface. The sidebar re-draws on it.
+    static let titleDidChange = Notification.Name("vigilTitleDidChange")
+
+    /// Calls `body` on every event after which what is in front of the
+    /// human may read differently: a pane's state, focus, the key window,
+    /// the app's activation, a window covered, minimized or closed, a Space
+    /// or display change, the quick terminal shown or hidden, vigil's
+    /// modes. The one list every "who is looking" reader observes (the
+    /// summon, auto-follow, the screen context sent to authz), so none of
+    /// them needs a heartbeat. `body` runs on main, possibly while AppKit
+    /// is mid-change: readers re-read on the next turn.
+    static func onPresenceInputs(_ body: @escaping @MainActor () -> Void) {
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            stateDidChange, focusDidChange, modeDidChange, .quickTerminalDidChangeVisibility,
+            NSWindow.didBecomeKeyNotification, NSWindow.didChangeOcclusionStateNotification,
+            NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.willCloseNotification,
+            NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
+            NSApplication.didChangeScreenParametersNotification,
+        ]
+        for name in names {
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in MainActor.assumeIsolated { body() } }
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { body() }
+        }
+    }
 
     /// When each PANE was last under the eyes (its view visible in the key
     /// window), keyed by pane daemon id: blocked/done older than the pane's
@@ -425,11 +458,13 @@ class VigilWorkspaces {
 
     // MARK: Stored state of the parts in the extension files
 
-    /// Attention (+Attention): the events log's drain offset, the 1s
-    /// presence pulse, and the vnode watch on the log.
+    /// Attention (+Attention): the events log's drain offset and the vnode
+    /// watch on the log.
     var eventsOffset: UInt64 = 0
-    var eventsTimer: Timer?
     var eventsWatch: DispatchSourceFileSystemObject?
+    /// The content receipt's settle checks, one pending per pane: a screen
+    /// hash is judged only after it held still (`checkScreen`).
+    var screenSettle: [String: DispatchWorkItem] = [:]
 
     /// Name of the session currently hosted by the quick terminal.
     var floatingName: String?

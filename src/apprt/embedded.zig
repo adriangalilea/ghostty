@@ -1783,7 +1783,7 @@ pub const CAPI = struct {
     export fn ghostty_surface_vigil_transport_status(surface: *Surface) termio.Attach.TransportStatus {
         return switch (surface.core_surface.io.backend) {
             .attach => |*attach| attach.transportStatus(),
-            else => .{ .state = 0, .pending_bytes = 0, .written_bytes = 0 },
+            else => .{ .state = 0, .pending_bytes = 0, .written_bytes = 0, .stalled = false },
         };
     }
 
