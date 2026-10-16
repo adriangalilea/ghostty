@@ -333,8 +333,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				App/iOS/iOSApp.swift,
+				App/iOS/VigilAgents.swift,
 				App/iOS/VigilAuthz.swift,
-				App/iOS/VigilFollow.swift,
 				App/iOS/VigilPhone.swift,
 				App/iOS/VigilPhoneUI.swift,
 				App/iOS/VigilTheme.swift,

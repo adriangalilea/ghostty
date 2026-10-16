@@ -5,70 +5,101 @@ import VigilActivity
 import VigilWire
 import WidgetKit
 
-/// A followed session, tab or pane on the Lock Screen and in the Dynamic
-/// Island, shaped by what it needs from you:
+/// A Mac's agents on the Lock Screen and in the Dynamic Island: the first
+/// row in full, shaped by what it needs from you (the question and wide
+/// Allow / Deny; the question its turn ended on and Reply; what it does
+/// now, its last lines), and under it the others needing you as one line
+/// each (a tap opens the pane), ‹ › turning through the rest. Nothing
+/// needing you: one quiet line until the Mac ends it.
 ///
-/// - working (and stopping, or unconfirmed): what it does now (the verb in
-///   the state's color, the status line's facts as chips), the last lines
-///   above its prompt in a terminal well, the turn's clock ticking on the
-///   phone;
-/// - blocked: the question, its evidence (the command, the edit), and wide
-///   Allow / Deny when one tap may answer it (through authz, unlocked);
-/// - done and idle: its last words.
-///
-/// Reply (the pane opens with its keyboard up) and Open are always one tap
-/// away.
-/// Every word beyond the state arrives sealed to this phone (`Detail`) and
-/// is opened here with the app's key; without it the activity shows the
-/// state alone. Within Apple's limits: 160 pt tall on the Lock Screen,
-/// buttons only where they can act (Lock Screen, expanded island), compact
-/// views that fit the narrowest island.
+/// Every word beyond the leading state arrives sealed to this phone
+/// (`Agents`) and is opened here with the app's key; without it the
+/// activity shows the state alone. Within Apple's limits: 160 pt tall on
+/// the Lock Screen, buttons only where they can act (Lock Screen, expanded
+/// island), compact views that fit the narrowest island.
 @main struct VigilLive: WidgetBundle {
-    var body: some Widget { SessionActivityWidget() }
+    var body: some Widget { AgentsActivityWidget() }
 }
 
-struct SessionActivityWidget: Widget {
+/// What one render shows, opened once.
+private struct Shown {
+    let state: AgentsActivity.ContentState
+    let mac: String
+    let note: Agents?
+
+    init(_ context: ActivityViewContext<AgentsActivity>) {
+        state = context.state
+        mac = context.attributes.mac
+        note = context.state.opened
+    }
+
+    var top: Agents.Row? { note?.rows.first }
+    var others: [Agents.Row] { Array(note?.rows.dropFirst() ?? []) }
+    /// Everyone needing you or followed, carried or not.
+    var count: Int { (note?.rows.count ?? 0) + (note?.more ?? 0) }
+    /// Opened, and nothing to show.
+    var resting: Bool { note?.rows.isEmpty == true }
+    /// One-line rows per page under the first: one when the first row
+    /// carries buttons (the 160 pt budget), else two.
+    var perPage: Int { top?.detail?.question?.answers != nil ? 1 : 2 }
+    var pages: Int { max(1, Int((Double(others.count) / Double(perPage)).rounded(.up))) }
+    var page: Int { min(state.page ?? 0, pages - 1) }
+    var pageRows: [Agents.Row] { Array(others.dropFirst(page * perPage).prefix(perPage)) }
+    var url: URL? { top.map { URL(string: "vigil://pane/\($0.pane)")! } }
+}
+
+struct AgentsActivityWidget: Widget {
     var body: some WidgetConfiguration {
-        ActivityConfiguration(for: SessionActivity.self) { context in
-            LockScreen(context: context, detail: context.state.opened)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 11)
-                .activityBackgroundTint(Color(white: 0.06).opacity(0.82))
-                .activitySystemActionForegroundColor(.white)
-                .widgetURL(context.attributes.url)
+        ActivityConfiguration(for: AgentsActivity.self) { context in
+            let shown = Shown(context)
+            Group {
+                if shown.resting {
+                    Resting(mac: shown.note?.mac)
+                } else {
+                    LockScreen(shown: shown, stale: context.isStale)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 11)
+                }
+            }
+            .activityBackgroundTint(Color(white: 0.06).opacity(0.82))
+            .activitySystemActionForegroundColor(.white)
+            .widgetURL(shown.url)
         } dynamicIsland: { context in
-            let state = context.state.state
-            let detail = context.state.opened
+            let shown = Shown(context)
+            let state = shown.top?.state ?? shown.state.state
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Badge(attributes: context.attributes, state: state, size: 40).padding(.leading, 4)
+                    Badge(emoji: shown.top?.emoji, state: state, size: 40).padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Clock(state: context.state, detail: detail)
-                        .font(.title3.weight(.semibold)).padding(.trailing, 4)
+                    if let top = shown.top {
+                        Clock(row: top).font(.title3.weight(.semibold)).padding(.trailing, 4)
+                    }
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(context.attributes.label).font(.subheadline.weight(.semibold)).lineLimit(1)
-                        Subtitle(attributes: context.attributes, state: state, detail: detail).font(.caption2)
+                        Text(shown.top?.label ?? shown.note?.mac ?? "vigil").font(.subheadline.weight(.semibold)).lineLimit(1)
+                        if let top = shown.top { Subtitle(row: top, mac: nil).font(.caption2) }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    StateContent(context: context, detail: detail, compact: true).padding(.top, 4)
+                    if let top = shown.top {
+                        Needs(row: top, mac: shown.mac, compact: true).padding(.top, 4)
+                    }
                 }
             } compactLeading: {
-                Badge(attributes: context.attributes, state: state, size: 22)
+                Badge(emoji: shown.top?.emoji, state: state, size: 22)
             } compactTrailing: {
-                if state == .working {
-                    Clock(state: context.state, detail: detail, template: "00:00").font(.caption.weight(.semibold))
+                if shown.count > 1 {
+                    Text("\(shown.count)").font(.caption.weight(.bold)).monospacedDigit().foregroundStyle(state.tint)
                 } else {
                     Image(systemName: state.symbol).foregroundStyle(state.tint)
                 }
             } minimal: {
                 Image(systemName: state.symbol).foregroundStyle(state.tint)
             }
-            .widgetURL(context.attributes.url)
+            .widgetURL(shown.url)
             .keylineTint(state.tint)
         }
     }
@@ -77,98 +108,177 @@ struct SessionActivityWidget: Widget {
 // MARK: - Lock Screen
 
 private struct LockScreen: View {
-    let context: ActivityViewContext<SessionActivity>
-    let detail: Detail?
+    let shown: Shown
+    let stale: Bool
 
     var body: some View {
-        let state = context.state.state
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 10) {
-                Badge(attributes: context.attributes, state: state, size: 34)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(context.attributes.label).font(.headline).lineLimit(1)
-                    Subtitle(attributes: context.attributes, state: state, detail: detail).font(.caption)
+            if let top = shown.top {
+                HStack(alignment: .center, spacing: 10) {
+                    Badge(emoji: top.emoji, state: top.state, size: 34)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(top.label).font(.headline).lineLimit(1)
+                        Subtitle(row: top, mac: shown.note?.mac).font(.caption)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Clock(row: top).font(.title2.weight(.semibold))
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Clock(state: context.state, detail: detail)
-                    .font(.title2.weight(.semibold))
+                Needs(row: top, mac: shown.mac, compact: false)
+            } else {
+                // Not opened yet: the leading state alone.
+                HStack(spacing: 10) {
+                    Badge(emoji: nil, state: shown.state.state, size: 34)
+                    Text(shown.state.state.words).font(.headline).foregroundStyle(shown.state.state.tint)
+                }
             }
-            StateContent(context: context, detail: detail, compact: false)
+            if !shown.pageRows.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(shown.pageRows, id: \.pane) { row in OneLine(row: row) }
+                }
+                Pager(shown: shown)
+            }
+            if stale {
+                Label("Not updated lately", systemImage: "clock.badge.exclamationmark")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
     }
 }
 
-// MARK: - What the state needs
+/// Nothing needs you: one quiet line, gone on its own.
+private struct Resting: View {
+    let mac: String?
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(AgentState.done.tint.opacity(0.8))
+            Text("All caught up").foregroundStyle(.secondary)
+            Spacer(minLength: 6)
+            if let mac { Text(mac).foregroundStyle(.tertiary).lineLimit(1) }
+        }
+        .font(.footnote.weight(.medium))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+}
 
-/// The body under the header, on the Lock Screen and in the expanded
-/// island alike (`compact` trims it for the island). Every state is budgeted
-/// to Apple's 160 pt Lock Screen limit with the header: past it the system
-/// truncates.
-private struct StateContent: View {
-    let context: ActivityViewContext<SessionActivity>
-    let detail: Detail?
+// MARK: - What the first row needs
+
+/// The first row's body, on the Lock Screen and in the expanded island
+/// (`compact` trims it for the island). Budgeted with the header and the
+/// one-line rows to Apple's 160 pt: past it the system truncates.
+private struct Needs: View {
+    let row: Agents.Row
+    let mac: String
     let compact: Bool
 
     var body: some View {
-        let state = context.state.state
+        let detail = row.detail
         VStack(alignment: .leading, spacing: 6) {
-            switch state {
+            switch row.state {
+            case .blocked where row.flavor == .ask:
+                // Its turn ended on a question: the question, and Reply.
+                HStack(alignment: .top, spacing: 8) {
+                    Text(row.line ?? "Asked you something").font(.subheadline).lineLimit(compact ? 1 : 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: true), wide: false)
+                }
             case .blocked:
                 if let question = detail?.question {
                     // The evidence is the question (the command, the edit);
                     // the title stands in only when there is none.
                     if let body = question.body, !body.isEmpty {
-                        Well(text: body, lines: 2)
+                        Well(text: body, lines: 1)
                     } else {
-                        Text(question.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+                        Text(question.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                     }
                     HStack(spacing: 8) {
                         if let answers = question.answers {
                             AnswerButton(title: answers.denyLabel, symbol: AnswerLook.symbol(.reject), tint: AnswerLook.refuse,
-                                         intent: AnswerIntent(device: context.attributes.device, request: question.request, action: answers.deny, shown: question.title))
+                                         intent: AnswerIntent(device: mac, request: question.request, action: answers.deny, shown: question.title))
                             AnswerButton(title: answers.allowLabel, symbol: AnswerLook.symbol(.approveOnce), tint: AnswerLook.approve,
-                                         intent: AnswerIntent(device: context.attributes.device, request: question.request, action: answers.allow, shown: question.title))
+                                         intent: AnswerIntent(device: mac, request: question.request, action: answers.allow, shown: question.title))
                         } else {
-                            if let pane = detail?.pane {
-                                Pill(title: "Answer in vigil", symbol: "arrow.up.forward.app", intent: OpenPaneIntent(pane: pane, keyboard: false), wide: true)
-                            }
+                            Pill(title: "Answer in vigil", symbol: "arrow.up.forward.app", intent: OpenPaneIntent(pane: row.pane, keyboard: false), wide: true)
                         }
                     }
                 } else {
-                    Text("Waiting for you in the terminal").font(.subheadline.weight(.medium))
-                    Actions(detail: detail, facts: false)
+                    Text(row.line ?? "Waiting for you in the terminal").font(.subheadline.weight(.medium)).lineLimit(1)
                 }
             case .working, .interrupting, .unknown:
                 HStack(spacing: 6) {
-                    if let now = detail?.now { Now(text: now, tint: state.tint) } else { Facts(detail: detail) }
+                    if let now = detail?.now { Now(text: now, tint: row.state.tint) } else { Facts(detail: detail) }
                     Spacer(minLength: 4)
-                    if let pane = detail?.pane {
-                        Pill(title: nil, symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: pane, keyboard: true), wide: false)
-                        Pill(title: nil, symbol: "terminal.fill", intent: OpenPaneIntent(pane: pane, keyboard: false), wide: false)
-                    }
+                    Pill(title: nil, symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: true), wide: false)
+                    Pill(title: nil, symbol: "terminal.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: false), wide: false)
                 }
-                if let tail = detail?.tail, !tail.isEmpty, !(compact && detail?.now != nil) {
-                    Well(text: tail.joined(separator: "\n"), lines: 2)
+                if let tail = detail?.tail, !tail.isEmpty, !compact {
+                    Well(text: tail.joined(separator: "\n"), lines: 1)
                 }
             case .done, .idle:
-                if let said = detail?.said, !said.isEmpty {
-                    // Its words as one paragraph: the message's own line
-                    // breaks (markdown lists, blank lines) are layout for a
-                    // terminal, not for three lines on a Lock Screen.
-                    Text(said.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-                            .filter { !$0.isEmpty }.joined(separator: " "))
-                        .font(.footnote)
-                        .foregroundStyle(state == .idle ? .secondary : .primary)
-                        .lineLimit(compact ? 2 : 3)
-                } else if let tail = detail?.tail, !tail.isEmpty {
-                    Well(text: tail.joined(separator: "\n"), lines: 2)
+                HStack(alignment: .top, spacing: 8) {
+                    if let said = detail?.said ?? row.line, !said.isEmpty {
+                        // Its words as one paragraph: the message's own line
+                        // breaks are layout for a terminal, not a Lock Screen.
+                        Text(said.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+                                .filter { !$0.isEmpty }.joined(separator: " "))
+                            .font(.footnote)
+                            .foregroundStyle(row.state == .idle ? .secondary : .primary)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Spacer(minLength: 0)
+                    }
+                    Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: true), wide: false)
                 }
-                Actions(detail: detail, facts: !compact)
             }
-            if context.isStale && !compact {
-                Label("Not updated lately", systemImage: "clock.badge.exclamationmark")
-                    .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Another row needing you, in one line: its state, its face and name,
+/// what it needs, how long; a tap opens its pane.
+private struct OneLine: View {
+    let row: Agents.Row
+    var body: some View {
+        Button(intent: OpenPaneIntent(pane: row.pane, keyboard: false)) {
+            HStack(spacing: 6) {
+                Circle().fill(row.state.tint).frame(width: 7, height: 7)
+                if let emoji = row.emoji { Text(emoji).font(.caption) }
+                Text(row.label).font(.caption.weight(.semibold)).lineLimit(1).layoutPriority(1)
+                Text(row.line ?? row.state.words).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 4)
+                Text(Date(timeIntervalSince1970: row.since), style: .relative)
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary).lineLimit(1)
+                    .frame(width: 52, alignment: .trailing)
             }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// ‹ n/m › when the others fill more than a page, "+N more" when the Mac
+/// carried fewer than it has.
+private struct Pager: View {
+    let shown: Shown
+    var body: some View {
+        let more = shown.note?.more ?? 0
+        if shown.pages > 1 || more > 0 {
+            HStack(spacing: 10) {
+                if shown.pages > 1 {
+                    Button(intent: PageIntent(mac: shown.mac, page: (shown.page + shown.pages - 1) % shown.pages)) {
+                        Image(systemName: "chevron.left")
+                    }
+                    Text("\(shown.page + 1)/\(shown.pages)").monospacedDigit()
+                    Button(intent: PageIntent(mac: shown.mac, page: (shown.page + 1) % shown.pages)) {
+                        Image(systemName: "chevron.right")
+                    }
+                }
+                Spacer(minLength: 0)
+                if more > 0 { Text("+\(more) more") }
+            }
+            .buttonStyle(.plain)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
         }
     }
 }
@@ -206,29 +316,12 @@ private struct Facts: View {
     }
 }
 
-/// Context, then Reply and Open.
-private struct Actions: View {
-    let detail: Detail?
-    let facts: Bool
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if facts { Facts(detail: detail) }
-            Spacer(minLength: 4)
-            if let pane = detail?.pane {
-                Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: pane, keyboard: true), wide: false)
-                Pill(title: "Open", symbol: "terminal.fill", intent: OpenPaneIntent(pane: pane, keyboard: false), wide: false)
-            }
-        }
-    }
-}
-
 // MARK: - Pieces
 
 /// The session's face (its emoji) on a tile tinted by the state, or the
 /// state's own symbol when it has none.
 private struct Badge: View {
-    let attributes: SessionActivity
+    let emoji: String?
     let state: AgentState
     let size: CGFloat
 
@@ -236,7 +329,7 @@ private struct Badge: View {
         RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
             .fill(state.tint.opacity(0.24))
             .overlay {
-                if let emoji = attributes.emoji {
+                if let emoji {
                     Text(emoji).font(.system(size: size * 0.52))
                 } else {
                     Image(systemName: state.symbol).font(.system(size: size * 0.46, weight: .semibold)).foregroundStyle(state.tint)
@@ -247,18 +340,19 @@ private struct Badge: View {
     }
 }
 
-/// "Working · rebuild-authz-on-tether · mbp-m5-max": the state in its
-/// color, the conversation's name (else the followed tab or pane's, else
-/// the agent), the Mac.
+/// "Waiting for you · rebuild-authz-on-tether · mbp-m5-max": the state in
+/// its color (a turn that ended on a question says so), the conversation's
+/// name, the Mac; a followed row wears a pin.
 private struct Subtitle: View {
-    let attributes: SessionActivity
-    let state: AgentState
-    let detail: Detail?
+    let row: Agents.Row
+    let mac: String?
 
     var body: some View {
-        let what = detail?.name ?? attributes.detail ?? detail?.agent.map(\.capitalized)
-        (Text(state.words).foregroundStyle(state.tint).fontWeight(.semibold)
-            + Text([what, attributes.mac].compactMap { $0 }.map { "  ·  \($0)" }.joined()).foregroundStyle(.secondary))
+        let words = row.state == .blocked && row.flavor == .ask ? "Asked you" : row.state.words
+        let what = row.detail?.name ?? row.detail?.agent.map(\.capitalized)
+        ((row.pinned ? Text(Image(systemName: "pin.fill")) + Text(" ") : Text("")).foregroundStyle(.secondary)
+            + Text(words).foregroundStyle(row.state.tint).fontWeight(.semibold)
+            + Text([what, mac].compactMap { $0 }.map { "  ·  \($0)" }.joined()).foregroundStyle(.secondary))
             .lineLimit(1)
     }
 }
@@ -274,13 +368,12 @@ private struct Subtitle: View {
 /// timer draws over it. Its range ends where the activity can (ActivityKit
 /// keeps one 8 hours active and 4 more on the Lock Screen).
 private struct Clock: View {
-    let state: SessionActivity.ContentState
-    let detail: Detail?
+    let row: Agents.Row
     /// The widest the clock may draw here (the compact island: "00:00").
     var template = "00:00:00"
     static let lifetime: TimeInterval = 12 * 3600
     var body: some View {
-        let since = Date(timeIntervalSince1970: state.state == .working ? detail?.turn ?? state.since : state.since)
+        let since = Date(timeIntervalSince1970: row.state == .working ? row.detail?.turn ?? row.since : row.since)
         Text(template)
             .monospacedDigit()
             .hidden()
@@ -288,7 +381,7 @@ private struct Clock: View {
                 Text(timerInterval: since...since.addingTimeInterval(Self.lifetime), countsDown: false)
                     .monospacedDigit()
                     .multilineTextAlignment(.trailing)
-                    .foregroundStyle(state.state.tint)
+                    .foregroundStyle(row.state.tint)
             }
     }
 }

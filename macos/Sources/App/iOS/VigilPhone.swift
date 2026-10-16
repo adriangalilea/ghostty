@@ -127,7 +127,7 @@ final class VigilPhone: ObservableObject {
         self.node = node
         unlinked = nil
         log("tether: node up (root \(node.root().prefix(10)))")
-        VigilFollow.adopt(followed: followed)
+        VigilAgents.begin()
         readPeers()
         Task { [weak self] in
             for await event in node.events {
@@ -154,6 +154,14 @@ final class VigilPhone: ObservableObject {
             }
         }
         for host in hosts { watch(host) }
+        // Each Mac learns where this phone's agents activity is reached and
+        // what is followed there.
+        VigilAgents.macs(Dictionary(uniqueKeysWithValues: hosts.map { host in
+            (host.id, followed.compactMap { key -> Follow.Scope? in
+                guard key.hasPrefix(host.id + "/") else { return nil }
+                return Follow.Scope(key: String(key.dropFirst(host.id.count + 1)))
+            })
+        }))
     }
 
     /// vigil could not start its tether node: nothing reaches a Mac.
@@ -294,27 +302,21 @@ final class VigilPhone: ObservableObject {
 
     /// Follows a session, tab or pane (or stops): its panes are owned with
     /// their Mac's authz, so their questions come to this app and Authz for
-    /// iPhone stays quiet for them, and it rides the Lock Screen as a Live
-    /// Activity; stopping lets go of both (a pane another follow still
-    /// covers stays owned).
+    /// iPhone stays quiet for them, and it rides the top of its Mac's agents
+    /// activity whatever its state (`VigilAgents`); stopping lets go of both
+    /// (a pane another follow still covers stays owned).
     func follow(_ node: Node, _ on: Bool) {
         guard let key = node.followKey, let scope = node.scope else { return }
         if on { followed.insert(key) } else { followed.remove(key) }
         log("follow: \(node.title) \(on ? "followed" : "no longer followed")")
+        let lead = lead(node)
         if on {
             own(node, panes: livePanes(node), until: Date().addingTimeInterval(Self.ownSpan))
-            guard let mac = hosts.first(where: { $0.id == node.root }),
-                  let session = nodes.flatMap(\.children).first(where: { $0.scope?.session == scope.session && $0.kind == .session })
-            else { return }
-            let lead = lead(node)
-            VigilFollow.start(SessionActivity(mac: mac.name, device: mac.id, scope: scope, label: session.title, emoji: session.emoji,
-                                              detail: node.kind == .session ? nil : node.caption),
-                              state: lead.state, since: lead.since)
         } else {
             let kept = Set(followedNodes.flatMap(livePanes))
             own(node, panes: livePanes(node).filter { !kept.contains($0) }, until: Date())
-            VigilFollow.end(key)
         }
+        VigilAgents.follow(scope, on: node.root, on, state: lead.state, since: lead.since)
     }
 
     /// Every follow's panes, owned again for a full span.
@@ -350,18 +352,13 @@ final class VigilPhone: ObservableObject {
         return (lead.state, lead.since ?? Date().timeIntervalSince1970)
     }
 
-    /// The tree moved: a follow that gained a pane owns it, and every
-    /// follow's activity shows the state now (vigil is open; the Mac's
-    /// pushes carry it while it is not).
+    /// The tree moved: a follow that gained a pane owns it (the agents
+    /// activity is its Mac's to draw).
     private func followTree() {
         let until = Date().addingTimeInterval(Self.ownSpan)
         for node in followedNodes {
             let panes = livePanes(node)
             if !Set(panes).isSubset(of: ownedPanes) { own(node, panes: panes, until: until) }
-            if let key = node.followKey {
-                let lead = lead(node)
-                VigilFollow.update(key, state: lead.state, since: lead.since)
-            }
         }
     }
 
