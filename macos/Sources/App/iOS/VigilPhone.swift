@@ -320,6 +320,10 @@ final class VigilPhone: ObservableObject {
         var sizeOwner: String = ""
         /// What following this row follows (nil for a Mac).
         var scope: Follow.Scope? = nil
+        /// How a followed tab or pane is named on the Lock Screen: its own
+        /// label, else the title its program set (Claude names it after the
+        /// conversation), never a process name.
+        var caption: String? = nil
         var children: [Node] = []
 
         /// The Mac's tether root (every id below a Mac starts with it).
@@ -395,7 +399,7 @@ final class VigilPhone: ObservableObject {
             else { return }
             let lead = lead(node)
             VigilFollow.start(SessionActivity(mac: mac.name, device: mac.id, scope: scope, label: session.title, emoji: session.emoji,
-                                              detail: node.kind == .session ? nil : node.title),
+                                              detail: node.kind == .session ? nil : node.caption),
                               state: lead.state, since: lead.since)
         } else {
             let kept = Set(followedNodes.flatMap(livePanes))
@@ -490,7 +494,8 @@ final class VigilPhone: ObservableObject {
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
                                 sizeOwner: (truth?.size ?? "").split(separator: " ", maxSplits: 2).dropFirst(2).joined(separator: " "),
-                                scope: Follow.Scope(session: s.name, kind: .pane, pane: p.id))
+                                scope: Follow.Scope(session: s.name, kind: .pane, pane: p.id),
+                                caption: p.label ?? Self.caption(p.title))
                 }
                 for (ti, t) in tabs.enumerated() {
                     let all = t.panes + (t.dock?.panes ?? [])
@@ -498,7 +503,8 @@ final class VigilPhone: ObservableObject {
                     if showTab {
                         let name = t.label ?? URL(fileURLWithPath: t.panes.first?.cwd ?? "").lastPathComponent
                         var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji,
-                                       scope: all.first.map { Follow.Scope(session: s.name, kind: .tab, pane: $0.id) })
+                                       scope: all.first.map { Follow.Scope(session: s.name, kind: .tab, pane: $0.id) },
+                                       caption: t.label ?? Self.caption(t.panes.first?.title))
                         tab.children = all.map(paneNode)
                         sess.children.append(tab)
                     } else {
@@ -509,6 +515,15 @@ final class VigilPhone: ObservableObject {
             }
             return node
         }
+    }
+
+    /// A terminal title as a name: the program's status glyph (Claude's
+    /// braille spinner, its idle ✳) dropped; nothing left is no name.
+    nonisolated static func caption(_ title: String?) -> String? {
+        guard let title else { return nil }
+        let name = String(title.unicodeScalars.drop { !$0.properties.isAlphabetic && !("0"..."9").contains($0) })
+            .trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? nil : name
     }
 
     private static let shells: Set<String> = ["fish", "bash", "zsh", "sh", "login", "caffeinate"]
