@@ -436,8 +436,11 @@ extension VigilWorkspaces {
             if let s = paneAgentState(pane),
                s.state == .blocked || s.state == .done,
                (lastAck(pane) ?? .distantPast) < s.since {
+                // Written off main: the seen file landing is the change (the
+                // facts reload posts it). Posting here too re-entered this
+                // function through `onPresenceInputs` before the mark existed,
+                // recursing until the stack ran out.
                 markSeen(pane, revision: s.revision)
-                changed = true
             }
         }
         if let name, let session = workspaces[name],
