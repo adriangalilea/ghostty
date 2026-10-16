@@ -263,12 +263,19 @@ private struct Subtitle: View {
 
 /// How long: the turn's own clock while it works (the phone ticks it, no
 /// push needed), else since the state began.
+///
+/// A timer text reserves the width of the longest string its range can
+/// show, so the range must end where the activity can: ActivityKit keeps
+/// one 8 hours active and 4 more on the Lock Screen. Ended at
+/// `distantFuture` the width was unbounded, and under `fixedSize` the whole
+/// Lock Screen view laid out at a NaN width and drew black (2026-10-16).
 private struct Clock: View {
     let state: SessionActivity.ContentState
     let detail: Detail?
+    static let lifetime: TimeInterval = 12 * 3600
     var body: some View {
         let since = Date(timeIntervalSince1970: state.state == .working ? detail?.turn ?? state.since : state.since)
-        Text(timerInterval: since...Date.distantFuture, countsDown: false)
+        Text(timerInterval: since...since.addingTimeInterval(Self.lifetime), countsDown: false)
             .monospacedDigit()
             .multilineTextAlignment(.trailing)
             .foregroundStyle(state.state.tint)
