@@ -198,14 +198,9 @@ private struct Facts: View {
     let detail: Detail?
     var body: some View {
         HStack(spacing: 6) {
-            if let context = detail?.context { Chip(text: "\(Self.tokens(context)) ctx", symbol: "brain") }
+            if let context = detail?.context { Chip(text: "\(context)% ctx", symbol: "brain") }
             if let detail, detail.panes > 1 { Chip(text: "\(detail.working)/\(detail.panes) working", symbol: "square.stack") }
         }
-    }
-
-    static func tokens(_ count: Int) -> String {
-        count >= 1_000_000 ? String(format: "%.1fM", Double(count) / 1_000_000)
-            : count >= 1000 ? "\(count / 1000)k" : "\(count)"
     }
 }
 
@@ -250,15 +245,16 @@ private struct Badge: View {
     }
 }
 
-/// "Working · E-id handoff brief review · mbp-m5-max": the state in its
-/// color, the followed tab or pane (else the agent), the Mac.
+/// "Working · rebuild-authz-on-tether · mbp-m5-max": the state in its
+/// color, the conversation's name (else the followed tab or pane's, else
+/// the agent), the Mac.
 private struct Subtitle: View {
     let attributes: SessionActivity
     let state: SessionState
     let detail: Detail?
 
     var body: some View {
-        let what = attributes.detail ?? detail?.agent.map(\.capitalized)
+        let what = detail?.name ?? attributes.detail ?? detail?.agent.map(\.capitalized)
         (Text(state.words).foregroundStyle(state.tint).fontWeight(.semibold)
             + Text([what, attributes.mac].compactMap { $0 }.map { "  ·  \($0)" }.joined()).foregroundStyle(.secondary))
             .lineLimit(1)
