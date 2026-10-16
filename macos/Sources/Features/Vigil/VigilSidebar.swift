@@ -295,8 +295,7 @@ final class VigilSidebarModel: ObservableObject {
     @Published private(set) var burials: [VigilSessionManager.SidebarBurial] = []
 
     /// The tray's per-second countdown, and nothing else: re-derive the
-    /// burial rows without paying a tree snapshot (the 2s whole-tree
-    /// ticker that used to carry this is gone).
+    /// burial rows without paying a tree snapshot.
     func refreshBurials() {
         let fresh = VigilSessionManager.shared.sidebarBurials()
         if fresh != burials { burials = fresh }
@@ -551,9 +550,8 @@ final class VigilSidebarModel: ObservableObject {
 
     // Session-drag handling shared by EVERY drop surface in the bar
     // (session rows, tab rows, pane rows, the tail): territory decides
-    // the target. A session dropped on a child row used to hit a delegate
-    // that refused it - the drag CANCELLED with draggingItem stuck (row
-    // dimmed, preview silently reverted) until the staleness timer.
+    // the target, so no surface refuses a drag (a refusal cancels it with
+    // the row left dimmed until the staleness timer).
 
     func sessionDragEntered(over target: String) {
         guard case .session(let dragging) = draggingItem else { return }
