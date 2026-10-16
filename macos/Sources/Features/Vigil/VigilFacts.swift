@@ -33,7 +33,6 @@ final class VigilFacts: @unchecked Sendable {
     private let beforeRead: @Sendable () -> Void
     private var current = Snapshot()
     private var directories: [String: DispatchSourceFileSystemObject] = [:]
-    private var inPlace: [String: (UInt64, DispatchSourceFileSystemObject)] = [:]
     private var processes: [Int32: DispatchSourceProcess] = [:]
     private var pending = false
     private var stopped = false
@@ -54,9 +53,8 @@ final class VigilFacts: @unchecked Sendable {
         queue.async {
             self.stopped = true
             self.directories.values.forEach { $0.cancel() }
-            self.inPlace.values.forEach { $0.1.cancel() }
             self.processes.values.forEach { $0.cancel() }
-            self.directories.removeAll(); self.inPlace.removeAll(); self.processes.removeAll()
+            self.directories.removeAll(); self.processes.removeAll()
         }
     }
 
@@ -134,7 +132,6 @@ final class VigilFacts: @unchecked Sendable {
             }
         }
         leases.sort { ($0.pane, $0.pid, $0.note) < ($1.pane, $1.pid, $1.note) }
-        watchInPlace(files)
         watchProcesses(Set(leases.map(\.pid)))
         guard files != current.files || leases != current.leases || current.revision == 0 else { return }
         // Renderer receipts can change on every output beat. They update the
@@ -150,25 +147,6 @@ final class VigilFacts: @unchecked Sendable {
         deliver(current)
         let elapsed = began.duration(to: .now)
         if elapsed > .milliseconds(100) { trace("facts: revision \(current.revision) read off main in \(elapsed)") }
-    }
-
-    /// Size and screen hashes currently change in place; directory watches
-    /// alone cannot observe those writes. Their inode watches follow replacement.
-    private func watchInPlace(_ files: [String: File]) {
-        let wanted = files.filter { $0.key.hasPrefix("vigild/") && ($0.key.hasSuffix(".size") || $0.key.hasSuffix(".screen")) }
-        for key in Array(inPlace.keys) where wanted[key]?.inode != inPlace[key]?.0 {
-            inPlace.removeValue(forKey: key)?.1.cancel()
-        }
-        for (key, file) in wanted where inPlace[key] == nil {
-            let fd = open(root + "/" + key, O_EVTONLY | O_CLOEXEC | O_NOFOLLOW)
-            guard fd >= 0 else { continue }
-            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd,
-                eventMask: [.write, .extend, .delete, .rename], queue: queue)
-            source.setEventHandler { [weak self] in self?.invalidate() }
-            source.setCancelHandler { close(fd) }
-            inPlace[key] = (file.inode, source)
-            source.resume()
-        }
     }
 
     private func watchProcesses(_ pids: Set<Int32>) {

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import VigilHarness
 import VigilWire
 
@@ -58,10 +59,29 @@ final class VigilRemote: ObservableObject {
         guard !started else { return }
         started = true
         followPeers()
+        // A Mac out of reach announces nothing when it comes back; this
+        // Mac's own network changing is the event that says "try now". The
+        // 15 s re-dial stays as the floor for a peer that wakes on its own.
+        path.pathUpdateHandler = { [weak self] update in
+            guard update.status == .satisfied else { return }
+            Task { @MainActor [weak self] in self?.redialAll("network changed") }
+        }
+        path.start(queue: .global(qos: .utility))
     }
+    private let path = NWPathMonitor()
+
+    /// Every Mac whose stream is down is dialed now.
+    private func redialAll(_ why: String) {
+        let down = hosts.filter { streams[$0.device] == nil && !dialing.contains($0.device) }
+        guard !down.isEmpty else { return }
+        Self.trace?("remote: \(why): dialing \(down.map(\.name)) now")
+        for host in down { stream(host.device) }
+    }
+    private var dialing = Set<String>()
 
     func stop() {
         stopped = true
+        path.cancel()
         for handle in streams.values { try? handle.close() }
         streams.removeAll()
         lines.removeAll()
@@ -113,11 +133,13 @@ final class VigilRemote: ObservableObject {
     /// A Mac's directory stream, through the hub. A stream that ends is
     /// dialed again after 15s while the Mac is still paired.
     private func stream(_ device: String) {
-        guard !stopped, streams[device] == nil, host(device) != nil else { return }
+        guard !stopped, streams[device] == nil, !dialing.contains(device), host(device) != nil else { return }
+        dialing.insert(device)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let result = Result { try Self.hub.request(.open(device: device, .dir)) }
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.dialing.remove(device)
                 switch result {
                 case .failure(let error):
                     self.ended(device, "\(error)")

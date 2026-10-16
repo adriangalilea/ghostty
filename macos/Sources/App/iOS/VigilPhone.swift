@@ -1,5 +1,6 @@
 import Foundation
 import GhosttyKit
+import Network
 import OSLog
 import TetherKit
 import VigilActivity
@@ -129,6 +130,15 @@ final class VigilPhone: ObservableObject {
         log("tether: node up (root \(node.root().prefix(10)))")
         VigilFollow.adopt(followed: followed)
         readPeers()
+        path.pathUpdateHandler = { [weak self] update in
+            guard update.status == .satisfied else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.errors.isEmpty == false else { return }
+                self.log("network changed: dialing the Macs that are down")
+                self.redialFailed()
+            }
+        }
+        path.start(queue: .global(qos: .utility))
         Task { [weak self] in
             for await event in node.events {
                 switch event {
@@ -155,13 +165,22 @@ final class VigilPhone: ObservableObject {
     /// Back on screen: every Mac whose stream is down is dialed now, not
     /// at the end of its pause.
     func wake() {
+        redialFailed()
+        renewClaims()
+    }
+
+    /// Every Mac whose stream is down is dialed now, not at the end of its
+    /// pause: on screen again, or the phone's network changed (a Mac out of
+    /// reach announces nothing when it comes back; this is the event that
+    /// says "try now").
+    private func redialFailed() {
         for (id, task) in watches where errors[id] != nil {
             task.cancel()
             watches[id] = nil
         }
         readPeers()
-        renewClaims()
     }
+    private let path = NWPathMonitor()
 
     /// vigil could not start its tether node: nothing reaches a Mac.
     func unlinked(_ why: String) {
