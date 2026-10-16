@@ -437,6 +437,8 @@ struct VigilSidebarView: View {
             }
             .opacity(row.stateTag == "windowed" ? 1 : 0.85)
             Spacer(minLength: 4)
+            // Folded, who looks from elsewhere rolls up: a peek is never hidden.
+            if collapsed { lookerGlyphs(row.tabs.flatMap(\.panes).flatMap(\.lookers)) }
             followKeycap(id)
             // No lifecycle tag on the row: every session is ALIVE by
             // construction (daemons carry it); the only honest distinction
@@ -550,6 +552,7 @@ struct VigilSidebarView: View {
                     .background(Capsule().fill(Color.primary.opacity(0.08)))
             }
             Spacer(minLength: 4)
+            if collapsed { lookerGlyphs(tab.panes.flatMap(\.lookers)) }
             followKeycap(tab.id)
             // The tab's class slot is free; collapsed, it wears the
             // descendants' antenna so a listener never vanishes.
@@ -658,6 +661,7 @@ struct VigilSidebarView: View {
                     .foregroundColor(Color.secondary.opacity(0.8))
             }
             Spacer(minLength: 4)
+            paneMarks(pane)
             followKeycap(id)
             watchGlyph(pane)
             dotSlot(pane.state)
@@ -785,6 +789,38 @@ struct VigilSidebarView: View {
     /// must read at a glance, and yellow is free on this rail (working's
     /// yellow dot never shares a row - the antenna hides while working).
     /// Declared vs derived lives in the tooltip (lease notes first).
+    /// What a pane is to the world beyond this window, each only when it
+    /// differs from the default: who looks from elsewhere (the phone,
+    /// another Mac), a phone following it, its priority (high rings
+    /// through Focus, low never rings).
+    private func paneMarks(_ pane: VigilSessionManager.SidebarPane) -> some View {
+        HStack(spacing: 3 * scale) {
+            lookerGlyphs(pane.lookers)
+            if pane.followed {
+                mark("bell.fill", .primary.opacity(0.75), "Followed on iPhone: its stalls and ends ring there")
+            }
+            switch pane.priority {
+            case .high: mark("exclamationmark", .orange, "High priority: rings through Focus")
+            case .low: mark("moon.fill", .secondary, "Low priority: never rings")
+            case .normal: EmptyView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func lookerGlyphs(_ lookers: [Viewer]) -> some View {
+        ForEach(Array(Set(lookers)).sorted { $0.rawValue < $1.rawValue }, id: \.self) { viewer in
+            mark(viewer == .phone ? "iphone" : "laptopcomputer", .cyan, "Open on \(viewer.words) right now")
+        }
+    }
+
+    private func mark(_ symbol: String, _ color: Color, _ help: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 9 * scale, weight: .bold))
+            .foregroundStyle(color)
+            .help(help)
+    }
+
     private func watchGlyph(_ pane: VigilSessionManager.SidebarPane) -> some View {
         Group {
             if watchActive(pane) {

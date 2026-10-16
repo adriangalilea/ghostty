@@ -274,7 +274,11 @@ final class VigilRemote: ObservableObject {
                             program: program,
                             state: truth?.shown,
                             isDock: offset >= tab.panes.count,
-                            emoji: pane.emoji)
+                            emoji: pane.emoji,
+                            // Another Mac looking at a remote pane is this
+                            // one (two Macs): only the phone is news.
+                            lookers: truth?.lookers.filter { $0 == .phone } ?? [],
+                            priority: pane.priority ?? .normal)
                     }
                     let anchor = all.first.map { Self.compositeId(host.device, $0.id) }
                     let title = tab.label.flatMap { $0.isEmpty ? nil : $0 }

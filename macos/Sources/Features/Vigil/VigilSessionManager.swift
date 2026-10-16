@@ -5464,6 +5464,11 @@ class VigilSessionManager {
         /// Underived truth: background processes alive under the pane
         /// beyond its program (tree file argv, shortened).
         var watchProcs: [String] = []
+        /// Who looks at it from off its Mac (its daemon's `viewers`).
+        var lookers: [Viewer] = []
+        /// A phone follows it (the hub's board).
+        var followed: Bool = false
+        var priority: Registry.Priority = .normal
     }
 
     struct SidebarTab: Identifiable, Equatable {
@@ -5584,7 +5589,10 @@ class VigilSessionManager {
                 isDock: isDock,
                 emoji: pane.emoji,
                 watchNotes: leases[pane.id]?.map(\.note) ?? [],
-                watchProcs: paneWatchers(pane.id))
+                watchProcs: paneWatchers(pane.id),
+                lookers: Viewer.parse(paneFileLines(pane.id, "viewers").joined(separator: "\n")),
+                followed: phoneFollows.contains(pane.id),
+                priority: pane.priority ?? .normal)
         }
 
         /// A tab's skim label: WHERE it lives (cwd basename), never an echo
@@ -5748,7 +5756,9 @@ class VigilSessionManager {
     /// board records it (`board-status.json`, its one writer): read off main
     /// whenever the harness directory changes, so the sidebar's "Follow on
     /// iPhone" says what is true, whichever side followed.
-    private(set) var phoneFollows: Set<String> = []
+    private(set) var phoneFollows: Set<String> = [] {
+        didSet { if phoneFollows != oldValue { NotificationCenter.default.post(name: Self.stateDidChange, object: nil) } }
+    }
     private var boardWatch: DispatchSourceFileSystemObject?
 
     private func watchPhoneFollows() {
