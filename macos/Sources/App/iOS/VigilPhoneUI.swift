@@ -34,13 +34,11 @@ struct VigilPhoneRoot: View {
             HomeView()
         }
         .environmentObject(model)
-        // vigil://pane/<id> (a request's Go there), vigil://session/<mac>/<session>
-        // (a followed session's activity) and vigil://reply/<id> (its Reply).
+        // vigil://pane/<id> (a request's Go there, a followed pane's activity)
+        // and vigil://session/<mac>/<session> (a followed session's).
         .onOpenURL { url in
             Task { @MainActor in
-                guard let ref = await model.resolve(url: url) else { return }
-                if url.host == "reply" { model.composeOn = ref }
-                path = [ref]
+                if let ref = await model.resolve(url: url) { path = [ref] }
             }
         }
         // A tapped question's pane.

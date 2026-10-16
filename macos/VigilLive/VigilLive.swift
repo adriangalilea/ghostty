@@ -59,7 +59,7 @@ struct SessionActivityWidget: Widget {
                 Badge(attributes: context.attributes, state: state, size: 22)
             } compactTrailing: {
                 if state == .working {
-                    Clock(state: context.state, detail: detail).font(.caption.weight(.semibold)).frame(maxWidth: 46)
+                    Clock(state: context.state, detail: detail, template: "00:00").font(.caption.weight(.semibold))
                 } else {
                     Image(systemName: state.symbol).foregroundStyle(state.tint)
                 }
@@ -90,7 +90,6 @@ private struct LockScreen: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Clock(state: context.state, detail: detail)
                     .font(.title2.weight(.semibold))
-                    .fixedSize()
             }
             StateContent(context: context, detail: detail, compact: false)
         }
@@ -128,7 +127,9 @@ private struct StateContent: View {
                             AnswerButton(title: "Allow", symbol: "checkmark", tint: .green,
                                          intent: AnswerIntent(device: context.attributes.device, request: question.request, action: allow, shown: question.title))
                         } else {
-                            Pill(title: "Answer in vigil", symbol: "arrow.up.forward.app", url: ActivityLink.pane(detail?.pane ?? ""), wide: true)
+                            if let pane = detail?.pane {
+                                Pill(title: "Answer in vigil", symbol: "arrow.up.forward.app", intent: OpenPaneIntent(pane: pane, reply: false), wide: true)
+                            }
                         }
                     }
                 } else {
@@ -140,8 +141,8 @@ private struct StateContent: View {
                     if let now = detail?.now { Now(text: now, tint: state.tint) } else { Facts(detail: detail) }
                     Spacer(minLength: 4)
                     if let pane = detail?.pane {
-                        Pill(title: nil, symbol: "arrowshape.turn.up.left.fill", url: ActivityLink.reply(pane), wide: false)
-                        Pill(title: nil, symbol: "terminal.fill", url: ActivityLink.pane(pane), wide: false)
+                        Pill(title: nil, symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: pane, reply: true), wide: false)
+                        Pill(title: nil, symbol: "terminal.fill", intent: OpenPaneIntent(pane: pane, reply: false), wide: false)
                     }
                 }
                 if let tail = detail?.tail, !tail.isEmpty, !(compact && detail?.now != nil) {
@@ -149,11 +150,14 @@ private struct StateContent: View {
                 }
             case .done, .idle:
                 if let said = detail?.said, !said.isEmpty {
-                    Text(said)
+                    // Its words as one paragraph: the message's own line
+                    // breaks (markdown lists, blank lines) are layout for a
+                    // terminal, not for three lines on a Lock Screen.
+                    Text(said.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+                            .filter { !$0.isEmpty }.joined(separator: " "))
                         .font(.footnote)
                         .foregroundStyle(state == .idle ? .secondary : .primary)
                         .lineLimit(compact ? 2 : 3)
-                        .fixedSize(horizontal: false, vertical: true)
                 } else if let tail = detail?.tail, !tail.isEmpty {
                     Well(text: tail.joined(separator: "\n"), lines: 2)
                 }
@@ -215,8 +219,8 @@ private struct Actions: View {
             if facts { Facts(detail: detail) }
             Spacer(minLength: 4)
             if let pane = detail?.pane {
-                Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", url: ActivityLink.reply(pane), wide: false)
-                Pill(title: "Open", symbol: "terminal.fill", url: ActivityLink.pane(pane), wide: false)
+                Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: pane, reply: true), wide: false)
+                Pill(title: "Open", symbol: "terminal.fill", intent: OpenPaneIntent(pane: pane, reply: false), wide: false)
             }
         }
     }
@@ -264,21 +268,30 @@ private struct Subtitle: View {
 /// How long: the turn's own clock while it works (the phone ticks it, no
 /// push needed), else since the state began.
 ///
-/// A timer text reserves the width of the longest string its range can
-/// show, so the range must end where the activity can: ActivityKit keeps
-/// one 8 hours active and 4 more on the Lock Screen. Ended at
-/// `distantFuture` the width was unbounded, and under `fixedSize` the whole
-/// Lock Screen view laid out at a NaN width and drew black (2026-10-16).
+/// A timer text is filled in by the system's renderer after layout, so it
+/// has no natural width to lay out with: asked for one (`fixedSize`), the
+/// whole Lock Screen view laid out at a NaN width and drew black
+/// (2026-10-16, the renderer's display list read `frame (nan …)`). The
+/// space is a template's ("00:00:00" in the same font, never shown), the
+/// timer draws over it. Its range ends where the activity can (ActivityKit
+/// keeps one 8 hours active and 4 more on the Lock Screen).
 private struct Clock: View {
     let state: SessionActivity.ContentState
     let detail: Detail?
+    /// The widest the clock may draw here (the compact island: "00:00").
+    var template = "00:00:00"
     static let lifetime: TimeInterval = 12 * 3600
     var body: some View {
         let since = Date(timeIntervalSince1970: state.state == .working ? detail?.turn ?? state.since : state.since)
-        Text(timerInterval: since...since.addingTimeInterval(Self.lifetime), countsDown: false)
+        Text(template)
             .monospacedDigit()
-            .multilineTextAlignment(.trailing)
-            .foregroundStyle(state.state.tint)
+            .hidden()
+            .overlay(alignment: .trailing) {
+                Text(timerInterval: since...since.addingTimeInterval(Self.lifetime), countsDown: false)
+                    .monospacedDigit()
+                    .multilineTextAlignment(.trailing)
+                    .foregroundStyle(state.state.tint)
+            }
     }
 }
 
@@ -316,24 +329,27 @@ private struct Chip: View {
     }
 }
 
-/// A link into the app, as a pill (its symbol alone when it has no title).
+/// Into the app, as a pill (its symbol alone when it has no title): a
+/// button with an intent, the only tap target the Lock Screen takes besides
+/// the activity's own `widgetURL`.
 private struct Pill: View {
     let title: String?
     let symbol: String
-    let url: URL
+    let intent: OpenPaneIntent
     let wide: Bool
     var body: some View {
-        Link(destination: url) {
+        Button(intent: intent) {
             Group {
                 if let title { Label(title, systemImage: symbol) } else { Image(systemName: symbol) }
             }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white)
-                .frame(maxWidth: wide ? .infinity : nil)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 5)
-                .background(.white.opacity(0.16), in: Capsule())
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: wide ? .infinity : nil)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(.white.opacity(0.16), in: Capsule())
         }
+        .buttonStyle(.plain)
     }
 }
 

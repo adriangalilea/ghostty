@@ -564,9 +564,7 @@ final class VigilPhone: ObservableObject {
             let leaves = session.leaves.compactMap { leaf in leaf.pane.map { (leaf, $0) } }
             return (leaves.first { $0.0.state == "blocked" } ?? leaves.first)?.1
         }
-        guard url.host == "pane" || url.host == "reply" else {
-            log("url: \(url) is not vigil://pane/<id>, vigil://reply/<id> or vigil://session/<mac>/<session>"); return nil
-        }
+        guard url.host == "pane" else { log("url: \(url) is not vigil://pane/<id> or vigil://session/<mac>/<session>"); return nil }
         let id = url.lastPathComponent
         guard Open.validPane(id) else { log("url: \(url) names no pane"); return nil }
         let deadline = Date().addingTimeInterval(5)
@@ -587,9 +585,11 @@ final class VigilPhone: ObservableObject {
     /// it and clears it.
     @Published var opening: PaneRef?
 
-    func openPane(_ id: String) {
+    /// `compose`: with its composer up (an activity's Reply).
+    func openPane(_ id: String, compose: Bool = false) {
         Task {
             guard let url = URL(string: "vigil://pane/\(id)"), let ref = await resolve(url: url) else { return }
+            if compose { composeOn = ref }
             opening = ref
         }
     }
