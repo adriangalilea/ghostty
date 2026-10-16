@@ -228,9 +228,8 @@ struct VigilSidebarView: View {
                 .fixedSize()
             }
             .help("off: asks stay in the queue (keycap, badge, ⌘⇧J). summon: a permission prompt or question mid-turn pulls the quick terminal in on the asking pane; answering advances in place. window: this window shapeshifts to any unseen ask.")
-            // Asks are Authz's; this row is a view of its switches. The rail
-            // below is this Mac's dictation into the focused pane.
-            VigilAsksRow()
+            // Asks are Authz's, switched in its menu bar and Settings alone.
+            // The rail below is this Mac's dictation into the focused pane.
                     if VigilVoice.available {
                         HStack(spacing: 5) {
                             MicButton(
