@@ -4,6 +4,7 @@ import AskKit
 import AuthzProtocol
 import Foundation
 import VigilHarness
+import VigilWire
 
 /// Vigil's side of authorization, now that asks are Authz.app's (its own
 /// daemon, authzd, holds requests, keys and receipts; Authz.app presents
@@ -51,37 +52,61 @@ final class VigilHarnessCoordinator {
 
     // MARK: context
 
-    /// What is in front of the human here: the focused local pane (only
-    /// while this app is active and the focus is not another Mac's pane),
-    /// and every local pane shown in a visible window.
-    private func screen() -> (focused: String?, visible: [String]) {
+    /// What is in front of the human here, by the Mac each pane lives on
+    /// ("" = this Mac): the focused pane (only while this app is active)
+    /// and every pane shown in a visible window. A pane of another Mac on
+    /// screen here is in front of you for THAT Mac's requests too.
+    private func screen() -> [String: Open.Screen] {
         let manager = VigilSessionManager.shared
         let key = NSApp.keyWindow?.windowController as? TerminalController
-        let focusedView = key?.focusedSurface
-        let focused = NSApp.isActive && focusedView?.vigilHost == nil ? focusedView?.vigilAttachId : nil
-        var visible: [String] = []
+        let focusedView = NSApp.isActive ? key?.focusedSurface : nil
+        let expires = Date().timeIntervalSince1970 + 90
+        var homes: [String: Open.Screen] = ["": Open.Screen(focused: nil, visible: [], expiresAt: expires)]
+        if let view = focusedView, let pane = view.vigilAttachId {
+            homes[view.vigilHost ?? "", default: Open.Screen(focused: nil, visible: [], expiresAt: expires)].focused = pane
+        }
         for window in NSApp.windows where window.isVisible && window.occlusionState.contains(.visible) {
             guard let controller = window.windowController as? TerminalController else { continue }
-            for view in controller.surfaceTree where view.vigilHost == nil && !view.isHiddenOrHasHiddenAncestor {
-                if let pane = view.vigilAttachId, manager.paneOnAnyScreen(pane) { visible.append(pane) }
+            for view in controller.surfaceTree where !view.isHiddenOrHasHiddenAncestor {
+                guard let pane = view.vigilAttachId else { continue }
+                let home = view.vigilHost ?? ""
+                if home.isEmpty, !manager.paneOnAnyScreen(pane) { continue }
+                homes[home, default: Open.Screen(focused: nil, visible: [], expiresAt: expires)].visible.append(pane)
             }
         }
-        return (focused, Array(Set(visible)).sorted())
+        return homes.mapValues { Open.Screen(focused: $0.focused, visible: Array(Set($0.visible)).sorted(), expiresAt: $0.expiresAt) }
     }
 
+    /// What each other Mac was last told (cleared there with an empty view
+    /// the moment its panes leave the screen here).
+    private var reportedRemote: [String: Open.Screen] = [:]
+
     func report(renew: Bool = false) {
-        let (focused, visible) = screen()
-        guard renew || reported?.focusedContext != focused || reported?.visibleContexts != visible else { return }
-        let context = RequesterContext(
-            focusedContext: focused, visibleContexts: visible, expiresAt: Date().timeIntervalSince1970 + 90)
-        reported = context
-        // The broker's socket is local and quick; never on the main thread.
-        DispatchQueue.global(qos: .utility).async {
-            do {
-                let response = try HarnessWire.call(RPCRequest("context", .from(context)))
-                if !response.ok { VigilSessionManager.vlogSync("authz context: broker refused (\(response.value))") }
-            } catch {
-                VigilSessionManager.vlogSync("authz context: broker unreachable (\(error))")
+        var homes = screen()
+        let mine = homes.removeValue(forKey: "") ?? Open.Screen(focused: nil, visible: [], expiresAt: 0)
+        if renew || reported?.focusedContext != mine.focused || reported?.visibleContexts != mine.visible {
+            let context = RequesterContext(focusedContext: mine.focused, visibleContexts: mine.visible, expiresAt: mine.expiresAt)
+            reported = context
+            // The broker's socket is local and quick; never on the main thread.
+            DispatchQueue.global(qos: .utility).async {
+                do {
+                    let response = try HarnessWire.call(RPCRequest("context", .from(context)))
+                    if !response.ok { VigilSessionManager.vlogSync("authz context: broker refused (\(response.value))") }
+                } catch {
+                    VigilSessionManager.vlogSync("authz context: broker unreachable (\(error))")
+                }
+            }
+        }
+        for home in Set(homes.keys).union(reportedRemote.keys) {
+            let now = homes[home] ?? Open.Screen(focused: nil, visible: [], expiresAt: Date().timeIntervalSince1970 + 90)
+            let before = reportedRemote[home]
+            guard renew || before?.focused != now.focused || before?.visible != now.visible else { continue }
+            reportedRemote[home] = now.visible.isEmpty && now.focused == nil ? nil : now
+            // Through this Mac's hub to that Mac's; a blocking call, off main.
+            DispatchQueue.global(qos: .utility).async {
+                do { _ = try Local.Client(socket: VigilPaths.hub).call(device: home, .context(now)) } catch {
+                    VigilSessionManager.vlogSync("authz context: \(home.prefix(10)) not told what is on screen here (\(error))")
+                }
             }
         }
     }
