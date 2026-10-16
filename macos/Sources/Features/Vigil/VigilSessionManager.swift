@@ -59,7 +59,15 @@ class VigilSessionManager {
         Task { @MainActor [weak self] in
             guard let self, snapshot.revision > self.facts.revision else { return }
             let sidebarChanged = snapshot.sidebarRevision != self.facts.sidebarRevision
+            let ended = self.facts.revision == 0 ? [] : Self.commandsEnded(from: self.facts, to: snapshot)
             self.facts = snapshot
+            // A long command that just ended is news, the same as an
+            // agent's turn ending: one attention path for both.
+            if !ended.isEmpty {
+                var changed = false
+                for pane in ended { changed = self.attend(event: "Stop", pane: pane, container: "") || changed }
+                if changed { self.attentionChanged() }
+            }
             if sidebarChanged { NotificationCenter.default.post(name: Self.stateDidChange, object: nil) }
         }
     }
@@ -1244,51 +1252,67 @@ class VigilSessionManager {
         var changed = false
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
             guard let event = try? JSONDecoder().decode(WakeEvent.self, from: Data(line.utf8)) else { continue }
-            // Ownership resolution, strongest first: the pane daemon the
-            // agent lives in (survives drag-out; env container goes
-            // stale), then the birth container.
-            let name: String
-            if let pane = event.pane, !pane.isEmpty, let owner = sessionOwning(pane: pane) {
-                name = owner
-            } else if sessions[event.container] != nil {
-                name = event.container
-            } else {
-                continue
-            }
-            // Presence beats attention, PANE-granular: only an event whose
-            // console is actually on screen is already answered. A watched
-            // session's hidden tab queues like any other (session-level
-            // presence acked those sight-unseen). Pane-less events keep
-            // the session-level rule (nothing finer to check).
-            if let pane = event.pane, !pane.isEmpty {
-                if paneVisible(pane) {
-                    markSeen(pane)
-                    changed = true
-                    continue
-                }
-            } else if isWatching(name) {
-                changed = true
-                continue
-            }
-            // Notification = permission prompt, Question = AskUserQuestion
-            // (both mid-turn, the agent is stalled); Ask = the adapter
-            // classifier found a question at turn end. Distinct ranks:
-            // the summon and ⌘⇧J serve mid-turn blockers first.
-            let attention: Attention = switch event.event {
-            case "Notification", "Question": .midTurn
-            case "Ask": .input
-            default: .done
-            }
-            // Escalate only: an input request is not downgraded by a later Stop.
-            if attention.rawValue > sessions[name]!.attention.rawValue {
-                sessions[name]!.attention = attention
-                sessions[name]!.attentionSince = Date()
-                changed = true
-            }
+            changed = attend(event: event.event, pane: event.pane, container: event.container) || changed
         }
-        if changed {
-            onAttentionChange?()
-            NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+        if changed { attentionChanged() }
+    }
+
+    private func attentionChanged() {
+        onAttentionChange?()
+        NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+    }
+
+    /// One thing that may need you, from an agent's hook, the daemon (a
+    /// bell) or a command's end: whether it changed anything.
+    private func attend(event: String, pane: String?, container: String) -> Bool {
+        // Ownership resolution, strongest first: the pane daemon the
+        // agent lives in (survives drag-out; env container goes
+        // stale), then the birth container.
+        let name: String
+        if let pane, !pane.isEmpty, let owner = sessionOwning(pane: pane) {
+            name = owner
+        } else if sessions[container] != nil {
+            name = container
+        } else {
+            return false
+        }
+        // Presence beats attention, PANE-granular: only an event whose
+        // console is actually on screen is already answered. A watched
+        // workspace's hidden tab queues like any other. Pane-less events
+        // keep the workspace-level rule (nothing finer to check).
+        if let pane, !pane.isEmpty {
+            if paneVisible(pane) {
+                markSeen(pane)
+                return true
+            }
+        } else if isWatching(name) {
+            return true
+        }
+        // Notification = permission prompt, Question = AskUserQuestion
+        // (both mid-turn, the agent is stalled); Ask = the adapter
+        // classifier found a question at turn end. Distinct ranks:
+        // the summon and ⌘⇧J serve mid-turn blockers first.
+        let attention: Attention = switch event {
+        case "Notification", "Question": .midTurn
+        case "Ask": .input
+        default: .done
+        }
+        // Escalate only: an input request is not downgraded by a later Stop.
+        guard attention.rawValue > sessions[name]!.attention.rawValue else { return false }
+        sessions[name]!.attention = attention
+        sessions[name]!.attentionSince = Date()
+        return true
+    }
+
+    /// Panes whose command ended between two fact revisions, long enough to
+    /// be news (`CommandFact.endIsNews`).
+    private static func commandsEnded(from old: VigilFacts.Snapshot, to new: VigilFacts.Snapshot) -> [String] {
+        new.files.compactMap { key, file -> String? in
+            guard key.hasPrefix("panes/"), key.hasSuffix(".command"), old.files[key]?.text != file.text,
+                  let fact = CommandFact(file.text), fact.endIsNews,
+                  CommandFact(old.files[key]?.text ?? "")?.ended != fact.ended
+            else { return nil }
+            return String(key.dropFirst("panes/".count).dropLast(".command".count))
         }
     }
 

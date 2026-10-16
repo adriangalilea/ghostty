@@ -118,7 +118,7 @@ final class VigilFacts: @unchecked Sendable {
             let names = (try? FileManager.default.contentsOfDirectory(atPath: root + "/" + folder)) ?? []
             for name in names {
                 let ext = name.split(separator: ".").last.map(String.init) ?? ""
-                let wanted = folder == "panes" ? ["pid", "tree", "died", "size", "screen", "viewers"].contains(ext)
+                let wanted = folder == "panes" ? ["pid", "tree", "died", "size", "screen", "viewers", "command"].contains(ext)
                     : folder == "state" ? ["state", "seen"].contains(ext) : ext == "json"
                 guard wanted else { continue }
                 let key = folder + "/" + name
