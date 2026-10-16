@@ -32,7 +32,8 @@ enum VigilFollow {
     /// The directory moved: the activity says so now (vigil is open).
     static func update(_ key: String, state: SessionState, since: Double) {
         guard let activity = activity(of: key) else { return }
-        let content = SessionActivity.ContentState(state: state, since: since)
+        // The detail is the Mac's alone (sealed there): kept as it last came.
+        let content = SessionActivity.ContentState(state: state, since: since, detail: activity.content.state.detail)
         guard activity.content.state != content else { return }
         Task { await activity.update(ActivityContent(state: content, staleDate: nil)) }
     }
@@ -78,10 +79,11 @@ enum VigilFollow {
         }
     }
 
-    /// Tells the Mac where its updates go (or that they stop).
+    /// Tells the Mac where its updates go (or that they stop), and the key
+    /// it seals their details to.
     private static func tell(_ attributes: SessionActivity, token: String, following: Bool) async {
-        let follow = Follow(scope: attributes.scope, token: token, environment: VigilAuthz.apns.rawValue)
         do {
+            let follow = Follow(scope: attributes.scope, token: token, environment: VigilAuthz.apns.rawValue, key: try ActivityKey.publicKey())
             guard let node = VigilAuthz.shared.runtime.node else { throw WireError.refused("vigil is not connected to tether yet") }
             _ = try await VigilLink.call(node, device: attributes.device, following ? .follow(follow) : .unfollow(follow))
             VigilPhone.shared.log("follow: \(attributes.mac) \(following ? "updates" : "no longer updates") \(name(attributes))")

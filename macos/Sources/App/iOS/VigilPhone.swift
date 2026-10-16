@@ -549,7 +549,9 @@ final class VigilPhone: ObservableObject {
             let leaves = session.leaves.compactMap { leaf in leaf.pane.map { (leaf, $0) } }
             return (leaves.first { $0.0.state == "blocked" } ?? leaves.first)?.1
         }
-        guard url.host == "pane" else { log("url: \(url) is not vigil://pane/<id> or vigil://session/<mac>/<session>"); return nil }
+        guard url.host == "pane" || url.host == "reply" else {
+            log("url: \(url) is not vigil://pane/<id>, vigil://reply/<id> or vigil://session/<mac>/<session>"); return nil
+        }
         let id = url.lastPathComponent
         guard Open.validPane(id) else { log("url: \(url) names no pane"); return nil }
         let deadline = Date().addingTimeInterval(5)
@@ -770,6 +772,26 @@ final class VigilPhone: ObservableObject {
                 }
                 log("seen: \(ref.pane) on \(ref.host.name) FAILED: \(error)")
             }
+        }
+    }
+
+    // MARK: Reply (a line typed into a pane, from a followed activity)
+
+    /// The pane a reply is being written to (the reply sheet shows while set).
+    @Published var replying: PaneRef?
+
+    /// Types `text` into the pane and submits it, as its Mac's hub does for
+    /// a person at the keyboard; true once the Mac took it.
+    func reply(_ ref: PaneRef, _ text: String) async -> Bool {
+        let line = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+        guard Open.validReply(line) else { log("reply: nothing to send"); return false }
+        do {
+            _ = try await VigilLink.call(linked(), device: ref.host.id, .reply(ref.pane, text: line))
+            log("reply: \(line.count) characters to \(ref.pane) on \(ref.host.name)")
+            return true
+        } catch {
+            log("reply: \(ref.pane) on \(ref.host.name) FAILED: \(VigilLink.reason(error))")
+            return false
         }
     }
 

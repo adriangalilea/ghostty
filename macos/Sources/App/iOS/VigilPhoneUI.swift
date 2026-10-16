@@ -34,12 +34,16 @@ struct VigilPhoneRoot: View {
             HomeView()
         }
         .environmentObject(model)
-        // vigil://pane/<id> (a request's Go there) and
-        // vigil://session/<mac>/<session> (a followed session's activity).
+        // vigil://pane/<id> (a request's Go there), vigil://session/<mac>/<session>
+        // (a followed session's activity) and vigil://reply/<id> (its Reply).
         .onOpenURL { url in
             Task { @MainActor in
-                if let ref = await model.resolve(url: url) { path = [ref] }
+                guard let ref = await model.resolve(url: url) else { return }
+                if url.host == "reply" { model.replying = ref } else { path = [ref] }
             }
+        }
+        .sheet(item: Binding(get: { model.replying.map(ReplyTarget.init) }, set: { model.replying = $0?.ref })) { target in
+            ReplySheet(ref: target.ref).environmentObject(model)
         }
         // A tapped question's pane.
         .onChange(of: model.opening) { _, ref in
@@ -999,6 +1003,65 @@ struct ReceiptsSection: View {
             ForEach(Array(receipts.lines.suffix(60).reversed().enumerated()), id: \.offset) { _, line in
                 Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+// MARK: - Reply (from a followed activity)
+
+struct ReplyTarget: Identifiable {
+    let ref: PaneRef
+    var id: String { "\(ref.host.id)/\(ref.pane)" }
+}
+
+/// A line to a pane, written on the phone: what the pane last said above
+/// it (the live preview), the field focused at once, Send types it into
+/// the pane and submits it. Nothing is sent without the tap.
+struct ReplySheet: View {
+    let ref: PaneRef
+    @EnvironmentObject private var model: VigilPhone
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var sending = false
+    @State private var failed = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                if let node = model.paneNodes[ref], node.rows > 0, node.cols > 0 {
+                    PanePreview(ref: ref, grid: .init(rows: node.rows, cols: node.cols))
+                        .frame(maxHeight: 260)
+                }
+                TextField("Reply to \(ref.title)", text: $text, axis: .vertical)
+                    .lineLimit(1...6)
+                    .focused($focused)
+                    .submitLabel(.send)
+                    .onSubmit(send)
+                    .padding(12)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                if failed { Text("Not sent. Its Mac did not take it.").font(.footnote).foregroundStyle(.orange) }
+                Spacer()
+            }
+            .padding()
+            .navigationTitle(ref.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Send", action: send).disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .onAppear { focused = true }
+        }
+    }
+
+    private func send() {
+        sending = true
+        Task {
+            let taken = await model.reply(ref, text)
+            sending = false
+            if taken { dismiss() } else { failed = true }
         }
     }
 }

@@ -5,6 +5,7 @@ import OSLog
 import SwiftUI
 import UIKit
 import UserNotifications
+import VigilActivity
 import VigilWire
 
 private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "authz")
@@ -59,6 +60,18 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
         }
     }
 
+    /// Allow or Deny inside a followed session's Live Activity: the question
+    /// names its Mac, whose authz home answers it (`AnswerIntent`).
+    func answer(device: String, request: String, action: String, shown: String) async {
+        await runtime.start()
+        guard let home = runtime.macs.first(where: { $0.id == device }).flatMap({ mac -> String? in
+            if case .answering(let home, _) = mac.state { home } else { nil }
+        }) else {
+            return VigilPhone.shared.log("authz: \(request.prefix(8)) not answered: its Mac does not let vigil answer")
+        }
+        await answer((request, home), action: action, shown: shown)
+    }
+
     /// A tapped question: the pane that asks, once its home's view is current.
     func open(_ target: (id: String, home: String)) async {
         await runtime.start()
@@ -90,6 +103,10 @@ final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().setNotificationCategories([RequestNotification.quickCategory])
+        // A Live Activity's Allow/Deny runs here, in the app's process.
+        AnswerIntent.answer = { device, request, action, shown in
+            await VigilAuthz.shared.answer(device: device, request: request, action: action, shown: shown)
+        }
         return true
     }
 
