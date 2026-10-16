@@ -121,9 +121,9 @@ struct VigilSidebarView: View {
             footer
         }
         .onReceive(staleHealer) { _ in model.refresh(reason: "stale labels") }
-        .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.stateDidChange)
+        .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.stateDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "facts") }
-        .onReceive(NotificationCenter.default.publisher(for: VigilSessionManager.focusDidChange)
+        .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.focusDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "focus") }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
             .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "key window") }
@@ -303,7 +303,7 @@ struct VigilSidebarView: View {
         .onReceive(burialCountdown) { _ in model.refreshBurials() }
     }
 
-    private func burialRow(_ burial: VigilSessionManager.SidebarBurial) -> some View {
+    private func burialRow(_ burial: VigilWorkspaces.SidebarBurial) -> some View {
         let id = "burial-\(burial.id)"
         return HStack(spacing: 4) {
             Text(face(burial.emoji))
@@ -319,7 +319,7 @@ struct VigilSidebarView: View {
                 .monospacedDigit()
                 .foregroundColor(.secondary)
             Button {
-                VigilSessionManager.shared.reapNow(burial.id)
+                VigilWorkspaces.shared.reapNow(burial.id)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 7 * scale, weight: .bold))
@@ -336,7 +336,7 @@ struct VigilSidebarView: View {
         .background(rowBackground(id: id, hovered: hovered == id))
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
-        .onTapGesture { VigilSessionManager.shared.exhume(burial.id) }
+        .onTapGesture { VigilWorkspaces.shared.exhume(burial.id) }
         .help("Killed; dies for real in \(burial.remaining)s. Click to recover it whole (⌘⇧T also exhumes).")
     }
 
@@ -360,7 +360,7 @@ struct VigilSidebarView: View {
 
     // MARK: Session group (one block per session)
 
-    private func sessionGroup(_ row: VigilSessionManager.SidebarSessionRow) -> some View {
+    private func sessionGroup(_ row: VigilWorkspaces.SidebarWorkspaceRow) -> some View {
         let collapsed = model.collapsedSessions.contains(row.id)
         return VStack(alignment: .leading, spacing: 0) {
             sessionRow(row, collapsed: collapsed)
@@ -402,7 +402,7 @@ struct VigilSidebarView: View {
 
     // MARK: Rows
 
-    private func sessionRow(_ row: VigilSessionManager.SidebarSessionRow, collapsed: Bool) -> some View {
+    private func sessionRow(_ row: VigilWorkspaces.SidebarWorkspaceRow, collapsed: Bool) -> some View {
         let id = row.id
         // The chevron NEVER blinks out from under the cursor: any session
         // with content keeps it, however boring the content.
@@ -423,13 +423,13 @@ struct VigilSidebarView: View {
                 font: .system(size: 12 * scale, weight: .semibold),
                 color: .primary,
                 onRename: { label in
-                    let manager = VigilSessionManager.shared
-                    guard let session = manager.sessions[id] else { return }
+                    let manager = VigilWorkspaces.shared
+                    guard let session = manager.workspaces[id] else { return }
                     manager.rename(name: id, label: label ?? session.label, emoji: session.emoji)
                 },
                 onPickEmoji: { emoji in
-                    let manager = VigilSessionManager.shared
-                    guard let session = manager.sessions[id] else { return }
+                    let manager = VigilWorkspaces.shared
+                    guard let session = manager.workspaces[id] else { return }
                     manager.rename(name: id, label: session.label, emoji: emoji)
                 }
             ) {
@@ -479,14 +479,14 @@ struct VigilSidebarView: View {
                 Menu("Merge Into") {
                     ForEach(model.rows.filter { $0.id != id }) { other in
                         Button("\(face(other.emoji)) \(other.label)") {
-                            VigilSessionManager.shared.mergeSession(id, into: other.id)
+                            VigilWorkspaces.shared.mergeWorkspace(id, into: other.id)
                         }
                     }
                 }
             }
             Divider()
             Button("Kill…", role: .destructive) {
-                VigilSessionManager.shared.killWithConfirm(name: id)
+                VigilWorkspaces.shared.killWithConfirm(name: id)
             }
         }
         .help("\(row.label) (\(row.id)) · \(row.stateTag)")
@@ -506,7 +506,7 @@ struct VigilSidebarView: View {
         model.draggingItem == item ? 0.45 : 1
     }
 
-    private func tabRow(_ tab: VigilSessionManager.SidebarTab, session: String) -> some View {
+    private func tabRow(_ tab: VigilWorkspaces.SidebarTab, session: String) -> some View {
         let collapsed = model.collapsedTabs.contains(tab.id)
         return HStack(spacing: 4) {
             chevron(collapsed: collapsed) {
@@ -525,16 +525,16 @@ struct VigilSidebarView: View {
                 color: tab.captured ? .secondary : .primary,
                 onRename: tab.anchor.map { anchor in
                     { label in
-                        VigilSessionManager.shared.setCustomIdentity(
+                        VigilWorkspaces.shared.setCustomIdentity(
                             key: "tab:\(anchor)", label: label,
-                            emoji: VigilSessionManager.shared.customIdentity("tab:\(anchor)")?.emoji)
+                            emoji: VigilWorkspaces.shared.customIdentity("tab:\(anchor)")?.emoji)
                     }
                 },
                 onPickEmoji: tab.anchor.map { anchor in
                     { emoji in
-                        VigilSessionManager.shared.setCustomIdentity(
+                        VigilWorkspaces.shared.setCustomIdentity(
                             key: "tab:\(anchor)",
-                            label: VigilSessionManager.shared.customIdentity("tab:\(anchor)")?.label,
+                            label: VigilWorkspaces.shared.customIdentity("tab:\(anchor)")?.label,
                             emoji: emoji)
                     }
                 }
@@ -599,16 +599,16 @@ struct VigilSidebarView: View {
                         label: tab.title,
                         emoji: tab.emoji,
                         context: "a terminal tab. running: \(tab.panes.map(\.title).joined(separator: ", "))\n"
-                            + VigilSessionManager.shared.workContext(
+                            + VigilWorkspaces.shared.workContext(
                                 panes: tab.panes.compactMap(\.paneId))
                     ) { label, emoji in
-                        VigilSessionManager.shared.setCustomIdentity(
+                        VigilWorkspaces.shared.setCustomIdentity(
                             key: "tab:\(anchor)", label: label, emoji: emoji)
                     }
                 }
             }
             Button("Close Tab…", role: .destructive) {
-                VigilSessionManager.shared.closeTabFromSidebar(
+                VigilWorkspaces.shared.closeTabFromSidebar(
                     name: session, anchor: tab.anchor, in: model.hostController)
             }
         }
@@ -627,9 +627,9 @@ struct VigilSidebarView: View {
     }
 
     private func paneRow(
-        _ pane: VigilSessionManager.SidebarPane,
+        _ pane: VigilWorkspaces.SidebarPane,
         session: String,
-        tab: VigilSessionManager.SidebarTab,
+        tab: VigilWorkspaces.SidebarTab,
         level: Int
     ) -> some View {
         let id = "\(tab.id)#\(pane.id)"
@@ -642,16 +642,16 @@ struct VigilSidebarView: View {
                 color: .primary.opacity(0.85),
                 onRename: pane.paneId.map { id in
                     { label in
-                        VigilSessionManager.shared.setCustomIdentity(
+                        VigilWorkspaces.shared.setCustomIdentity(
                             key: id, label: label,
-                            emoji: VigilSessionManager.shared.customIdentity(id)?.emoji)
+                            emoji: VigilWorkspaces.shared.customIdentity(id)?.emoji)
                     }
                 },
                 onPickEmoji: pane.paneId.map { id in
                     { emoji in
-                        VigilSessionManager.shared.setCustomIdentity(
+                        VigilWorkspaces.shared.setCustomIdentity(
                             key: id,
-                            label: VigilSessionManager.shared.customIdentity(id)?.label,
+                            label: VigilWorkspaces.shared.customIdentity(id)?.label,
                             emoji: emoji)
                     }
                 }
@@ -694,28 +694,28 @@ struct VigilSidebarView: View {
                         label: pane.title,
                         emoji: pane.emoji,
                         context: "a terminal pane, running: \(pane.program ?? "a shell")\n"
-                            + VigilSessionManager.shared.workContext(panes: [paneId])
+                            + VigilWorkspaces.shared.workContext(panes: [paneId])
                     ) { label, emoji in
-                        VigilSessionManager.shared.setCustomIdentity(
+                        VigilWorkspaces.shared.setCustomIdentity(
                             key: paneId, label: label, emoji: emoji)
                     }
                 }
                 // Any pane, whatever runs in it: an agent's stall or a
                 // command's end rings on the phone, as loud as its priority.
-                let following = VigilSessionManager.shared.phoneFollows.contains(paneId)
+                let following = VigilWorkspaces.shared.phoneFollows.contains(paneId)
                 Button(following ? "Stop Following on iPhone" : "Follow on iPhone") {
-                    VigilSessionManager.shared.followOnPhones(pane: paneId, !following)
+                    VigilWorkspaces.shared.followOnPhones(pane: paneId, !following)
                 }
                 Menu("Priority") {
                     ForEach(Registry.Priority.allCases, id: \.self) { priority in
                         Toggle(priority.rawValue.capitalized, isOn: Binding(
-                            get: { VigilSessionManager.shared.priority(ofPane: paneId) == priority },
-                            set: { if $0 { VigilSessionManager.shared.setPriority(pane: paneId, priority) } }))
+                            get: { VigilWorkspaces.shared.priority(ofPane: paneId) == priority },
+                            set: { if $0 { VigilWorkspaces.shared.setPriority(pane: paneId, priority) } }))
                     }
                 }
             }
             Button("Close Pane…", role: .destructive) {
-                VigilSessionManager.shared.closePaneFromSidebar(
+                VigilWorkspaces.shared.closePaneFromSidebar(
                     name: session, paneId: pane.navigationId, in: model.hostController)
             }
         }
@@ -777,7 +777,7 @@ struct VigilSidebarView: View {
     /// The sentry's antenna is LIT: a declared lease, or survivor
     /// processes under a QUIET pane (hidden while the agent works - tool
     /// churn would blink it; a survivor under a quiet pane is the signal).
-    private func watchActive(_ pane: VigilSessionManager.SidebarPane) -> Bool {
+    private func watchActive(_ pane: VigilWorkspaces.SidebarPane) -> Bool {
         !pane.watchNotes.isEmpty || (pane.state != .working && !pane.watchProcs.isEmpty)
     }
 
@@ -793,7 +793,7 @@ struct VigilSidebarView: View {
     /// differs from the default: who looks from elsewhere (the phone,
     /// another Mac), a phone following it, its priority (high rings
     /// through Focus, low never rings).
-    private func paneMarks(_ pane: VigilSessionManager.SidebarPane) -> some View {
+    private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         HStack(spacing: 3 * scale) {
             lookerGlyphs(pane.lookers)
             if pane.followed {
@@ -821,7 +821,7 @@ struct VigilSidebarView: View {
             .help(help)
     }
 
-    private func watchGlyph(_ pane: VigilSessionManager.SidebarPane) -> some View {
+    private func watchGlyph(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         Group {
             if watchActive(pane) {
                 antennaGlyph(pane.watchNotes + pane.watchProcs)
@@ -840,7 +840,7 @@ struct VigilSidebarView: View {
     /// Collapse must not hide a listener: the antenna rolls up to the
     /// collapsed tab/session row (same slot, same yellow), carrying every
     /// descendant's notes in one tooltip.
-    private func watchRollup(_ panes: [VigilSessionManager.SidebarPane]) -> some View {
+    private func watchRollup(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
         let watching = panes.filter { watchActive($0) }
         return Group {
             if !watching.isEmpty {

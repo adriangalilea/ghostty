@@ -99,7 +99,7 @@ enum VigilVoice {
         let gen = generation
         onStateChange?()
 
-        let identity = VigilSessionManager.shared.cortexIdentity(ofPane: pane)
+        let identity = VigilWorkspaces.shared.cortexIdentity(ofPane: pane)
         let wanted = Languages.activeLocales
         var grounding = GroundingSet()
         if let keywords = identity?.keywords, !keywords.isEmpty {
@@ -246,7 +246,7 @@ enum VigilVoice {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: VigilSessionManager.vigildBin)
+        process.executableURL = URL(fileURLWithPath: VigilWorkspaces.vigildBin)
         process.arguments = ["sendraw", pane, clean + " "]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice

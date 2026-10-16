@@ -830,7 +830,7 @@ extension TerminalWindow: TabTitleEditorDelegate {
         // you just typed vanished a moment later. Route it into the store,
         // which then renders back through titleOverride.
         if let terminal = targetController as? TerminalController,
-           VigilSessionManager.shared.setTabLabel(
+           VigilWorkspaces.shared.setTabLabel(
                terminal, editedTitle.isEmpty ? nil : editedTitle) {
             return
         }

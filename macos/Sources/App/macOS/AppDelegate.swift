@@ -388,12 +388,12 @@ class AppDelegate: NSObject,
             // back as windows, exactly as they were; only a truly blank
             // slate gets the virgin initial window.
             if TerminalController.all.isEmpty {
-                if VigilSessionManager.shared.restoreForegroundSessions() {
+                if VigilWorkspaces.shared.restoreForegroundWorkspaces() {
                     // The workspace is back; no virgin window.
                 } else if derivedConfig.initialWindow {
                     // A detached fleet still exists. Activation reopens it;
                     // only an empty registry needs a fresh session.
-                    if !VigilSessionManager.shared.reopen() {
+                    if !VigilWorkspaces.shared.reopen() {
                         undoManager.disableUndoRegistration()
                         _ = TerminalController.newWindow(ghostty)
                         undoManager.enableUndoRegistration()
@@ -416,14 +416,14 @@ class AppDelegate: NSObject,
            let keyword = AEKeyword("why?"),
            let why = event.attributeDescriptor(forKeyword: keyword),
            [kAEShutDown, kAERestart, kAEReallyLogOut].contains(why.typeCodeValue) {
-            VigilSessionManager.shared.prepareForSystemShutdown()
+            VigilWorkspaces.shared.prepareForSystemShutdown()
             return .terminateNow
         }
 
         // vigil: while sessions exist, quit means "detach everything and keep
         // living as a menu bar service" (no dock, no windows, ptys alive).
         // Killing for real is the explicit Quit in the eye menu.
-        if VigilSessionManager.shared.interceptTermination() {
+        if VigilWorkspaces.shared.interceptTermination() {
             return .terminateCancel
         }
 
@@ -497,7 +497,7 @@ class AppDelegate: NSObject,
         // most recent session comes back; a NEW session is born by ⌘N
         // alone, never by activating the app. Only an empty fleet gets a
         // fresh window.
-        if VigilSessionManager.shared.reopen() { return false }
+        if VigilWorkspaces.shared.reopen() { return false }
         _ = TerminalController.newWindow(ghostty)
         return false
     }

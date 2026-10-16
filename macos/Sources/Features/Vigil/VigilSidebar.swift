@@ -177,7 +177,7 @@ final class VigilSidebarCollapse: ObservableObject {
 /// UI-only bits (selection per window; collapse via the shared store).
 @MainActor
 final class VigilSidebarModel: ObservableObject {
-    @Published private(set) var rows: [VigilSessionManager.SidebarSessionRow] = []
+    @Published private(set) var rows: [VigilWorkspaces.SidebarWorkspaceRow] = []
     /// The keyboard CURSOR: the row enter/collapse/expand would hit. It is
     /// NOT "where you are" (that's the derived active chain in the rows);
     /// it renders only while the bar owns the keyboard (keyboardActive).
@@ -207,16 +207,16 @@ final class VigilSidebarModel: ObservableObject {
     }
 
     /// Where you are: its own instant channel (see ActiveChain).
-    @Published private(set) var focus: VigilSessionManager.ActiveChain?
+    @Published private(set) var focus: VigilWorkspaces.ActiveChain?
 
     func refreshFocus() {
-        let fresh = VigilSessionManager.shared.activeChain(in: hostController)
+        let fresh = VigilWorkspaces.shared.activeChain(in: hostController)
         if fresh != focus { focus = fresh }
     }
 
-    func isFront(_ row: VigilSessionManager.SidebarSessionRow) -> Bool { focus?.session == row.id }
-    func isFront(_ tab: VigilSessionManager.SidebarTab) -> Bool { focus?.tab == tab.id }
-    func isFocused(_ pane: VigilSessionManager.SidebarPane) -> Bool {
+    func isFront(_ row: VigilWorkspaces.SidebarWorkspaceRow) -> Bool { focus?.session == row.id }
+    func isFront(_ tab: VigilWorkspaces.SidebarTab) -> Bool { focus?.tab == tab.id }
+    func isFocused(_ pane: VigilWorkspaces.SidebarPane) -> Bool {
         pane.navigationId != nil && focus?.pane == pane.navigationId
     }
 
@@ -247,7 +247,7 @@ final class VigilSidebarModel: ObservableObject {
         stormSources[reason, default: 0] += 1
         if stormCount == 200 {
             let sources = stormSources.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
-            VigilSessionManager.shared.vlog("!! sidebar refresh storm: 200 calls in 10s (\(sources))")
+            VigilWorkspaces.shared.vlog("!! sidebar refresh storm: 200 calls in 10s (\(sources))")
         }
         guard immediate || now.timeIntervalSince(lastRefresh) >= 0.25 else {
             if !refreshQueued {
@@ -274,29 +274,29 @@ final class VigilSidebarModel: ObservableObject {
             else { return }
         }
         let snapT0 = Date()
-        let fresh = VigilSessionManager.shared.sidebarSnapshot()
+        let fresh = VigilWorkspaces.shared.sidebarSnapshot()
         let snapMs = Date().timeIntervalSince(snapT0) * 1000
         if snapMs > 25 {
-            VigilSessionManager.shared.vlog(String(format: "sidebar: snapshot took %.0fms", snapMs))
+            VigilWorkspaces.shared.vlog(String(format: "sidebar: snapshot took %.0fms", snapMs))
         }
         if fresh != rows { rows = fresh }
-        let freshBurials = VigilSessionManager.shared.sidebarBurials()
+        let freshBurials = VigilWorkspaces.shared.sidebarBurials()
         if freshBurials != burials { burials = freshBurials }
-        let hint = VigilSessionManager.shared.nextAskHint()
+        let hint = VigilWorkspaces.shared.nextAskHint()
         if hint != followHint { followHint = hint }
     }
 
     /// The ⌘⇧J affordance (auto-follow off): the queue's head, re-derived
     /// on every refresh, so visiting it rolls the hint to the next.
-    @Published private(set) var followHint: VigilSessionManager.AskHint?
+    @Published private(set) var followHint: VigilWorkspaces.AskHint?
 
     /// The sticky bottom tray: killed sessions living out their grace.
-    @Published private(set) var burials: [VigilSessionManager.SidebarBurial] = []
+    @Published private(set) var burials: [VigilWorkspaces.SidebarBurial] = []
 
     /// The tray's per-second countdown, and nothing else: re-derive the
     /// burial rows without paying a tree snapshot.
     func refreshBurials() {
-        let fresh = VigilSessionManager.shared.sidebarBurials()
+        let fresh = VigilWorkspaces.shared.sidebarBurials()
         if fresh != burials { burials = fresh }
     }
 
@@ -427,12 +427,12 @@ final class VigilSidebarModel: ObservableObject {
     /// shapeshifts into this window.
     func jumpAttention() {
         exitHintMode()
-        guard let name = VigilSessionManager.shared.mostUrgentName else {
+        guard let name = VigilWorkspaces.shared.mostUrgentName else {
             _ = Earcon.knock.play()
             return
         }
         selection = name
-        VigilSessionManager.shared.follow(name, in: hostController)
+        VigilWorkspaces.shared.follow(name, in: hostController)
         onLeaveControl?()
     }
 
@@ -482,8 +482,8 @@ final class VigilSidebarModel: ObservableObject {
     /// the map's size) and the window's occupant. A click that "does
     /// nothing" must say whether it missed the map or was refused later.
     func tapped(at point: CGPoint) {
-        let manager = VigilSessionManager.shared
-        let occupant = hostController.map { manager.mirroredSession(of: $0) ?? manager.sessionName(of: $0) ?? "stray" } ?? "no window"
+        let manager = VigilWorkspaces.shared
+        let occupant = hostController.map { manager.mirroredWorkspace(of: $0) ?? manager.workspaceName(of: $0) ?? "stray" } ?? "no window"
         guard let row = row(at: point) else {
             manager.vlog(String(format: "sidebar: tap (%.0f,%.0f) hit no row (%d rows mapped) in window of '%@'", point.x, point.y, hitRows.count, occupant))
             return
@@ -573,7 +573,7 @@ final class VigilSidebarModel: ObservableObject {
            rows.contains(where: { $0.id == target }) { // gap/tail pass "": commit-only
             endDrag()
             DispatchQueue.main.async {
-                VigilSessionManager.shared.mergeSession(source, into: target)
+                VigilWorkspaces.shared.mergeWorkspace(source, into: target)
             }
         } else {
             commitOrder()
@@ -584,7 +584,7 @@ final class VigilSidebarModel: ObservableObject {
     /// Drop: the preview order becomes THE order (persisted; the overview
     /// cycles in the same order).
     func commitOrder() {
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         for (index, row) in rows.enumerated() {
             manager.setOrder(name: row.id, order: index)
         }
@@ -629,7 +629,7 @@ final class VigilSidebarModel: ObservableObject {
     /// tearing down/creating windows inside a live NSDraggingSession is
     /// asking AppKit for trouble.
     func dragPerform(at point: CGPoint) {
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         let row = row(at: point)
         switch draggingItem {
         case .session:
@@ -721,7 +721,7 @@ final class VigilSidebarModel: ObservableObject {
     /// focused there instead).
     func activate(_ item: NavItem) {
         selection = item.id
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         switch item.kind {
         case .session(let name):
             if let host = hostController {

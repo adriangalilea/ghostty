@@ -188,9 +188,9 @@ enum VigilSessionControl {
             return .init(id: request.id, ok: true, code: "ok", message: "Content-free input diagnostics.", input: views)
         }
         if request.operation == "status" {
-            return .init(id: request.id, ok: true, code: "ok", message: "App status.", status: VigilSessionManager.shared.status())
+            return .init(id: request.id, ok: true, code: "ok", message: "App status.", status: VigilWorkspaces.shared.status())
         }
-        if request.operation == "describe" { return VigilSessionManager.shared.applySessionCommand(request) }
+        if request.operation == "describe" { return VigilWorkspaces.shared.applySessionCommand(request) }
         let receipts = directory.appendingPathComponent("workspace-receipts")
         let file = receipts.appendingPathComponent(request.id.uuidString + ".json")
         let encoder = JSONEncoder()
@@ -218,7 +218,7 @@ enum VigilSessionControl {
             // Write intent before any side effect. A crash can leave an
             // indeterminate receipt but a retry cannot create another pane.
             try encoder.encode(Receipt(request: request, reply: nil)).write(to: file, options: .atomic)
-            let reply = VigilSessionManager.shared.applySessionCommand(request)
+            let reply = VigilWorkspaces.shared.applySessionCommand(request)
             try encoder.encode(Receipt(request: request, reply: reply)).write(to: file, options: .atomic)
             return reply
         } catch {

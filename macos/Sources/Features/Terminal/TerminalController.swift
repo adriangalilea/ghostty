@@ -177,7 +177,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // vigil: THE chokepoint for structure changes in a session window
         // (a split born or closed, an undo, a surface dragged in): the
         // session registry edits itself here, synchronously.
-        VigilSessionManager.shared.treeDidChange(self, from: from, to: to)
+        VigilWorkspaces.shared.treeDidChange(self, from: from, to: to)
 
         // Whenever our surface tree changes in any way (new split, close split, etc.)
         // we want to invalidate our state.
@@ -205,7 +205,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // vigil: a session window emptied (its only pane dragged out or
         // exited) closes through the registry, without the recreate undo.
         if newTree.isEmpty {
-            if VigilSessionManager.shared.handleEmptiedTree(self) { return }
+            if VigilWorkspaces.shared.handleEmptiedTree(self) { return }
             closeTabImmediately()
             return
         }
@@ -264,10 +264,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) -> TerminalController {
         // vigil: every window is a session, daemon-backed from birth. Skips
         // configs that already carry an attach id (create/resurrection/tab).
-        let vigil = VigilSessionManager.shared.newWindowConfig(base: baseConfig)
+        let vigil = VigilWorkspaces.shared.newWindowConfig(base: baseConfig)
         let c = TerminalController.init(ghostty, withBaseConfig: vigil?.config ?? baseConfig)
         if let vigil {
-            VigilSessionManager.shared.registerSession(
+            VigilWorkspaces.shared.registerWorkspace(
                 controller: c, name: vigil.name, cwd: vigil.cwd)
         }
 
@@ -436,7 +436,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // If our parent is in non-native fullscreen, then new tabs do not work.
         if baseConfig?.vigilAttach == nil,
-           VigilSessionManager.shared.remoteSessionCommand(in: parentController, operation: "new_tab") { return nil }
+           VigilWorkspaces.shared.remoteSessionCommand(in: parentController, operation: "new_tab") { return nil }
 
         // See: https://github.com/mitchellh/ghostty/issues/392
         if let fullscreenStyle = parentController.fullscreenStyle,
@@ -452,7 +452,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // vigil: a new tab JOINS its window's session (session scope = the
         // window): daemon-backed from birth under the session's identity.
-        let vigilTab = VigilSessionManager.shared.newTabConfig(
+        let vigilTab = VigilWorkspaces.shared.newTabConfig(
             parent: parentController, base: baseConfig)
 
         // Create a new window and add it to the parent
@@ -460,7 +460,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             ghostty, withBaseConfig: vigilTab?.config ?? baseConfig)
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
         if let vigilTab {
-            VigilSessionManager.shared.registerMember(controller, name: vigilTab.name, after: parentController)
+            VigilWorkspaces.shared.registerMember(controller, name: vigilTab.name, after: parentController)
         }
         guard let window = controller.window else { return controller }
 
@@ -700,7 +700,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // there (vigil's process truth, never ghostty's always-running
         // daemon child).
         if surfaceTree.root != node {
-            if VigilSessionManager.shared.closePane(node, in: self, withConfirmation: withConfirmation) { return }
+            if VigilWorkspaces.shared.closePane(node, in: self, withConfirmation: withConfirmation) { return }
             super.closeSurface(node, withConfirmation: withConfirmation)
             return
         }
@@ -713,7 +713,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // vigil viewport: ⌘W closes the TAB, never the window (the mounted
         // tab buries and the next tab/session takes the viewport).
-        if VigilSessionManager.shared.closeViewportTab(self) { return }
+        if VigilWorkspaces.shared.closeViewportTab(self) { return }
 
         // 1 window, closing the window
         closeWindow(nil)
@@ -981,7 +981,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Close all windows, asking for confirmation if necessary.
     static func closeAllWindows() {
         // vigil: every session window detaches; nothing dies.
-        if VigilSessionManager.shared.detachAllWindows() { return }
+        if VigilWorkspaces.shared.detachAllWindows() { return }
         // The window we use for confirmations. Try to find the first window that
         // needs quit confirmation. This lets us attach the confirmation to something
         // that is running.
@@ -1320,12 +1320,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     @IBAction func closeTab(_ sender: Any?) {
-        if VigilSessionManager.shared.closeRemoteTab(self) { return }
+        if VigilWorkspaces.shared.closeRemoteTab(self) { return }
         guard let window = window else { return }
         guard window.tabGroup?.windows.count ?? 0 > 1 else {
             // vigil viewport: a lone window's "close tab" closes the
             // MOUNTED tab; the next tab/session takes the viewport.
-            if VigilSessionManager.shared.closeViewportTab(self) { return }
+            if VigilWorkspaces.shared.closeViewportTab(self) { return }
             closeWindow(sender)
             return
         }
@@ -1335,18 +1335,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // session, buried with the undo grace, then its processes DIE. The
         // confirm asks vigil's process truth (what holds the tty), never
         // ghostty's always-running daemon child.
-        if VigilSessionManager.shared.sessionName(of: self) != nil {
-            let busy = VigilSessionManager.shared.busyPrograms(
+        if VigilWorkspaces.shared.workspaceName(of: self) != nil {
+            let busy = VigilWorkspaces.shared.busyPrograms(
                 panes: surfaceTree.compactMap(\.vigilAttachId))
             guard !busy.isEmpty else {
-                VigilSessionManager.shared.closeTabStructurally(self)
+                VigilWorkspaces.shared.closeTabStructurally(self)
                 return
             }
             confirmClose(
                 messageText: "Close Tab?",
-                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tab kills it (undo keeps it for \(Int(VigilSessionManager.killGrace))s)."
+                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tab kills it (undo keeps it for \(Int(VigilWorkspaces.killGrace))s)."
             ) {
-                VigilSessionManager.shared.closeTabStructurally(self)
+                VigilWorkspaces.shared.closeTabStructurally(self)
             }
             return
         }
@@ -1368,7 +1368,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let window = window else { return }
         guard let tabGroup = window.tabGroup else { return }
         // vigil: session tabs leave through the graveyard.
-        if VigilSessionManager.shared.closeSiblingTabs(of: self, onlyRight: false) { return }
+        if VigilWorkspaces.shared.closeSiblingTabs(of: self, onlyRight: false) { return }
 
         // If we only have one window then we have no other tabs to close
         guard tabGroup.windows.count > 1 else { return }
@@ -1402,7 +1402,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let window = window else { return }
         guard let tabGroup = window.tabGroup else { return }
         // vigil: session tabs leave through the graveyard.
-        if VigilSessionManager.shared.closeSiblingTabs(of: self, onlyRight: true) { return }
+        if VigilWorkspaces.shared.closeSiblingTabs(of: self, onlyRight: true) { return }
         guard let currentIndex = tabGroup.windows.firstIndex(of: window) else { return }
 
         let tabsToClose = tabGroup.windows.enumerated().filter { $0.offset > currentIndex }
@@ -1448,21 +1448,21 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // A mirror viewport (a second view of a session living elsewhere)
         // closes plain: its mirror clients end, nothing detaches, nothing
         // dies.
-        if group.contains(where: { VigilSessionManager.shared.mirroredSession(of: $0) != nil }) {
+        if group.contains(where: { VigilWorkspaces.shared.mirroredWorkspace(of: $0) != nil }) {
             for c in group {
-                VigilSessionManager.shared.endMirrorViewport(c)
+                VigilWorkspaces.shared.endMirrorViewport(c)
                 c.closeWindowImmediately()
             }
             return
         }
 
-        let sessionNames = group.compactMap { VigilSessionManager.shared.sessionName(of: $0) }
+        let sessionNames = group.compactMap { VigilWorkspaces.shared.workspaceName(of: $0) }
         if !sessionNames.isEmpty {
             var handled = Set<String>()
             for c in group where !c.surfaceTree.isEmpty {
-                if let name = VigilSessionManager.shared.sessionName(of: c) {
+                if let name = VigilWorkspaces.shared.workspaceName(of: c) {
                     guard handled.insert(name).inserted else { continue }
-                    _ = VigilSessionManager.shared.handleWindowClose(controller: c)
+                    _ = VigilWorkspaces.shared.handleWindowClose(controller: c)
                 } else {
                     c.closeWindowImmediately()
                 }

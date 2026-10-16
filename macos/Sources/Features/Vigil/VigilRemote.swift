@@ -146,7 +146,7 @@ final class VigilRemote: ObservableObject {
             follow(peer.id)
         }
         Self.trace?("remote: Macs \(peers.map(\.name))")
-        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+        NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
     /// A Mac's directory, followed through the hub: each step a line.
@@ -188,7 +188,7 @@ final class VigilRemote: ObservableObject {
         guard let index = hosts.firstIndex(where: { $0.device == device }), hosts[index].error != why else { return }
         Self.trace?("remote: \(hosts[index].name): \(why)")
         hosts[index].error = why
-        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+        NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
     func host(_ device: String) -> Host? { hosts.first { $0.device == device } }
@@ -230,20 +230,20 @@ final class VigilRemote: ObservableObject {
             return dir.panes[split.name] != nil
         }
         hosts[index].directory = dir
-        VigilSessionManager.shared.remoteDirectoryChanged(device)
+        VigilWorkspaces.shared.remoteDirectoryChanged(device)
         hosts[index].error = nil
         if before.map({ $0 != shape }) ?? true {
             Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.workspaces.count) workspaces, \(dir.panes.count) panes")
         }
-        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+        NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
     /// The sidebar's rows for every remote Mac, built like the local
     /// snapshot: session → tabs → panes, program and state by the rules
     /// every row follows (`Program`, `AgentState`). Everything captured
     /// (no local views exist), row ids namespaced by the Mac.
-    func sidebarRows() -> [VigilSessionManager.SidebarSessionRow] {
-        var rows: [VigilSessionManager.SidebarSessionRow] = []
+    func sidebarRows() -> [VigilWorkspaces.SidebarWorkspaceRow] {
+        var rows: [VigilWorkspaces.SidebarWorkspaceRow] = []
         for host in hosts {
             let hostLabel = host.directory?.host ?? host.name
             let header = host.error.map { "\(hostLabel) (\($0))" } ?? hostLabel
@@ -255,11 +255,11 @@ final class VigilRemote: ObservableObject {
             }
             for session in dir.ordered {
                 let composite = Self.compositeId(host.device, session.name)
-                var tabs: [VigilSessionManager.SidebarTab] = []
+                var tabs: [VigilWorkspaces.SidebarTab] = []
                 for (index, tab) in (session.tabs ?? []).enumerated() {
                     let all = tab.members
                     guard !all.isEmpty else { continue }
-                    let panes = all.enumerated().map { offset, pane -> VigilSessionManager.SidebarPane in
+                    let panes = all.enumerated().map { offset, pane -> VigilWorkspaces.SidebarPane in
                         let truth = dir.panes[pane.id]
                         let program = truth?.program
                         let title = pane.label
@@ -284,7 +284,7 @@ final class VigilRemote: ObservableObject {
                     let title = tab.label.flatMap { $0.isEmpty ? nil : $0 }
                         ?? ((tab.panes.first?.cwd ?? "") as NSString).lastPathComponent
                     tabs.append(.init(
-                        id: VigilSessionManager.tabRowId(composite, anchor: anchor, index: index),
+                        id: VigilWorkspaces.tabRowId(composite, anchor: anchor, index: index),
                         title: title.isEmpty ? "tab \(index + 1)" : title,
                         index: index,
                         panes: panes,
@@ -323,7 +323,7 @@ final class VigilRemote: ObservableObject {
         guard !seenInFlight.contains(key) else { return }
         seenInFlight.insert(key)
         hosts[index].directory?.panes[pane]?.seen = truth.since
-        NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+        NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let failure: String?
             do {
@@ -337,7 +337,7 @@ final class VigilRemote: ObservableObject {
                 if failure != nil, let self, let index = self.hosts.firstIndex(where: { $0.device == device }),
                    self.hosts[index].directory?.panes[pane]?.stateRevision == revision {
                     self.hosts[index].directory?.panes[pane]?.seen = truth.seen
-                    NotificationCenter.default.post(name: VigilSessionManager.stateDidChange, object: nil)
+                    NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
                 }
                 Self.trace?("remote: seen \(key)" + (failure.map { " FAILED (\($0))" } ?? ""))
             }

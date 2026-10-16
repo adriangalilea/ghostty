@@ -249,7 +249,7 @@ class BaseTerminalController: NSWindowController,
             case .up: directionName = "up"
             case .down: directionName = "down"
             }
-            if VigilSessionManager.shared.remoteSessionCommand(
+            if VigilWorkspaces.shared.remoteSessionCommand(
                 in: self, from: oldView, operation: "split", direction: directionName) { return nil }
         }
 
@@ -257,7 +257,7 @@ class BaseTerminalController: NSWindowController,
         // daemon-backed like every other pane of it: the whole workspace
         // survives, not just the first pane.
         guard let ghostty_app = ghostty.app else { return nil }
-        let config = VigilSessionManager.shared.configForNewSplit(
+        let config = VigilWorkspaces.shared.configForNewSplit(
             in: self,
             from: oldView,
             base: config)
@@ -324,7 +324,7 @@ class BaseTerminalController: NSWindowController,
                 surfaceView.isFirstResponder
             surfaceView.vigilFocusDidChange(focused, reason: "window/tree focus sync")
         }
-        NotificationCenter.default.post(name: VigilSessionManager.focusDidChange, object: nil)
+        NotificationCenter.default.post(name: VigilWorkspaces.focusDidChange, object: nil)
     }
 
     // Call this whenever the frame changes
@@ -394,7 +394,7 @@ class BaseTerminalController: NSWindowController,
         // sidebar too. Renaming here opens that editor rather than setting
         // a second, unstored title that only the tab bar would know about.
         if let terminal = self as? TerminalController,
-           VigilSessionManager.shared.promptTabIdentity(terminal) {
+           VigilWorkspaces.shared.promptTabIdentity(terminal) {
             return
         }
 
@@ -433,7 +433,7 @@ class BaseTerminalController: NSWindowController,
         // vigil: a DOCK tenant is not in the tree; its close (⌘W with the
         // keyboard in the dock) closes the tenant alone.
         if let terminal = self as? TerminalController,
-           VigilSessionManager.shared.closeDockTenantIfHosted(
+           VigilWorkspaces.shared.closeDockTenantIfHosted(
                view, in: terminal, withConfirmation: withConfirmation) {
             return
         }
@@ -955,7 +955,7 @@ class BaseTerminalController: NSWindowController,
             alert.messageText = "Cannot Move a Mirrored Pane"
             alert.informativeText = "Moving panes into or out of a mirrored session is not supported yet. The sessions have not changed."
             if let window { alert.beginSheetModal(for: window) }
-            VigilSessionManager.vlogSync("session edit: refused native pane drop involving a mirror")
+            VigilWorkspaces.vlogSync("session edit: refused native pane drop involving a mirror")
             return
         }
         // Map drop zone to split direction

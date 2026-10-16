@@ -25,7 +25,7 @@ final class VigilBars {
             MainActor.assumeIsolated { VigilBars.shared.route(event) }
         }
         NotificationCenter.default.addObserver(
-            forName: VigilSessionManager.stateDidChange,
+            forName: VigilWorkspaces.stateDidChange,
             object: nil, queue: .main
         ) { _ in
             MainActor.assumeIsolated { VigilBars.shared.scheduleAutoFollow() }
@@ -58,12 +58,12 @@ final class VigilBars {
 
     private func autoFollowNow() {
         guard VigilFollowMode.current == .window, !controlMode else { return }
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         guard let target = manager.followTarget else { return }
         guard NSApp.isActive,
               let window = NSApp.keyWindow,
               let controller = window.windowController as? TerminalController else { return }
-        let current = manager.sessionName(of: controller)
+        let current = manager.workspaceName(of: controller)
         guard current != target else { return }
         // Any raw block in the current session vetoes the yank: it may be
         // an ask Adrian is mid-answering, or an approved tool mid-run.
@@ -80,7 +80,7 @@ final class VigilBars {
         // cooldown indicator (a swallowed event re-flashes it).
         shield(window: controller.window)
         let face: String = {
-            guard let session = manager.sessions[target] else { return target }
+            guard let session = manager.workspaces[target] else { return target }
             let emoji = session.emoji.map { "\($0) " } ?? ""
             return emoji + session.label
         }()
@@ -216,10 +216,10 @@ final class VigilBars {
     /// window syncs, so a later toggle elsewhere (which moves the default)
     /// can never repaint it: only a toggle on this window changes it.
     func sidebarVisible(for controller: TerminalController) -> Bool {
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         let fallback = UserDefaults.standard.bool(forKey: visibleKey)
-        if let name = manager.sessionName(of: controller), manager.sessions[name] != nil {
-            if let stored = manager.sessions[name]!.sidebar { return stored }
+        if let name = manager.workspaceName(of: controller), manager.workspaces[name] != nil {
+            if let stored = manager.workspaces[name]!.sidebar { return stored }
             manager.stampSidebar(name: name, fallback)
             return fallback
         }
@@ -229,9 +229,9 @@ final class VigilBars {
     }
 
     func setSidebarVisible(_ visible: Bool, for controller: TerminalController) {
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         UserDefaults.standard.set(visible, forKey: visibleKey)
-        if let name = manager.sessionName(of: controller) {
+        if let name = manager.workspaceName(of: controller) {
             manager.setSidebar(name: name, visible) // persists + syncs every member
         } else {
             strayVisible.setObject(NSNumber(value: visible), forKey: controller)
@@ -276,7 +276,7 @@ final class VigilBars {
         if showSidebar { sidebar.model.refresh(reason: "bars") }
 
         // Right: the tab's dock.
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         let runtime = manager.dock(for: controller)
         let showDock = runtime.map { !$0.collapsed && !$0.views.isEmpty } ?? false
         var dockWidth: CGFloat = 0

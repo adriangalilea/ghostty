@@ -166,7 +166,7 @@ enum VigilTabFaces {
         for (index, tabButton) in buttons.enumerated() {
             guard let tabWindow = host.tabbedWindows?[safe: index],
                   let controller = tabWindow.windowController as? TerminalController,
-                  let key = VigilSessionManager.shared.tabIdentityKey(for: controller)
+                  let key = VigilWorkspaces.shared.tabIdentityKey(for: controller)
             else { continue }
 
             let control: VigilTabFaceControl
@@ -185,14 +185,14 @@ enum VigilTabFaces {
                     control.centerYAnchor.constraint(equalTo: tabButton.centerYAnchor),
                 ])
             }
-            control.update(emoji: VigilSessionManager.shared.customIdentity(key)?.emoji)
+            control.update(emoji: VigilWorkspaces.shared.customIdentity(key)?.emoji)
             control.onPick = { [weak controller] picked in
                 guard let controller,
-                      let key = VigilSessionManager.shared.tabIdentityKey(for: controller)
+                      let key = VigilWorkspaces.shared.tabIdentityKey(for: controller)
                 else { return }
-                VigilSessionManager.shared.setCustomIdentity(
+                VigilWorkspaces.shared.setCustomIdentity(
                     key: key,
-                    label: VigilSessionManager.shared.customIdentity(key)?.label,
+                    label: VigilWorkspaces.shared.customIdentity(key)?.label,
                     emoji: picked)
             }
         }

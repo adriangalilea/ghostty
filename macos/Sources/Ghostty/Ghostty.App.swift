@@ -637,28 +637,28 @@ extension Ghostty {
 
             case GHOSTTY_ACTION_VIGIL_NEXT:
                 // Action callbacks arrive on the main thread (app tick).
-                MainActor.assumeIsolated { VigilSessionManager.shared.next() }
+                MainActor.assumeIsolated { VigilWorkspaces.shared.next() }
 
             case GHOSTTY_ACTION_VIGIL_DETACH_WINDOW:
-                MainActor.assumeIsolated { VigilSessionManager.shared.detachFrontWindow() }
+                MainActor.assumeIsolated { VigilWorkspaces.shared.detachFrontWindow() }
 
             case GHOSTTY_ACTION_VIGIL_NEW_SESSION:
-                MainActor.assumeIsolated { VigilSessionManager.shared.newSession() }
+                MainActor.assumeIsolated { VigilWorkspaces.shared.newWorkspace() }
 
             case GHOSTTY_ACTION_VIGIL_OVERVIEW:
                 MainActor.assumeIsolated { VigilOverview.shared.toggle() }
 
             case GHOSTTY_ACTION_VIGIL_CYCLE:
-                MainActor.assumeIsolated { VigilSessionManager.shared.cycle() }
+                MainActor.assumeIsolated { VigilWorkspaces.shared.cycle() }
 
             case GHOSTTY_ACTION_VIGIL_NEXT_FLOATING:
-                MainActor.assumeIsolated { VigilSessionManager.shared.nextFloating() }
+                MainActor.assumeIsolated { VigilWorkspaces.shared.nextFloating() }
 
             case GHOSTTY_ACTION_VIGIL_KILL:
-                MainActor.assumeIsolated { VigilSessionManager.shared.killCurrent() }
+                MainActor.assumeIsolated { VigilWorkspaces.shared.killCurrent() }
 
             case GHOSTTY_ACTION_VIGIL_FLOAT:
-                MainActor.assumeIsolated { VigilSessionManager.shared.togglePinFront() }
+                MainActor.assumeIsolated { VigilWorkspaces.shared.togglePinFront() }
 
             case GHOSTTY_ACTION_TOGGLE_VISIBILITY:
                 toggleVisibility(app, target: target)

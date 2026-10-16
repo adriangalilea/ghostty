@@ -225,7 +225,7 @@ extension NSApplication {
             let cwd = try text("workingDirectory", "initial working directory")
             let program = try text("command", "command")
             let openWindow = (args["openWindow"] as? NSNumber)?.boolValue ?? false
-            let name = VigilSessionManager.shared.apiNewSession(
+            let name = VigilWorkspaces.shared.apiNewWorkspace(
                 label: label, cwd: cwd, command: program, openWindow: openWindow)
             return ["name": name, "label": label ?? name] as NSDictionary
         } catch {

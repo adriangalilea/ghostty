@@ -34,7 +34,7 @@ final class VigilSummon {
     /// The pane currently summoned. While set, the engine watches for its
     /// answer, never for new targets (a chained prompt in the same pane
     /// keeps the panel in place).
-    private var current: VigilSessionManager.SummonCandidate?
+    private var current: VigilWorkspaces.SummonCandidate?
 
     /// Dismissing the panel with an ask still open is a SNOOZE: only a
     /// block FRESHER than this re-opens the flow (and re-admits everything
@@ -58,7 +58,7 @@ final class VigilSummon {
 
     private init() {
         NotificationCenter.default.addObserver(
-            forName: VigilSessionManager.stateDidChange, object: nil, queue: .main
+            forName: VigilWorkspaces.stateDidChange, object: nil, queue: .main
         ) { _ in
             MainActor.assumeIsolated { VigilSummon.shared.schedule() }
         }
@@ -73,7 +73,7 @@ final class VigilSummon {
             MainActor.assumeIsolated {
                 let summon = VigilSummon.shared
                 guard summon.current != nil,
-                      let quick = VigilSessionManager.shared.quickTerminalWindow,
+                      let quick = VigilWorkspaces.shared.quickTerminalWindow,
                       event.window === quick else { return }
                 if event.type == .leftMouseDown {
                     summon.engaged = true
@@ -112,10 +112,10 @@ final class VigilSummon {
     }
 
     /// Everything after the snooze gate and the current summon.
-    private func queue() -> [VigilSessionManager.SummonCandidate] {
+    private func queue() -> [VigilWorkspaces.SummonCandidate] {
         // Every drop is LOGGED with its reason: "no float appeared" must be
         // answerable from the log alone.
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         return manager.summonQueue().filter { c in
             if c.since <= snoozeDate {
                 manager.vlog("summon: drop \(c.pane) (snoozed)")
@@ -147,7 +147,7 @@ final class VigilSummon {
     /// voice is the earcon family.
     static func chime() {
         if !Earcon.waiting.play() {
-            VigilSessionManager.shared.vlog("summon: waiting cue SILENT - output player refused")
+            VigilWorkspaces.shared.vlog("summon: waiting cue SILENT - output player refused")
         }
     }
 
@@ -155,12 +155,12 @@ final class VigilSummon {
     /// cannot see (a visible ending is seen; news is what you cannot see).
     static func doneChime() {
         if !Earcon.ended.play() {
-            VigilSessionManager.shared.vlog("summon: ended cue SILENT - output player refused")
+            VigilWorkspaces.shared.vlog("summon: ended cue SILENT - output player refused")
         }
     }
 
     private func announce() {
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         let asks = manager.midTurnAsks()
         // The ledger lives exactly as long as its blocks: entries for
         // panes no longer mid-turn-blocked drop here, so the map is
@@ -215,12 +215,12 @@ final class VigilSummon {
         // mode of `off` must never silence every blocker).
         announce()
         guard VigilFollowMode.current == .summon else { return }
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
 
         if let cur = current {
             // Adrian moved the flow himself (manual float of another
             // session, a mount): the summon is over, his gesture wins.
-            guard manager.panelSession == cur.name else {
+            guard manager.panelWorkspace == cur.name else {
                 current = nil
                 settleWork?.cancel()
                 Hush.release("summon")
@@ -270,13 +270,13 @@ final class VigilSummon {
         summon(head)
     }
 
-    private func summon(_ candidate: VigilSessionManager.SummonCandidate) {
+    private func summon(_ candidate: VigilWorkspaces.SummonCandidate) {
         lingerWork?.cancel()
         lingerWork = nil
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         let appearing = !manager.quickTerminalVisible
         manager.float(name: candidate.name, landOn: candidate.pane)
-        guard manager.panelSession == candidate.name else {
+        guard manager.panelWorkspace == candidate.name else {
             manager.vlog("summon: float REFUSED for '\(candidate.name)'")
             return
         }
@@ -294,7 +294,7 @@ final class VigilSummon {
         // the panel's terminal briefly, and the pill names the arrival.
         VigilBars.shared.shield(window: manager.quickTerminalWindow)
         let text: String = {
-            guard let session = manager.sessions[candidate.name] else { return candidate.name }
+            guard let session = manager.workspaces[candidate.name] else { return candidate.name }
             let emoji = session.emoji.map { "\($0) " } ?? ""
             let waiting = queue().count
             return emoji + session.label + (waiting > 0 ? "  ·  +\(waiting) waiting" : "")
@@ -304,7 +304,7 @@ final class VigilSummon {
 
     private func advance() {
         guard VigilFollowMode.current == .summon, let cur = current else { return }
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         // Re-blocked during the settle: stay put, it is asking again.
         if manager.paneAgentState(cur.pane)?.state == .blocked { return }
         if let next = queue().first {
@@ -328,9 +328,9 @@ final class VigilSummon {
                 if let next = self.queue().first {
                     self.current = nil
                     self.summon(next)
-                } else if VigilSessionManager.shared.quickTerminalVisible {
+                } else if VigilWorkspaces.shared.quickTerminalVisible {
                     self.engineDismiss = true
-                    VigilSessionManager.shared.dismissQuickTerminal()
+                    VigilWorkspaces.shared.dismissQuickTerminal()
                 } else {
                     self.current = nil
                     Hush.release("summon")
@@ -358,9 +358,9 @@ final class VigilSummon {
         lingerWork?.cancel()
         lingerWork = nil
         if !wasEngine,
-           VigilSessionManager.shared.paneAgentState(cur.pane)?.state == .blocked {
+           VigilWorkspaces.shared.paneAgentState(cur.pane)?.state == .blocked {
             snoozeDate = Date()
-            VigilSessionManager.shared.vlog("summon: snoozed (manual dismissal mid-ask)")
+            VigilWorkspaces.shared.vlog("summon: snoozed (manual dismissal mid-ask)")
         }
         Hush.release("summon")
     }

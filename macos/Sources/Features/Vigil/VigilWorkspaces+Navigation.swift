@@ -1,0 +1,469 @@
+import AppKit
+import AskKit
+import Listen
+import Say
+import SwiftUI
+import GhosttyKit
+import VigilHarness
+import VigilWire
+
+extension VigilWorkspaces {
+    // MARK: Sidebar navigation (rows resolve through shapeshift)
+
+    /// Returns true for every remote viewport, including refusal. A failed
+    /// remote command can never fall through to Ghostty's local spawn path.
+    @discardableResult
+    func remoteSessionCommand(in base: BaseTerminalController, from view: Ghostty.SurfaceView? = nil,
+                              operation: String, direction: String? = nil, expectedRevision: String? = nil) -> Bool {
+        if !(base is TerminalController), let surface = view ?? base.focusedSurface,
+           let device = surface.vigilHost, let pane = surface.vigilAttachId {
+            guard let controller = openRemotePane(device: device, pane: pane) else { return true }
+            dismissQuickTerminal()
+            return remoteSessionCommand(in: controller, from: surface, operation: operation, direction: direction, expectedRevision: expectedRevision)
+        }
+        guard let controller = base as? TerminalController,
+              let composite = mirroredWorkspace(of: controller) else { return false }
+        // Another local window is a mirror of the same home registry too.
+        // It uses the identical transaction instead of creating an orphan
+        // daemon outside that registry through the native split callback.
+        guard let split = VigilRemote.split(composite) else {
+            guard let session = workspaces[composite],
+                  let anchor = (view ?? controller.focusedSurface)?.vigilAttachId else {
+                remoteCommandError(controller, "That workspace can't be reached right now.")
+                return true
+            }
+            let request = VigilSessionControl.Request(version: 1, id: UUID(), issuedAt: Date().timeIntervalSince1970,
+                session: composite, revision: expectedRevision ?? session.layoutRevision,
+                operation: operation, anchor: anchor, direction: direction)
+            let reply = VigilSessionControl.transact(request)
+            guard reply.ok else { remoteCommandError(controller, reply.message); return true }
+            if let name = reply.session, name != composite {
+                shapeshift(in: controller, to: name, anchor: reply.pane)
+            } else if operation == "new_tab", let pane = reply.pane {
+                mirrorInto(controller, name: composite, anchor: pane)
+            } else if let pane = reply.pane, let landing = controller.surfaceTree.first(where: { $0.vigilAttachId == pane }) {
+                Ghostty.moveFocus(to: landing)
+                if controller.window?.isKeyWindow == true { landing.vigilRequestSize(reason: "session edit") }
+            }
+            return true
+        }
+        guard let (_, session) = VigilRemote.shared.session(composite),
+              let anchor = (view ?? controller.focusedSurface)?.vigilAttachId,
+              (session.tabs ?? []).contains(where: { $0.paneIds.contains(anchor) }) else {
+            remoteCommandError(controller, "The remote pane is unavailable. No local process was created.")
+            return true
+        }
+        guard !remoteEdits.contains(composite) else {
+            remoteCommandError(controller, "The last change to this workspace hasn't been confirmed by its Mac yet.")
+            return true
+        }
+        guard let revision = session.layoutRevision else {
+            remoteCommandError(controller, "vigil on that Mac is too old to edit this workspace from here. Update it and relaunch.")
+            return true
+        }
+        let request = VigilSessionControl.Request(version: 1, id: UUID(), issuedAt: Date().timeIntervalSince1970,
+            session: split.name, revision: expectedRevision ?? revision,
+            operation: operation, anchor: anchor, direction: direction)
+        remoteEdits.insert(composite)
+        vlog("remote command: \(request.id) \(operation) -> \(split.device)/\(split.name)/\(anchor)")
+        Task { [weak controller] in
+            defer { remoteEdits.remove(composite) }
+            do {
+                let reply = try await VigilRemote.shared.command(split.device, request: request)
+                guard reply.ok else {
+                    if let controller { remoteCommandError(controller, reply.message) }
+                    vlog("remote command: \(request.id) refused \(reply.code)")
+                    return
+                }
+                vlog("remote command: \(request.id) committed \(reply.pane ?? "")")
+                if let controller, mirroredWorkspace(of: controller) == composite, let pane = reply.pane {
+                    remoteLandings[ObjectIdentifier(controller)] = pane
+                    if let name = reply.session, name != split.name {
+                        remoteDestinations[ObjectIdentifier(controller)] = VigilRemote.compositeId(split.device, name)
+                    }
+                }
+                remoteEdits.remove(composite)
+                // The home committed it; its directory stream brings the result.
+                remoteDirectoryChanged(split.device)
+            } catch {
+                vlog("remote command: \(request.id) outcome unknown: \(error.localizedDescription)")
+                if let controller {
+                    remoteCommandError(controller, "\(error.localizedDescription)\nCommand \(request.id). Check the workspace on its Mac before trying again.")
+                }
+            }
+        }
+        return true
+    }
+
+    func remoteCommandError(_ controller: TerminalController, _ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "The workspace was not changed"
+        alert.informativeText = message
+        if let window = controller.window { alert.beginSheetModal(for: window) }
+    }
+
+    func confirmRemoteClose(in controller: TerminalController, view: Ghostty.SurfaceView? = nil,
+                                    operation: String, confirm: Bool = true) -> Bool {
+        guard let composite = mirroredWorkspace(of: controller) else { return false }
+        let target = view ?? controller.focusedSurface
+        let revision = VigilRemote.shared.session(composite)?.session.layoutRevision
+            ?? workspaces[composite]?.layoutRevision
+        let proceed = { [weak controller] in
+            guard let controller, self.mirroredWorkspace(of: controller) == composite else { return }
+            self.remoteSessionCommand(in: controller, from: target, operation: operation, expectedRevision: revision)
+        }
+        if confirm {
+            // Named as the sidebar names them: the session's face and label,
+            // the Mac it lives on (never the composite id, a tether key).
+            let remote = VigilRemote.shared.session(composite)
+            let local = workspaces[composite]
+            let label = [remote?.session.emoji ?? local?.emoji, remote?.session.label ?? local?.label]
+                .compactMap { $0 }.joined(separator: " ")
+            let mac = remote.flatMap { VigilRemote.shared.host($0.device)?.name } ?? "its Mac"
+            let what = operation == "close_tab" ? "tab" : "pane"
+            controller.confirmClose(messageText: "Close this \(what) of \(label.isEmpty ? "the workspace" : label)?",
+                informativeText: "It closes on \(mac), in every window showing it. For \(Int(Self.killGrace / 60)) minutes it can come back on \(mac) with ⌘⇧T.",
+                completion: proceed)
+        } else { proceed() }
+        return true
+    }
+
+    func closeRemoteTab(_ controller: TerminalController) -> Bool {
+        confirmRemoteClose(in: controller, operation: "close_tab")
+    }
+
+    func remoteDirectoryChanged(_ device: String) {
+        for controller in mirrorViewports.keyEnumerator().allObjects.compactMap({ $0 as? TerminalController }) {
+            if let destination = remoteDestinations[ObjectIdentifier(controller)],
+               VigilRemote.shared.session(destination) != nil {
+                mirrorViewports.setObject(destination as NSString, forKey: controller)
+                remoteDestinations.removeValue(forKey: ObjectIdentifier(controller))
+            }
+            guard let composite = mirroredWorkspace(of: controller),
+                  let identity = VigilRemote.split(composite), identity.device == device,
+                  !remoteEdits.contains(composite) else { continue }
+            guard let (_, session) = VigilRemote.shared.session(composite) else {
+                // An unreachable host is not a deletion; keep its view.
+                guard VigilRemote.shared.host(device)?.directory != nil else { continue }
+                endMirrorViewport(controller)
+                swapTree(controller, SplitTree())
+                controller.window?.close()
+                continue
+            }
+            let ids = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
+            let pending = remoteLandings[ObjectIdentifier(controller)]
+            let selected = pending.flatMap { id in (session.tabs ?? []).first { $0.paneIds.contains(id) } }
+            guard let tab = selected ?? (session.tabs ?? []).first(where: { !ids.isDisjoint(with: $0.paneIds) }) ?? session.tabs?.first else { continue }
+            let revision = VigilSessionControl.revision([tab])
+            guard remoteLayouts[ObjectIdentifier(controller)] != revision else { continue }
+            reconcileWorkspaceTree(controller, tab: tab, host: device, session: identity.name)
+            remoteLayouts[ObjectIdentifier(controller)] = revision
+            if let pending, let landing = controller.surfaceTree.first(where: { $0.vigilAttachId == pending }) {
+                remoteLandings.removeValue(forKey: ObjectIdentifier(controller))
+                Ghostty.moveFocus(to: landing)
+                if controller.window?.isKeyWindow == true { landing.vigilRequestSize(reason: "remote session edit") }
+            }
+            vlog("remote layout: \(composite) reconciled \(tab.panes.count) panes; retained existing clients")
+        }
+    }
+
+    func syncLocalMirrorLayouts() {
+        for controller in mirrorViewports.keyEnumerator().allObjects.compactMap({ $0 as? TerminalController }) {
+            guard let name = mirroredWorkspace(of: controller), VigilRemote.split(name) == nil else { continue }
+            let ids = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
+            guard let tabs = workspaces[name]?.tabs,
+                  let tab = tabs.first(where: { !ids.isDisjoint(with: $0.paneIds) }) ?? tabs.first else {
+                endMirrorViewport(controller)
+                swapTree(controller, SplitTree())
+                controller.window?.close()
+                continue
+            }
+            let shape = VigilSessionControl.revision([tab])
+            guard remoteLayouts[ObjectIdentifier(controller)] != shape else { continue }
+            remoteLayouts[ObjectIdentifier(controller)] = shape
+            reconcileWorkspaceTree(controller, tab: tab, host: nil, session: name)
+        }
+    }
+
+    /// The home app's serialized session transaction. Remote callers supply
+    /// identities and intent, never a replacement registry or local cwd.
+    func applySessionCommand(_ request: VigilSessionControl.Request) -> VigilSessionControl.Reply {
+        typealias Reply = VigilSessionControl.Reply
+        refreshWorkspaceRevisions()
+        guard var session = workspaces[request.session] else {
+            return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
+        }
+        if request.operation == "describe" {
+            return Reply(id: request.id, ok: true, code: "snapshot", message: "Home session topology revision.",
+                         revision: session.layoutRevision, session: request.session)
+        }
+        guard session.layoutRevision == request.revision else {
+            return .failure(request, "conflict", "The workspace changed in the meantime. Look at it again and retry.")
+        }
+        guard let index = session.tabs.firstIndex(where: { $0.paneIds.contains(request.anchor) }) else {
+            return .failure(request, "not_found", "That pane is no longer in this workspace.")
+        }
+        guard session.float == nil else {
+            return .failure(request, "presentation_busy", "This workspace is in the floating terminal on its Mac. Put it back before changing its tabs or splits.")
+        }
+        var tab = session.tabs[index]
+        var created: Registry.Pane?
+        var removed: [Registry.Pane] = []
+        switch request.operation {
+        case "new_session":
+            let cwd = liveView(attachId: request.anchor)?.pwd
+                ?? tab.panes.first(where: { $0.id == request.anchor })?.cwd ?? session.cwd
+            let name = createWorkspace(cwd: cwd)
+            guard let created = workspaces[name], let pane = created.tabs.first?.panes.first,
+                  startDaemon(pane: pane, session: name) else {
+                persist()
+                return .failure(request, "spawn_failed", "The workspace was created on its Mac, but its terminal did not start.")
+            }
+            persist()
+            guard let data = try? Data(contentsOf: persistURL),
+                  let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
+                  saved.contains(where: { $0.name == name && $0.tabs?.first?.panes.first?.id == pane.id }) else {
+                return .failure(request, "commit_failed", "The new workspace could not be confirmed on its Mac.")
+            }
+            return Reply(id: request.id, ok: true, code: "committed", message: "Workspace created on its homeMac.",
+                         revision: workspaces[name]?.layoutRevision, pane: pane.id, session: name)
+        case "split", "new_tab":
+            guard let anchor = tab.panes.first(where: { $0.id == request.anchor }) else {
+                return .failure(request, "unsupported_target", "A dock tenant cannot anchor a split or tab.")
+            }
+            if request.operation == "split", !["left", "right", "up", "down"].contains(request.direction ?? "") {
+                return .failure(request, "invalid_direction", "Expected left, right, up or down.")
+            }
+            let id = "vigil-\(request.session)-\(nextPaneIndex(name: request.session))"
+            // The home pane supplies cwd. No M5 environment, command or path
+            // is inherited from a remote surface configuration.
+            let pane = Registry.Pane(id: id, cwd: liveView(attachId: anchor.id)?.pwd ?? anchor.cwd)
+            guard startDaemon(pane: pane, session: request.session) else {
+                persist() // the allocated identity is never recycled
+                return .failure(request, "spawn_failed", "The terminal could not start on its Mac; its vigil.log says why.")
+            }
+            created = pane
+            session.paneSeq = workspaces[request.session]!.paneSeq
+            if request.operation == "new_tab" {
+                session.tabs.insert(Registry.Tab(panes: [pane], layout: nil), at: index + 1)
+            } else {
+                let anchorIndex = tab.panes.firstIndex { $0.id == anchor.id }!
+                let newIndex = tab.panes.count
+                let layout = Self.completeLayout(tab)
+                func insert(_ node: Registry.Layout) -> Registry.Layout {
+                    switch node {
+                    case .leaf(let i):
+                        guard i == anchorIndex else { return node }
+                        switch request.direction {
+                        case "left": return .h(0.5, .leaf(newIndex), node)
+                        case "up": return .v(0.5, .leaf(newIndex), node)
+                        case "down": return .v(0.5, node, .leaf(newIndex))
+                        default: return .h(0.5, node, .leaf(newIndex))
+                        }
+                    case .h(let ratio, let left, let right): return .h(ratio, insert(left), insert(right))
+                    case .v(let ratio, let left, let right): return .v(ratio, insert(left), insert(right))
+                    }
+                }
+                tab.layout = insert(layout)
+                tab.panes.append(pane)
+                session.tabs[index] = tab
+            }
+        case "close_pane", "close_tab":
+            removed = request.operation == "close_tab"
+                ? tab.panes + (tab.dock?.panes ?? [])
+                : (tab.panes + (tab.dock?.panes ?? [])).filter { $0.id == request.anchor }
+            let ids = Set(removed.map(\.id))
+            let previous = tab.panes
+            tab.panes.removeAll { ids.contains($0.id) }
+            let mapping = Dictionary(uniqueKeysWithValues: tab.panes.enumerated().map { ($0.element.id, $0.offset) })
+            func prune(_ node: Registry.Layout) -> Registry.Layout? {
+                switch node {
+                case .leaf(let i):
+                    guard previous.indices.contains(i), let next = mapping[previous[i].id] else { return nil }
+                    return .leaf(next)
+                case .h(let ratio, let l, let r):
+                    let left = prune(l), right = prune(r)
+                    if let left, let right { return .h(ratio, left, right) }
+                    return left ?? right
+                case .v(let ratio, let l, let r):
+                    let left = prune(l), right = prune(r)
+                    if let left, let right { return .v(ratio, left, right) }
+                    return left ?? right
+                }
+            }
+            tab.layout = prune(Self.completeLayout(session.tabs[index]))
+            if var dock = tab.dock {
+                dock.panes.removeAll { ids.contains($0.id) }
+                dock.active = min(dock.active, max(0, dock.panes.count - 1))
+                tab.dock = dock.panes.isEmpty ? nil : dock
+            }
+            if tab.panes.isEmpty {
+                // A tab cannot consist only of its dock.
+                removed += tab.dock?.panes ?? []
+                session.tabs.remove(at: index)
+            } else { session.tabs[index] = tab }
+        default:
+            return .failure(request, "unsupported_operation", "vigil on that Mac can't do this; update it.")
+        }
+
+        // Invalidate warm caches; live home views are reconciled by identity
+        // below, so unchanged panes keep their clients and terminal state.
+        session.held = []
+        workspaces[request.session] = session
+        for controller in members(of: request.session) {
+            let oldIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
+            if let target = session.tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? session.tabs.first {
+                reconcileWorkspaceTree(controller, tab: target, host: nil, session: request.session)
+            } else {
+                memberships.removeObject(forKey: controller)
+                if let dock = dockMap.object(forKey: controller) {
+                    for view in dock.views { view.vigilDestroySurface() }
+                    dock.unmount()
+                    dockMap.removeObject(forKey: controller)
+                }
+                swapTree(controller, SplitTree())
+                controller.window?.close()
+            }
+        }
+        for controller in mirrorViewports.keyEnumerator().allObjects.compactMap({ $0 as? TerminalController })
+            where mirroredWorkspace(of: controller) == request.session {
+            let oldIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
+            if let target = session.tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? session.tabs.first {
+                reconcileWorkspaceTree(controller, tab: target, host: nil, session: request.session)
+            } else {
+                endMirrorViewport(controller)
+                swapTree(controller, SplitTree())
+                controller.window?.close()
+            }
+        }
+        for pane in removed { buryPane(pane, from: request.session) }
+        if session.tabs.isEmpty { workspaces.removeValue(forKey: request.session) }
+        persist()
+        // Success is the committed registry, not merely a spawned process.
+        guard let data = try? Data(contentsOf: persistURL),
+              let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
+              VigilSessionControl.revision(saved.first { $0.name == request.session && $0.buriedUntil == nil }?.tabs ?? [])
+                == VigilSessionControl.revision(session.tabs) else {
+            return .failure(request, "commit_failed", "The change could not be confirmed on its Mac. Check the workspace there before retrying.")
+        }
+        vlog("session command: \(request.id) \(request.operation) \(request.session)/\(request.anchor) committed\(created.map { " -> \($0.id)" } ?? "")")
+        return Reply(id: request.id, ok: true, code: "committed", message: "Workspace edit committed.",
+                     revision: workspaces[request.session]?.layoutRevision, pane: created?.id)
+    }
+
+    private static func completeLayout(_ tab: Registry.Tab) -> Registry.Layout {
+        if let layout = tab.layout { return layout }
+        let last = max(0, tab.panes.count - 1)
+        return (0..<last).reversed().reduce(Registry.Layout.leaf(last)) { .h(0.5, .leaf($1), $0) }
+    }
+
+    /// A registry projection, never a user edit. Reuse views by daemon id;
+    /// constructing a split tree does not run native "new split" actions.
+    private func reconcileWorkspaceTree(_ controller: TerminalController, tab: Registry.Tab, host: String?, session: String) {
+        guard let app = ghosttyApp?.app, !tab.panes.isEmpty else { return }
+        if mirroredWorkspace(of: controller) != nil {
+            remoteLayouts[ObjectIdentifier(controller)] = VigilSessionControl.revision([tab])
+        }
+        let existing = Dictionary(uniqueKeysWithValues: controller.surfaceTree.compactMap { view in
+            view.vigilAttachId.map { ($0, view) }
+        })
+        let focusedId = controller.focusedSurface?.vigilAttachId
+        var views: [Ghostty.SurfaceView] = []
+        for pane in tab.panes {
+            if let view = existing[pane.id] { views.append(view); continue }
+            if host == nil, mirroredWorkspace(of: controller) == nil, let view = adoptable(pane.id) {
+                views.append(view); continue
+            }
+            var config = host == nil ? resurrectConfig(name: session, pane: pane) : Ghostty.SurfaceConfiguration()
+            config.vigilAttach = pane.id
+            config.workingDirectory = pane.cwd
+            config.vigilMirror = mirroredWorkspace(of: controller) != nil
+            if let host {
+                config.vigilHost = host
+                config.vigilMirror = true
+                config.vigilExplicitClaim = true
+            }
+            views.append(Ghostty.SurfaceView(app, baseConfig: config))
+        }
+        func tree(_ layout: Registry.Layout) -> SplitTree<Ghostty.SurfaceView>.Node {
+            switch layout {
+            case .leaf(let i): return .leaf(view: views[min(max(i, 0), views.count - 1)])
+            case .h(let ratio, let left, let right):
+                return .split(.init(direction: .horizontal, ratio: ratio, left: tree(left), right: tree(right)))
+            case .v(let ratio, let left, let right):
+                return .split(.init(direction: .vertical, ratio: ratio, left: tree(left), right: tree(right)))
+            }
+        }
+        let ids = Set(tab.panes.map(\.id))
+        for (id, view) in existing where !ids.contains(id) { view.vigilDestroySurface() }
+        swapTree(controller, SplitTree(root: tree(Self.completeLayout(tab)), zoomed: nil))
+        if host == nil, mirroredWorkspace(of: controller) == nil {
+            let oldDock = dockMap.object(forKey: controller)
+            if (oldDock?.views.compactMap(\.vigilAttachId) ?? []) != (tab.dock?.panes.map(\.id) ?? []) {
+                if let oldDock {
+                    for view in oldDock.views { view.vigilDestroySurface() }
+                    oldDock.unmount()
+                    dockMap.removeObject(forKey: controller)
+                }
+                materializeDockCapture(controller, tab.dock) { self.resurrectConfig(name: session, pane: $0) }
+                VigilBars.shared.sync(controller)
+            }
+        }
+        if let focus = views.first(where: { $0.vigilAttachId == focusedId }) ?? views.first {
+            controller.focusedSurface = focus
+            if controller.window?.isKeyWindow == true { Ghostty.moveFocus(to: focus) }
+        }
+    }
+
+    /// A tab row, anchored by any of its pane ids (indices shift as tabs
+    /// go live/cold; pane ids never lie). Live tab → focus its window;
+    /// captured tab of THIS window's session → swap it in; anything else →
+    /// shapeshift the session here, then swap the tab if it stayed captured.
+    func activateTab(name: String, anchor: String?, in controller: TerminalController?) {
+        if let anchor, let view = liveView(attachId: anchor), treeHome(of: view) != nil {
+            // On screen in THIS window (or no window asked): focus it. On
+            // screen in another window: this viewport mirrors it
+            // (shapeshift's rule).
+            if let window = shownHere(view, controller) {
+                window.makeKeyAndOrderFront(nil)
+                return
+            }
+            mirrorInto(controller!, name: name, anchor: anchor)
+            return
+        }
+        guard let controller else { open(name: name); return }
+        if workspaceName(of: controller) != name {
+            // ONE swap, straight to the anchored tab: mounting tab 0 and
+            // then swapping again was a visible double-blink.
+            shapeshift(in: controller, to: name, anchor: anchor)
+        }
+        // On screen is SITTING IN A TREE, never mere view existence nor a
+        // view's window: an undo corpse, a warm tab or a released tree
+        // can hold this pane's SurfaceView, and treating it as shown made
+        // both branches skip - the click (and follow) died in silence.
+        if let anchor, workspaceName(of: controller) == name,
+           liveView(attachId: anchor).flatMap(treeHome(of:)) == nil {
+            shapeshiftTab(name: name, anchor: anchor, in: controller)
+        }
+    }
+
+    /// A pane row: a live surface gets direct focus; a captured one rides
+    /// activateTab, whose mount lands focus on it directly.
+    func activatePane(name: String, paneId: String?, in controller: TerminalController?) {
+        if VigilRemote.split(name) != nil, let controller {
+            mountRemote(controller, composite: name, anchor: paneId)
+            return
+        }
+        guard let paneId else {
+            activateTab(name: name, anchor: nil, in: controller)
+            return
+        }
+        if let view = liveView(attachId: paneId), let window = shownHere(view, controller) {
+            window.makeKeyAndOrderFront(nil)
+            Ghostty.moveFocus(to: view)
+            return
+        }
+        activateTab(name: name, anchor: paneId, in: controller)
+    }
+
+}

@@ -116,8 +116,8 @@ enum VigilIdentity {
     /// same editor view, alert chrome. The overview edits inline instead.
     @MainActor
     static func editModal(name: String) {
-        let manager = VigilSessionManager.shared
-        guard let session = manager.sessions[name] else { return }
+        let manager = VigilWorkspaces.shared
+        guard let session = manager.workspaces[name] else { return }
         editModal(
             title: "Workspace identity",
             label: session.label,
@@ -142,7 +142,7 @@ enum VigilIdentity {
         context: String,
         onCommit: @escaping (String?, String?) -> Void
     ) {
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         let draft = VigilIdentityDraft(label: label, emoji: emoji ?? "")
         let alert = NSAlert()
         alert.messageText = title

@@ -276,17 +276,17 @@ extension Ghostty {
             let status = ghostty_surface_vigil_transport_status(surface)
             if vigilTransportState != status.state {
                 vigilTransportState = status.state
-                VigilSessionManager.shared.vlog("transport: \(vigilHost ?? "")/\(vigilAttachId ?? "") state=\(status.state) queued=\(status.pending_bytes) written=\(status.written_bytes)")
+                VigilWorkspaces.shared.vlog("transport: \(vigilHost ?? "")/\(vigilAttachId ?? "") state=\(status.state) queued=\(status.pending_bytes) written=\(status.written_bytes)")
             }
             let pending = status.pending_bytes > 0 && status.state != 2
             if vigilInputPending != pending {
                 vigilInputPending = pending
-                VigilSessionManager.shared.vlog("transport: \(vigilHost ?? "")/\(vigilAttachId ?? "") queued=\(status.pending_bytes) written=\(status.written_bytes)")
+                VigilWorkspaces.shared.vlog("transport: \(vigilHost ?? "")/\(vigilAttachId ?? "") queued=\(status.pending_bytes) written=\(status.written_bytes)")
             }
         }
 
         @objc func vigilReconnectSession(_ sender: Any? = nil) {
-            VigilSessionManager.shared.reconnectRemoteViewport(self)
+            VigilWorkspaces.shared.reconnectRemoteViewport(self)
         }
 
         @objc func vigilConnectionDetails(_ sender: Any?) {
@@ -308,7 +308,7 @@ extension Ghostty {
 
             An open stream does not prove the program consumed input. A quiet program is not necessarily stuck.
             """
-            VigilSessionManager.shared.vlog("connection details: " + details.replacingOccurrences(of: "\n", with: " | "))
+            VigilWorkspaces.shared.vlog("connection details: " + details.replacingOccurrences(of: "\n", with: " | "))
             let alert = NSAlert()
             alert.messageText = "Connection to \(device)"
             alert.informativeText = details
@@ -402,7 +402,7 @@ extension Ghostty {
                 guard NSApp.isActive, window?.isKeyWindow == true || (intent && window?.isVisible == true),
                       vigilViewportSize.width > 0, vigilViewportSize.height > 0 else {
                     if vigilPendingSizeClaim != nil {
-                        VigilSessionManager.vlogSync("size control: \(vigilHost ?? "")/\(vigilAttachId ?? "?") claim waits (\(reason)): active=\(NSApp.isActive) window=\(window == nil ? "none" : "\(window!.windowNumber)") key=\(window?.isKeyWindow == true) visible=\(window?.isVisible == true) viewport=\(Int(vigilViewportSize.width))x\(Int(vigilViewportSize.height))")
+                        VigilWorkspaces.vlogSync("size control: \(vigilHost ?? "")/\(vigilAttachId ?? "?") claim waits (\(reason)): active=\(NSApp.isActive) window=\(window == nil ? "none" : "\(window!.windowNumber)") key=\(window?.isKeyWindow == true) visible=\(window?.isVisible == true) viewport=\(Int(vigilViewportSize.width))x\(Int(vigilViewportSize.height))")
                     }
                     return
                 }
@@ -428,7 +428,7 @@ extension Ghostty {
                 vigilWantsSize = false
                 vigilSizeAcknowledged = false
             }
-            VigilSessionManager.vlogSync("size control: \(vigilHost ?? "")/\(vigilAttachId ?? "?") \(own ? "claim" : "yield") (\(reason))")
+            VigilWorkspaces.vlogSync("size control: \(vigilHost ?? "")/\(vigilAttachId ?? "?") \(own ? "claim" : "yield") (\(reason))")
         }
         /// Font-size steps below the config size taken to fit a
         /// letterboxed grid (0 = the config size).
@@ -704,7 +704,7 @@ extension Ghostty {
             guard self.focused != focused else { return }
             self.focused = focused
             if let id = vigilAttachId {
-                VigilSessionManager.vlogSync("surface focus: \(vigilHost ?? "local")/\(id) \(focused) key=\(window?.isKeyWindow == true) responder=\(isFirstResponder) letterbox=\(vigilOwnerGrid != nil) (\(reason))")
+                VigilWorkspaces.vlogSync("surface focus: \(vigilHost ?? "local")/\(id) \(focused) key=\(window?.isKeyWindow == true) responder=\(isFirstResponder) letterbox=\(vigilOwnerGrid != nil) (\(reason))")
             }
 
             // If we lost our focus then remove the mouse event suppression so

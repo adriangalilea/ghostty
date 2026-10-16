@@ -33,17 +33,17 @@ class VigilOverview: NSObject {
     /// All of ghostty, one grid: every session (any state) plus any stray
     /// window that slipped past registration (safety net).
     private func buildEntries() -> [OverviewEntry] {
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         // Self-heal before showing anything: a dead-window session must never
         // become a card. Then scream if any impossible state slipped through.
         manager.reconcile()
         manager.assertInvariants("buildEntries")
-        manager.vlog("overview: " + manager.sessions.keys.sorted().joined(separator: " "))
+        manager.vlog("overview: " + manager.workspaces.keys.sorted().joined(separator: " "))
         // Every rebuild refreshes live thumbnails: p/u/undo change what a
         // card IS mid-showing, and a freshly born session has no frozen
         // snapshot to fall back on.
         manager.refreshThumbnails()
-        var entries = manager.sessions.values
+        var entries = manager.workspaces.values
             .sorted { ($0.order, $0.label) < ($1.order, $1.label) }
             .map { session -> OverviewEntry in
                 OverviewEntry(
@@ -54,7 +54,7 @@ class VigilOverview: NSObject {
                     place: manager.place(session.name),
                     attention: session.attention,
                     thumbnail: session.thumbnail,
-                    pinned: manager.sessionPinned(session.name),
+                    pinned: manager.workspacePinned(session.name),
                     controller: manager.anchorController(of: session.name),
                     running: manager.runningSummary(of: session.name),
                     died: manager.diedSummary(of: session.name))
@@ -72,7 +72,7 @@ class VigilOverview: NSObject {
                 emoji: nil,
                 place: .windowed,
                 attention: .none,
-                thumbnail: VigilSessionManager.windowSnapshot(controller),
+                thumbnail: VigilWorkspaces.windowSnapshot(controller),
                 pinned: manager.isPinned(controller),
                 controller: controller,
                 running: [],
@@ -96,7 +96,7 @@ class VigilOverview: NSObject {
     }
 
     private func show() {
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         manager.reconcile()
 
         model.entries = buildEntries()
@@ -106,7 +106,7 @@ class VigilOverview: NSObject {
             ?? TerminalController.preferredParent
         model.selection = front.flatMap { f in
             // Any tab of the front window selects its session's card.
-            if let name = manager.sessionName(of: f) {
+            if let name = manager.workspaceName(of: f) {
                 return model.entries.firstIndex { $0.name == name }
             }
             return model.entries.firstIndex { $0.controller === f }
@@ -158,12 +158,12 @@ class VigilOverview: NSObject {
             onDismissBurial: { [weak self] burial in self?.dismissBurial(burial) },
             onRelaunchDied: { [weak self] entry in
                 guard let self else { return }
-                VigilSessionManager.shared.relaunchDied(name: entry.name)
+                VigilWorkspaces.shared.relaunchDied(name: entry.name)
                 self.model.entries = self.buildEntries()
             },
             onDismissDied: { [weak self] entry in
                 guard let self else { return }
-                VigilSessionManager.shared.dismissDied(name: entry.name)
+                VigilWorkspaces.shared.dismissDied(name: entry.name)
                 self.model.entries = self.buildEntries()
             })
         let hosting = NSHostingView(rootView: view)
@@ -236,7 +236,7 @@ class VigilOverview: NSObject {
                 // key there is no surface to run the keybind, so the monitor
                 // is the only one who can honor it. Read from config, never
                 // hardcoded.
-                if let config = VigilSessionManager.shared.ghosttyApp?.config,
+                if let config = VigilWorkspaces.shared.ghosttyApp?.config,
                    let shortcut = config.keyboardShortcut(for: "vigil_overview"),
                    Self.eventMatches(event, shortcut) {
                     self.hide()
@@ -246,7 +246,7 @@ class VigilOverview: NSObject {
                 // The configured undo shortcut works from inside the panel
                 // (no surface here to run the keybind): exhume the last
                 // kill and refresh the grid so it reappears in place.
-                if let config = VigilSessionManager.shared.ghosttyApp?.config,
+                if let config = VigilWorkspaces.shared.ghosttyApp?.config,
                    let shortcut = config.keyboardShortcut(for: "undo"),
                    Self.eventMatches(event, shortcut) {
                     (NSApp.delegate as? AppDelegate)?.undoManager.undo()
@@ -310,8 +310,8 @@ class VigilOverview: NSObject {
     /// order fields so it survives restarts. Stray windows keep their
     /// relative place only for this showing.
     private func persistOrder() {
-        let manager = VigilSessionManager.shared
-        for (index, entry) in model.entries.enumerated() where manager.sessions[entry.name] != nil {
+        let manager = VigilWorkspaces.shared
+        for (index, entry) in model.entries.enumerated() where manager.workspaces[entry.name] != nil {
             manager.setOrder(name: entry.name, order: index)
         }
     }
@@ -329,12 +329,12 @@ class VigilOverview: NSObject {
         // Windowed already has a window: just focus it. Background needs
         // open() to re-embed or resurrect. Place decides, not the class.
         if entry.place == .windowed, let controller = entry.controller {
-            VigilSessionManager.shared.vlog("overview: focus '\(entry.name)'")
+            VigilWorkspaces.shared.vlog("overview: focus '\(entry.name)'")
             controller.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {
-            VigilSessionManager.shared.vlog("overview: open '\(entry.name)'")
-            VigilSessionManager.shared.open(name: entry.name)
+            VigilWorkspaces.shared.vlog("overview: open '\(entry.name)'")
+            VigilWorkspaces.shared.open(name: entry.name)
         }
     }
 
@@ -343,7 +343,7 @@ class VigilOverview: NSObject {
     /// path).
     private func createSession() {
         hide()
-        VigilSessionManager.shared.newSession(
+        VigilWorkspaces.shared.newWorkspace(
             cwd: FileManager.default.homeDirectoryForCurrentUser.path)
     }
 
@@ -352,9 +352,9 @@ class VigilOverview: NSObject {
     /// (onSubmit → commitRename), esc cancels (the key monitor).
     private func renameSelected() {
         guard let entry = model.selected, entry.isWindow else { return }
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         model.draft = VigilIdentityDraft(label: entry.label, emoji: entry.emoji ?? "")
-        model.editContext = manager.sessions[entry.name] != nil
+        model.editContext = manager.workspaces[entry.name] != nil
             ? manager.identityContext(name: entry.name)
             : "title: \(entry.label)\nscreen:\n"
                 + String((entry.controller?.focusedSurface?.cachedScreenContents.get() ?? "").suffix(1500))
@@ -369,9 +369,9 @@ class VigilOverview: NSObject {
         guard model.editing, let entry = model.selected, let draft = model.draft else { return }
         model.editing = false
         model.draft = nil
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         let label = draft.label.trimmingCharacters(in: .whitespaces)
-        if manager.sessions[entry.name] != nil {
+        if manager.workspaces[entry.name] != nil {
             manager.rename(
                 name: entry.name,
                 label: label.isEmpty ? entry.label : label,
@@ -396,9 +396,9 @@ class VigilOverview: NSObject {
     /// (works for background sessions too); a stray window is pure window level.
     private func togglePinSelected() {
         guard let entry = model.selected, entry.isWindow else { return }
-        let manager = VigilSessionManager.shared
-        if manager.sessions[entry.name] != nil {
-            manager.togglePinSession(entry.name)
+        let manager = VigilWorkspaces.shared
+        if manager.workspaces[entry.name] != nil {
+            manager.togglePinWorkspace(entry.name)
         } else if let controller = entry.controller {
             manager.togglePin(controller)
         }
@@ -409,23 +409,23 @@ class VigilOverview: NSObject {
 
     /// Pull a killed session back out of its grace period, intact.
     private func recover(_ entry: OverviewEntry) {
-        VigilSessionManager.shared.exhume(entry.name)
+        VigilWorkspaces.shared.exhume(entry.name)
         model.entries = buildEntries()
         model.selection = min(model.selection, max(model.entries.count - 1, 0))
         refit()
     }
 
     /// Recover a burial from the tray (back to a living session).
-    private func recoverBurial(_ burial: VigilSessionManager.Burial) {
-        VigilSessionManager.shared.exhume(burial.name)
+    private func recoverBurial(_ burial: VigilWorkspaces.Burial) {
+        VigilWorkspaces.shared.exhume(burial.name)
         model.entries = buildEntries()
         model.selection = min(model.selection, max(model.entries.count - 1, 0))
         refit()
     }
 
     /// Dismiss a burial NOW: reap it immediately instead of waiting the grace.
-    private func dismissBurial(_ burial: VigilSessionManager.Burial) {
-        VigilSessionManager.shared.reapNow(burial.name)
+    private func dismissBurial(_ burial: VigilWorkspaces.Burial) {
+        VigilWorkspaces.shared.reapNow(burial.name)
         model.entries = buildEntries()
         model.selection = min(model.selection, max(model.entries.count - 1, 0))
         refit()
@@ -437,7 +437,7 @@ class VigilOverview: NSObject {
     /// never kill blind.
     private func removeSelected() {
         guard let entry = model.selected, entry.isWindow else { return }
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
 
         let alert = NSAlert()
         alert.messageText = "\(entry.removeVerb.capitalized) \(entry.title)?"
@@ -451,7 +451,7 @@ class VigilOverview: NSObject {
         case .floating: info = "In the floating terminal; this is the kill. \(dying)"
         case .background: info = "Running in the background; this is the kill. \(dying)"
         }
-        if let session = manager.sessions[entry.name] {
+        if let session = manager.workspaces[entry.name] {
             info = "cwd: \(session.cwd)\ntabs: \(max(session.tabs.count, 1)) panes: \(max(session.paneCount, 1))\n" + info
         }
         alert.informativeText = info
@@ -468,7 +468,7 @@ class VigilOverview: NSObject {
 
         // Any registered session (any state) buries via kill(); killStray
         // is only for an unregistered window (safety net).
-        if manager.sessions[entry.name] != nil {
+        if manager.workspaces[entry.name] != nil {
             manager.kill(name: entry.name)
         } else if let controller = entry.controller {
             manager.killStray(controller)
@@ -526,8 +526,8 @@ struct OverviewEntry: Identifiable {
     /// The session's emoji face; display ornament, never identity.
     let emoji: String?
     /// Where the session is displayed (derived by the manager at build).
-    let place: VigilSessionManager.Place
-    let attention: VigilSessionManager.Attention
+    let place: VigilWorkspaces.Place
+    let attention: VigilWorkspaces.Attention
     let thumbnail: NSImage?
     /// Pinned on top (Antinote-style); only meaningful for live windows.
     let pinned: Bool
@@ -601,7 +601,7 @@ class OverviewModel: ObservableObject {
     /// Killed sessions in their grace period, rendered as a compact tray
     /// below the grid (out of the navigable grid, so a kill never reflows
     /// the live cards and each has its own unambiguous recover/dismiss).
-    @Published var burials: [VigilSessionManager.Burial] = []
+    @Published var burials: [VigilWorkspaces.Burial] = []
 
     var selected: OverviewEntry? {
         entries.indices.contains(selection) ? entries[selection] : nil
@@ -627,8 +627,8 @@ struct OverviewView: View {
     let onRename: (OverviewEntry) -> Void
     let onCommitRename: () -> Void
     let onRecover: (OverviewEntry) -> Void
-    let onRecoverBurial: (VigilSessionManager.Burial) -> Void
-    let onDismissBurial: (VigilSessionManager.Burial) -> Void
+    let onRecoverBurial: (VigilWorkspaces.Burial) -> Void
+    let onDismissBurial: (VigilWorkspaces.Burial) -> Void
     let onRelaunchDied: (OverviewEntry) -> Void
     let onDismissDied: (OverviewEntry) -> Void
 
@@ -741,7 +741,7 @@ struct OverviewView: View {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(0.6))
                 TimelineView(.periodic(from: .now, by: 0.3)) { _ in
-                    let live = entry.controller.flatMap(VigilSessionManager.windowSnapshot)
+                    let live = entry.controller.flatMap(VigilWorkspaces.windowSnapshot)
                     if let image = live ?? entry.thumbnail {
                         Image(nsImage: image)
                             .resizable()
@@ -980,8 +980,8 @@ struct OverviewView: View {
                     VStack {
                         Spacer()
                         HStack {
-                            chip(entry.attention.rawValue >= VigilSessionManager.Attention.input.rawValue ? "needs you" : "done",
-                                 entry.attention.rawValue >= VigilSessionManager.Attention.input.rawValue ? .red : .green, filled: true)
+                            chip(entry.attention.rawValue >= VigilWorkspaces.Attention.input.rawValue ? "needs you" : "done",
+                                 entry.attention.rawValue >= VigilWorkspaces.Attention.input.rawValue ? .red : .green, filled: true)
                                 .padding(6)
                             Spacer()
                         }

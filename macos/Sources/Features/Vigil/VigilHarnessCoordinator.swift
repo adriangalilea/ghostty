@@ -32,7 +32,7 @@ final class VigilHarnessCoordinator {
         started = true
         launch("vigil-agent", ["ensure"])
         let center = NotificationCenter.default
-        for name in [VigilSessionManager.focusDidChange, VigilSessionManager.stateDidChange,
+        for name in [VigilWorkspaces.focusDidChange, VigilWorkspaces.stateDidChange,
                      NSWindow.didBecomeKeyNotification, NSApplication.didBecomeActiveNotification,
                      NSApplication.didResignActiveNotification] {
             center.addObserver(forName: name, object: nil, queue: .main) { _ in
@@ -57,7 +57,7 @@ final class VigilHarnessCoordinator {
     /// and every pane shown in a visible window. A pane of another Mac on
     /// screen here is in front of you for THAT Mac's requests too.
     private func screen() -> [String: Open.Screen] {
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         let key = NSApp.keyWindow?.windowController as? TerminalController
         let focusedView = NSApp.isActive ? key?.focusedSurface : nil
         let expires = Date().timeIntervalSince1970 + 90
@@ -91,9 +91,9 @@ final class VigilHarnessCoordinator {
             DispatchQueue.global(qos: .utility).async {
                 do {
                     let response = try HarnessWire.call(RPCRequest("context", .from(context)))
-                    if !response.ok { VigilSessionManager.vlogSync("authz context: broker refused (\(response.value))") }
+                    if !response.ok { VigilWorkspaces.vlogSync("authz context: broker refused (\(response.value))") }
                 } catch {
-                    VigilSessionManager.vlogSync("authz context: broker unreachable (\(error))")
+                    VigilWorkspaces.vlogSync("authz context: broker unreachable (\(error))")
                 }
             }
         }
@@ -105,7 +105,7 @@ final class VigilHarnessCoordinator {
             // Through this Mac's hub to that Mac's; a blocking call, off main.
             DispatchQueue.global(qos: .utility).async {
                 do { _ = try Local.Client(socket: VigilPaths.hub).call(device: home, .context(now)) } catch {
-                    VigilSessionManager.vlogSync("authz context: \(home.prefix(10)) not told what is on screen here (\(error))")
+                    VigilWorkspaces.vlogSync("authz context: \(home.prefix(10)) not told what is on screen here (\(error))")
                 }
             }
         }
@@ -124,7 +124,7 @@ final class VigilHarnessCoordinator {
         let asking = authz.object(forKey: AskSettings.enabledKey) as? Bool ?? true
         // AuthzAsk's AskLane.quietKey: requesters switched off in Authz.
         let quiet = Set(authz.stringArray(forKey: "authz.quietRequesters") ?? [])
-        return asking && !quiet.contains(Self.requester) && !VigilSessionManager.shared.paneOnAnyScreen(pane)
+        return asking && !quiet.contains(Self.requester) && !VigilWorkspaces.shared.paneOnAnyScreen(pane)
     }
 
     /// The broker's requester name at authzd: its signing identifier.
@@ -139,10 +139,10 @@ final class VigilHarnessCoordinator {
               let url = URL(string: text), url.scheme == "vigil", url.host == "pane",
               let pane = url.pathComponents.dropFirst().first, !pane.isEmpty
         else {
-            VigilSessionManager.vlogSync("handoff: unreadable link")
+            VigilWorkspaces.vlogSync("handoff: unreadable link")
             return
         }
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         NSApp.activate()
         if let name = manager.owner(ofPane: pane) {
             let controller = (NSApp.keyWindow?.windowController as? TerminalController) ?? TerminalController.lastMain
@@ -172,14 +172,14 @@ final class VigilHarnessCoordinator {
         process.terminationHandler = { process in
             Task { @MainActor in
                 VigilHarnessCoordinator.shared.starters.removeAll { $0 === process }
-                VigilSessionManager.shared.vlog("broker: \(binary) \(arguments.joined(separator: " ")) exited \(process.terminationStatus)")
+                VigilWorkspaces.shared.vlog("broker: \(binary) \(arguments.joined(separator: " ")) exited \(process.terminationStatus)")
             }
         }
         do {
             try process.run()
             starters.append(process)
         } catch {
-            VigilSessionManager.shared.vlog("broker: installed \(binary) unavailable (\(error))")
+            VigilWorkspaces.shared.vlog("broker: installed \(binary) unavailable (\(error))")
         }
     }
 }

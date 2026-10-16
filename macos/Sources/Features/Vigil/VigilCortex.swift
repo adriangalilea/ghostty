@@ -71,7 +71,7 @@ enum VigilCortex {
     /// unavailable) - callers proceed ungrounded.
     static func identity(session name: String) -> Read? {
         guard #available(macOS 26.0, *) else { return nil }
-        let context = VigilSessionManager.shared.identityContext(name: name)
+        let context = VigilWorkspaces.shared.identityContext(name: name)
         let hash = context.hashValue
         if let cached = cache[name],
             cached.contextHash == hash || Date().timeIntervalSince(cached.at) < 600 {

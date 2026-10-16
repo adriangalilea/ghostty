@@ -273,7 +273,7 @@ class QuickTerminalController: BaseTerminalController {
 
         // vigil: a change while a session floats (a split born or closed,
         // the last pane exiting) edits its registry.
-        VigilSessionManager.shared.quickTreeDidChange(from: from, to: to)
+        VigilWorkspaces.shared.quickTreeDidChange(from: from, to: to)
 
         // If our surface tree is nil then we animate the window out. We
         // defer reinitializing the tree to save some memory here.
@@ -288,7 +288,7 @@ class QuickTerminalController: BaseTerminalController {
         // vigil swapping a floating session's tree in or out drives the
         // animation itself; auto-animating here would pop the window open
         // while handing the stashed workspace back.
-        if VigilSessionManager.shared.quickTreeSwap { return }
+        if VigilWorkspaces.shared.quickTreeSwap { return }
         if !from.isEmpty && !visible {
             animateIn()
             return

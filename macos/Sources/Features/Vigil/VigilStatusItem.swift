@@ -26,7 +26,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
-        VigilSessionManager.shared.ghosttyApp = ghostty
+        VigilWorkspaces.shared.ghosttyApp = ghostty
         VigilRemote.shared.start()
 
         // Let macOS persist the item's menu-bar position across launches
@@ -37,7 +37,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
-        VigilSessionManager.shared.onAttentionChange = { [weak self] in
+        VigilWorkspaces.shared.onAttentionChange = { [weak self] in
             self?.updateBadge()
         }
         VigilVoice.onStateChange = { [weak self] in
@@ -102,7 +102,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             button.setAccessibilityLabel("vigil dictating")
             return
         }
-        let count = VigilSessionManager.shared.pendingCount
+        let count = VigilWorkspaces.shared.pendingCount
         let eye = NSImage(
             systemSymbolName: count > 0 ? "eye.fill" : "eye",
             accessibilityDescription: "vigil")
@@ -115,7 +115,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let manager = VigilSessionManager.shared
+        let manager = VigilWorkspaces.shared
         manager.reconcile()
 
         if manager.pendingCount > 0 {
@@ -126,13 +126,13 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        if manager.sessions.isEmpty {
+        if manager.workspaces.isEmpty {
             let item = NSMenuItem(title: "No workspaces", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
         }
 
-        for session in manager.sessions.values.sorted(by: { $0.label < $1.label }) {
+        for session in manager.workspaces.values.sorted(by: { $0.label < $1.label }) {
             let place = manager.place(session.name)
             let verb: String
             switch place {
@@ -174,7 +174,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     }
 
     @objc private func quitForReal(_ sender: NSMenuItem) {
-        VigilSessionManager.shared.quitForReal()
+        VigilWorkspaces.shared.quitForReal()
     }
 
     private func sessionItem(_ title: String, _ action: Selector, _ name: String, _ symbol: String? = nil) -> NSMenuItem {
@@ -193,8 +193,8 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     /// must be non-template for the palette colour to survive; a
     /// monochrome one stays template to adapt to the menu.
     private static func stateImage(
-        _ place: VigilSessionManager.Place,
-        _ attention: VigilSessionManager.Attention
+        _ place: VigilWorkspaces.Place,
+        _ attention: VigilWorkspaces.Attention
     ) -> NSImage? {
         let symbol: String
         switch place {
@@ -217,15 +217,15 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     }
 
     @objc private func nextSession(_ sender: NSMenuItem) {
-        VigilSessionManager.shared.next()
+        VigilWorkspaces.shared.next()
     }
 
     @objc private func cycleSession(_ sender: NSMenuItem) {
-        VigilSessionManager.shared.cycle()
+        VigilWorkspaces.shared.cycle()
     }
 
     @objc private func nextFloating(_ sender: NSMenuItem) {
-        VigilSessionManager.shared.nextFloating()
+        VigilWorkspaces.shared.nextFloating()
     }
 
     @objc private func overview(_ sender: NSMenuItem) {
@@ -234,17 +234,17 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func openSession(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        VigilSessionManager.shared.open(name: name)
+        VigilWorkspaces.shared.open(name: name)
     }
 
     @objc private func detachSession(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        VigilSessionManager.shared.detach(name: name)
+        VigilWorkspaces.shared.detach(name: name)
     }
 
     @objc private func killSession(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        VigilSessionManager.shared.killWithConfirm(name: name)
+        VigilWorkspaces.shared.killWithConfirm(name: name)
     }
 
     @objc private func renameSession(_ sender: NSMenuItem) {
@@ -253,11 +253,11 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     }
 
     @objc private func detachFrontWindow(_ sender: NSMenuItem) {
-        VigilSessionManager.shared.detachFrontWindow()
+        VigilWorkspaces.shared.detachFrontWindow()
     }
 
     @objc private func newSession(_ sender: NSMenuItem) {
-        VigilSessionManager.shared.newSession()
+        VigilWorkspaces.shared.newWorkspace()
     }
 
 }

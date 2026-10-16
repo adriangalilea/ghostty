@@ -51,11 +51,11 @@ final class VigilDockHost: NSView {
 
         handle = VigilDragHandle(
             base: { [weak controller] in
-                controller.flatMap { VigilSessionManager.shared.dock(for: $0)?.width } ?? 340
+                controller.flatMap { VigilWorkspaces.shared.dock(for: $0)?.width } ?? 340
             },
             apply: { [weak controller] width in
                 guard let controller else { return }
-                VigilSessionManager.shared.setDockWidth(controller, width: width)
+                VigilWorkspaces.shared.setDockWidth(controller, width: width)
             },
             flip: true) // the dock grows when its left edge drags LEFT
         handle.translatesAutoresizingMaskIntoConstraints = false
@@ -101,15 +101,15 @@ final class VigilDockHost: NSView {
             active: runtime.active,
             onSelect: { [weak controller] index in
                 guard let controller else { return }
-                VigilSessionManager.shared.setDockActive(controller, index: index)
+                VigilWorkspaces.shared.setDockActive(controller, index: index)
             },
             onAdd: { [weak controller] in
                 guard let controller else { return }
-                VigilSessionManager.shared.addDockTenant(controller)
+                VigilWorkspaces.shared.addDockTenant(controller)
             },
             onClose: { [weak controller] index in
                 guard let controller else { return }
-                VigilSessionManager.shared.closeDockTenant(controller, index: index)
+                VigilWorkspaces.shared.closeDockTenant(controller, index: index)
             })
 
         if let strip {
@@ -240,14 +240,14 @@ private struct VigilDockTenantLabel: View {
 
     private var label: String {
         if let pane = surface.vigilAttachId {
-            if let custom = VigilSessionManager.shared.customIdentity(pane) {
+            if let custom = VigilWorkspaces.shared.customIdentity(pane) {
                 let face = custom.emoji.flatMap(\.first).map { "\($0) " } ?? ""
                 if let name = custom.label { return face + name }
-                if !face.isEmpty, let program = VigilSessionManager.shared.paneProgram(pane) {
+                if !face.isEmpty, let program = VigilWorkspaces.shared.paneProgram(pane) {
                     return face + program
                 }
             }
-            if let program = VigilSessionManager.shared.paneProgram(pane) {
+            if let program = VigilWorkspaces.shared.paneProgram(pane) {
                 return program
             }
         }
