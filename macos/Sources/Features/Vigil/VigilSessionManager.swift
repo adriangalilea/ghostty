@@ -4,6 +4,7 @@ import Listen
 import Say
 import SwiftUI
 import GhosttyKit
+import VigilWire
 
 /// vigil: sessions as a first-class native concept.
 ///
@@ -104,40 +105,6 @@ class VigilSessionManager {
         case midTurn = 3
     }
 
-    /// The second token of a blocked pane's state file: WHY it is blocked.
-    /// permission (a tool waits for approval) and question (AskUserQuestion
-    /// fired and waits) are MID-TURN blockers - the agent is frozen
-    /// mid-work; ask is a turn-end question, conversational, it can wait.
-    /// The summon follows mid-turn blockers only. A flavorless blocked
-    /// (pre-flavor state file) is treated as ask: never summoned,
-    /// self-corrects on the pane's next event. `consent` is written by
-    /// the DAEMON alone (its pre-session dialog fallback, PROTOCOL layer
-    /// 1): mid-turn — it summons, chimes and lights the eye like any
-    /// blocker — but the ask gate refuses it by construction (a consent
-    /// surface is answered by Adrian at the pane the summon brings him
-    /// to, never narrated, never typed by nod or voice).
-    enum BlockFlavor: String {
-        case permission, question, ask, consent
-        var midTurn: Bool { self != .ask }
-    }
-
-    /// Continuous program state of a pane, distinct from Attention: the
-    /// attention FIFO is the edge-triggered queue of "needs Adrian" moments;
-    /// this is the always-current answer to "what is this pane's program
-    /// doing". Written by the hook adapter as a one-word file per pane
-    /// (~/.local/state/wake/state/<pane>.state, mtime = since); any program
-    /// may adopt the contract (Claude and Codex do today). Ranked for the sidebar
-    /// tree rollup: a collapsed node shows the max over its descendants.
-    enum AgentState: Int, Comparable {
-        case idle = 0
-        case done = 1
-        case working = 2
-        case unknown = 3
-        case interrupting = 4
-        case blocked = 5
-        static func < (a: AgentState, b: AgentState) -> Bool { a.rawValue < b.rawValue }
-    }
-
     /// Anything projecting session state (sidebar, overview) re-reads on
     /// this: posted from the persist/attention chokepoints.
     static let stateDidChange = Notification.Name("vigilStateDidChange")
@@ -192,7 +159,7 @@ class VigilSessionManager {
         for session in sessions.values.map({ $0 }) + graveyard.values.map({ $0 }) {
             for tab in session.tabs {
                 if wantsTab {
-                    guard tabPaneIds(tab).first == target else { continue }
+                    guard tab.paneIds.first == target else { continue }
                     guard tab.label != nil || tab.emoji != nil else { return nil }
                     return CustomIdentity(label: tab.label, emoji: tab.emoji)
                 }
@@ -216,7 +183,7 @@ class VigilSessionManager {
                 // CONTAINS, not "is first": the anchor is the tab's stable
                 // handle, but requiring first position made a rename
                 // silently do nothing (Adrian, naming a tab '*-utils').
-                if wantsTab, tabPaneIds(tabs[index]).contains(target) {
+                if wantsTab, tabs[index].paneIds.contains(target) {
                     tabs[index].label = label
                     tabs[index].emoji = emoji
                     hit = true
@@ -257,87 +224,9 @@ class VigilSessionManager {
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
 
-    /// One leaf of the workspace. `id` is its vigild daemon id, THE identity
-    /// (`vigil-<birth session>-<index>`, minted monotonic, never recycled);
-    /// resurrection is a native reattach to that daemon, and a daemon that
-    /// died comes back as a fresh shell in `cwd` (honest, nothing replayed).
-    struct Pane: Codable, Equatable {
-        let id: String
-        var cwd: String
-        /// The pane's last known terminal title, refreshed while it is
-        /// live. A name that lives only in a live terminal is a side
-        /// effect that vanishes when the pane loses its views; stored here it
-        /// survives detach, quit, reboot and resurrection.
-        var title: String?
-        /// The name and face YOU gave this pane: owned by one writer, moves
-        /// with the pane on a drag.
-        var label: String?
-        var emoji: String?
-        /// The program the pane's daemon runs as its child (session API
-        /// birth, `vigil new -- claude`); nil = the login shell. Part of
-        /// the soul: a capture mount after the daemon died spawns it again,
-        /// never types it.
-        var command: String?
-
-        init(id: String, cwd: String, title: String? = nil,
-             label: String? = nil, emoji: String? = nil, command: String? = nil) {
-            self.id = id
-            self.cwd = cwd
-            self.title = title
-            self.label = label
-            self.emoji = emoji
-            self.command = command
-        }
-    }
-
-    /// Recursive shape of one tab's splits. Pane indices refer to Tab.panes,
-    /// whose order is the tree's DFS leaf order (SplitTree iteration order).
-    indirect enum Layout: Codable, Equatable {
-        case leaf(Int)
-        case h(Double, Layout, Layout) // left | right, ratio = left share
-        case v(Double, Layout, Layout) // top / bottom
-
-        var firstLeaf: Int {
-            switch self {
-            case .leaf(let i): return i
-            case .h(_, let l, _), .v(_, let l, _): return l.firstLeaf
-            }
-        }
-    }
-
-    /// One tab of the workspace, captured: its panes (DFS leaf order) and
-    /// their split shape. nil layout = single pane. The dock is the tab's
-    /// right bar (a stack of tool panes, one visible), captured alongside.
-    struct Tab: Codable, Equatable {
-        var panes: [Pane]
-        var layout: Layout?
-        var dock: DockCapture?
-        /// The tab's own name and face, anchored to the tab, not to a
-        /// side map: the sidebar row, the native tab bar and the rename
-        /// prompt all read this one value.
-        var label: String?
-        var emoji: String?
-
-        init(panes: [Pane], layout: Layout?, dock: DockCapture? = nil,
-             label: String? = nil, emoji: String? = nil) {
-            self.panes = panes
-            self.layout = layout
-            self.dock = dock
-            self.label = label
-            self.emoji = emoji
-        }
-    }
-
-    /// The captured shape of one tab's dock: its tenants (ordinary
-    /// daemon-backed panes), which one shows, its width, and whether it is
-    /// collapsed. Collapse never kills: the tenants' daemons run on.
-    struct DockCapture: Codable, Equatable {
-        var panes: [Pane]
-        var active: Int
-        var width: Double
-        var collapsed: Bool
-    }
-
+    /// A session as this app holds it: the registry's record (`Registry`,
+    /// VigilWire: the one format of vigil.json and every directory) plus
+    /// what only a running app has (warm views, the float, attention).
     struct Session {
         let name: String
         var label: String
@@ -360,7 +249,7 @@ class VigilSessionManager {
         /// entry per tab in tab order, always current (edited at every
         /// structural event, never inferred). Resurrection rebuilds it as
         /// tabs of ONE window.
-        var tabs: [Tab] = []
+        var tabs: [Registry.Tab] = []
         /// Manual overview ordering (drag & drop); lower first.
         var order: Int = 0
         /// Pinned-on-top intent, persisted: applied to the window whenever
@@ -648,7 +537,7 @@ class VigilSessionManager {
         let ids = controller.surfaceTree.compactMap(\.vigilAttachId)
             + (dock?.views.compactMap(\.vigilAttachId) ?? [])
         guard let first = ids.first, !ownedPaneIds(sessions[name]!).contains(first) else { return }
-        var carried: [Pane] = []
+        var carried: [Registry.Pane] = []
         var label: String?
         var emoji: String?
         for id in ids {
@@ -659,7 +548,7 @@ class VigilSessionManager {
             chown(id, to: name)
         }
         let (panes, layout) = capture(controller.surfaceTree, carrying: carried)
-        let tab = Tab(
+        let tab = Registry.Tab(
             panes: panes, layout: layout,
             dock: dock.flatMap { captureDock($0, carrying: carried) },
             label: label, emoji: emoji)
@@ -667,7 +556,7 @@ class VigilSessionManager {
         // native tab), never at the end: registry order IS the tab order.
         let parentIds = Set(parent?.surfaceTree.compactMap(\.vigilAttachId) ?? [])
         if !parentIds.isEmpty,
-           let index = sessions[name]!.tabs.firstIndex(where: { !Set(tabPaneIds($0)).isDisjoint(with: parentIds) }) {
+           let index = sessions[name]!.tabs.firstIndex(where: { !Set($0.paneIds).isDisjoint(with: parentIds) }) {
             sessions[name]!.tabs.insert(tab, at: index + 1)
         } else {
             sessions[name]!.tabs.append(tab)
@@ -813,12 +702,7 @@ class VigilSessionManager {
 
     /// Every pane id a session owns: its registry, nothing else.
     func ownedPaneIds(_ session: Session) -> Set<String> {
-        Set(session.tabs.flatMap(tabPaneIds))
-    }
-
-    /// Every daemon id a tab lists (panes + dock).
-    func tabPaneIds(_ tab: Tab) -> [String] {
-        (tab.panes + (tab.dock?.panes ?? [])).map(\.id)
+        Set(session.tabs.flatMap(\.paneIds))
     }
 
     /// The live session that owns a pane (never a burial): where a link to
@@ -831,12 +715,12 @@ class VigilSessionManager {
     /// Where a pane lives right now: a session or a burial, and its tab.
     private func locate(_ id: String) -> (owner: String, buried: Bool, tab: Int)? {
         for (name, session) in sessions {
-            if let tab = session.tabs.firstIndex(where: { tabPaneIds($0).contains(id) }) {
+            if let tab = session.tabs.firstIndex(where: { $0.paneIds.contains(id) }) {
                 return (name, false, tab)
             }
         }
         for (name, session) in graveyard {
-            if let tab = session.tabs.firstIndex(where: { tabPaneIds($0).contains(id) }) {
+            if let tab = session.tabs.firstIndex(where: { $0.paneIds.contains(id) }) {
                 return (name, true, tab)
             }
         }
@@ -844,7 +728,7 @@ class VigilSessionManager {
     }
 
     /// The pane's registry entry, wherever it lives.
-    private func registered(_ id: String) -> Pane? {
+    private func registered(_ id: String) -> Registry.Pane? {
         guard let at = locate(id) else { return nil }
         let tab = (at.buried ? graveyard[at.owner] : sessions[at.owner])!.tabs[at.tab]
         return (tab.panes + (tab.dock?.panes ?? [])).first { $0.id == id }
@@ -856,11 +740,11 @@ class VigilSessionManager {
     /// dying with the husk); an emptied burial is dropped; a held runtime
     /// releases the pane's view so no two trees ever hold one daemon. The
     /// one primitive under every move and every re-claim.
-    private func takePane(_ id: String) -> (pane: Pane, tabLabel: String?, tabEmoji: String?)? {
+    private func takePane(_ id: String) -> (pane: Registry.Pane, tabLabel: String?, tabEmoji: String?)? {
         guard let at = locate(id) else { return nil }
         var session = (at.buried ? graveyard[at.owner] : sessions[at.owner])!
         var tab = session.tabs[at.tab]
-        var pane: Pane?
+        var pane: Registry.Pane?
         if let index = tab.panes.firstIndex(where: { $0.id == id }) {
             pane = tab.panes.remove(at: index)
             tab.layout = nil
@@ -919,8 +803,8 @@ class VigilSessionManager {
     /// its current entry (title, and the name and face YOU gave it): a
     /// capture is a rewrite and would otherwise erase what the view does
     /// not know about.
-    private func capturedPane(_ view: Ghostty.SurfaceView, id: String, previous: Pane?) -> Pane {
-        Pane(
+    private func capturedPane(_ view: Ghostty.SurfaceView, id: String, previous: Registry.Pane?) -> Registry.Pane {
+        Registry.Pane(
             id: id,
             cwd: view.pwd ?? previous?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
             title: capturedTitle(of: view) ?? previous?.title,
@@ -931,9 +815,9 @@ class VigilSessionManager {
 
     /// A live tree as registry panes (DFS leaf order) + split shape.
     private func capture(
-        _ tree: SplitTree<Ghostty.SurfaceView>, carrying previous: [Pane]
-    ) -> (panes: [Pane], layout: Layout?) {
-        let panes = tree.compactMap { view -> Pane? in
+        _ tree: SplitTree<Ghostty.SurfaceView>, carrying previous: [Registry.Pane]
+    ) -> (panes: [Registry.Pane], layout: Registry.Layout?) {
+        let panes = tree.compactMap { view -> Registry.Pane? in
             guard let id = view.vigilAttachId else {
                 vlog("!! capture: a surface with NO daemon id in a session tree - skipped")
                 return nil
@@ -943,13 +827,13 @@ class VigilSessionManager {
         return (panes, Self.captureLayout(tree))
     }
 
-    private func captureDock(_ runtime: VigilDockRuntime, carrying previous: [Pane]) -> DockCapture? {
-        let panes = runtime.views.compactMap { view -> Pane? in
+    private func captureDock(_ runtime: VigilDockRuntime, carrying previous: [Registry.Pane]) -> Registry.Dock? {
+        let panes = runtime.views.compactMap { view -> Registry.Pane? in
             guard let id = view.vigilAttachId else { return nil }
             return capturedPane(view, id: id, previous: previous.first { $0.id == id } ?? registered(id))
         }
         guard !panes.isEmpty else { return nil }
-        return DockCapture(
+        return Registry.Dock(
             panes: panes,
             active: min(max(runtime.active, 0), panes.count - 1),
             width: Double(runtime.width),
@@ -991,10 +875,10 @@ class VigilSessionManager {
         guard !touched.isEmpty else { return }
 
         func tabIndex() -> Int? {
-            sessions[name]!.tabs.firstIndex { !Set(tabPaneIds($0)).isDisjoint(with: touched) }
+            sessions[name]!.tabs.firstIndex { !Set($0.paneIds).isDisjoint(with: touched) }
         }
-        let listedHere = tabIndex().map { Set(tabPaneIds(sessions[name]!.tabs[$0])) } ?? []
-        var carried: [Pane] = []
+        let listedHere = tabIndex().map { Set(sessions[name]!.tabs[$0].paneIds) } ?? []
+        var carried: [Registry.Pane] = []
         var inheritedLabel: String?
         var inheritedEmoji: String?
         for id in after.subtracting(before) where !listedHere.contains(id) {
@@ -1029,7 +913,7 @@ class VigilSessionManager {
             }
         } else if !panes.isEmpty {
             vlog("!! tree: '\(name)' has a live tree with no registry tab -> appended")
-            session.tabs.append(Tab(panes: panes, layout: layout, label: inheritedLabel, emoji: inheritedEmoji))
+            session.tabs.append(Registry.Tab(panes: panes, layout: layout, label: inheritedLabel, emoji: inheritedEmoji))
         }
         sessions[name] = session
         for pane in closed { buryPane(pane, from: name) }
@@ -1039,14 +923,14 @@ class VigilSessionManager {
     /// A closed pane (split ⌘W, process exit, dock tenant close, captured
     /// close) rests in the graveyard as its own one-pane session: same
     /// 120s grace, same undo, same reap as every other death.
-    private func buryPane(_ pane: Pane, from owner: String) {
+    private func buryPane(_ pane: Registry.Pane, from owner: String) {
         var buried = Session(
             name: newSessionId(),
             label: pane.label ?? pane.title ?? paneProgram(pane.id)
                 ?? (pane.cwd as NSString).lastPathComponent,
             emoji: pane.emoji,
             cwd: pane.cwd)
-        buried.tabs = [Tab(panes: [pane], layout: nil)]
+        buried.tabs = [Registry.Tab(panes: [pane], layout: nil)]
         vlog("close: pane '\(pane.id)' leaves '\(owner)' -> buried as '\(buried.name)'")
         bury(buried)
     }
@@ -1599,14 +1483,11 @@ class VigilSessionManager {
         var result: [SummonCandidate] = []
         for host in VigilRemote.shared.hosts where host.error == nil {
             guard let directory = host.directory else { continue }
-            for session in directory.sessions where session.buriedUntil == nil {
-                for pane in (session.tabs ?? []).flatMap({ tabPaneIds($0) }) {
+            for session in directory.live {
+                for pane in session.paneIds {
                     guard let truth = directory.panes[pane], truth.alive,
-                          let revision = truth.stateRevision, let token = truth.state,
-                          let state = VigilRemote.agentState(token), state == .blocked || state == .done,
-                          (truth.seen ?? 0) < (truth.since ?? 0) else { continue }
-                    let flavor = token.split(separator: " ").dropFirst().first.flatMap { BlockFlavor(rawValue: String($0)) }
-                    let isMidTurn = state == .blocked && flavor?.midTurn == true
+                          let revision = truth.unseenRevision, let token = truth.token else { continue }
+                    let isMidTurn = token.state == .blocked && token.flavor?.midTurn == true
                     if let midTurn, midTurn != isMidTurn { continue }
                     result.append(SummonCandidate(name: VigilRemote.compositeId(host.device, session.name),
                         pane: VigilRemote.compositeId(host.device, pane), since: VigilRemote.shared.arrival(device: host.device, pane: pane, revision: revision)))
@@ -1923,7 +1804,7 @@ class VigilSessionManager {
             vlog("mirror: '\(name)' has no tabs to show - refused")
             return
         }
-        let tab = anchor.flatMap { a in session.tabs.first { tabPaneIds($0).contains(a) } } ?? session.tabs[0]
+        let tab = anchor.flatMap { a in session.tabs.first { $0.paneIds.contains(a) } } ?? session.tabs[0]
         guard !tab.panes.isEmpty else {
             vlog("mirror: '\(name)' tab has no panes - refused")
             return
@@ -1933,7 +1814,7 @@ class VigilSessionManager {
         } else {
             releaseOccupant(of: controller)
         }
-        let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [self] pane in
+        let configFor: (Registry.Pane) -> Ghostty.SurfaceConfiguration = { [self] pane in
             var config = resurrectConfig(name: name, pane: pane)
             config.vigilMirror = true
             return config
@@ -1979,7 +1860,7 @@ class VigilSessionManager {
     @discardableResult
     func openRemotePane(device: String, pane: String) -> TerminalController? {
         guard let directory = VigilRemote.shared.host(device)?.directory,
-              let session = directory.sessions.first(where: { session in (session.tabs ?? []).contains { tabPaneIds($0).contains(pane) } }) else {
+              let session = directory.sessions.first(where: { session in (session.tabs ?? []).contains { $0.paneIds.contains(pane) } }) else {
             vlog("handoff: remote \(device)/\(pane) refused; pane absent from directory")
             return nil
         }
@@ -2026,7 +1907,7 @@ class VigilSessionManager {
         }
         let rawAnchor = anchor.flatMap { VigilRemote.split($0)?.name }
         let tabs = session.tabs ?? []
-        let tab = rawAnchor.flatMap { a in tabs.first { tabPaneIds($0).contains(a) } } ?? tabs.first
+        let tab = rawAnchor.flatMap { a in tabs.first { $0.paneIds.contains(a) } } ?? tabs.first
         guard let tab, !tab.panes.isEmpty else { return nil }
         // Already this viewport's mirror and the clicked pane is on screen:
         // a click is a focus move, never a teardown and two fresh proxy
@@ -2046,7 +1927,7 @@ class VigilSessionManager {
                 releaseOccupant(of: controller)
             }
         }
-        let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { pane in
+        let configFor: (Registry.Pane) -> Ghostty.SurfaceConfiguration = { pane in
             var config = Ghostty.SurfaceConfiguration()
             config.workingDirectory = pane.cwd
             config.vigilAttach = pane.id
@@ -2167,7 +2048,7 @@ class VigilSessionManager {
         guard let ghostty = ghosttyApp, let app = ghostty.app else { return }
         let tab = sessions[name]!.tabs[tabIndex]
         guard !tab.panes.isEmpty else { return }
-        let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [self] in
+        let configFor: (Registry.Pane) -> Ghostty.SurfaceConfiguration = { [self] in
             resurrectConfig(name: name, pane: $0)
         }
         let firstPane = min(tab.layout?.firstLeaf ?? 0, tab.panes.count - 1)
@@ -2313,7 +2194,7 @@ class VigilSessionManager {
     private func createSession(cwd: String, command: String? = nil) -> String {
         let name = newSessionId()
         var session = Session(name: name, label: name, cwd: cwd)
-        session.tabs = [Tab(panes: [Pane(id: "vigil-\(name)-0", cwd: cwd, command: command)], layout: nil)]
+        session.tabs = [Registry.Tab(panes: [Registry.Pane(id: "vigil-\(name)-0", cwd: cwd, command: command)], layout: nil)]
         session.paneSeq = 1 // index 0 consumed at birth
         sessions[name] = session
         vlog("born(create): '\(name)' cwd=\(cwd)\(command.map { " command=\($0)" } ?? "")")
@@ -2346,7 +2227,7 @@ class VigilSessionManager {
     /// vigild scrubs agent ancestry itself. Failure screams — a created
     /// session that is not running is the lie this call exists to kill.
     @discardableResult
-    private func startDaemon(pane: Pane, session: String) -> Bool {
+    private func startDaemon(pane: Registry.Pane, session: String) -> Bool {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: Self.vigildBin)
         var args = ["new", pane.id]
@@ -2517,7 +2398,7 @@ class VigilSessionManager {
         var pool = ms.filter { !$0.surfaceTree.isEmpty }
         var held: [TabRuntime] = []
         for tab in sessions[name]!.tabs {
-            let ids = Set(tabPaneIds(tab))
+            let ids = Set(tab.paneIds)
             guard let index = pool.firstIndex(where: { member in
                 member.surfaceTree.contains { $0.vigilAttachId.map(ids.contains) ?? false }
             }) else { continue } // a captured tab lives in the registry alone
@@ -2545,7 +2426,7 @@ class VigilSessionManager {
             // (review, 2026-09-06).
             let (strayPanes, strayLayout) = capture(stray.surfaceTree, carrying: [])
             if !strayPanes.isEmpty {
-                let tab = Tab(panes: strayPanes, layout: strayLayout)
+                let tab = Registry.Tab(panes: strayPanes, layout: strayLayout)
                 sessions[name]!.tabs.append(tab)
             }
             held.append(TabRuntime(tree: stray.surfaceTree, dock: dockMap.object(forKey: stray)))
@@ -2564,10 +2445,10 @@ class VigilSessionManager {
 
     /// The workspace's split shape, pane indices in DFS leaf order (the
     /// same order capturePanes walks).
-    static func captureLayout(_ tree: SplitTree<Ghostty.SurfaceView>) -> Layout? {
+    static func captureLayout(_ tree: SplitTree<Ghostty.SurfaceView>) -> Registry.Layout? {
         guard let root = tree.root else { return nil }
         var counter = 0
-        func walk(_ node: SplitTree<Ghostty.SurfaceView>.Node) -> Layout {
+        func walk(_ node: SplitTree<Ghostty.SurfaceView>.Node) -> Registry.Layout {
             switch node {
             case .leaf:
                 defer { counter += 1 }
@@ -2723,9 +2604,9 @@ class VigilSessionManager {
     /// the moment it is shown.
     private func ensureHostPanes(_ name: String) {
         var tabs = sessions[name]!.tabs
-        if tabs.isEmpty { tabs = [Tab(panes: [], layout: nil)] }
+        if tabs.isEmpty { tabs = [Registry.Tab(panes: [], layout: nil)] }
         for index in tabs.indices where tabs[index].panes.isEmpty {
-            tabs[index].panes = [Pane(id: "vigil-\(name)-\(nextPaneIndex(name: name))", cwd: sessions[name]!.cwd)]
+            tabs[index].panes = [Registry.Pane(id: "vigil-\(name)-\(nextPaneIndex(name: name))", cwd: sessions[name]!.cwd)]
             tabs[index].layout = nil
         }
         sessions[name]!.tabs = tabs
@@ -2740,7 +2621,7 @@ class VigilSessionManager {
         ensureHostPanes(name)
         let tabs = sessions[name]!.tabs
 
-        func configFor(_ pane: Pane) -> Ghostty.SurfaceConfiguration {
+        func configFor(_ pane: Registry.Pane) -> Ghostty.SurfaceConfiguration {
             resurrectConfig(name: name, pane: pane)
         }
 
@@ -2794,7 +2675,7 @@ class VigilSessionManager {
     /// A pane's resurrection config: cwd + session identity + its native
     /// attach id (a live daemon makes the surface a reattach; a dead one
     /// is spawned fresh on first contact).
-    private func resurrectConfig(name: String, pane: Pane) -> Ghostty.SurfaceConfiguration {
+    private func resurrectConfig(name: String, pane: Registry.Pane) -> Ghostty.SurfaceConfiguration {
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = pane.cwd
         config.environmentVariables["VIGIL_SESSION"] = name
@@ -2808,8 +2689,8 @@ class VigilSessionManager {
     /// native reattach exactly like a split pane's.
     private func materializeDockCapture(
         _ controller: TerminalController,
-        _ capture: DockCapture?,
-        configFor: (Pane) -> Ghostty.SurfaceConfiguration
+        _ capture: Registry.Dock?,
+        configFor: (Registry.Pane) -> Ghostty.SurfaceConfiguration
     ) {
         guard let capture, !capture.panes.isEmpty,
               let app = ghosttyApp?.app else { return }
@@ -2838,8 +2719,8 @@ class VigilSessionManager {
     /// reflowed its transcript at 153 columns, then at 70, on every mount.
     private func materializeSplits(
         _ controller: BaseTerminalController,
-        tab: Tab,
-        configFor: (Pane) -> Ghostty.SurfaceConfiguration
+        tab: Registry.Tab,
+        configFor: (Registry.Pane) -> Ghostty.SurfaceConfiguration
     ) {
         let panes = tab.panes
         guard panes.count > 1 else { return }
@@ -2867,7 +2748,7 @@ class VigilSessionManager {
             if !config.vigilMirror, let adopted = adoptable(panes[index].id) { return adopted }
             return Ghostty.SurfaceView(app, baseConfig: config)
         }
-        func build(_ node: Layout) -> SplitTree<Ghostty.SurfaceView>.Node {
+        func build(_ node: Registry.Layout) -> SplitTree<Ghostty.SurfaceView>.Node {
             switch node {
             case .leaf(let i):
                 return .leaf(view: view(i))
@@ -2881,7 +2762,7 @@ class VigilSessionManager {
         assertInvariants("materialize")
     }
 
-    static func leaves(_ node: Layout) -> [Int] {
+    static func leaves(_ node: Registry.Layout) -> [Int] {
         switch node {
         case .leaf(let i): return [i]
         case .h(_, let l, let r), .v(_, let l, let r): return leaves(l) + leaves(r)
@@ -2890,7 +2771,7 @@ class VigilSessionManager {
 
     /// The shape a tab with panes but no captured layout takes: each pane
     /// split to the right of the previous one.
-    static func chainLayout(count: Int, from index: Int = 0) -> Layout {
+    static func chainLayout(count: Int, from index: Int = 0) -> Registry.Layout {
         guard index < count - 1 else { return .leaf(index) }
         return .h(0.5, .leaf(index), chainLayout(count: count, from: index + 1))
     }
@@ -2984,13 +2865,13 @@ class VigilSessionManager {
     private func buryTab(tree: SplitTree<Ghostty.SurfaceView>, dock: VigilDockRuntime?, from name: String) {
         let ids = Set(tree.compactMap(\.vigilAttachId) + (dock?.views.compactMap(\.vigilAttachId) ?? []))
         var session = sessions[name]!
-        let tab: Tab
-        if let index = session.tabs.firstIndex(where: { !Set(tabPaneIds($0)).isDisjoint(with: ids) }) {
+        let tab: Registry.Tab
+        if let index = session.tabs.firstIndex(where: { !Set($0.paneIds).isDisjoint(with: ids) }) {
             tab = session.tabs.remove(at: index)
         } else {
             vlog("!! buryTab: '\(name)' tab \(ids) was not in its registry")
             let (panes, layout) = capture(tree, carrying: [])
-            tab = Tab(panes: panes, layout: layout, dock: dock.flatMap { captureDock($0, carrying: []) })
+            tab = Registry.Tab(panes: panes, layout: layout, dock: dock.flatMap { captureDock($0, carrying: []) })
         }
         sessions[name] = session
         let surface = tree.root?.leftmostLeaf()
@@ -3109,7 +2990,7 @@ class VigilSessionManager {
         }
         let absorbed = sessions[other]!
         for tab in absorbed.tabs {
-            for id in tabPaneIds(tab) { chown(id, to: absorberName) }
+            for id in tab.paneIds { chown(id, to: absorberName) }
         }
         sessions[absorberName]!.tabs += absorbed.tabs
         if absorbed.attention.rawValue > sessions[absorberName]!.attention.rawValue {
@@ -3237,7 +3118,7 @@ class VigilSessionManager {
                 held: [runtime])
             stray.thumbnail = surface?.asImage
             let (panes, layout) = capture(tree, carrying: [])
-            stray.tabs = [Tab(panes: panes, layout: layout)]
+            stray.tabs = [Registry.Tab(panes: panes, layout: layout)]
             sessions[stray.name] = stray
             vlog("!! release: session-less window minted as stray '\(stray.name)'")
             setOcclusion(false, [runtime])
@@ -3343,12 +3224,12 @@ class VigilSessionManager {
             ensureHostPanes(name)
             let tabs = sessions[name]!.tabs
             guard let app = ghostty.app else { return }
-            let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [unowned self] in
+            let configFor: (Registry.Pane) -> Ghostty.SurfaceConfiguration = { [unowned self] in
                 self.resurrectConfig(name: name, pane: $0)
             }
             let usable = tabs.enumerated().filter { !$0.element.panes.isEmpty }
             let chosen = anchor.flatMap { a in
-                usable.first { tabPaneIds($0.element).contains(a) }
+                usable.first { $0.element.paneIds.contains(a) }
             } ?? usable.first
             guard let chosen else { return }
             let first = chosen.element
@@ -3415,12 +3296,12 @@ class VigilSessionManager {
             if ms > 25 { vlog(String(format: "shapeshiftTab: '%@' in %.0fms", anchor, ms)) }
         }
         let live = liveAttachIds(of: name)
-        guard let target = session.tabs.first(where: { tabPaneIds($0).contains(anchor) }),
+        guard let target = session.tabs.first(where: { $0.paneIds.contains(anchor) }),
               !target.panes.isEmpty else {
             vlog("shapeshiftTab: '\(name)' anchor \(anchor) matches NO registered tab - refused loud")
             return
         }
-        guard Set(tabPaneIds(target)).isDisjoint(with: live) else { return } // already showing
+        guard Set(target.paneIds).isDisjoint(with: live) else { return } // already showing
         vlog("shapeshiftTab: '\(name)' -> tab anchored at \(anchor)")
 
         // The tab leaving the viewport stays WARM: held by its session with
@@ -3463,9 +3344,9 @@ class VigilSessionManager {
     /// their daemons).
     /// True when the tab now occupies the viewport.
     @discardableResult
-    private func mountCapturedTab(_ target: Tab, name: String, in controller: TerminalController, landOn paneId: String? = nil) -> Bool {
+    private func mountCapturedTab(_ target: Registry.Tab, name: String, in controller: TerminalController, landOn paneId: String? = nil) -> Bool {
         guard !target.panes.isEmpty, let app = ghosttyApp?.app else { return false }
-        let configFor: (Pane) -> Ghostty.SurfaceConfiguration = { [unowned self] in
+        let configFor: (Registry.Pane) -> Ghostty.SurfaceConfiguration = { [unowned self] in
             self.resurrectConfig(name: name, pane: $0)
         }
         let panes = target.panes
@@ -3501,7 +3382,7 @@ class VigilSessionManager {
               members(of: name).count <= 1 else { return false }
         let live = liveAttachIds(of: name)
         let captured = sessions[name]!.tabs.filter { tab in
-            !tab.panes.isEmpty && Set(tabPaneIds(tab)).isDisjoint(with: live)
+            !tab.panes.isEmpty && Set(tab.paneIds).isDisjoint(with: live)
         }
 
         if let next = captured.first {
@@ -3530,7 +3411,7 @@ class VigilSessionManager {
         return true
     }
 
-    private func buryMountedTab(thenMount next: Tab, name: String, in controller: TerminalController) {
+    private func buryMountedTab(thenMount next: Registry.Tab, name: String, in controller: TerminalController) {
         let tree = controller.surfaceTree
         let dock = dockMap.object(forKey: controller)
         dockMap.removeObject(forKey: controller)
@@ -3574,8 +3455,8 @@ class VigilSessionManager {
             controller.closeTab(nil)
             return
         }
-        guard let tab = sessions[name]!.tabs.first(where: { tabPaneIds($0).contains(anchor) }) else { return }
-        let busy = busyPrograms(panes: tabPaneIds(tab))
+        guard let tab = sessions[name]!.tabs.first(where: { $0.paneIds.contains(anchor) }) else { return }
+        let busy = busyPrograms(panes: tab.paneIds)
         let proceed = { [weak self] in
             guard let self else { return }
             self.buryColdTab(tab, from: name)
@@ -3590,9 +3471,9 @@ class VigilSessionManager {
         }
     }
 
-    private func buryColdTab(_ tab: Tab, from name: String) {
-        let ids = tabPaneIds(tab)
-        sessions[name]?.tabs.removeAll { tabPaneIds($0) == ids }
+    private func buryColdTab(_ tab: Registry.Tab, from name: String) {
+        let ids = tab.paneIds
+        sessions[name]?.tabs.removeAll { $0.paneIds == ids }
         let cwd = tab.panes.first?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
         var buried = Session(
             name: newSessionId(),
@@ -3693,7 +3574,7 @@ class VigilSessionManager {
     /// session here used to leave a live tree sessionless when that session
     /// was already displayed and `mount` refused (2026-08-12).
     /// Returns the tab's registry entry (dock included).
-    private func vacateMountedTab(_ controller: TerminalController, name: String) -> Tab? {
+    private func vacateMountedTab(_ controller: TerminalController, name: String) -> Registry.Tab? {
         let tree = controller.surfaceTree
         guard !tree.isEmpty else { return nil }
         let dock = dockMap.object(forKey: controller)
@@ -3701,7 +3582,7 @@ class VigilSessionManager {
         var mountedIds = Set<String>()
         for view in tree { if let id = view.vigilAttachId { mountedIds.insert(id) } }
         for view in dock?.views ?? [] { if let id = view.vigilAttachId { mountedIds.insert(id) } }
-        let index = sessions[name]?.tabs.firstIndex { !Set(tabPaneIds($0)).isDisjoint(with: mountedIds) }
+        let index = sessions[name]?.tabs.firstIndex { !Set($0.paneIds).isDisjoint(with: mountedIds) }
         let captured = index.map { sessions[name]!.tabs.remove(at: $0) }
         dock?.unmount()
 
@@ -3777,12 +3658,12 @@ class VigilSessionManager {
     /// session, where it lands as a captured tab.
     func moveTab(anchor: String, from source: String, to target: String) {
         guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
-        var moved: Tab?
+        var moved: Registry.Tab?
         if let view = liveView(attachId: anchor),
            let controller = view.window?.windowController as? TerminalController,
            sessionName(of: controller) == source {
             moved = vacateMountedTab(controller, name: source)
-        } else if let index = sessions[source]!.tabs.firstIndex(where: { tabPaneIds($0).contains(anchor) }) {
+        } else if let index = sessions[source]!.tabs.firstIndex(where: { $0.paneIds.contains(anchor) }) {
             moved = sessions[source]!.tabs.remove(at: index)
         }
         guard let moved else { return }
@@ -3790,7 +3671,7 @@ class VigilSessionManager {
         let warm = takeWarm(moved, from: source)
         sessions[target]!.held += warm
         sessions[target]!.tabs.append(moved)
-        for id in tabPaneIds(moved) { chown(id, to: target) }
+        for id in moved.paneIds { chown(id, to: target) }
         if let view = liveView(attachId: anchor),
            let controller = view.window?.windowController as? TerminalController {
             settleVacatedController(controller, movedTo: target)
@@ -3807,7 +3688,7 @@ class VigilSessionManager {
     func movePane(paneId: String, from source: String, to target: String, isDock: Bool) {
         guard source != target, sessions[source] != nil, sessions[target] != nil else { return }
         var vacatedController: TerminalController?
-        var vacated: Tab?
+        var vacated: Registry.Tab?
 
         // A live view leaves its window first (its registry entry follows
         // below, through the one take primitive). Vigil's own tree edit
@@ -3835,7 +3716,7 @@ class VigilSessionManager {
         // the source), else taken from wherever it lives. An emptied tab's
         // NAME AND FACE travel with its only pane instead of dying with the
         // husk (a ♠️ typed onto a tab evaporated here, 2026-08-10).
-        var pane: Pane?
+        var pane: Registry.Pane?
         var inheritedLabel: String?
         var inheritedEmoji: String?
         if let vacated {
@@ -3844,16 +3725,16 @@ class VigilSessionManager {
             // in the source, as a captured tab that keeps the tab's identity;
             // only a tab emptied by this move hands its name to the pane.
             let rest = vacated.panes.filter { $0.id != paneId }
-            let restDock = vacated.dock.flatMap { d -> DockCapture? in
+            let restDock = vacated.dock.flatMap { d -> Registry.Dock? in
                 let keep = d.panes.filter { $0.id != paneId }
                 return keep.isEmpty ? nil
-                    : DockCapture(panes: keep, active: min(d.active, keep.count - 1), width: d.width, collapsed: d.collapsed)
+                    : Registry.Dock(panes: keep, active: min(d.active, keep.count - 1), width: d.width, collapsed: d.collapsed)
             }
             if rest.isEmpty, restDock == nil {
                 inheritedLabel = vacated.label
                 inheritedEmoji = vacated.emoji
             } else {
-                sessions[source]!.tabs.append(Tab(
+                sessions[source]!.tabs.append(Registry.Tab(
                     panes: rest, layout: nil, dock: restDock, label: vacated.label, emoji: vacated.emoji))
             }
         } else if let taken = takePane(paneId) {
@@ -3880,28 +3761,28 @@ class VigilSessionManager {
                 VigilBars.shared.sync(host)
                 // The registry entry lands in the HOST tab's dock.
                 let hostIds = Set(host.surfaceTree.compactMap(\.vigilAttachId))
-                let index = sessions[target]!.tabs.firstIndex { !Set(tabPaneIds($0)).isDisjoint(with: hostIds) }
+                let index = sessions[target]!.tabs.firstIndex { !Set($0.paneIds).isDisjoint(with: hostIds) }
                     ?? {
                         vlog("!! movePane: host tab \(hostIds.sorted()) of '\(target)' not in its registry - tenant appended as a new tab")
-                        sessions[target]!.tabs.append(Tab(panes: [], layout: nil))
+                        sessions[target]!.tabs.append(Registry.Tab(panes: [], layout: nil))
                         return sessions[target]!.tabs.count - 1
                     }()
                 var dock = sessions[target]!.tabs[index].dock
-                    ?? DockCapture(panes: [], active: 0, width: Double(runtime.width), collapsed: false)
+                    ?? Registry.Dock(panes: [], active: 0, width: Double(runtime.width), collapsed: false)
                 dock.panes.append(pane)
                 dock.active = dock.panes.count - 1
                 sessions[target]!.tabs[index].dock = dock
             } else {
                 if sessions[target]!.tabs.isEmpty {
-                    sessions[target]!.tabs = [Tab(panes: [], layout: nil)]
+                    sessions[target]!.tabs = [Registry.Tab(panes: [], layout: nil)]
                 }
                 var dock = sessions[target]!.tabs[0].dock
-                    ?? DockCapture(panes: [], active: 0, width: 340, collapsed: false)
+                    ?? Registry.Dock(panes: [], active: 0, width: 340, collapsed: false)
                 dock.panes.append(pane)
                 sessions[target]!.tabs[0].dock = dock
             }
         } else {
-            sessions[target]!.tabs.append(Tab(
+            sessions[target]!.tabs.append(Registry.Tab(
                 panes: [pane], layout: nil,
                 label: inheritedLabel, emoji: inheritedEmoji))
         }
@@ -3940,7 +3821,7 @@ class VigilSessionManager {
            let controller = view.window?.windowController as? TerminalController,
            controller.surfaceTree.contains(view),
            let app = ghosttyApp?.app,
-           let tabIndex = session.tabs.firstIndex(where: { tabPaneIds($0).contains(anchor) }) {
+           let tabIndex = session.tabs.firstIndex(where: { $0.paneIds.contains(anchor) }) {
             // Live split, right of the anchor. The registry lists the
             // pane in the anchored tab FIRST, so the chokepoint sees a
             // listed pane materialize, never a foreign one to claim.
@@ -3951,7 +3832,7 @@ class VigilSessionManager {
             if let tree = try? controller.surfaceTree.inserting(view: newView, at: view, direction: .right) {
                 controller.surfaceTree = tree
             }
-        } else if let tabIndex = session.tabs.firstIndex(where: { tabPaneIds($0).contains(anchor) }) {
+        } else if let tabIndex = session.tabs.firstIndex(where: { $0.paneIds.contains(anchor) }) {
             session.tabs[tabIndex].panes.append(contentsOf: fresh.panes)
             session.tabs[tabIndex].layout = nil
             sessions[target] = session
@@ -3972,7 +3853,7 @@ class VigilSessionManager {
         sessions[target]!.tabs.append(contentsOf: moving)
         sessions[source]!.tabs = []
         for tab in moving {
-            for id in tabPaneIds(tab) { chown(id, to: target) }
+            for id in tab.paneIds { chown(id, to: target) }
         }
         for member in ms {
             dockMap.object(forKey: member)?.unmount()
@@ -4164,7 +4045,7 @@ class VigilSessionManager {
         }
         guard let (_, session) = VigilRemote.shared.session(composite),
               let anchor = (view ?? controller.focusedSurface)?.vigilAttachId,
-              (session.tabs ?? []).contains(where: { tabPaneIds($0).contains(anchor) }) else {
+              (session.tabs ?? []).contains(where: { $0.paneIds.contains(anchor) }) else {
             remoteCommandError(controller, "The remote pane is unavailable. No local process was created.")
             return true
         }
@@ -4267,8 +4148,8 @@ class VigilSessionManager {
             }
             let ids = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
             let pending = remoteLandings[ObjectIdentifier(controller)]
-            let selected = pending.flatMap { id in (session.tabs ?? []).first { tabPaneIds($0).contains(id) } }
-            guard let tab = selected ?? (session.tabs ?? []).first(where: { !ids.isDisjoint(with: tabPaneIds($0)) }) ?? session.tabs?.first else { continue }
+            let selected = pending.flatMap { id in (session.tabs ?? []).first { $0.paneIds.contains(id) } }
+            guard let tab = selected ?? (session.tabs ?? []).first(where: { !ids.isDisjoint(with: $0.paneIds) }) ?? session.tabs?.first else { continue }
             let revision = VigilSessionControl.revision([tab])
             guard remoteLayouts[ObjectIdentifier(controller)] != revision else { continue }
             reconcileSessionTree(controller, tab: tab, host: device, session: identity.name)
@@ -4287,7 +4168,7 @@ class VigilSessionManager {
             guard let name = mirroredSession(of: controller), VigilRemote.split(name) == nil else { continue }
             let ids = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
             guard let tabs = sessions[name]?.tabs,
-                  let tab = tabs.first(where: { !ids.isDisjoint(with: tabPaneIds($0)) }) ?? tabs.first else {
+                  let tab = tabs.first(where: { !ids.isDisjoint(with: $0.paneIds) }) ?? tabs.first else {
                 endMirrorViewport(controller)
                 swapTree(controller, SplitTree())
                 controller.window?.close()
@@ -4315,15 +4196,15 @@ class VigilSessionManager {
         guard session.layoutRevision == request.revision else {
             return .failure(request, "conflict", "The session layout changed. Review the current layout and try again.")
         }
-        guard let index = session.tabs.firstIndex(where: { tabPaneIds($0).contains(request.anchor) }) else {
+        guard let index = session.tabs.firstIndex(where: { $0.paneIds.contains(request.anchor) }) else {
             return .failure(request, "not_found", "The target pane no longer belongs to this session.")
         }
         guard session.float == nil else {
             return .failure(request, "presentation_busy", "Return the home session from its floating panel before editing its structure.")
         }
         var tab = session.tabs[index]
-        var created: Pane?
-        var removed: [Pane] = []
+        var created: Registry.Pane?
+        var removed: [Registry.Pane] = []
         switch request.operation {
         case "new_session":
             let cwd = liveView(attachId: request.anchor)?.pwd
@@ -4336,7 +4217,7 @@ class VigilSessionManager {
             }
             persist()
             guard let data = try? Data(contentsOf: persistURL),
-                  let saved = try? JSONDecoder().decode([PersistedSession].self, from: data),
+                  let saved = try? JSONDecoder().decode([Registry.Session].self, from: data),
                   saved.contains(where: { $0.name == name && $0.tabs?.first?.panes.first?.id == pane.id }) else {
                 return .failure(request, "commit_failed", "The new home session could not be verified on disk.")
             }
@@ -4352,7 +4233,7 @@ class VigilSessionManager {
             let id = "vigil-\(request.session)-\(nextPaneIndex(name: request.session))"
             // The home pane supplies cwd. No M5 environment, command or path
             // is inherited from a remote surface configuration.
-            let pane = Pane(id: id, cwd: liveView(attachId: anchor.id)?.pwd ?? anchor.cwd)
+            let pane = Registry.Pane(id: id, cwd: liveView(attachId: anchor.id)?.pwd ?? anchor.cwd)
             guard startDaemon(pane: pane, session: request.session) else {
                 persist() // the allocated identity is never recycled
                 return .failure(request, "spawn_failed", "The home daemon could not start; see the home vigil.log.")
@@ -4360,12 +4241,12 @@ class VigilSessionManager {
             created = pane
             session.paneSeq = sessions[request.session]!.paneSeq
             if request.operation == "new_tab" {
-                session.tabs.insert(Tab(panes: [pane], layout: nil), at: index + 1)
+                session.tabs.insert(Registry.Tab(panes: [pane], layout: nil), at: index + 1)
             } else {
                 let anchorIndex = tab.panes.firstIndex { $0.id == anchor.id }!
                 let newIndex = tab.panes.count
                 let layout = Self.completeLayout(tab)
-                func insert(_ node: Layout) -> Layout {
+                func insert(_ node: Registry.Layout) -> Registry.Layout {
                     switch node {
                     case .leaf(let i):
                         guard i == anchorIndex else { return node }
@@ -4391,7 +4272,7 @@ class VigilSessionManager {
             let previous = tab.panes
             tab.panes.removeAll { ids.contains($0.id) }
             let mapping = Dictionary(uniqueKeysWithValues: tab.panes.enumerated().map { ($0.element.id, $0.offset) })
-            func prune(_ node: Layout) -> Layout? {
+            func prune(_ node: Registry.Layout) -> Registry.Layout? {
                 switch node {
                 case .leaf(let i):
                     guard previous.indices.contains(i), let next = mapping[previous[i].id] else { return nil }
@@ -4427,7 +4308,7 @@ class VigilSessionManager {
         sessions[request.session] = session
         for controller in members(of: request.session) {
             let oldIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
-            if let target = session.tabs.first(where: { !oldIds.isDisjoint(with: tabPaneIds($0)) }) ?? session.tabs.first {
+            if let target = session.tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? session.tabs.first {
                 reconcileSessionTree(controller, tab: target, host: nil, session: request.session)
             } else {
                 memberships.removeObject(forKey: controller)
@@ -4443,7 +4324,7 @@ class VigilSessionManager {
         for controller in mirrorViewports.keyEnumerator().allObjects.compactMap({ $0 as? TerminalController })
             where mirroredSession(of: controller) == request.session {
             let oldIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
-            if let target = session.tabs.first(where: { !oldIds.isDisjoint(with: tabPaneIds($0)) }) ?? session.tabs.first {
+            if let target = session.tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? session.tabs.first {
                 reconcileSessionTree(controller, tab: target, host: nil, session: request.session)
             } else {
                 endMirrorViewport(controller)
@@ -4456,7 +4337,7 @@ class VigilSessionManager {
         persist()
         // Success is the committed registry, not merely a spawned process.
         guard let data = try? Data(contentsOf: persistURL),
-              let saved = try? JSONDecoder().decode([PersistedSession].self, from: data),
+              let saved = try? JSONDecoder().decode([Registry.Session].self, from: data),
               VigilSessionControl.revision(saved.first { $0.name == request.session && $0.buriedUntil == nil }?.tabs ?? [])
                 == VigilSessionControl.revision(session.tabs) else {
             return .failure(request, "commit_failed", "The home registry could not be verified. Inspect the session before retrying.")
@@ -4466,15 +4347,15 @@ class VigilSessionManager {
                      revision: sessions[request.session]?.layoutRevision, pane: created?.id)
     }
 
-    private static func completeLayout(_ tab: Tab) -> Layout {
+    private static func completeLayout(_ tab: Registry.Tab) -> Registry.Layout {
         if let layout = tab.layout { return layout }
         let last = max(0, tab.panes.count - 1)
-        return (0..<last).reversed().reduce(Layout.leaf(last)) { .h(0.5, .leaf($1), $0) }
+        return (0..<last).reversed().reduce(Registry.Layout.leaf(last)) { .h(0.5, .leaf($1), $0) }
     }
 
     /// A registry projection, never a user edit. Reuse views by daemon id;
     /// constructing a split tree does not run native "new split" actions.
-    private func reconcileSessionTree(_ controller: TerminalController, tab: Tab, host: String?, session: String) {
+    private func reconcileSessionTree(_ controller: TerminalController, tab: Registry.Tab, host: String?, session: String) {
         guard let app = ghosttyApp?.app, !tab.panes.isEmpty else { return }
         if mirroredSession(of: controller) != nil {
             remoteLayouts[ObjectIdentifier(controller)] = VigilSessionControl.revision([tab])
@@ -4500,7 +4381,7 @@ class VigilSessionManager {
             }
             views.append(Ghostty.SurfaceView(app, baseConfig: config))
         }
-        func tree(_ layout: Layout) -> SplitTree<Ghostty.SurfaceView>.Node {
+        func tree(_ layout: Registry.Layout) -> SplitTree<Ghostty.SurfaceView>.Node {
             switch layout {
             case .leaf(let i): return .leaf(view: views[min(max(i, 0), views.count - 1)])
             case .h(let ratio, let left, let right):
@@ -4852,7 +4733,7 @@ class VigilSessionManager {
             cwd: cwd,
             held: [TabRuntime(tree: tree, dock: nil)])
         let (panes, layout) = capture(tree, carrying: [])
-        session.tabs = [Tab(panes: panes, layout: layout)]
+        session.tabs = [Registry.Tab(panes: panes, layout: layout)]
         bury(session)
     }
 
@@ -5053,10 +4934,10 @@ class VigilSessionManager {
         runtime.active = runtime.views.count - 1
         runtime.collapsed = false
         let tabIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
-        if let index = sessions[name]!.tabs.firstIndex(where: { !Set(tabPaneIds($0)).isDisjoint(with: tabIds) }) {
+        if let index = sessions[name]!.tabs.firstIndex(where: { !Set($0.paneIds).isDisjoint(with: tabIds) }) {
             var dock = sessions[name]!.tabs[index].dock
-                ?? DockCapture(panes: [], active: 0, width: Double(runtime.width), collapsed: false)
-            dock.panes.append(Pane(id: id, cwd: cwd))
+                ?? Registry.Dock(panes: [], active: 0, width: Double(runtime.width), collapsed: false)
+            dock.panes.append(Registry.Pane(id: id, cwd: cwd))
             dock.active = dock.panes.count - 1
             dock.collapsed = false
             sessions[name]!.tabs[index].dock = dock
@@ -5118,29 +4999,6 @@ class VigilSessionManager {
         return errno == EWOULDBLOCK
     }
 
-    /// Compact human label for one tree line's argv; nil for noise (shells,
-    /// wrappers, caffeinate). Interpreters are named by their script.
-    static func processLabel(_ argv: String) -> String? {
-        let parts = argv.split(separator: " ")
-        guard let first = parts.first else { return nil }
-        // Labels are lexical; argv and remote paths need no filesystem lookup.
-        let base = (String(first) as NSString).lastPathComponent
-        if base.hasPrefix("-") { return nil }
-        // "ssh: /path/ctl [mux]" and friends: daemons that rewrite argv0
-        // with a colon are background machinery, never the pane's program.
-        if base.hasSuffix(":") { return nil }
-        let noise: Set<String> = ["fish", "bash", "zsh", "sh", "login", "caffeinate"]
-        if noise.contains(base) { return nil }
-        let interpreters: Set<String> = ["node", "python", "python3", "ruby", "bun", "deno", "tsx"]
-        if interpreters.contains(base) {
-            for part in parts.dropFirst() where !part.hasPrefix("-") && !part.contains("=") {
-                let pb = (String(part) as NSString).lastPathComponent
-                if pb.contains(".") { return pb }
-            }
-        }
-        return base
-    }
-
     /// Immutable file facts are loaded by the directory watcher off main.
     struct PaneState {
         let state: AgentState
@@ -5155,7 +5013,7 @@ class VigilSessionManager {
     /// argv column of a tree/died file. Line 1 is the daemon's child: a
     /// shell for an ordinary pane, the PROGRAM for a session-API pane
     /// (`/bin/sh -lc cmd` execs in place). Never skipped by position;
-    /// `processLabel` nils shells by name.
+    /// `Program.label` nils shells by name.
     private func paneCommands(_ pane: String, _ ext: String) -> [String] {
         paneFileLines(pane, ext).map {
             $0.split(separator: "\t", maxSplits: 1).last.map(String.init) ?? ""
@@ -5188,32 +5046,21 @@ class VigilSessionManager {
         busyPrograms(panes: controller.surfaceTree.compactMap(\.vigilAttachId))
     }
 
-    private func paneForegroundLabel(_ pane: String) -> String? {
-        let pidLines = paneFileLines(pane, "pid")
-        guard pidLines.count >= 3,
-              let fg = Int(pidLines[2].trimmingCharacters(in: .whitespaces)) else { return nil }
-        for line in paneFileLines(pane, "tree") {
-            let parts = line.split(separator: "\t", maxSplits: 1)
-            guard parts.count == 2, Int(parts[0]) == fg else { continue }
-            return Self.processLabel(String(parts[1]))
-        }
-        return nil
+    /// The tty's foreground pid (`<pane>.pid`'s third line, the tty's
+    /// e_tpgid).
+    private func paneForeground(_ pane: String) -> Int32? {
+        let lines = paneFileLines(pane, "pid")
+        return lines.count >= 3 ? Int32(lines[2].trimmingCharacters(in: .whitespaces)) : nil
     }
 
-    /// One pane's "program": what the user actually SEES. The deep
-    /// foreground process wins; only when it has no label (a shell at its
-    /// prompt) does the deepest interesting descendant speak, so a
-    /// background ssh mux or stray daemon in the tree never masquerades
-    /// as the pane's program.
+    private func paneForegroundLabel(_ pane: String) -> String? {
+        Program.foreground(tree: paneFileLines(pane, "tree"), pid: paneForeground(pane))
+    }
+
+    /// One pane's program, what you see in it (`Program.of`, the rule every
+    /// row on every device names a pane by).
     func paneProgram(_ pane: String) -> String? {
-        let lines = paneFileLines(pane, "tree")
-        guard !lines.isEmpty else { return nil }
-        if let fg = paneForegroundLabel(pane) { return fg }
-        var out: String?
-        for argv in paneCommands(pane, "tree") {
-            if let label = Self.processLabel(argv) { out = label }
-        }
-        return out
+        Program.of(tree: paneFileLines(pane, "tree"), foreground: paneForeground(pane))
     }
 
     /// Background SENTRIES under a pane: labeled tree processes that are
@@ -5233,7 +5080,7 @@ class VigilSessionManager {
         let program = paneProgram(pane)
         var out: [String] = []
         for argv in paneCommands(pane, "tree") {
-            guard let label = Self.processLabel(argv), label != program else { continue }
+            guard let label = Program.label(argv), label != program else { continue }
             let short = argv.count > 90 ? String(argv.prefix(87)) + "…" : argv
             if !out.contains(short) { out.append(short) }
         }
@@ -5291,41 +5138,20 @@ class VigilSessionManager {
         factsLoader.start()
     }
 
-    /// The pane's continuous program state as its adapter last wrote it.
-    /// First token only; trailing tokens tolerated (older files carried
-    /// a "blocked input" flavor).
+    /// The pane's continuous program state as its broker last published it
+    /// (`StateToken`), here or on the pane's own Mac.
     func paneAgentState(_ pane: String) -> PaneState? {
-        if let remote = VigilRemote.split(pane), let truth = VigilRemote.shared.host(remote.device)?.directory?.panes[remote.name],
-           let token = truth.state, let state = VigilRemote.agentState(token), let revision = truth.stateRevision {
-            let flavor = token.split(separator: " ").dropFirst().first.flatMap { BlockFlavor(rawValue: String($0)) }
-            return PaneState(state: state, flavor: flavor, since: Date(timeIntervalSince1970: truth.since ?? 0), revision: revision)
+        if let remote = VigilRemote.split(pane) {
+            guard let truth = VigilRemote.shared.host(remote.device)?.directory?.panes[remote.name],
+                  let token = truth.token, let revision = truth.stateRevision else { return nil }
+            return PaneState(state: token.state, flavor: token.flavor, since: Date(timeIntervalSince1970: truth.since ?? 0), revision: revision)
         }
-        return readPaneAgentState(pane)
-    }
-
-    private func readPaneAgentState(_ pane: String) -> PaneState? {
         guard let file = facts.files["wake/state/\(pane).state"] else { return nil }
-        let revision = file.revision
-        let raw = file.text
-        let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
-        let state: AgentState
-        switch parts.first.map(String.init) ?? "" {
-        case "working": state = .working
-        case "blocked": state = .blocked
-        case "done": state = .done
-        case "idle": state = .idle
-        case "unknown": state = .unknown
-        case "interrupting": state = .interrupting
-        default: return nil
+        guard let token = StateToken(file.text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            vlog("!! state: \(pane).state reads '\(file.text)', not a state")
+            return nil
         }
-        let flavor = parts.count > 1 ? BlockFlavor(rawValue: String(parts[1])) : nil
-        let since = file.since
-        // A broker outage never erases an already observed attention flavor.
-        if state == .working, parts.count > 1 {
-            if parts[1] == "unknown" { return PaneState(state: .unknown, flavor: nil, since: since, revision: revision) }
-            if parts[1] == "interrupting" { return PaneState(state: .interrupting, flavor: nil, since: since, revision: revision) }
-        }
-        return PaneState(state: state, flavor: flavor, since: since, revision: revision)
+        return PaneState(state: token.state, flavor: token.flavor, since: file.since, revision: file.revision)
     }
 
     /// Seen-ack changes presentation only; it never resolves a broker request.
@@ -5349,7 +5175,7 @@ class VigilSessionManager {
         var out: [String] = []
         for pane in ownedPaneIds(session).sorted() {
             for argv in paneCommands(pane, "tree") {
-                if let label = Self.processLabel(argv), !out.contains(label) {
+                if let label = Program.label(argv), !out.contains(label) {
                     out.append(label)
                 }
             }
@@ -5371,7 +5197,7 @@ class VigilSessionManager {
         var out: [DiedProcess] = []
         for pane in ownedPaneIds(session).sorted() {
             for argv in paneCommands(pane, "died") {
-                guard let label = Self.processLabel(argv),
+                guard let label = Program.label(argv),
                       !["claude", "codex"].contains(label) else { continue }
                 guard !["claude", "codex"].contains(where: {
                     argv.hasPrefix($0) || argv.contains("/\($0)")
@@ -5386,7 +5212,7 @@ class VigilSessionManager {
     func diedSummary(of name: String) -> [String] {
         var out: [String] = []
         for died in diedProcesses(of: name) {
-            if let label = Self.processLabel(died.command), !out.contains(label) {
+            if let label = Program.label(died.command), !out.contains(label) {
                 out.append(label)
             }
         }
@@ -5396,10 +5222,8 @@ class VigilSessionManager {
     /// True when the pane's shell sits at a prompt (pidfile line 3, the
     /// deep foreground, equals the child shell): safe to type into.
     private func paneIdleAtShell(_ pane: String) -> Bool {
-        let lines = paneFileLines(pane, "pid")
-        guard lines.count >= 3,
-              let child = lines[0].split(separator: " ").last.flatMap({ Int($0) }),
-              let fg = Int(lines[2].trimmingCharacters(in: .whitespaces))
+        guard let child = paneFileLines(pane, "pid").first?.split(separator: " ").last.flatMap({ Int32($0) }),
+              let fg = paneForeground(pane)
         else { return false }
         return child == fg
     }
@@ -5522,8 +5346,8 @@ class VigilSessionManager {
     /// session's cache, to wherever the tab goes (a burial, another session).
     /// Left behind, the cache would hold surfaces of panes the session no
     /// longer owns, and a later mount or reap would act on them.
-    private func takeWarm(_ tab: Tab, from name: String) -> [TabRuntime] {
-        let ids = Set(tabPaneIds(tab))
+    private func takeWarm(_ tab: Registry.Tab, from name: String) -> [TabRuntime] {
+        let ids = Set(tab.paneIds)
         guard let held = sessions[name]?.held else { return [] }
         func belongs(_ runtime: TabRuntime) -> Bool {
             runtime.tree.contains { $0.vigilAttachId.map(ids.contains) == true }
@@ -5537,7 +5361,7 @@ class VigilSessionManager {
     private func registryOrdered(_ runtimes: [TabRuntime], of session: Session) -> [TabRuntime] {
         func position(_ runtime: TabRuntime) -> Int {
             let ids = Set(runtime.tree.compactMap(\.vigilAttachId))
-            return session.tabs.firstIndex { !ids.isDisjoint(with: tabPaneIds($0)) } ?? Int.max
+            return session.tabs.firstIndex { !ids.isDisjoint(with: $0.paneIds) } ?? Int.max
         }
         return runtimes.sorted { position($0) < position($1) }
     }
@@ -5554,7 +5378,7 @@ class VigilSessionManager {
     }
 
     /// Adopt-or-mint, the one way a mount gets a pane's view.
-    private func surface(for pane: Pane, configFor: (Pane) -> Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? {
+    private func surface(for pane: Registry.Pane, configFor: (Registry.Pane) -> Ghostty.SurfaceConfiguration) -> Ghostty.SurfaceView? {
         if let view = adoptable(pane.id) { return view }
         guard let app = ghosttyApp?.app else { return nil }
         return Ghostty.SurfaceView(app, baseConfig: configFor(pane))
@@ -5725,7 +5549,7 @@ class VigilSessionManager {
         // A remote viewport: the chain's ids are device-namespaced like the
         // remote rows'.
         if let (device, remote) = VigilRemote.shared.session(name) {
-            let tab = (remote.tabs ?? []).first { !Set(tabPaneIds($0)).isDisjoint(with: ids) }
+            let tab = (remote.tabs ?? []).first { !Set($0.paneIds).isDisjoint(with: ids) }
             let anchor = tab.flatMap { $0.panes.first?.id ?? $0.dock?.panes.first?.id }
             return ActiveChain(
                 session: name,
@@ -5733,7 +5557,7 @@ class VigilSessionManager {
                 pane: front.focusedSurface?.vigilAttachId.map { VigilRemote.compositeId(device, $0) })
         }
         guard let session = sessions[name] else { return nil }
-        let tab = session.tabs.first { !Set(tabPaneIds($0)).isDisjoint(with: ids) }
+        let tab = session.tabs.first { !Set($0.paneIds).isDisjoint(with: ids) }
         let anchor = tab.flatMap { $0.panes.first?.id ?? $0.dock?.panes.first?.id }
         return ActiveChain(
             session: name,
@@ -5749,16 +5573,6 @@ class VigilSessionManager {
         anchor.map { "\(session)-tab-\($0)" } ?? "\(session)-t\(index)"
     }
 
-    /// The cluster rule, shared by session and tab rollups: one dot PER
-    /// PANE with an active state (two blocked claudes = two orange dots),
-    /// most urgent first, capped at 4; idle panes stay out of the cluster
-    /// unless idle is all there is (then a single idle dot).
-    static func clusterStates(_ states: [AgentState]) -> [AgentState] {
-        let active = states.filter { $0 != .idle }.sorted { $0.rawValue > $1.rawValue }
-        if !active.isEmpty { return Array(active.prefix(4)) }
-        return states.isEmpty ? [] : [.idle]
-    }
-
     /// One immutable projection of everything the left bar shows, READ
     /// FROM THE REGISTRY: every session, wherever displayed → its
     /// tabs → their panes (splits AND dock tenants), each pane decorated
@@ -5769,7 +5583,7 @@ class VigilSessionManager {
     func sidebarSnapshot() -> [SidebarSessionRow] {
         let leases = watchLeases()
 
-        func paneRow(_ pane: Pane, view: Ghostty.SurfaceView?, isDock: Bool) -> SidebarPane {
+        func paneRow(_ pane: Registry.Pane, view: Ghostty.SurfaceView?, isDock: Bool) -> SidebarPane {
             let program = paneProgram(pane.id)
             let liveTitle = view.flatMap { liveTabTitle($0.title) }
             // The name YOU gave it, else what runs there, else what it was
@@ -5777,7 +5591,7 @@ class VigilSessionManager {
             // calls itself, else where it lives.
             let title = pane.label
                 ?? program
-                ?? pane.command.flatMap(Self.processLabel)
+                ?? pane.command.flatMap(Program.label)
                 ?? liveTitle
                 ?? pane.title
                 ?? (pane.cwd as NSString).lastPathComponent
@@ -5830,7 +5644,7 @@ class VigilSessionManager {
             }
             var tabs: [SidebarTab] = []
             for (index, tab) in session.tabs.enumerated() {
-                let ids = Set(tabPaneIds(tab))
+                let ids = Set(tab.paneIds)
                 guard !ids.isEmpty else { continue }
                 var panes = tab.panes.map { paneRow($0, view: live[$0.id], isDock: false) }
                 panes += (tab.dock?.panes ?? []).map { paneRow($0, view: live[$0.id], isDock: true) }
@@ -5853,7 +5667,7 @@ class VigilSessionManager {
                 label: session.label,
                 stateTag: place(name).rawValue,
                 attention: session.attention,
-                states: Self.clusterStates(tabs.flatMap(\.panes).compactMap(\.state)),
+                states: AgentState.cluster(tabs.flatMap(\.panes).compactMap(\.state)),
                 tabs: tabs))
         }
         return rows + VigilRemote.shared.sidebarRows()
@@ -6370,23 +6184,6 @@ class VigilSessionManager {
 
     // MARK: Persistence (identity + cwd + captured tabs; trees are runtime)
 
-    private struct PersistedSession: Codable {
-        let name: String
-        let label: String
-        let emoji: String?
-        let cwd: String
-        let tabs: [Tab]?
-        let order: Int?
-        let pinned: Bool?
-        let sidebar: Bool?
-        let buriedUntil: Date?
-        /// Had a window at record time; launch restores it as one.
-        let foreground: Bool?
-        /// Monotonic pane-index counter; indices are never recycled.
-        let paneSeq: Int?
-        let layoutRevision: String?
-    }
-
     /// Frozen foreground truth for the shutdown persist: the flags must
     /// record the windows as OPEN while the app dies with them showing.
     private var shutdownForeground: [String: Bool]?
@@ -6451,7 +6248,7 @@ class VigilSessionManager {
         }
     }
 
-    private func refreshFacts(_ pane: inout Pane, from view: Ghostty.SurfaceView) {
+    private func refreshFacts(_ pane: inout Registry.Pane, from view: Ghostty.SurfaceView) {
         if let pwd = view.pwd { pane.cwd = pwd }
         if let title = capturedTitle(of: view) { pane.title = title }
     }
@@ -6470,10 +6267,10 @@ class VigilSessionManager {
         if publish { refreshLiveFacts() }
         refreshSessionRevisions()
         var entries = sessions.values.map {
-            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
+            Registry.Session(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
         }
         entries += graveyard.values.map {
-            PersistedSession(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
+            Registry.Session(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
@@ -6737,10 +6534,10 @@ class VigilSessionManager {
         // is the workspace. A live file that decodes always wins, even if
         // the backup is newer, because the backup IS an older live file.
         var payload = try? Data(contentsOf: persistURL)
-        var decoded = payload.flatMap { try? JSONDecoder().decode([PersistedSession].self, from: $0) }
+        var decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Session].self, from: $0) }
         if decoded == nil {
             payload = try? Data(contentsOf: persistBackupURL)
-            decoded = payload.flatMap { try? JSONDecoder().decode([PersistedSession].self, from: $0) }
+            decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Session].self, from: $0) }
             if decoded != nil {
                 vlog("!! load: vigil.json unreadable, recovered the workspace from vigil.json.bak")
             }
@@ -6759,7 +6556,7 @@ class VigilSessionManager {
             // attach two surfaces to one socket (frames interleave into
             // garbage). The writer cannot produce this; a file that has it
             // screams.
-            for id in session.tabs.flatMap(tabPaneIds) where !seen.insert(id).inserted {
+            for id in session.tabs.flatMap(\.paneIds) where !seen.insert(id).inserted {
                 vlog("!! load: '\(entry.name)' lists '\(id)' which another entry already lists")
             }
             // The counter must clear every index this session has ever

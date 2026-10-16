@@ -4,6 +4,7 @@ import Ink
 import Say
 import SwiftUI
 import UniformTypeIdentifiers
+import VigilWire
 
 /// The left bar's face. One visual BLOCK per session (the active one
 /// spotlit), and one rigid column grid so every glyph and dot lands on
@@ -566,7 +567,7 @@ struct VigilSidebarView: View {
             }
             Group {
                 if collapsed {
-                    dotCluster(VigilSessionManager.clusterStates(tab.panes.compactMap(\.state)))
+                    dotCluster(AgentState.cluster(tab.panes.compactMap(\.state)))
                 } else {
                     dotSlot(nil)
                 }
@@ -581,7 +582,7 @@ struct VigilSidebarView: View {
             hovered: hovered == tab.id,
             activity: model.isFront(tab) ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed
-                ? VigilSessionManager.clusterStates(tab.panes.compactMap(\.state)).first
+                ? AgentState.cluster(tab.panes.compactMap(\.state)).first
                 : nil))
         .background(reportHit(id: tab.id, kind: .tab(session: session, anchor: tab.anchor)))
         .contentShape(Rectangle())
@@ -807,7 +808,7 @@ struct VigilSidebarView: View {
 
     /// Fixed-width dot column: absent state reserves the slot, so the
     /// right rail never wiggles.
-    private func dotSlot(_ state: VigilSessionManager.AgentState?) -> some View {
+    private func dotSlot(_ state: AgentState?) -> some View {
         VigilStateDot(state: state)
             .frame(width: Grid.dot)
     }
@@ -815,7 +816,7 @@ struct VigilSidebarView: View {
     /// The collapsed rollup: one dot per distinct descendant state,
     /// overlapped (negative gap), blocked leftmost so the most urgent
     /// reads first. Grows inward; the right rail edge never moves.
-    private func dotCluster(_ states: [VigilSessionManager.AgentState]) -> some View {
+    private func dotCluster(_ states: [AgentState]) -> some View {
         HStack(spacing: -2) {
             if states.isEmpty {
                 Color.clear.frame(width: 7, height: 7)
@@ -847,7 +848,7 @@ struct VigilSidebarView: View {
     private func rowBackground(
         id: String, hovered: Bool,
         activity: RowActivity = .none,
-        state: VigilSessionManager.AgentState? = nil
+        state: AgentState? = nil
     ) -> some View {
         ZStack {
             // The state's whisper, under everything: same collapse logic
@@ -874,7 +875,7 @@ struct VigilSidebarView: View {
         }
     }
 
-    private func stateTint(_ state: VigilSessionManager.AgentState?) -> Color? {
+    private func stateTint(_ state: AgentState?) -> Color? {
         switch state {
         case .blocked: return Color.orange.opacity(0.10)
         case .working: return Color.yellow.opacity(0.06)
@@ -900,7 +901,7 @@ struct VigilSidebarView: View {
 /// main during a pure Metal scroll). CABasicAnimation runs in the render
 /// server: zero app-side work per frame.
 struct VigilStateDot: View {
-    let state: VigilSessionManager.AgentState?
+    let state: AgentState?
 
     var body: some View {
         VigilDotLayer(state: state)
@@ -909,7 +910,7 @@ struct VigilStateDot: View {
 }
 
 private struct VigilDotLayer: NSViewRepresentable {
-    let state: VigilSessionManager.AgentState?
+    let state: AgentState?
 
     func makeNSView(context: Context) -> VigilDotNSView { VigilDotNSView() }
     func updateNSView(_ view: VigilDotNSView, context: Context) {
@@ -918,11 +919,11 @@ private struct VigilDotLayer: NSViewRepresentable {
 }
 
 final class VigilDotNSView: NSView {
-    private var current: VigilSessionManager.AgentState??
+    private var current: AgentState??
 
     override var intrinsicContentSize: NSSize { NSSize(width: 7, height: 7) }
 
-    func apply(_ state: VigilSessionManager.AgentState?) {
+    func apply(_ state: AgentState?) {
         if current == state { return }
         current = state
         wantsLayer = true

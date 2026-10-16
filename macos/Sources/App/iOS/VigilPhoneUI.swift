@@ -1,6 +1,8 @@
 import AuthzEndpoint
 import SwiftUI
 import GhosttyKit
+import VigilActivity
+import VigilWire
 
 /// The phone's screens: ONE home tree (Macs → sessions → tabs → panes,
 /// collapsible, the sidebar's rollup dots on every folded row) and a pane,
@@ -220,25 +222,13 @@ struct TreeNodeView: View {
     /// dot = agent state. A pane shows its own; a folded node its
     /// descendants' cluster; an unfolded node nothing (its children speak).
     @ViewBuilder private var cluster: some View {
-        let states: [String] = node.kind == .pane || folded ? node.cluster : []
+        let states: [AgentState] = node.kind == .pane || folded ? node.cluster : []
         HStack(spacing: 4) {
             ForEach(Array(states.enumerated()), id: \.offset) { _, s in
-                Circle().fill(StateColor.of(s, alive: true)).frame(width: 8, height: 8)
+                Circle().fill(s.tint).frame(width: 8, height: 8)
             }
         }
         .frame(minWidth: 8)
-    }
-}
-
-enum StateColor {
-    static func of(_ state: String?, alive: Bool) -> Color {
-        guard alive else { return .gray.opacity(0.3) }
-        switch state {
-        case "blocked": return .orange
-        case "working": return .yellow
-        case "done": return .teal
-        default: return .gray
-        }
     }
 }
 
@@ -796,7 +786,7 @@ struct PaneScreen: View {
                 VStack(spacing: 1) {
                     Text(current.title).font(.headline)
                     HStack(spacing: 4) {
-                        Circle().fill(StateColor.of(node?.state, alive: node?.alive ?? true)).frame(width: 6, height: 6)
+                        Circle().fill(node?.alive == false ? Color.gray.opacity(0.3) : (node?.state ?? .idle).tint).frame(width: 6, height: 6)
                         Text("\(current.host.name) · \(model.sessionTitle(for: current))")
                             .font(.caption2).foregroundStyle(.secondary)
                     }

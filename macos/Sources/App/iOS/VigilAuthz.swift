@@ -21,7 +21,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
         .init(
             tetherApp: VigilWire.app, keyGroup: "G387QW47LV.com.adriangalilea.vigil.keys",
             sealGroup: "G387QW47LV.com.adriangalilea.vigil.notify",
-            name: "vigil on \(UIDevice.current.name)", relayApp: "vigil", presents: .claimed))
+            name: "vigil on \(UIDevice.current.name)", presents: .claimed))
 
     /// Starts (or, back on screen, resumes) the app's tether node: it joins
     /// the homes, and the phone model reaches the Macs' sessions through

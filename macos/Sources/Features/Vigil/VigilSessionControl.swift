@@ -2,6 +2,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import VigilWire
 
 /// Session edits belong to the home app's registry writer. This socket is
 /// an authenticated-user command channel, separate from terminal bytes and
@@ -73,11 +74,11 @@ enum VigilSessionControl {
     static var socketPath: String { directory.appendingPathComponent("session-control.sock").path }
 
     @MainActor
-    static func revision(_ tabs: [VigilSessionManager.Tab]) -> String {
+    static func revision(_ tabs: [Registry.Tab]) -> String {
         // Runtime titles/cwd/attention must not invalidate a structural edit.
         struct Shape: Encodable {
             let panes: [String]
-            let layout: VigilSessionManager.Layout?
+            let layout: Registry.Layout?
             let dock: [String]
         }
         let encoder = JSONEncoder()
@@ -92,7 +93,7 @@ enum VigilSessionControl {
     /// transaction enters MainActor. A quiet server has no periodic work.
     static func start() -> DispatchSourceRead? {
         let path = socketPath
-        guard path.utf8.count < 104 else { return nil }
+        guard var address = try? UnixSocket.address(path) else { return nil }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
@@ -104,12 +105,6 @@ enum VigilSessionControl {
         if lstat(path, &old) == 0 {
             guard old.st_mode & S_IFMT == S_IFSOCK else { close(fd); return nil }
             unlink(path)
-        }
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-        withUnsafeMutableBytes(of: &address.sun_path) { bytes in
-            bytes.copyBytes(from: Array(path.utf8) + [0])
         }
         let bound = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }

@@ -10,11 +10,11 @@ import VigilWire
 /// to the activity's token, which this app hands it with a `follow` call,
 /// again whenever iOS rotates it), ended here when it is no longer
 /// followed. Both writers read the same directory with
-/// `SessionState.lead`, so they say the same thing.
+/// `AgentState.lead`, so they say the same thing.
 @MainActor
 enum VigilFollow {
     /// Starts (or finds) the activity of a follow.
-    static func start(_ attributes: SessionActivity, state: SessionState, since: Double) {
+    static func start(_ attributes: SessionActivity, state: AgentState, since: Double) {
         if activity(of: attributes.key) != nil { return }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else {
             return VigilPhone.shared.log("follow: Live Activities are off for vigil (Settings > vigil)")
@@ -30,7 +30,7 @@ enum VigilFollow {
     }
 
     /// The directory moved: the activity says so now (vigil is open).
-    static func update(_ key: String, state: SessionState, since: Double) {
+    static func update(_ key: String, state: AgentState, since: Double) {
         guard let activity = activity(of: key) else { return }
         // The detail is the Mac's alone (sealed there): kept as it last came.
         let content = SessionActivity.ContentState(state: state, since: since, detail: activity.content.state.detail)

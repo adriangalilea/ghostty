@@ -8,9 +8,10 @@ import WidgetKit
 /// A followed session, tab or pane on the Lock Screen and in the Dynamic
 /// Island, shaped by what it needs from you:
 ///
-/// - working: what it does now (the verb in the state's color, the status
-///   line's facts as chips), the last lines above its prompt in a terminal
-///   well, the turn's clock ticking on the phone;
+/// - working (and stopping, or unconfirmed): what it does now (the verb in
+///   the state's color, the status line's facts as chips), the last lines
+///   above its prompt in a terminal well, the turn's clock ticking on the
+///   phone;
 /// - blocked: the question, its evidence (the command, the edit), and wide
 ///   Allow / Deny when one tap may answer it (through authz, unlocked);
 /// - done and idle: its last words.
@@ -102,7 +103,7 @@ private struct LockScreen: View {
 /// The body under the header, on the Lock Screen and in the expanded
 /// island alike (`compact` trims it for the island). Every state is budgeted
 /// to Apple's 160 pt Lock Screen limit with the header: past it the system
-/// draws nothing at all (a 175 pt layout showed a black activity).
+/// truncates.
 private struct StateContent: View {
     let context: ActivityViewContext<SessionActivity>
     let detail: Detail?
@@ -137,7 +138,7 @@ private struct StateContent: View {
                     Text("Waiting for you in the terminal").font(.subheadline.weight(.medium))
                     Actions(detail: detail, facts: false)
                 }
-            case .working:
+            case .working, .interrupting, .unknown:
                 HStack(spacing: 6) {
                     if let now = detail?.now { Now(text: now, tint: state.tint) } else { Facts(detail: detail) }
                     Spacer(minLength: 4)
@@ -228,7 +229,7 @@ private struct Actions: View {
 /// state's own symbol when it has none.
 private struct Badge: View {
     let attributes: SessionActivity
-    let state: SessionState
+    let state: AgentState
     let size: CGFloat
 
     var body: some View {
@@ -251,7 +252,7 @@ private struct Badge: View {
 /// the agent), the Mac.
 private struct Subtitle: View {
     let attributes: SessionActivity
-    let state: SessionState
+    let state: AgentState
     let detail: Detail?
 
     var body: some View {
@@ -366,36 +367,5 @@ private struct AnswerButton: View {
                 .background(tint.opacity(0.85), in: Capsule())
         }
         .buttonStyle(.plain)
-    }
-}
-
-extension SessionState {
-    /// The sidebar's colors: blocked asks (orange), working (yellow), done
-    /// (teal), idle (quiet).
-    var tint: Color {
-        switch self {
-        case .blocked: .orange
-        case .working: .yellow
-        case .done: .teal
-        case .idle: .gray
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .blocked: "hand.raised.fill"
-        case .working: "bolt.fill"
-        case .done: "checkmark"
-        case .idle: "moon.zzz.fill"
-        }
-    }
-
-    var words: String {
-        switch self {
-        case .blocked: "Waiting for you"
-        case .working: "Working"
-        case .done: "Done"
-        case .idle: "Idle"
-        }
     }
 }

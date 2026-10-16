@@ -44,65 +44,6 @@ final class VigilPhone: ObservableObject {
         var name: String
     }
 
-    // The Mac's directory document (vigild dir).
-    struct Pane: Decodable {
-        let id: String
-        var cwd: String
-        var title: String?
-        var label: String?
-        var emoji: String?
-        var command: String?
-    }
-    struct Dock: Decodable { var panes: [Pane] }
-    struct Tab: Decodable {
-        var panes: [Pane]
-        var label: String?
-        var emoji: String?
-        var dock: Dock?
-    }
-    struct Session: Decodable {
-        let name: String
-        var label: String
-        var emoji: String?
-        var order: Int?
-        var tabs: [Tab]?
-    }
-    struct PaneTruth: Decodable {
-        var alive: Bool
-        var state: String?
-        var tree: [String]?
-        /// "rows cols <owner>", the owner's pty grid (a preview renders it scaled).
-        var size: String?
-        /// FNV-1a (hex) of the daemon's viewport text: the content receipt.
-        var screen: String?
-        /// The state file's mtime and the `<pane>.seen` mtime, unix seconds.
-        var stateRevision: String?
-        var since: Double?
-        var seen: Double?
-        /// What a row shows, the ONE reading every viewport gives the
-        /// directory: `working unknown` / `working interrupting` are the
-        /// harness's uncertainty, not work; done/blocked already seen
-        /// anywhere (seen >= since) is idle.
-        var displayState: String? {
-            guard let state else { return nil }
-            let parts = state.split(separator: " ").map(String.init)
-            guard let first = parts.first else { return nil }
-            if first == "working", parts.count > 1, parts[1] == "unknown" || parts[1] == "interrupting" { return "unknown" }
-            if first == "done" || first == "blocked", let seen, let since, seen >= since { return "idle" }
-            return first
-        }
-        var grid: (rows: Int, cols: Int)? {
-            // "rows cols <owner hello>": the grid is the first two words.
-            let p = (size ?? "").split(separator: " ").prefix(2).compactMap { Int($0) }
-            return p.count == 2 && p[0] > 0 && p[1] > 0 ? (p[0], p[1]) : nil
-        }
-    }
-    struct Directory: Decodable {
-        var host: String
-        var sessions: [Session]
-        var panes: [String: PaneTruth]
-    }
-
     /// The paired Macs running vigil, from tether (never typed in).
     @Published private(set) var hosts: [Host] = [] { didSet { rebuildTree() } }
     /// Directories and errors publish; the TREE is derived once per change
@@ -249,13 +190,9 @@ final class VigilPhone: ObservableObject {
                     let stream = try await VigilLink.stream(self.linked(), device: host.id, .dir)
                     self.errors[host.id] = nil
                     pause = 1
-                    var buffer = Data()
+                    var lines = Lines()
                     while let chunk = try await stream.recv() {
-                        buffer.append(chunk)
-                        while let newline = buffer.firstIndex(of: 10) {
-                            let line = buffer[buffer.startIndex..<newline]
-                            buffer = Data(buffer[buffer.index(after: newline)...])
-                            guard !line.isEmpty else { continue }
+                        for line in try lines.append(chunk) {
                             let dir = try JSONDecoder().decode(Directory.self, from: line)
                             if self.directories[host.id] == nil {
                                 self.log("dir: \(host.name) = \(dir.host), \(dir.sessions.count) sessions, \(dir.panes.count) panes")
@@ -311,8 +248,8 @@ final class VigilPhone: ObservableObject {
         let title: String
         var subtitle: String? = nil
         var emoji: String? = nil
-        /// A pane's own state; nodes above carry the cluster.
-        var state: String? = nil
+        /// A pane's own state as shown; nodes above carry the cluster.
+        var state: AgentState? = nil
         var alive: Bool = true
         var pane: PaneRef? = nil
         /// The owner's grid, for the row's live preview.
@@ -334,29 +271,15 @@ final class VigilPhone: ObservableObject {
         /// This node and every node under it.
         var all: [Node] { [self] + children.flatMap(\.all) }
 
-        /// The cluster this node shows when collapsed (its own state for a
-        /// pane), the sidebar's rule.
-        var cluster: [String] {
-            if kind == .pane { return alive ? [state ?? "idle"] : [] }
-            let all = children.flatMap { $0.leafStates }
-            let active = all.filter { $0 != "idle" }
-                .sorted { Self.rank($0) > Self.rank($1) }
-            var seen = Set<String>()
-            let distinct = active.filter { seen.insert($0).inserted }
-            if !distinct.isEmpty { return Array(distinct.prefix(4)) }
-            return all.isEmpty ? [] : ["idle"]
-        }
-        var leafStates: [String] {
-            if kind == .pane { return alive ? [state ?? "idle"] : [] }
-            return children.flatMap { $0.leafStates }
+        /// The dots this node shows when collapsed (`AgentState.cluster`,
+        /// the Mac sidebar's rule), its own state for a pane.
+        var cluster: [AgentState] {
+            AgentState.cluster(leaves.filter(\.alive).map { $0.state ?? .idle })
         }
         /// Every pane node under this one.
         var leaves: [Node] {
             if kind == .pane { return [self] }
             return children.flatMap { $0.leaves }
-        }
-        static func rank(_ s: String) -> Int {
-            switch s { case "blocked": return 3; case "working": return 2; case "done": return 1; default: return 0 }
         }
     }
 
@@ -435,10 +358,10 @@ final class VigilPhone: ObservableObject {
     }
 
     /// The leading state of a row's panes and since when, read from its
-    /// Mac's directory the way the Mac reads it (`SessionState.lead`).
-    private func lead(_ node: Node) -> (state: SessionState, since: Double) {
+    /// Mac's directory the way the Mac reads it (`AgentState.lead`).
+    private func lead(_ node: Node) -> (state: AgentState, since: Double) {
         let panes = directories[node.root]?.panes ?? [:]
-        let lead = SessionState.lead(node.leaves.compactMap(\.scope?.pane).map { (panes[$0]?.state, panes[$0]?.since, panes[$0]?.seen) })
+        let lead = AgentState.lead(node.leaves.compactMap(\.scope?.pane).map { (panes[$0]?.shown ?? .idle, panes[$0]?.since) })
         return (lead.state, lead.since ?? Date().timeIntervalSince1970)
     }
 
@@ -476,30 +399,28 @@ final class VigilPhone: ObservableObject {
                             title: dir?.host ?? host.name,
                             subtitle: errors[host.id] ?? (dir == nil ? "connecting…" : nil))
             guard let dir else { return node }
-            let sessions = dir.sessions.sorted { ($0.order ?? 0, $0.label) < ($1.order ?? 0, $1.label) }
-            node.children = sessions.map { s in
+            node.children = dir.ordered.map { s in
                 let tabs = s.tabs ?? []
                 let sid = "\(host.id)/\(s.name)"
                 var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji,
                                 scope: Follow.Scope(session: s.name, kind: .session))
-                func paneNode(_ p: Pane) -> Node {
+                func paneNode(_ p: Registry.Pane) -> Node {
                     let truth = dir.panes[p.id]
-                    let program = Self.program(truth?.tree)
-                    let title = p.label ?? program
-                        ?? p.command.map { String($0.split(separator: " ").first ?? "").split(separator: "/").last.map(String.init) ?? $0 }
+                    let program = truth?.program
+                    let title = p.label ?? program ?? p.command.flatMap(Program.label)
                         ?? p.title ?? URL(fileURLWithPath: p.cwd).lastPathComponent
                     let alive = truth?.alive ?? false
                     return Node(id: "\(sid)/\(p.id)", kind: .pane, title: title, emoji: p.emoji,
-                                state: truth?.displayState,
+                                state: truth?.shown,
                                 alive: alive,
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
-                                sizeOwner: (truth?.size ?? "").split(separator: " ", maxSplits: 2).dropFirst(2).joined(separator: " "),
+                                sizeOwner: truth?.owner ?? "",
                                 scope: Follow.Scope(session: s.name, kind: .pane, pane: p.id),
                                 caption: p.label ?? Self.caption(p.title))
                 }
                 for (ti, t) in tabs.enumerated() {
-                    let all = t.panes + (t.dock?.panes ?? [])
+                    let all = t.members
                     let showTab = tabs.count > 1 || t.label != nil || t.emoji != nil
                     if showTab {
                         let name = t.label ?? URL(fileURLWithPath: t.panes.first?.cwd ?? "").lastPathComponent
@@ -527,25 +448,6 @@ final class VigilPhone: ObservableObject {
         return name.isEmpty ? nil : name
     }
 
-    private static let shells: Set<String> = ["fish", "bash", "zsh", "sh", "login", "caffeinate"]
-    nonisolated private static func program(_ tree: [String]?) -> String? {
-        var out: String?
-        for line in tree ?? [] {
-            let argv = line.split(separator: "\t", maxSplits: 1).last.map(String.init) ?? ""
-            let first = argv.split(separator: " ").first.map(String.init) ?? ""
-            let base = String(first.split(separator: "/").last ?? "")
-            if base.isEmpty || base.hasPrefix("-") || base.hasSuffix(":") || shells.contains(base) { continue }
-            if ["node", "python", "python3", "ruby", "bun", "deno", "tsx"].contains(base) {
-                let script = argv.split(separator: " ").dropFirst()
-                    .first { !$0.hasPrefix("-") && !$0.contains("=") && $0.contains(".") }
-                out = script.map { String($0.split(separator: "/").last ?? $0) } ?? base
-            } else {
-                out = base
-            }
-        }
-        return out
-    }
-
     // MARK: URLs (vigil://pane/<id>)
 
     /// `vigil://pane/<id>` (a request's Go there, from Authz): the pane is
@@ -563,7 +465,7 @@ final class VigilPhone: ObservableObject {
                 log("url: \(url) names no session listed here"); return nil
             }
             let leaves = session.leaves.compactMap { leaf in leaf.pane.map { (leaf, $0) } }
-            return (leaves.first { $0.0.state == "blocked" } ?? leaves.first)?.1
+            return (leaves.first { $0.0.state == .blocked } ?? leaves.first)?.1
         }
         guard url.host == "pane" else { log("url: \(url) is not vigil://pane/<id> or vigil://session/<mac>/<session>"); return nil }
         let id = url.lastPathComponent
@@ -771,15 +673,11 @@ final class VigilPhone: ObservableObject {
     }
 
     /// A pane shown full screen here was seen: the fact belongs to ITS Mac
-    /// (`vigild seen`, PROTOCOL.md), written only on a seen-flip (unseen
-    /// done/blocked), the directory updated optimistically so the row
-    /// decays with the glance and the Mac's next document confirms it.
+    /// (`vigild seen`, PROTOCOL.md), written only on a seen-flip (an
+    /// outcome not yet seen), the directory updated optimistically so the
+    /// row decays with the glance and the Mac's next document confirms it.
     private func markSeen(_ ref: PaneRef) {
-        guard let truth = directories[ref.host.id]?.panes[ref.pane],
-              let revision = truth.stateRevision, revision.utf8.allSatisfy({ (48...57).contains($0) || $0 == 45 }),
-              let first = truth.state?.split(separator: " ").first,
-              first == "done" || first == "blocked",
-              (truth.seen ?? 0) < (truth.since ?? 0) else { return }
+        guard let truth = directories[ref.host.id]?.panes[ref.pane], let revision = truth.unseenRevision else { return }
         directories[ref.host.id]?.panes[ref.pane]?.seen = truth.since
         Task { [weak self] in
             guard let self else { return }
