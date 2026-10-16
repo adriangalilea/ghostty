@@ -1567,8 +1567,7 @@ class VigilSessionManager {
     /// Drop a session into the quick terminal (Quake-style peek). The key
     /// always does something sensible: something floating -> dismiss it;
     /// else the most urgent pending session; else the session of the window
-    /// you are in right now. That last fallback is why the key felt dead:
-    /// with nothing pending it used to no-op.
+    /// you are in right now, so the key is never dead.
     func nextFloating() {
         if panelSession != nil {
             quickController(create: false)?.animateOut()
@@ -1624,12 +1623,10 @@ class VigilSessionManager {
                 vlog("float: windowed '\(name)' has no pane to mirror - refused")
                 return
             }
-            // WINDOWED view or bust: a leaked windowless view (the
-            // sidebar-mode runtime drop makes cold-tab-with-leaked-view a
-            // steady state) used to satisfy the nil check, skip the
-            // materialize, and then fail the windowed guard below —
-            // a summon refusable FOREVER for that pane (review,
-            // 2026-09-06). materializeCapturedTab adopts the leak.
+            // WINDOWED view or bust: a windowless view would skip the
+            // materialize and then fail the windowed guard below, making
+            // the summon refusable forever for that pane.
+            // materializeCapturedTab adopts such a view.
             if liveView(attachId: target)?.window == nil {
                 // A captured tab (registered, daemon alive, no view)
                 // becomes a silent native tab of its home window first, so
@@ -3570,9 +3567,9 @@ class VigilSessionManager {
     /// still has a tab, the viewport mounts it. If the source is empty, the
     /// controller deliberately stays unclaimed with its moved tree intact;
     /// `settleVacatedController` atomically hands that viewport to the move
-    /// target after the target owns the pane. Choosing an arbitrary
-    /// session here used to leave a live tree sessionless when that session
-    /// was already displayed and `mount` refused (2026-08-12).
+    /// target after the target owns the pane. Never an arbitrary session:
+    /// one already displayed refuses `mount` and leaves the live tree
+    /// sessionless.
     /// Returns the tab's registry entry (dock included).
     private func vacateMountedTab(_ controller: TerminalController, name: String) -> Registry.Tab? {
         let tree = controller.surfaceTree
@@ -6105,10 +6102,9 @@ class VigilSessionManager {
     }
 
     /// The ACTUAL WORK in these panes, captured by the adapter from the
-    /// agent's prompt event: what was asked, in the user's own words. A
-    /// screen scrape only ever caught whatever happened to be painted, and
-    /// a cwd basename named every $HOME pane "adrian". Legacy Claude entries
-    /// without an asks cache fall back to their transcript.
+    /// agent's prompt event: what was asked, in the user's own words (a
+    /// screen holds only what happens to be painted, and a cwd basename
+    /// names every $HOME pane "adrian").
     func workContext(panes: [String]) -> String {
         var out: [String] = []
         for pane in panes.sorted() {
