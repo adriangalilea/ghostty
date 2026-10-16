@@ -29,7 +29,7 @@ enum VigilCortex {
     /// palette + count guides: the model physically cannot emit an invalid
     /// emoji or a wrong shape.
     @available(macOS 26.0, *)
-    @Generable(description: "An identity for a terminal workspace session")
+    @Generable(description: "An identity for a terminal workspace")
     struct SessionRead {
         @Guide(
             description: "emoji evoking the task", .count(1),

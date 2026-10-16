@@ -208,26 +208,26 @@ struct VigilSidebarView: View {
     /// unseen ask). Summon carries its hush sub-toggle.
     private var footer: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 5) {
-                Image(systemName: followMode == .summon
-                      ? "bolt.horizontal.circle" : "arrow.right.circle")
-                    .font(.system(size: 9))
-                    .foregroundColor(followMode == .off ? .secondary : .orange)
-                Text("follow")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(followMode == .off ? .secondary : .primary)
-                Spacer()
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    Image(systemName: followMode == .summon
+                          ? "bolt.horizontal.circle" : "arrow.right.circle")
+                        .font(.system(size: 9))
+                        .foregroundColor(followMode == .off ? .secondary : .orange)
+                    Text("When something needs you")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(followMode == .off ? .secondary : .primary)
+                }
                 Picker("", selection: $followModeRaw) {
-                    Text("off").tag(VigilFollowMode.off.rawValue)
-                    Text("summon").tag(VigilFollowMode.summon.rawValue)
-                    Text("window").tag(VigilFollowMode.window.rawValue)
+                    Text("Do nothing").tag(VigilFollowMode.off.rawValue)
+                    Text("Summon it").tag(VigilFollowMode.summon.rawValue)
+                    Text("Jump to it").tag(VigilFollowMode.window.rawValue)
                 }
                 .pickerStyle(.segmented)
                 .controlSize(.mini)
                 .labelsHidden()
-                .fixedSize()
             }
-            .help("off: asks stay in the queue (keycap, badge, ⌘⇧J). summon: a permission prompt or question mid-turn pulls the quick terminal in on the asking pane; answering advances in place. window: this window shapeshifts to any unseen ask.")
+            .help("Do nothing: it waits in the queue (the orange keycap, the badge, ⌘⇧J). Summon it: a permission prompt or a question mid-turn brings the floating terminal in on that pane; answering moves to the next. Jump to it: this window switches to anything waiting that you haven't seen.")
             // Asks are Authz's, switched in its menu bar and Settings alone.
             // The rail below is this Mac's dictation into the focused pane.
                     if VigilVoice.available {

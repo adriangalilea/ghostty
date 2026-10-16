@@ -708,53 +708,53 @@ fn actionCommands(action: Action.Key) []const Command {
         .crash,
         => comptime &.{},
 
-        // vigil session verbs, first-class palette citizens.
+        // vigil workspace verbs, first-class palette citizens.
         .vigil_next => comptime &.{.{
             .action = .vigil_next,
-            .title = "Next Session",
-            .description = "Open the most urgent session in the attention queue.",
+            .title = "Go to What Needs You",
+            .description = "Open the pane that needs you most.",
         }},
 
         .vigil_detach_window => comptime &.{.{
             .action = .vigil_detach_window,
-            .title = "Detach Session",
-            .description = "Detach this window's session; it keeps running with no window.",
+            .title = "Send Workspace to Background",
+            .description = "Close this window; its workspace keeps running.",
         }},
 
         .vigil_new_session => comptime &.{.{
             .action = .vigil_new_session,
-            .title = "New Session",
-            .description = "Create a new named workspace session.",
+            .title = "New Workspace",
+            .description = "Create a new workspace in this window.",
         }},
 
         .vigil_overview => comptime &.{.{
             .action = .vigil_overview,
-            .title = "Sessions Overview",
-            .description = "Switcher with live thumbnails of every session.",
+            .title = "Workspaces Overview",
+            .description = "Switch with live thumbnails of every workspace.",
         }},
 
         .vigil_cycle => comptime &.{.{
             .action = .vigil_cycle,
-            .title = "Cycle Session",
-            .description = "Go to the next session in overview order.",
+            .title = "Next Workspace",
+            .description = "Go to the next workspace in the overview's order.",
         }},
 
         .vigil_next_floating => comptime &.{.{
             .action = .vigil_next_floating,
-            .title = "Next Session Floating",
-            .description = "Drop the most urgent session into the quick terminal.",
+            .title = "Summon What Needs You",
+            .description = "Bring the pane that needs you most into the floating terminal.",
         }},
 
         .vigil_kill => comptime &.{.{
             .action = .vigil_kill,
-            .title = "Kill Session",
-            .description = "Kill the session you are in (floating or normal window).",
+            .title = "Kill Workspace",
+            .description = "Kill the workspace you are in (undo for 120 seconds).",
         }},
 
         .vigil_float => comptime &.{.{
             .action = .vigil_float,
-            .title = "Toggle Floating",
-            .description = "Toggle the front window floating on top.",
+            .title = "Keep on Top",
+            .description = "Keep this window on top of other windows, or stop.",
         }},
 
         // No commands because I'm not sure they make sense in a command

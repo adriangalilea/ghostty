@@ -82,7 +82,7 @@ class VigilOverview: NSObject {
         entries.append(OverviewEntry(
             kind: .create,
             name: "vigil-create-tile",
-            label: "new session",
+            label: "new workspace",
             emoji: nil,
             place: .background,
             attention: .none,
@@ -448,7 +448,7 @@ class VigilOverview: NSObject {
         var info: String
         switch entry.place {
         case .windowed: info = "The window closes. \(dying)"
-        case .floating: info = "Floating in the quick terminal; this is the kill. \(dying)"
+        case .floating: info = "In the floating terminal; this is the kill. \(dying)"
         case .background: info = "Running in the background; this is the kill. \(dying)"
         }
         if let session = manager.sessions[entry.name] {
@@ -817,7 +817,7 @@ struct OverviewView: View {
                         HStack(spacing: 6) {
                             cornerButton("f", entry.pinned ? "macwindow.on.rectangle" : "macwindow",
                                          tint: .white, focused: focused,
-                                         help: entry.pinned ? "Floating on top. Click to drop." : "Float on top") { onPin(entry) }
+                                         help: entry.pinned ? "Kept on top. Click to stop." : "Keep on top") { onPin(entry) }
                             cornerButton("⌫", "trash", tint: .red, focused: focused,
                                          help: "Kill") { onKill(entry) }
                         }
@@ -956,7 +956,7 @@ struct OverviewView: View {
                         .font(.system(size: 34, weight: .medium))
                         .foregroundColor(.accentColor)
                     HStack(spacing: 5) {
-                        keycap("n"); Text("new session").font(.system(size: 12))
+                        keycap("n"); Text("new workspace").font(.system(size: 12))
                     }
                     .foregroundColor(.secondary)
                 }

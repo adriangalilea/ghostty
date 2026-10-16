@@ -973,7 +973,7 @@ struct SettingsView: View {
                         }
                     }
                 } header: { Text("Macs") } footer: {
-                    Text("Pairing is approved on the Mac with Touch ID. A paired Mac running vigil shows its sessions here.")
+                    Text("Pairing is approved on the Mac with Touch ID. A paired Mac running vigil shows its workspaces here.")
                 }
                 ReceiptsSection(receipts: model.receipts)
             }
@@ -983,8 +983,8 @@ struct SettingsView: View {
     }
 
     private func sessions(_ mac: EndpointRuntime.Mac) -> String {
-        if model.hosts.contains(where: { $0.id == mac.id }) { return "Sessions: shown here" }
-        return mac.state == .onAccount || mac.state == .pairing ? "Sessions: after pairing" : "Sessions: vigil is not running there"
+        if model.hosts.contains(where: { $0.id == mac.id }) { return "Workspaces: shown here" }
+        return mac.state == .onAccount || mac.state == .pairing ? "Workspaces: after pairing" : "Workspaces: vigil is not running there"
     }
 
     private func requests(_ mac: EndpointRuntime.Mac) -> String {

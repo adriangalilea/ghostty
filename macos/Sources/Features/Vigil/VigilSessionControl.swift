@@ -144,7 +144,7 @@ enum VigilSessionControl {
             if let newline = bytes.firstIndex(of: 10) {
                 guard newline < maxBytes,
                       let request = try? JSONDecoder().decode(Request.self, from: bytes.prefix(upTo: newline)) else {
-                    send(.failure(nil, "invalid_request", "Expected one session command JSON line."), to: fd)
+                    send(.failure(nil, "invalid_request", "Expected one workspace command JSON line."), to: fd)
                     return
                 }
                 Task { @MainActor in
@@ -154,7 +154,7 @@ enum VigilSessionControl {
                 return
             }
         }
-        send(.failure(nil, "request_too_large", "Session command exceeds 64 KiB."), to: fd)
+        send(.failure(nil, "request_too_large", "Workspace command exceeds 64 KiB."), to: fd)
     }
 
     private static func send(_ reply: Reply, to fd: Int32) {
@@ -178,7 +178,7 @@ enum VigilSessionControl {
 
     @MainActor
     static func transact(_ request: Request) -> Reply {
-        guard request.version == 1 else { return .failure(request, "unsupported_version", "Session API version 1 is required.") }
+        guard request.version == 1 else { return .failure(request, "unsupported_version", "Workspace command version 1 is required.") }
         let age = Date().timeIntervalSince1970 - request.issuedAt
         guard age >= -300, age < lifetime else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
         if request.operation == "inspect-input" {
@@ -202,7 +202,7 @@ enum VigilSessionControl {
                 guard try encoder.encode(receipt.request) == encoder.encode(request) else {
                     return .failure(request, "id_reused", "Command ID was already used for different arguments.")
                 }
-                return receipt.reply ?? .failure(request, "indeterminate", "The home app stopped during this command. Inspect the session before issuing another command.")
+                return receipt.reply ?? .failure(request, "indeterminate", "vigil on that Mac stopped during this command. Check the workspace there before sending another.")
             }
             // Bounded durable deduplication, cleaned at human input events.
             let files = try FileManager.default.contentsOfDirectory(at: receipts, includingPropertiesForKeys: nil)
@@ -214,7 +214,7 @@ enum VigilSessionControl {
                     try FileManager.default.removeItem(at: old)
                 } else { count += 1 }
             }
-            guard count < 4096 else { return .failure(request, "busy", "The session command receipt store is full.") }
+            guard count < 4096 else { return .failure(request, "busy", "Too many workspace commands are on record; try again shortly.") }
             // Write intent before any side effect. A crash can leave an
             // indeterminate receipt but a retry cannot create another pane.
             try encoder.encode(Receipt(request: request, reply: nil)).write(to: file, options: .atomic)

@@ -11,12 +11,12 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     /// Sessions menu items. Shortcuts come from the ghostty config (the
     /// `vigil_*` keybind actions) via AppDelegate.syncMenuShortcuts, never
     /// hardcoded: the user binds them, so conflicts are impossible here.
-    let menuNext = NSMenuItem(title: "Next", action: #selector(nextSession(_:)), keyEquivalent: "")
-    let menuCycle = NSMenuItem(title: "Cycle", action: #selector(cycleSession(_:)), keyEquivalent: "")
-    let menuNextFloating = NSMenuItem(title: "Next Floating", action: #selector(nextFloating(_:)), keyEquivalent: "")
+    let menuNext = NSMenuItem(title: "Go to What Needs You", action: #selector(nextSession(_:)), keyEquivalent: "")
+    let menuCycle = NSMenuItem(title: "Next Workspace", action: #selector(cycleSession(_:)), keyEquivalent: "")
+    let menuNextFloating = NSMenuItem(title: "Summon What Needs You", action: #selector(nextFloating(_:)), keyEquivalent: "")
     let menuOverview = NSMenuItem(title: "Overview", action: #selector(overview(_:)), keyEquivalent: "")
-    let menuNewSession = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
-    let menuDetach = NSMenuItem(title: "Detach Front Window", action: #selector(detachFrontWindow(_:)), keyEquivalent: "")
+    let menuNewSession = NSMenuItem(title: "New Workspace", action: #selector(newSession(_:)), keyEquivalent: "")
+    let menuDetach = NSMenuItem(title: "Send Workspace to Background", action: #selector(detachFrontWindow(_:)), keyEquivalent: "")
 
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
@@ -64,22 +64,22 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
     }
 
-    /// Native "Sessions" menu in the menu bar. Shortcuts are synced from the
+    /// Native "Workspaces" menu in the menu bar. Shortcuts are synced from the
     /// ghostty config exactly like every other menu item. Idempotent and
     /// re-callable: the app's main menu can be rebuilt after launch, wiping
     /// a menu installed at init.
     func installMainMenu() {
         guard let mainMenu = NSApp.mainMenu else { return }
-        guard !mainMenu.items.contains(where: { $0.title == "Sessions" }) else { return }
+        guard !mainMenu.items.contains(where: { $0.title == "Workspaces" }) else { return }
 
-        let menu = NSMenu(title: "Sessions")
+        let menu = NSMenu(title: "Workspaces")
         for item in [menuNext, menuNextFloating, menuCycle, menuOverview, .separator(), menuNewSession, menuDetach] {
             item.target = self
             item.menu?.removeItem(item)
             menu.addItem(item)
         }
 
-        let holder = NSMenuItem(title: "Sessions", action: nil, keyEquivalent: "")
+        let holder = NSMenuItem(title: "Workspaces", action: nil, keyEquivalent: "")
         holder.submenu = menu
         // Before the Help menu, the conventional spot for app-domain menus.
         mainMenu.insertItem(holder, at: max(0, mainMenu.items.count - 1))
@@ -105,12 +105,12 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         let count = VigilSessionManager.shared.pendingCount
         let eye = NSImage(
             systemSymbolName: count > 0 ? "eye.fill" : "eye",
-            accessibilityDescription: "vigil sessions")
+            accessibilityDescription: "vigil")
         eye?.isTemplate = true
         button.image = eye
         button.title = count > 0 ? "\(count)" : ""
         button.setAccessibilityLabel(
-            count > 0 ? "vigil sessions, \(count) pending" : "vigil sessions")
+            count > 0 ? "vigil, \(count) need you" : "vigil")
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -119,7 +119,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         manager.reconcile()
 
         if manager.pendingCount > 0 {
-            let next = NSMenuItem(title: "Next (\(manager.pendingCount) pending)", action: #selector(nextSession(_:)), keyEquivalent: "")
+            let next = NSMenuItem(title: "Go to What Needs You (\(manager.pendingCount))", action: #selector(nextSession(_:)), keyEquivalent: "")
             next.target = self
             next.image = NSImage(systemSymbolName: "bell.badge", accessibilityDescription: nil)
             menu.addItem(next)
@@ -127,7 +127,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
 
         if manager.sessions.isEmpty {
-            let item = NSMenuItem(title: "No sessions", action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: "No workspaces", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
         }
@@ -137,8 +137,8 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             let verb: String
             switch place {
             case .windowed: verb = "Focus"
-            case .floating: verb = "Focus (in the Quick Terminal)"
-            case .background: verb = "Open (still running)"
+            case .floating: verb = "Focus (in the floating terminal)"
+            case .background: verb = "Open (running in the background)"
             }
 
             // A parent item with a submenu never fires its own action on click,
@@ -151,7 +151,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             let submenu = NSMenu()
             submenu.addItem(sessionItem(verb, #selector(openSession(_:)), session.name, "macwindow"))
             if place == .windowed {
-                submenu.addItem(sessionItem("Detach (keep running)", #selector(detachSession(_:)), session.name, "rectangle.portrait.and.arrow.right"))
+                submenu.addItem(sessionItem("Send to Background", #selector(detachSession(_:)), session.name, "rectangle.portrait.and.arrow.right"))
             }
             submenu.addItem(sessionItem("Rename…", #selector(renameSession(_:)), session.name, "pencil"))
             submenu.addItem(.separator())
@@ -161,13 +161,13 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        let create = NSMenuItem(title: "New Session", action: #selector(newSession(_:)), keyEquivalent: "")
+        let create = NSMenuItem(title: "New Workspace", action: #selector(newSession(_:)), keyEquivalent: "")
         create.target = self
         create.image = NSImage(systemSymbolName: "plus.rectangle", accessibilityDescription: nil)
         menu.addItem(create)
 
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit Ghostty (kill all sessions)", action: #selector(quitForReal(_:)), keyEquivalent: "")
+        let quit = NSMenuItem(title: "Quit and Kill Every Workspace", action: #selector(quitForReal(_:)), keyEquivalent: "")
         quit.target = self
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
         menu.addItem(quit)

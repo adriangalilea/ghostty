@@ -57,8 +57,8 @@ struct VigilWindowMark: View {
                 on: pinned,
                 color: .primary,
                 action: onTogglePin,
-                help: pinned ? "Floating above other windows. Click to drop it back."
-                             : "Float this window above the others.")
+                help: pinned ? "Kept on top of other windows. Click to stop."
+                             : "Keep this window on top of other windows.")
 
             if let onToggleDock {
                 roundButton(
@@ -79,7 +79,7 @@ struct VigilWindowMark: View {
 
     private var identityHelp: String {
         let name = label.map { "“\($0)”. " } ?? ""
-        return "\(name)Edit this session's emoji and name."
+        return "\(name)Edit this workspace's emoji and name."
     }
 
     /// A subtle round button, glyph always in its colour on a faint disc:

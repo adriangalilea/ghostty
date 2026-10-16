@@ -388,8 +388,8 @@ struct VigilSidebarToggle: View {
             }
             .buttonStyle(.plain)
             .help(on
-                ? "Hide the session sidebar (⌘⇧B focuses it for keyboard navigation)."
-                : "Show the session sidebar: every session, its tabs, its panes, what they run. ⌘⇧B summons it with the keyboard; arrows move, enter lands, esc returns.")
+                ? "Hide the sidebar (⌘⇧B focuses it for keyboard navigation)."
+                : "Show the sidebar: every workspace, its tabs, its panes, what they run. ⌘⇧B summons it with the keyboard; arrows move, enter lands, esc returns.")
             Button { sizing.toggle() } label: {
                 Image(systemName: "textformat.size")
                     .font(.system(size: 12))

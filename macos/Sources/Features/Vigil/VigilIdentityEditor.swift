@@ -119,7 +119,7 @@ enum VigilIdentity {
         let manager = VigilSessionManager.shared
         guard let session = manager.sessions[name] else { return }
         editModal(
-            title: "Session identity",
+            title: "Workspace identity",
             label: session.label,
             emoji: session.emoji,
             context: manager.identityContext(name: name)
@@ -206,7 +206,7 @@ struct VigilIdentityEditor: View {
                                 .allowsHitTesting(false)
                         }
                     }
-                    .help("Emoji for this session. Click, then pick from the palette or type.")
+                    .help("Emoji for this workspace. Click, then pick from the palette or type.")
 
                 TextField("name", text: $draft.label)
                     .textFieldStyle(.plain)
@@ -230,7 +230,7 @@ struct VigilIdentityEditor: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(thinking)
-                    .help("Let the on-device model propose an emoji + name from what this session is doing. Click again for a different one.")
+                    .help("Let the on-device model propose an emoji + name from what this workspace is doing. Click again for a different one.")
                 }
             }
 

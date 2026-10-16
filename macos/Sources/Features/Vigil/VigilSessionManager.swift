@@ -4009,7 +4009,7 @@ class VigilSessionManager {
         guard let split = VigilRemote.split(composite) else {
             guard let session = sessions[composite],
                   let anchor = (view ?? controller.focusedSurface)?.vigilAttachId else {
-                remoteCommandError(controller, "The mirrored session is unavailable.")
+                remoteCommandError(controller, "That workspace can't be reached right now.")
                 return true
             }
             let request = VigilSessionControl.Request(version: 1, id: UUID(), issuedAt: Date().timeIntervalSince1970,
@@ -4034,11 +4034,11 @@ class VigilSessionManager {
             return true
         }
         guard !remoteEdits.contains(composite) else {
-            remoteCommandError(controller, "A session edit is still awaiting its home receipt.")
+            remoteCommandError(controller, "The last change to this workspace hasn't been confirmed by its Mac yet.")
             return true
         }
         guard let revision = session.layoutRevision else {
-            remoteCommandError(controller, "The home app has not published a versioned session layout. Update and relaunch it before editing.")
+            remoteCommandError(controller, "vigil on that Mac is too old to edit this workspace from here. Update it and relaunch.")
             return true
         }
         let request = VigilSessionControl.Request(version: 1, id: UUID(), issuedAt: Date().timeIntervalSince1970,
@@ -4068,7 +4068,7 @@ class VigilSessionManager {
             } catch {
                 vlog("remote command: \(request.id) outcome unknown: \(error.localizedDescription)")
                 if let controller {
-                    remoteCommandError(controller, "\(error.localizedDescription)\nCommand \(request.id). Inspect the remote session before repeating the action.")
+                    remoteCommandError(controller, "\(error.localizedDescription)\nCommand \(request.id). Check the workspace on its Mac before trying again.")
                 }
             }
         }
@@ -4077,7 +4077,7 @@ class VigilSessionManager {
 
     private func remoteCommandError(_ controller: TerminalController, _ message: String) {
         let alert = NSAlert()
-        alert.messageText = "Session edit failed"
+        alert.messageText = "The workspace was not changed"
         alert.informativeText = message
         if let window = controller.window { alert.beginSheetModal(for: window) }
     }
@@ -4101,7 +4101,7 @@ class VigilSessionManager {
                 .compactMap { $0 }.joined(separator: " ")
             let mac = remote.flatMap { VigilRemote.shared.host($0.device)?.name } ?? "its Mac"
             let what = operation == "close_tab" ? "tab" : "pane"
-            controller.confirmClose(messageText: "Close this \(what) of \(label.isEmpty ? "the session" : label)?",
+            controller.confirmClose(messageText: "Close this \(what) of \(label.isEmpty ? "the workspace" : label)?",
                 informativeText: "It closes on \(mac), in every window showing it. For \(Int(Self.killGrace / 60)) minutes it can come back on \(mac) with ⌘⇧T.",
                 completion: proceed)
         } else { proceed() }
@@ -4171,20 +4171,20 @@ class VigilSessionManager {
         typealias Reply = VigilSessionControl.Reply
         refreshSessionRevisions()
         guard var session = sessions[request.session] else {
-            return .failure(request, "not_found", "The home session no longer exists.")
+            return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
         }
         if request.operation == "describe" {
             return Reply(id: request.id, ok: true, code: "snapshot", message: "Home session topology revision.",
                          revision: session.layoutRevision, session: request.session)
         }
         guard session.layoutRevision == request.revision else {
-            return .failure(request, "conflict", "The session layout changed. Review the current layout and try again.")
+            return .failure(request, "conflict", "The workspace changed in the meantime. Look at it again and retry.")
         }
         guard let index = session.tabs.firstIndex(where: { $0.paneIds.contains(request.anchor) }) else {
-            return .failure(request, "not_found", "The target pane no longer belongs to this session.")
+            return .failure(request, "not_found", "That pane is no longer in this workspace.")
         }
         guard session.float == nil else {
-            return .failure(request, "presentation_busy", "Return the home session from its floating panel before editing its structure.")
+            return .failure(request, "presentation_busy", "This workspace is in the floating terminal on its Mac. Put it back before changing its tabs or splits.")
         }
         var tab = session.tabs[index]
         var created: Registry.Pane?
@@ -4197,13 +4197,13 @@ class VigilSessionManager {
             guard let created = sessions[name], let pane = created.tabs.first?.panes.first,
                   startDaemon(pane: pane, session: name) else {
                 persist()
-                return .failure(request, "spawn_failed", "The home session was created but its daemon did not start.")
+                return .failure(request, "spawn_failed", "The workspace was created on its Mac, but its terminal did not start.")
             }
             persist()
             guard let data = try? Data(contentsOf: persistURL),
                   let saved = try? JSONDecoder().decode([Registry.Session].self, from: data),
                   saved.contains(where: { $0.name == name && $0.tabs?.first?.panes.first?.id == pane.id }) else {
-                return .failure(request, "commit_failed", "The new home session could not be verified on disk.")
+                return .failure(request, "commit_failed", "The new workspace could not be confirmed on its Mac.")
             }
             return Reply(id: request.id, ok: true, code: "committed", message: "Session created on its home Mac.",
                          revision: sessions[name]?.layoutRevision, pane: pane.id, session: name)
@@ -4220,7 +4220,7 @@ class VigilSessionManager {
             let pane = Registry.Pane(id: id, cwd: liveView(attachId: anchor.id)?.pwd ?? anchor.cwd)
             guard startDaemon(pane: pane, session: request.session) else {
                 persist() // the allocated identity is never recycled
-                return .failure(request, "spawn_failed", "The home daemon could not start; see the home vigil.log.")
+                return .failure(request, "spawn_failed", "The terminal could not start on its Mac; its vigil.log says why.")
             }
             created = pane
             session.paneSeq = sessions[request.session]!.paneSeq
@@ -4283,7 +4283,7 @@ class VigilSessionManager {
                 session.tabs.remove(at: index)
             } else { session.tabs[index] = tab }
         default:
-            return .failure(request, "unsupported_operation", "This home app does not support that session operation.")
+            return .failure(request, "unsupported_operation", "vigil on that Mac can't do this; update it.")
         }
 
         // Invalidate warm caches; live home views are reconciled by identity
@@ -4324,7 +4324,7 @@ class VigilSessionManager {
               let saved = try? JSONDecoder().decode([Registry.Session].self, from: data),
               VigilSessionControl.revision(saved.first { $0.name == request.session && $0.buriedUntil == nil }?.tabs ?? [])
                 == VigilSessionControl.revision(session.tabs) else {
-            return .failure(request, "commit_failed", "The home registry could not be verified. Inspect the session before retrying.")
+            return .failure(request, "commit_failed", "The change could not be confirmed on its Mac. Check the workspace there before retrying.")
         }
         vlog("session command: \(request.id) \(request.operation) \(request.session)/\(request.anchor) committed\(created.map { " -> \($0.id)" } ?? "")")
         return Reply(id: request.id, ok: true, code: "committed", message: "Session edit committed.",
@@ -4567,7 +4567,7 @@ class VigilSessionManager {
             ) { manager in
                 manager.exhume(name)
             }
-            appDelegate.undoManager.setActionName("Kill Session")
+            appDelegate.undoManager.setActionName("Kill Workspace")
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.killGrace + 1) { [weak self] in
