@@ -20,7 +20,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
     let runtime = EndpointRuntime(
         .init(
             tetherApp: VigilWire.app, keyGroup: "G387QW47LV.com.adriangalilea.vigil.keys",
-            sealGroup: "G387QW47LV.com.adriangalilea.vigil.notify",
+            sealGroup: "G387QW47LV.com.adriangalilea.vigil.notify", activityGroup: nil,
             name: "vigil on \(UIDevice.current.name)", presents: .owned))
 
     /// Starts (or, back on screen, resumes) the app's tether node: it joins
@@ -88,7 +88,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
     func pushToken(_ token: Data) {
         let hex = token.map { String(format: "%02x", $0) }.joined()
         do {
-            try runtime.setPush(token: hex, environment: Self.apns, activityToken: nil)
+            try runtime.setPush(token: hex, environment: Self.apns, activityStart: nil)
         } catch {
             authzLog.notice("authz: push route: \(String(describing: error), privacy: .public)")
         }

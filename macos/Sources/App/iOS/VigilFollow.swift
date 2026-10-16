@@ -83,7 +83,7 @@ enum VigilFollow {
     /// it seals their details to.
     private static func tell(_ attributes: SessionActivity, token: String, following: Bool) async {
         do {
-            let follow = Follow(scope: attributes.scope, token: token, environment: VigilAuthz.apns.rawValue, key: try ActivityKey.publicKey())
+            let follow = Follow(scope: attributes.scope, token: token, environment: VigilAuthz.apns.rawValue, key: try SessionActivity.followKey())
             guard let node = VigilAuthz.shared.runtime.node else { throw WireError.refused("vigil is not connected to tether yet") }
             _ = try await VigilLink.call(node, device: attributes.device, following ? .follow(follow) : .unfollow(follow))
             VigilPhone.shared.log("follow: \(attributes.mac) \(following ? "updates" : "no longer updates") \(name(attributes))")
