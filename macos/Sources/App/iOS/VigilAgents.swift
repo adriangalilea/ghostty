@@ -112,9 +112,25 @@ enum VigilAgents {
         }
     }
 
-    /// Tells a Mac where this phone's activity is reached (only when that
-    /// changed since it was last told).
+    /// Each Mac's tellings, one at a time in order: two sent together (the
+    /// one before iOS gave the start token, the one after) could land in
+    /// either order, the older overwriting the newer at the Mac.
+    private static var chains: [String: Task<Void, Never>] = [:]
+
+    /// Tells a Mac where this phone's activity is reached, after whatever
+    /// it was told before, from the facts as they are when it goes (only
+    /// when that changed since it was last told).
     private static func tell(_ mac: String) async {
+        let previous = chains[mac]
+        let telling = Task { @MainActor in
+            await previous?.value
+            await send(mac)
+        }
+        chains[mac] = telling
+        await telling.value
+    }
+
+    private static func send(_ mac: String) async {
         let route: AgentsRoute
         do {
             route = AgentsRoute(start: startToken, token: tokens[mac], environment: VigilAuthz.apns.rawValue, key: try AgentsActivity.routeKey())

@@ -72,8 +72,9 @@ struct AgentsActivityWidget: Widget {
                     Badge(emoji: shown.top?.emoji, state: state, size: 40).padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    if let top = shown.top {
-                        Clock(row: top).font(.title3.weight(.semibold)).padding(.trailing, 4)
+                    if shown.count > 1 {
+                        Text("\(shown.count)").font(.title3.weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(.secondary).padding(.trailing, 6)
                     }
                 }
                 DynamicIslandExpandedRegion(.center) {
@@ -121,7 +122,6 @@ private struct LockScreen: View {
                         Subtitle(row: top, mac: shown.note?.mac).font(.caption)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    Clock(row: top).font(.title2.weight(.semibold))
                 }
                 Needs(row: top, mac: shown.mac, compact: false)
             } else {
@@ -340,9 +340,9 @@ private struct Badge: View {
     }
 }
 
-/// "Waiting for you · rebuild-authz-on-tether · mbp-m5-max": the state in
-/// its color (a turn that ended on a question says so), the conversation's
-/// name, the Mac; a followed row wears a pin.
+/// "Working 1:04 · rebuild-authz-on-tether · mbp-m5-max": the state in its
+/// color with how long it has held (`Clock`: a sentence, never a bare
+/// number), the conversation's name, the Mac; a followed row wears a pin.
 private struct Subtitle: View {
     let row: Agents.Row
     let mac: String?
@@ -350,37 +350,40 @@ private struct Subtitle: View {
     var body: some View {
         let words = row.state == .blocked && row.flavor == .ask ? "Asked you" : row.state.words
         let what = row.detail?.name ?? row.detail?.agent.map(\.capitalized)
-        ((row.pinned ? Text(Image(systemName: "pin.fill")) + Text(" ") : Text("")).foregroundStyle(.secondary)
-            + Text(words).foregroundStyle(row.state.tint).fontWeight(.semibold)
-            + Text([what, mac].compactMap { $0 }.map { "  ·  \($0)" }.joined()).foregroundStyle(.secondary))
-            .lineLimit(1)
+        HStack(spacing: 4) {
+            if row.pinned { Image(systemName: "pin.fill").foregroundStyle(.secondary) }
+            Text(words).foregroundStyle(row.state.tint).fontWeight(.semibold)
+            Clock(row: row).fontWeight(.semibold)
+            Text([what, mac].compactMap { $0 }.map { "·  \($0)" }.joined(separator: "  ")).foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .lineLimit(1)
     }
 }
 
-/// How long: the turn's own clock while it works (the phone ticks it, no
-/// push needed), else since the state began.
+/// How long the state has held: working, this turn (since your last
+/// message to it; the phone ticks it, no push needed); waiting, how long
+/// it has waited for you; done, since it finished.
 ///
 /// A timer text is filled in by the system's renderer after layout, so it
 /// has no natural width to lay out with: asked for one (`fixedSize`), the
 /// whole Lock Screen view laid out at a NaN width and drew black
 /// (2026-10-16, the renderer's display list read `frame (nan …)`). The
-/// space is a template's ("00:00:00" in the same font, never shown), the
-/// timer draws over it. Its range ends where the activity can (ActivityKit
-/// keeps one 8 hours active and 4 more on the Lock Screen).
+/// space is a template's ("0:00:00" in the same font, never shown), the
+/// timer draws over it from its leading edge, so the line never moves as
+/// it ticks. Its range ends where the activity can (ActivityKit keeps one
+/// 8 hours active and 4 more on the Lock Screen).
 private struct Clock: View {
     let row: Agents.Row
-    /// The widest the clock may draw here (the compact island: "00:00").
-    var template = "00:00:00"
     static let lifetime: TimeInterval = 12 * 3600
     var body: some View {
         let since = Date(timeIntervalSince1970: row.state == .working ? row.detail?.turn ?? row.since : row.since)
-        Text(template)
+        Text("0:00:00")
             .monospacedDigit()
             .hidden()
-            .overlay(alignment: .trailing) {
+            .overlay(alignment: .leading) {
                 Text(timerInterval: since...since.addingTimeInterval(Self.lifetime), countsDown: false)
                     .monospacedDigit()
-                    .multilineTextAlignment(.trailing)
                     .foregroundStyle(row.state.tint)
             }
     }
