@@ -74,6 +74,13 @@ sock_fd: posix.fd_t = -1,
 /// Write side: the same socket (a given fd may be one too).
 write_fd: posix.fd_t = -1,
 
+/// A hub dial waiting for its answer (a remote pane being dialed again):
+/// teardown shuts it down so the read thread it blocks returns at once.
+/// Set and cleared under the mutex, cleared before the descriptor closes,
+/// so a shutdown never reaches a reused number.
+dialing_mutex: std.Thread.Mutex = .{},
+dialing_fd: posix.fd_t = -1,
+
 /// Cached tty name of the daemon's pty (from its pidfile).
 cached_tty: ?[:0]const u8 = null,
 
@@ -229,6 +236,12 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
         try std.fmt.bufPrint(&path_buf, "{s}/.local/state/vigil/agent/hub.sock", .{posix.getenv("HOME") orelse return error.NoHome});
     const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
     errdefer posix.close(fd);
+    // Runs before the errdefer close (defers unwind in reverse).
+    self.setDialing(fd);
+    defer self.setDialing(-1);
+    // Teardown marks the transport closed before it severs: seen here, it
+    // came before this dial was registered and would not cut it.
+    if (self.transport_state.load(.acquire) == 2) return error.Closing;
     _ = try posix.fcntl(fd, posix.F.SETFD, posix.FD_CLOEXEC);
     var addr: std.net.Address = try .initUnix(path);
     try posix.connect(fd, &addr.any, addr.getOsSockLen());
@@ -258,10 +271,19 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
     return fd;
 }
 
-/// Cut the stream so the reader sees EOF.
+fn setDialing(self: *Attach, fd: posix.fd_t) void {
+    self.dialing_mutex.lock();
+    defer self.dialing_mutex.unlock();
+    self.dialing_fd = fd;
+}
+
+/// Cut the stream so the reader sees EOF, and a hub dial in flight with it.
 fn sever(self: *Attach) void {
     self.setTransport(2);
     if (self.sock_fd >= 0) posix.shutdown(self.sock_fd, .both) catch {};
+    self.dialing_mutex.lock();
+    defer self.dialing_mutex.unlock();
+    if (self.dialing_fd >= 0) posix.shutdown(self.dialing_fd, .both) catch {};
 }
 
 /// Hello: who this client is, for the daemon's receipts.
@@ -888,9 +910,22 @@ fn restoreDaemons(self: *Attach) void {
 /// screen to a fresh client over a clear, so nothing else is owed); null
 /// when the end was deliberate, the teardown began, or the daemon never
 /// came back within the window.
+///
+/// A local pane's deliberate end is its spec gone. A remote pane's truth
+/// is its home Mac's directory, which this side does not read: when the
+/// pane really ends it leaves the directory and the app closes this view
+/// (teardown sets `closing`). Until then the stream is dialed again
+/// through the hub, whatever ended it (the Mac asleep, its hub restarted,
+/// this Mac's network), so a lost remote pane comes back by itself and
+/// never waits on a button.
 fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
-    if (!self.specExists()) return null;
-    log.warn("attach: {s} stream ended with its spec on disk; reconnecting", .{self.id});
+    if (self.given_fd != null) return null; // the embedder owns that transport
+    if (self.host == null and !self.specExists()) return null;
+    if (self.host) |host| {
+        log.warn("attach: remote {s} on {s} stream ended; dialing it again through the hub", .{ self.id, host });
+    } else {
+        log.warn("attach: {s} stream ended with its spec on disk; reconnecting", .{self.id});
+    }
     self.setTransport(0);
     // Retire the writer (it may have severed itself on the dead socket
     // already) before the descriptor closes; a new one is born per socket.
@@ -909,9 +944,13 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
 
     const began = std.time.milliTimestamp();
     var restored = false;
-    while (std.time.milliTimestamp() - began < 30_000) {
+    // Remote: a pause that grows to 2 s between dials (a dial to a Mac out
+    // of reach itself takes up to tether's 10 s to say so).
+    var pause_ms: u64 = 200;
+    while (self.host != null or std.time.milliTimestamp() - began < 30_000) {
         if (closing.load(.acquire)) return null;
-        if (self.connectSock()) |nfd| {
+        const dialed = if (self.host) |host| self.connectHub(host) else self.connectSock();
+        if (dialed) |nfd| {
             self.write_mutex.lock();
             self.write_closed = false;
             self.write_buf.clearRetainingCapacity();
@@ -926,14 +965,21 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
             self.write_thread = t;
             self.sock_fd = nfd;
             self.write_fd = nfd;
-            self.sendHello("surface");
+            self.sendHello(if (self.host != null) "remote" else "surface");
             self.sendResize();
             self.setTransport(1);
             // warn, not info: the receipt must reach the unified log in a
             // release build; "I saw no overlay" is not a fact.
             log.warn("attach: {s} reattached in place after {d}ms", .{ self.id, std.time.milliTimestamp() - began });
             return nfd;
-        } else |_| {}
+        } else |err| if (self.host != null) {
+            log.info("attach: remote {s} not reached yet ({}); again in {d}ms", .{ self.id, err, pause_ms });
+            // In slices: teardown joins this thread and must not wait on it.
+            var slept: u64 = 0;
+            while (slept < pause_ms and !closing.load(.acquire)) : (slept += 50) std.Thread.sleep(50 * std.time.ns_per_ms);
+            pause_ms = @min(pause_ms * 2, 2_000);
+            continue;
+        }
         if (!self.specExists()) {
             log.info("attach: {s} spec gone while reconnecting; a deliberate end", .{self.id});
             return null;
