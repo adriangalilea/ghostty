@@ -438,7 +438,9 @@ class VigilWorkspaces {
     /// duplicate activates the holder and exits before touching anything.
     private func acquireInstanceLock() {
         let dir = VigilPaths.root
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        do { try VigilPaths.secureRoot() } catch {
+            lifecycleLog.error("state folder not made private", ["path": dir.path, "err": error])
+        }
         // O_CLOEXEC or every spawned vigild inherits the fd and HOLDS THE
         // FLOCK after the app dies, locking the app out of its own lock:
         // flock rides the file description, which fork shares and only
