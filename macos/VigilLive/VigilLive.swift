@@ -208,9 +208,9 @@ private struct Needs: View {
                     }
                     HStack(spacing: 8) {
                         if let answers = question.answers {
-                            AnswerButton(title: answers.denyLabel, symbol: AnswerLook.symbol(.reject), tint: AnswerLook.refuse,
+                            AnswerButton(title: answers.denyLabel, symbol: AnswerLook.symbol(.no), tint: AnswerLook.refuse,
                                          intent: AnswerIntent(device: mac, request: question.request, action: answers.deny, shown: question.title))
-                            AnswerButton(title: answers.allowLabel, symbol: AnswerLook.symbol(.approveOnce), tint: AnswerLook.approve,
+                            AnswerButton(title: answers.allowLabel, symbol: AnswerLook.symbol(.yes), tint: AnswerLook.approve,
                                          intent: AnswerIntent(device: mac, request: question.request, action: answers.allow, shown: question.title))
                         } else {
                             Pill(title: "Answer in vigil", symbol: "arrow.up.forward.app", intent: OpenPaneIntent(pane: row.pane, keyboard: false), wide: true)
