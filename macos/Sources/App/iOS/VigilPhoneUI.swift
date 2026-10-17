@@ -1,4 +1,5 @@
 import AuthzEndpoint
+import AuthzUI
 import SwiftUI
 import GhosttyKit
 import VigilActivity
@@ -99,8 +100,8 @@ struct HomeView: View {
 }
 
 /// What was closed on any Mac and still waits out its grace, as on the
-/// Mac's sidebar: tap a row to bring it back where it was, × to let it
-/// die now. The countdown runs on its own (no timer of ours).
+/// Mac's sidebar: tap a row to bring it back where it was, swipe it away
+/// to let it die now. The countdown runs on its own (no timer of ours).
 struct BurialTray: View {
     @EnvironmentObject private var model: VigilPhone
     var body: some View {
@@ -121,14 +122,11 @@ struct BurialTray: View {
                     Text(timerInterval: Date()...burial.until, countsDown: true)
                         .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                         .frame(width: 44, alignment: .trailing)
-                    Button { model.settle(burial, undo: false) } label: {
-                        Image(systemName: "xmark").font(.caption2.weight(.bold)).frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
-                    .accessibilityLabel("End it now")
                 }
                 .padding(.vertical, 4)
                 .contentShape(Rectangle())
+                // Swiped away = ended now, the way a notification is cleared.
+                .swipeToDismiss { model.settle(burial, undo: false) }
                 .onTapGesture { model.settle(burial, undo: true) }
                 .accessibilityAddTraits(.isButton)
                 .accessibilityHint("Brings it back where it was")
