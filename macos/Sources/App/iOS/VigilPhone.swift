@@ -1,6 +1,6 @@
 import Foundation
 import GhosttyKit
-import OSLog
+import Log
 import TetherKit
 import VigilActivity
 import VigilLink
@@ -13,39 +13,6 @@ final class VigilReceipts: ObservableObject {
     func append(_ line: String) {
         lines.append(line)
         if lines.count > 400 { lines.removeFirst(lines.count - 400) }
-    }
-}
-
-/// The receipts on disk, appended off the main thread in order: a megabyte,
-/// then the file becomes `.1` (the one before is dropped) and starts over.
-final class ReceiptFile: @unchecked Sendable {
-    static let shared = ReceiptFile()
-    private let queue = DispatchQueue(label: "vigil.receipts")
-    private let url: URL
-    private var handle: FileHandle?
-
-    private init() {
-        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0].appendingPathComponent("Logs")
-        try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
-        url = logs.appendingPathComponent("vigil-receipts.log")
-    }
-
-    func append(_ line: String) {
-        queue.async { [self] in
-            if handle == nil {
-                if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
-                handle = try? FileHandle(forWritingTo: url)
-                _ = try? handle?.seekToEnd()
-            }
-            handle?.write(Data(line.utf8))
-            if let size = try? handle?.offset(), size > 1_000_000 {
-                try? handle?.close()
-                handle = nil
-                let previous = url.appendingPathExtension("1")
-                try? FileManager.default.removeItem(at: previous)
-                try? FileManager.default.moveItem(at: url, to: previous)
-            }
-        }
     }
 }
 
@@ -69,7 +36,7 @@ struct PaneRef: Hashable {
 @MainActor
 final class VigilPhone: ObservableObject {
     static let shared = VigilPhone()
-    private static let logger = Logger(subsystem: "com.adriangalilea.vigil", category: "phone")
+    private static let phoneLog = Log.log.scope("phone")
 
     /// A Mac: a paired device running vigil, named by its tether root.
     struct Host: Identifiable, Hashable {
@@ -174,18 +141,15 @@ final class VigilPhone: ObservableObject {
         Ghostty.SurfaceView.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
     }
 
-    /// Every receipt goes four ways: the in-app list, os_log (Console /
-    /// `log stream`), stderr (`devicectl … launch --console` over the
-    /// cable), and a file in the app's container that outlives the process
-    /// (`Library/Logs/vigil-receipts.log`, the previous megabyte kept as
-    /// `.1`; `devicectl device copy from --domain-type appDataContainer`).
-    /// Nothing happens in this app without a line here.
+    /// Every receipt is a `Log` event (scope `phone`): the unified log,
+    /// stderr (`devicectl … launch --console` over the cable) and the app's
+    /// event file (`Library/Logs/vigil-phone.jsonl`, `EventFile`, which
+    /// `authz trace` reads), plus the in-app list. Nothing happens in this
+    /// app without a line here.
     func log(_ line: String) {
         let stamp = Date().formatted(date: .omitted, time: .standard)
-        Self.logger.notice("\(line, privacy: .public)")
-        FileHandle.standardError.write(Data("vigil: \(line)\n".utf8))
+        Self.phoneLog.info(line)
         receipts.append("\(stamp) \(line)")
-        ReceiptFile.shared.append("\(Date().ISO8601Format()) \(line)\n")
     }
 
     // MARK: Macs (paired devices serving vigil/1)

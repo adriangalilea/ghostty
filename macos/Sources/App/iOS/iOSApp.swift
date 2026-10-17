@@ -1,3 +1,4 @@
+import AuthzEndpoint
 import SwiftUI
 import GhosttyKit
 
@@ -11,6 +12,8 @@ struct VigilPhoneApp: App {
     @StateObject private var ghostty: Ghostty.App
 
     init() {
+        // First: every event from here on is kept on the phone too.
+        EventFile.start(service: "vigil-phone")
         if ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) != GHOSTTY_SUCCESS {
             preconditionFailure("Initialize ghostty backend failed")
         }
