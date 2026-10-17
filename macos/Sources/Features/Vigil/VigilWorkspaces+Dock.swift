@@ -61,7 +61,7 @@ extension VigilWorkspaces {
             dock.collapsed = false
             workspaces[name]!.tabs[index].dock = dock
         } else {
-            vlog("!! dock: '\(name)' tab \(tabIds) not in its registry; tenant '\(id)' unregistered")
+            dockLog.error("tab not in its registry; tenant unregistered", ["workspace": name, "tab": tabIds, "pane": id])
         }
         VigilBars.shared.sync(controller)
         persist()

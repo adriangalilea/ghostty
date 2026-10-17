@@ -4,53 +4,40 @@ import Listen
 import Say
 import SwiftUI
 import GhosttyKit
+import Log
 import VigilHarness
 import VigilWire
 
+// The app's record: every event is one line of Apple's unified log
+// (subsystem the bundle id, category the scope), written synchronously on
+// the calling thread, so a stalled or dying main still leaves its line.
+// Read it with `mise run log`. One scope per area:
+let lifecycleLog = Log.log.scope("lifecycle")
+let registryLog = Log.log.scope("registry")
+let moveLog = Log.log.scope("move")
+let graveyardLog = Log.log.scope("graveyard")
+let daemonLog = Log.log.scope("daemon")
+let viewportLog = Log.log.scope("viewport")
+let sizeLog = Log.log.scope("size")
+let sidebarLog = Log.log.scope("sidebar")
+let overviewLog = Log.log.scope("overview")
+let attentionLog = Log.log.scope("attention")
+let summonLog = Log.log.scope("summon")
+let followLog = Log.log.scope("follow")
+let dockLog = Log.log.scope("dock")
+let sessionLog = Log.log.scope("session")
+let remoteLog = Log.log.scope("remote")
+let handoffLog = Log.log.scope("handoff")
+let authzLog = Log.log.scope("authz")
+let factsLog = Log.log.scope("facts")
+let voiceLog = Log.log.scope("voice")
+let cortexLog = Log.log.scope("cortex")
+let sayLog = Log.log.scope("say")
+let watchdogLog = Log.log.scope("watchdog")
+let invariantsLog = Log.log.scope("invariants")
+
 extension VigilWorkspaces {
     // MARK: Instrumentation
-
-    /// Append-only lifecycle trace at vigil.log in vigil's folder. Every
-    /// session transition is recorded so an impossible state is caught the
-    /// moment it appears instead of being guessed at from a screenshot.
-    /// Dev builds only: a public (Release) build writes nothing to disk.
-    private nonisolated static let vlogQueue = DispatchQueue(label: "vigil.log", qos: .utility)
-    func vlog(_ msg: String) { Self.vlogQueue.async { Self.vlogSync(msg) } }
-
-    /// The append itself, callable from ANY thread with no hop: the
-    /// watchdog's stall line and the uncaught-exception handler's last
-    /// words must land while the process is still alive, and a main-actor
-    /// hop from a dying or stalled main never runs.
-    nonisolated static func vlogSync(_ msg: String) {
-        #if DEBUG
-        // LOCAL wall-clock time: the reader is a human cross-referencing
-        // "what did I just hear" against the log; Date()'s UTC description
-        // cost a 2h mental offset on every receipt read.
-        let stamp = vlogStamp.string(from: Date())
-        let line = "\(stamp) \(msg)\n"
-        // Bounded like every append-only log: past 16 MB the file becomes
-        // vigil.1.log (one generation) and a fresh one opens.
-        let path = VigilPaths.root.appendingPathComponent("vigil.log").path
-        var fd = Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
-        var info = stat()
-        if fd >= 0, fstat(fd, &info) == 0, info.st_size > 16 << 20 {
-            close(fd)
-            _ = Darwin.rename(path, VigilPaths.root.appendingPathComponent("vigil.1.log").path)
-            fd = Darwin.open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o600)
-        }
-        if fd >= 0 {
-            defer { close(fd) }
-            let data = Data(line.utf8)
-            data.withUnsafeBytes { _ = Darwin.write(fd, $0.baseAddress, $0.count) }
-        }
-        #endif
-    }
-
-    private static let vlogStamp: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
-        return f
-    }()
 
     /// Scream (loudly, in the log) when a session is in a state that must never
     /// exist, so the impossible state is caught the moment it appears instead
@@ -64,10 +51,10 @@ extension VigilWorkspaces {
         for (name, s) in workspaces {
             let shown = Set(members(of: name).flatMap { $0.surfaceTree.map(ObjectIdentifier.init) })
             for runtime in s.held where runtime.tree.contains(where: { shown.contains(ObjectIdentifier($0)) }) {
-                vlog("!! IMPOSSIBLE [\(site)]: '\(name)' warm tab \(runtime.tree.compactMap(\.vigilAttachId)) is also on screen")
+                invariantsLog.error("warm tab also on screen", ["site": site, "workspace": name, "panes": runtime.tree.compactMap(\.vigilAttachId)])
             }
             if s.float != nil, !s.held.isEmpty {
-                vlog("!! IMPOSSIBLE [\(site)]: '\(name)' floating with \(s.held.count) held runtimes")
+                invariantsLog.error("floating with held runtimes", ["site": site, "workspace": name, "held": s.held.count])
             }
         }
         // Every attach surface alive in the process must be REGISTERED (a
@@ -83,7 +70,7 @@ extension VigilWorkspaces {
         // mount (one leak printed 6,000 times buried every other alarm).
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects where !view.vigilMirror && view.surface != nil {
             guard let id = view.vigilAttachId, !owned.contains(id), reportedLeaks.insert(id).inserted else { continue }
-            vlog("!! IMPOSSIBLE [\(site)]: surface for '\(id)' is \(view.window == nil ? "windowless (LEAKED)" : "live") but registered NOWHERE")
+            invariantsLog.error("surface registered nowhere", ["site": site, "pane": id, "leaked": view.window == nil])
         }
         // Dead windows must actually die: a closed terminal window that
         // stays resident keeps its titlebar accessories, tab bar and
@@ -95,7 +82,7 @@ extension VigilWorkspaces {
             $0.window.map { $0.isVisible || $0.isMiniaturized } ?? false
         }.count
         if resident > max(20, visible * 4) {
-            vlog("!! IMPOSSIBLE [\(site)]: \(resident) TerminalControllers resident for \(visible) visible windows (window leak)")
+            invariantsLog.error("window leak", ["site": site, "resident": resident, "visible": visible])
         }
         // One daemon = ONE live pane: twin surfaces on one socket replay
         // interleaved frames into garbage (the duplicated-lazygit
@@ -111,7 +98,7 @@ extension VigilWorkspaces {
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects where !view.vigilMirror {
             guard let id = view.vigilAttachId else { continue }
             if !seenIds.insert(id).inserted {
-                vlog("!! IMPOSSIBLE [\(site)]: TWO surfaces attached to '\(id)' (twin clients on one daemon)")
+                invariantsLog.error("twin surfaces on one daemon", ["site": site, "pane": id])
             }
         }
         #endif
@@ -123,7 +110,7 @@ extension VigilWorkspaces {
         reconcileTabs()
         for controller in TerminalController.all
         where controller.surfaceTree.isEmpty && controller.window?.isVisible == true {
-            NSLog("vigil: closing zombie window (empty surface tree)")
+            viewportLog.warn("zombie window closed: empty surface tree")
             controller.window?.close()
         }
     }

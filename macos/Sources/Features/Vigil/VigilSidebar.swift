@@ -246,8 +246,7 @@ final class VigilSidebarModel: ObservableObject {
         stormCount += 1
         stormSources[reason, default: 0] += 1
         if stormCount == 200 {
-            let sources = stormSources.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
-            VigilWorkspaces.shared.vlog("!! sidebar refresh storm: 200 calls in 10s (\(sources))")
+            sidebarLog.error("refresh storm", ["calls": 200, "window": Duration.seconds(10), "sources": stormSources])
         }
         guard immediate || now.timeIntervalSince(lastRefresh) >= 0.25 else {
             if !refreshQueued {
@@ -275,9 +274,9 @@ final class VigilSidebarModel: ObservableObject {
         }
         let snapT0 = Date()
         let fresh = VigilWorkspaces.shared.sidebarSnapshot()
-        let snapMs = Date().timeIntervalSince(snapT0) * 1000
-        if snapMs > 25 {
-            VigilWorkspaces.shared.vlog(String(format: "sidebar: snapshot took %.0fms", snapMs))
+        let snapshotTook = Duration.seconds(Date().timeIntervalSince(snapT0))
+        if snapshotTook > .milliseconds(25) {
+            sidebarLog.info("snapshot slow", ["took": snapshotTook])
         }
         if fresh != rows { rows = fresh }
         let freshBurials = VigilWorkspaces.shared.sidebarBurials()
@@ -485,10 +484,10 @@ final class VigilSidebarModel: ObservableObject {
         let manager = VigilWorkspaces.shared
         let occupant = hostController.map { manager.mirroredWorkspace(of: $0) ?? manager.workspaceName(of: $0) ?? "stray" } ?? "no window"
         guard let row = row(at: point) else {
-            manager.vlog(String(format: "sidebar: tap (%.0f,%.0f) hit no row (%d rows mapped) in window of '%@'", point.x, point.y, hitRows.count, occupant))
+            sidebarLog.info("tap hit no row", ["x": Int(point.x), "y": Int(point.y), "rows": hitRows.count, "window": occupant])
             return
         }
-        manager.vlog(String(format: "sidebar: tap (%.0f,%.0f) -> %@ in window of '%@'", point.x, point.y, row.id, occupant))
+        sidebarLog.info("tap", ["x": Int(point.x), "y": Int(point.y), "row": row.id, "window": occupant])
         clicked(row)
     }
 
@@ -644,7 +643,7 @@ final class VigilSidebarModel: ObservableObject {
         case .tab(let from, let anchor):
             endDrag()
             if let to = row?.sessionName {
-                manager.vlog("drop: tab \(anchor) of '\(from)' on \(row?.id ?? "?")")
+                sidebarLog.info("tab dropped", ["tab": anchor, "workspace": from, "row": row?.id])
                 if to == from {
                     let onto = row?.tabAnchor
                     DispatchQueue.main.async { manager.reorderTab(anchor: anchor, in: from, onto: onto) }
@@ -652,11 +651,11 @@ final class VigilSidebarModel: ObservableObject {
                     DispatchQueue.main.async { manager.moveTab(anchor: anchor, from: from, to: to) }
                 }
             } else {
-                manager.vlog("drop: tab \(anchor) of '\(from)' on no row - nothing to do")
+                sidebarLog.info("tab dropped on no row", ["tab": anchor, "workspace": from])
             }
         case .pane(let from, let paneId, let isDock):
             endDrag()
-            manager.vlog("drop: pane \(paneId) of '\(from)' on \(row?.id ?? "no row")")
+            sidebarLog.info("pane dropped", ["pane": paneId, "workspace": from, "row": row?.id])
             if let row, let session = row.sessionName {
                 if let tabAnchor = row.tabAnchor {
                     DispatchQueue.main.async {

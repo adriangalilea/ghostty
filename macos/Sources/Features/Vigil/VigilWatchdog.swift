@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import Log
 
 /// The main thread's own witness: two facts a log cannot otherwise state
 /// when a main-thread stall inside an audio-engine start ends in an
@@ -21,13 +22,13 @@ import Foundation
 /// 2. The uncaught-exception handler: AVFoundation, AppKit and friends
 ///    assert by NSException, which Swift cannot catch and breakpad does
 ///    not record (no signal, no minidump, no .ips). The last act of a
-///    dying process is one vigil.log line with name, reason and the stack.
+///    dying process is one `watchdog` event with name, reason and the
+///    stack, written synchronously from the handler's thread.
 ///
 /// `vigil.watchdog.drill` (defaults, bool): 5s after arming, main sleeps
 /// 1.2s inside `mark("watchdog drill")` - the proof that the backtrace
 /// names this file and the sleep, run once per build change.
 enum VigilWatchdog {
-    nonisolated(unsafe) static var trace: ((String) -> Void)?
     static let stallFloor: TimeInterval = 0.5
     static let stallDeep: TimeInterval = 3
 
@@ -56,11 +57,12 @@ enum VigilWatchdog {
         mainStackLow = high - UInt(pthread_get_stacksize_np(pthread_self()))
         // A C function pointer: fully qualified statics, no implicit self.
         NSSetUncaughtExceptionHandler { exception in
-            let stack = exception.callStackSymbols.prefix(24).joined(separator: "\n    ")
             let crumb = VigilWatchdog.lock.withLock { VigilWatchdog.crumb }
-            VigilWatchdog.trace?(
-                "!! UNCAUGHT NSException \(exception.name.rawValue): \(exception.reason ?? "no reason")"
-                    + " (main was: \(crumb))\n    \(stack)")
+            watchdogLog.error("uncaught exception", [
+                "name": exception.name.rawValue, "reason": exception.reason, "mark": crumb,
+                "stack": Array(exception.callStackSymbols.prefix(24)),
+            ])
+            flushLog()
         }
         let thread = Thread {
             while true {
@@ -70,21 +72,19 @@ enum VigilWatchdog {
                 var reported = false
                 var deepened = false
                 while answered.wait(timeout: .now() + .milliseconds(Int(stallFloor * 1000))) == .timedOut {
-                    let stalled = Date().timeIntervalSince(sent)
+                    let stalled = Duration.seconds(Date().timeIntervalSince(sent))
                     if !reported {
                         reported = true
-                        trace?(
-                            "!! main stalled >\(Int(stallFloor * 1000))ms during '\(lock.withLock { crumb })'\n    "
-                                + mainBacktrace().joined(separator: "\n    "))
-                    } else if !deepened, stalled >= stallDeep {
+                        watchdogLog.error("main stalled", [
+                            "stalled": stalled, "mark": lock.withLock { crumb }, "stack": mainBacktrace(),
+                        ])
+                    } else if !deepened, stalled >= .seconds(stallDeep) {
                         deepened = true
-                        trace?(
-                            String(format: "!! main still stalled at %.0fms\n    ", stalled * 1000)
-                                + mainBacktrace().joined(separator: "\n    "))
+                        watchdogLog.error("main still stalled", ["stalled": stalled, "stack": mainBacktrace()])
                     }
                 }
                 if reported {
-                    trace?(String(format: "main recovered after %.0fms", Date().timeIntervalSince(sent) * 1000))
+                    watchdogLog.warn("main recovered", ["stalled": Duration.seconds(Date().timeIntervalSince(sent))])
                 }
                 Thread.sleep(forTimeInterval: 0.25)
             }

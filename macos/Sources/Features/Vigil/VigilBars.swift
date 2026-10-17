@@ -58,7 +58,7 @@ final class VigilBars {
         // Any raw block in the current session vetoes the yank: it may be
         // an ask Adrian is mid-answering, or an approved tool mid-run.
         if let current, manager.asking(current) { return }
-        manager.vlog("auto-follow -> '\(target)'")
+        followLog.info("auto-follow", ["workspace": target])
         // Pane-precise: the asking claude's TAB mounts and the pane takes
         // focus (a session-level shapeshift mounted the anchored tab; the
         // ask in tab 4 arrived at tab 1's console).

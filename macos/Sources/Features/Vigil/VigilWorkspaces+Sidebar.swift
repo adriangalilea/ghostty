@@ -289,8 +289,8 @@ extension VigilWorkspaces {
                 landed = true
             }
         }
-        guard landed else { return vlog("!! priority: nothing owns \(pane); not stored") }
-        vlog("priority: \(pane) \(priority.rawValue)")
+        guard landed else { return sidebarLog.error("priority not stored: nothing owns the pane", ["pane": pane]) }
+        sidebarLog.info("priority set", ["pane": pane, "priority": priority.rawValue])
         persist()
     }
 
@@ -305,7 +305,7 @@ extension VigilWorkspaces {
 
     func watchPhoneFollows() {
         let fd = Darwin.open(VigilPaths.agent.path, O_EVTONLY)
-        guard fd >= 0 else { return vlog("!! follow: cannot watch \(VigilPaths.agent.path) (errno \(errno))") }
+        guard fd >= 0 else { return followLog.error("cannot watch the phones' follows", ["path": VigilPaths.agent.path, "errno": errno]) }
         let watch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .global(qos: .utility))
         let read: @Sendable () -> Void = {
             struct Phone: Decodable { var follows: [String] }
@@ -329,9 +329,9 @@ extension VigilWorkspaces {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let phones = try Local.Client(socket: VigilPaths.hub).follow(pane: pane, on)
-                Self.vlogSync("follow: \(pane) \(on ? "followed" : "no longer followed") on \(phones.joined(separator: ", "))")
+                followLog.info(on ? "followed" : "no longer followed", ["pane": pane, "phones": phones])
             } catch {
-                Self.vlogSync("!! follow: \(pane) not \(on ? "followed" : "unfollowed") on the phones (\(error))")
+                followLog.error(on ? "follow failed" : "unfollow failed", ["pane": pane, "err": error])
             }
         }
     }

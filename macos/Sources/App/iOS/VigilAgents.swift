@@ -37,7 +37,7 @@ enum VigilAgents {
         Task {
             for await data in Activity<AgentsActivity>.pushToStartTokenUpdates {
                 startToken = data.map { String(format: "%02x", $0) }.joined()
-                VigilPhone.shared.log("agents: push-to-start token \(startToken!.prefix(8))")
+                VigilPhone.shared.receipts.info("agents", "push-to-start token", ["token": String(startToken!.prefix(8))])
                 for mac in macs.keys { await deliver(mac) }
             }
         }
@@ -79,7 +79,9 @@ enum VigilAgents {
         let mac = activity.attributes.mac
         let others = Activity<AgentsActivity>.activities.filter { $0.attributes.mac == mac && $0.id != activity.id }
         for older in others where older.attributes.born <= activity.attributes.born {
-            VigilPhone.shared.log("agents: !! two activities for \(mac.prefix(10)); the older ends (\(older.id.prefix(8)))")
+            VigilPhone.shared.receipts.error("agents", "two activities for one mac; the older ends", [
+                "mac": String(mac.prefix(10)), "older": String(older.id.prefix(8)),
+            ])
             await older.end(nil, dismissalPolicy: .immediate)
         }
         guard observed.insert(activity.id).inserted else { return }
@@ -112,13 +114,15 @@ enum VigilAgents {
         var attempt = 1
         while !(await tell(mac)) {
             guard app.applicationState != .background || app.backgroundTimeRemaining > 4 else {
-                VigilPhone.shared.log("agents: \(mac.prefix(10)) not told what runs before iOS's time ran out; told at the next launch")
+                VigilPhone.shared.receipts.warn("agents", "not told before ios's time ran out; told at the next launch", [
+                    "mac": String(mac.prefix(10)), "attempts": attempt,
+                ])
                 break
             }
             attempt += 1
             try? await Task.sleep(for: .seconds(2))
         }
-        if attempt > 1 { VigilPhone.shared.log("agents: \(mac.prefix(10)) told after \(attempt) attempts") }
+        if attempt > 1 { VigilPhone.shared.receipts.info("agents", "told after retries", ["mac": String(mac.prefix(10)), "attempts": attempt]) }
         if background, app.applicationState == .background { await VigilAuthz.shared.runtime.leave() }
     }
 
@@ -148,7 +152,7 @@ enum VigilAgents {
                                 at: Date().timeIntervalSince1970, environment: VigilAuthz.apns.rawValue,
                                 key: try AgentsActivity.routeKey())
         } catch {
-            VigilPhone.shared.log("agents: no key to give \(mac.prefix(10)) (\(error))")
+            VigilPhone.shared.receipts.error("agents", "no key to give", ["mac": String(mac.prefix(10)), "err": error])
             return false
         }
         if !force, let last = told[mac], last.reaches(route) { return true }
@@ -170,7 +174,7 @@ enum VigilAgents {
             guard let node = VigilAuthz.shared.runtime.node else { throw WireError.refused("vigil is not connected to tether yet") }
             return try await VigilLink.call(node, device: mac, open)
         } catch {
-            VigilPhone.shared.log("agents: \(mac.prefix(10)) not told \(open.op.rawValue): \(VigilLink.reason(error))")
+            VigilPhone.shared.receipts.warn("agents", "not told", ["mac": String(mac.prefix(10)), "op": open.op.rawValue, "err": error])
             return nil
         }
     }

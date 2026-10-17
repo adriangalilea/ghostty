@@ -20,8 +20,6 @@ enum VigilCortex {
         let at: Date
     }
 
-    static var trace: ((String) -> Void)?
-
     private static var cache: [String: Read] = [:]
     private static var inFlight: Set<String> = []
 
@@ -88,7 +86,7 @@ enum VigilCortex {
         Task {
             defer { inFlight.remove(name) }
             guard let read = await read(context: context) else {
-                trace?("cortex: \(name) read failed (model unavailable?)")
+                cortexLog.warn("read failed", ["workspace": name])
                 return
             }
             let entry = Read(
@@ -96,7 +94,7 @@ enum VigilCortex {
                     .filter { !$0.isEmpty },
                 contextHash: hash, at: Date())
             cache[name] = entry
-            trace?("cortex: \(name) keywords=[\(entry.keywords.joined(separator: ", "))]")
+            cortexLog.info("read", ["workspace": name, "keywords": entry.keywords])
         }
     }
 }

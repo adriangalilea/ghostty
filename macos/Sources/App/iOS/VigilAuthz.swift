@@ -1,13 +1,10 @@
 import AuthzEndpoint
 import AuthzGlance
 import AuthzProtocol
-import OSLog
 import UIKit
 import UserNotifications
 import VigilActivity
 import VigilWire
-
-private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "authz")
 
 /// vigil for iPhone as an authz endpoint ("vigil on <phone>"), beside Authz
 /// for iPhone on the same device. It presents only what it owns: the
@@ -30,7 +27,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
     func start() {
         Task {
             await runtime.start()
-            authzLog.notice("authz: \(self.runtime.status, privacy: .public)")
+            VigilPhone.shared.receipts.info("authz", "runtime started", ["status": "\(self.runtime.status)"])
             if let node = runtime.node {
                 VigilPhone.shared.attach(node: node)
                 VigilPhone.shared.renewOwnership()
@@ -51,7 +48,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
     func leave() {
         Task {
             await runtime.leave()
-            VigilPhone.shared.log("scene: background, connections closed")
+            VigilPhone.shared.receipts.info("scene", "background; connections closed")
         }
     }
 
@@ -60,10 +57,12 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
     /// notification saying so).
     func answer(_ target: (id: String, home: String), action: String, shown: String) async {
         switch await runtime.answer(target, action: action) {
-        case .answered: VigilPhone.shared.log("authz: answered \(target.id.prefix(8)) (\(action))")
-        case .alreadySettled, .gone: VigilPhone.shared.log("authz: \(target.id.prefix(8)) no longer waits")
+        case .answered:
+            VigilPhone.shared.receipts.info("authz", "answered", ["request": String(target.id.prefix(8)), "action": action])
+        case .alreadySettled, .gone:
+            VigilPhone.shared.receipts.info("authz", "no longer waits", ["request": String(target.id.prefix(8))])
         case .failed(let why):
-            VigilPhone.shared.log("authz: \(target.id.prefix(8)) not answered: \(why)")
+            VigilPhone.shared.receipts.error("authz", "not answered", ["request": String(target.id.prefix(8)), "why": "\(why)"])
             let content = UNMutableNotificationContent()
             content.title = "Not answered"
             content.body = "\(why) Open vigil to answer it: \(shown)"
@@ -79,7 +78,9 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
         guard let home = runtime.macs.first(where: { $0.id == device }).flatMap({ mac -> String? in
             if case .answering(let home, _) = mac.state { home } else { nil }
         }) else {
-            return VigilPhone.shared.log("authz: \(request.prefix(8)) not answered: its Mac does not let vigil answer")
+            return VigilPhone.shared.receipts.warn("authz", "not answered: its mac does not let vigil answer", [
+                "request": String(request.prefix(8)),
+            ])
         }
         await answer((request, home), action: action, shown: shown)
     }
@@ -88,7 +89,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
     func open(_ target: (id: String, home: String)) async {
         await runtime.start()
         guard case .waiting(let snapshot)? = await runtime.readStanding(target, within: .seconds(5)) else {
-            return VigilPhone.shared.log("authz: \(target.id.prefix(8)) no longer waits")
+            return VigilPhone.shared.receipts.info("authz", "no longer waits", ["request": String(target.id.prefix(8))])
         }
         VigilPhone.shared.openPane(snapshot.request.context)
     }
@@ -103,7 +104,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
         do {
             try runtime.setPush(token: hex, environment: Self.apns, activityStart: nil)
         } catch {
-            authzLog.notice("authz: push route: \(String(describing: error), privacy: .public)")
+            VigilPhone.shared.receipts.error("authz", "push route not set", ["err": error])
         }
     }
 }
@@ -128,7 +129,7 @@ final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        authzLog.notice("authz: APNs registration failed: \(String(describing: error), privacy: .public)")
+        Task { @MainActor in VigilPhone.shared.receipts.error("authz", "apns registration failed", ["err": error]) }
     }
 
     /// A question answered, withdrawn or expired elsewhere: its

@@ -25,11 +25,17 @@ final class VigilFacts: @unchecked Sendable {
         var files: [String: File] = [:]
         var leases: [Lease] = []
     }
+    /// What the worker reports; the host decides where it is written.
+    enum Event: Sendable {
+        case seenUnwritable(pane: String, error: any Error)
+        case unwatchable(folder: String)
+        case slowRead(revision: UInt64, elapsed: Duration)
+    }
 
     private let root: String
     private let queue = DispatchQueue(label: "vigil.files", qos: .userInitiated)
     private let deliver: @Sendable (Snapshot) -> Void
-    private let trace: @Sendable (String) -> Void
+    private let report: @Sendable (Event) -> Void
     private let beforeRead: @Sendable () -> Void
     private var current = Snapshot()
     private var directories: [String: DispatchSourceFileSystemObject] = [:]
@@ -42,11 +48,11 @@ final class VigilFacts: @unchecked Sendable {
 
     init(root: String = NSHomeDirectory() + "/.local/state/vigil",
          beforeRead: @escaping @Sendable () -> Void = {},
-         trace: @escaping @Sendable (String) -> Void,
+         report: @escaping @Sendable (Event) -> Void,
          deliver: @escaping @Sendable (Snapshot) -> Void) {
         self.root = root
         self.beforeRead = beforeRead
-        self.trace = trace
+        self.report = report
         self.deliver = deliver
     }
 
@@ -72,7 +78,7 @@ final class VigilFacts: @unchecked Sendable {
             do {
                 try Data((revision + "\n").utf8).write(to: URL(fileURLWithPath: path + ".seen"), options: .atomic)
                 self.invalidate()
-            } catch { self.trace("!! seen: cannot write \(pane): \(error)") }
+            } catch { self.report(.seenUnwritable(pane: pane, error: error)) }
         }
     }
 
@@ -92,7 +98,7 @@ final class VigilFacts: @unchecked Sendable {
             let path = root + "/" + folder
             try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
             let fd = open(path, O_EVTONLY | O_CLOEXEC | O_NOFOLLOW)
-            guard fd >= 0 else { trace("!! facts: cannot watch \(folder)"); continue }
+            guard fd >= 0 else { report(.unwatchable(folder: folder)); continue }
             let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd,
                 eventMask: [.write, .delete, .rename], queue: queue)
             source.setEventHandler { [weak self, weak source] in
@@ -148,7 +154,7 @@ final class VigilFacts: @unchecked Sendable {
             sidebarRevision: current.sidebarRevision + (sidebarChanged ? 1 : 0), files: files, leases: leases)
         deliver(current)
         let elapsed = began.duration(to: .now)
-        if elapsed > .milliseconds(100) { trace("facts: revision \(current.revision) read off main in \(elapsed)") }
+        if elapsed > .milliseconds(100) { report(.slowRead(revision: current.revision, elapsed: elapsed)) }
     }
 
     private func watchProcesses(_ pids: Set<Int32>) {

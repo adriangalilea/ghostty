@@ -65,17 +65,19 @@ extension VigilWorkspaces {
             session: split.name, revision: expectedRevision ?? revision,
             operation: operation, anchor: anchor, direction: direction)
         remoteEdits.insert(composite)
-        vlog("remote command: \(request.id) \(operation) -> \(split.device)/\(split.name)/\(anchor)")
+        sessionLog.info("remote command sent", [
+            "id": request.id.uuidString, "operation": operation, "host": split.device, "workspace": split.name, "pane": anchor,
+        ])
         Task { [weak controller] in
             defer { remoteEdits.remove(composite) }
             do {
                 let reply = try await VigilRemote.shared.command(split.device, request: request)
                 guard reply.ok else {
                     if let controller { remoteCommandError(controller, reply.message) }
-                    vlog("remote command: \(request.id) refused \(reply.code)")
+                    sessionLog.warn("remote command refused", ["id": request.id.uuidString, "code": reply.code])
                     return
                 }
-                vlog("remote command: \(request.id) committed \(reply.pane ?? "")")
+                sessionLog.info("remote command committed", ["id": request.id.uuidString, "pane": reply.pane])
                 if let controller, mirroredWorkspace(of: controller) == composite, let pane = reply.pane {
                     remoteLandings[ObjectIdentifier(controller)] = pane
                     if let name = reply.session, name != split.name {
@@ -86,7 +88,7 @@ extension VigilWorkspaces {
                 // The home committed it; its directory stream brings the result.
                 remoteDirectoryChanged(split.device)
             } catch {
-                vlog("remote command: \(request.id) outcome unknown: \(error.localizedDescription)")
+                sessionLog.error("remote command outcome unknown", ["id": request.id.uuidString, "err": error])
                 if let controller {
                     remoteCommandError(controller, "\(error.localizedDescription)\nCommand \(request.id). Check the workspace on its Mac before trying again.")
                 }
@@ -181,7 +183,7 @@ extension VigilWorkspaces {
                 Ghostty.moveFocus(to: landing)
                 if controller.window?.isKeyWindow == true { landing.vigilRequestSize(reason: "remote session edit") }
             }
-            vlog("remote layout: \(composite) reconciled \(tab.panes.count) panes; retained existing clients")
+            sessionLog.info("remote layout reconciled", ["workspace": composite, "panes": tab.panes.count])
         }
     }
 
@@ -251,11 +253,13 @@ extension VigilWorkspaces {
             }
             if request.operation == "reap" {
                 reapNow(request.session)
-                vlog("session command: \(request.id) reap \(request.session) committed")
+                sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": "reap", "workspace": request.session])
                 return Reply(id: request.id, ok: true, code: "committed", message: "Ended on its Mac.", revision: nil, session: request.session)
             }
             let back = exhume(request.session)
-            vlog("session command: \(request.id) exhume \(request.session) committed -> \(back ?? "?")")
+            sessionLog.info("session command committed", [
+                "id": request.id.uuidString, "operation": "exhume", "workspace": request.session, "back": back,
+            ])
             return Reply(id: request.id, ok: true, code: "committed", message: "Back on its Mac.",
                          revision: back.flatMap { workspaces[$0]?.layoutRevision }, session: back)
         }
@@ -313,7 +317,7 @@ extension VigilWorkspaces {
             let pane = Registry.Pane(id: id, cwd: liveView(attachId: anchor.id)?.pwd ?? anchor.cwd)
             guard startDaemon(pane: pane, session: request.session) else {
                 persist() // the allocated identity is never recycled
-                return .failure(request, "spawn_failed", "The terminal could not start on its Mac; its vigil.log says why.")
+                return .failure(request, "spawn_failed", "The terminal could not start on its Mac; its log says why (mise run log).")
             }
             created = pane
             session.paneSeq = workspaces[request.session]!.paneSeq
@@ -403,7 +407,10 @@ extension VigilWorkspaces {
                 == VigilSessionControl.revision(session.tabs) else {
             return .failure(request, "commit_failed", "The change could not be confirmed on its Mac. Check the workspace there before retrying.")
         }
-        vlog("session command: \(request.id) \(request.operation) \(request.session)/\(request.anchor) committed\(created.map { " -> \($0.id)" } ?? "")")
+        sessionLog.info("session command committed", [
+            "id": request.id.uuidString, "operation": request.operation, "workspace": request.session,
+            "anchor": request.anchor, "pane": created?.id,
+        ])
         return Reply(id: request.id, ok: true, code: "committed", message: "Workspace edit committed.",
                      revision: workspaces[request.session]?.layoutRevision, pane: created?.id)
     }

@@ -158,7 +158,7 @@ struct TreeNodeView: View {
                         .padding(.bottom, 4)
                 }
                 .buttonStyle(.plain)
-                .simultaneousGesture(TapGesture().onEnded { model.log("tap: preview \(node.title) (\(ref.pane))") })
+                .simultaneousGesture(TapGesture().onEnded { model.receipts.info("tap", "preview", ["title": node.title, "pane": ref.pane]) })
             }
             if foldable && !folded {
                 ForEach(node.children) { child in
@@ -217,7 +217,7 @@ struct TreeNodeView: View {
             if let ref = node.pane {
                 NavigationLink(value: ref) { content.frame(maxWidth: .infinity, alignment: .leading) }
                     .buttonStyle(.plain)
-                    .simultaneousGesture(TapGesture().onEnded { model.log("tap: row \(node.title) (\(ref.pane))") })
+                    .simultaneousGesture(TapGesture().onEnded { model.receipts.info("tap", "row", ["title": node.title, "pane": ref.pane]) })
             } else {
                 content.onTapGesture { if foldable { toggle() } }
             }
@@ -293,13 +293,13 @@ final class SurfaceHostView: UIView {
         guard view.superview !== self else { return }
         addSubview(view)
         view.frame = bounds
-        Ghostty.SurfaceView.trace("surface \(view.paneId): hosted by \(purpose)")
+        VigilPhone.shared.receipts.info("surface", "hosted", ["pane": view.paneId, "by": "\(purpose)"])
     }
 
     func unhost() {
         guard let view = hosted else { return }
         view.removeFromSuperview()
-        Ghostty.SurfaceView.trace("surface \(view.paneId): left \(purpose)")
+        VigilPhone.shared.receipts.info("surface", "unhosted", ["pane": view.paneId, "by": "\(purpose)"])
     }
 
     override func layoutSubviews() {
@@ -403,7 +403,7 @@ struct PanePreview: View {
             guard let view = try await model.surface(for: ref, app: app, screen: false) else { denied = true; return }
             surfaceView = view
         } catch {
-            model.log("preview: \(ref.pane) failed: \("\(error)")")
+            model.receipts.error("surface", "preview failed", ["pane": ref.pane, "err": error])
         }
     }
 }
@@ -438,7 +438,7 @@ final class KeyboardState: ObservableObject {
     private func set(_ value: CGFloat, _ why: String) {
         guard value != inset else { return }
         inset = value
-        Ghostty.SurfaceView.trace("keyboard: inset \(Int(value))pt (\(why))")
+        VigilPhone.shared.receipts.info("keyboard", "inset", ["points": Int(value), "why": why])
     }
 }
 
@@ -541,7 +541,11 @@ struct FitCanvas: UIViewRepresentable {
             content.frame = CGRect(origin: .zero, size: presented)
             contentSize = presented
             center()
-            Ghostty.SurfaceView.trace("surface \(view.paneId): fit x\(String(format: "%.2f", fit)) -> \(Int(presented.width))x\(Int(presented.height))pt in \(Int(bounds.width))x\(Int(bounds.height))")
+            VigilPhone.shared.receipts.info("surface", "fit", [
+                "pane": view.paneId, "scale": Double(fit),
+                "width": Int(presented.width), "height": Int(presented.height),
+                "bounds_width": Int(bounds.width), "bounds_height": Int(bounds.height),
+            ])
         }
 
         /// Keep the picture centered while it is smaller than the viewport.
@@ -595,7 +599,7 @@ struct FitCanvas: UIViewRepresentable {
         func scrollViewDidZoom(_ scrollView: UIScrollView) { (scrollView as? ZoomView)?.center() }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-            Ghostty.SurfaceView.trace("fit: zoom x\(String(format: "%.2f", scale))")
+            VigilPhone.shared.receipts.info("surface", "zoomed", ["scale": Double(scale)])
             DispatchQueue.main.async { self.parent.zoom = scale }
         }
     }
@@ -871,7 +875,7 @@ struct PaneScreen: View {
         .onChange(of: model.streamGeneration) { _, _ in
             guard screenVisible, phase == .active else { return }
             guard surfaceView?.surface == nil else { return }
-            model.log("pane: \(current.pane) stream died on screen, re-dialing")
+            model.receipts.warn("pane", "stream died on screen; re-dialing", ["pane": current.pane])
             // A reconnect is no act of yours: the size stays whose it was.
             let held = ownSize
             leave()
@@ -884,7 +888,7 @@ struct PaneScreen: View {
         .onChange(of: phase) { _, now in
             switch now {
             case .background, .inactive:
-                model.log("pane: \(current.pane) phase \(now), yielding")
+                model.receipts.info("pane", "scene left; yielding", ["pane": current.pane, "phase": "\(now)"])
                 entryGeneration = UUID()
                 surfaceView?.claimSize(false)
                 surfaceView?.keyboardWanted = false
@@ -892,7 +896,7 @@ struct PaneScreen: View {
                 ownSize = false
             case .active:
                 guard screenVisible else { return }
-                model.log("pane: \(current.pane) active again")
+                model.receipts.info("pane", "active again", ["pane": current.pane])
                 if let view = surfaceView, view.surface != nil {
                     view.attended = true
                     view.refreshFromDaemon()
@@ -916,13 +920,13 @@ struct PaneScreen: View {
         let generation = UUID()
         entryGeneration = generation
         model.present(ref)
-        model.log("pane: screen \(ref.pane)")
+        model.receipts.info("pane", "screen", ["pane": ref.pane])
         guard let app = ghostty.app else { error = "ghostty not ready"; return }
         do {
             guard let view = try await model.surface(for: ref, app: app, screen: true) else { error = "no surface"; return }
             guard !Task.isCancelled, screenVisible, phase == .active,
                   entryGeneration == generation, current == ref else {
-                model.log("pane: \(ref.pane) attachment finished after presentation ended; no claim")
+                model.receipts.info("pane", "attached after presentation ended; no claim", ["pane": ref.pane])
                 return
             }
             view.accessory = makeAccessory(for: view)
@@ -934,7 +938,7 @@ struct PaneScreen: View {
         } catch {
             guard entryGeneration == generation, screenVisible else { return }
             self.error = "\(error)"
-            model.log("attach: \(ref.pane) failed: \("\(error)")")
+            model.receipts.error("pane", "attach failed", ["pane": ref.pane, "err": error])
         }
     }
 
@@ -960,7 +964,7 @@ struct PaneScreen: View {
         guard own != ownSize, let view = surfaceView, screenVisible, phase == .active else { return }
         ownSize = view.claimSize(own)
         fitZoom = 1
-        model.log("pane: \(current.pane) \(ownSize ? "own size (claims the pty)" : "fit (mirrors the owner)")")
+        model.receipts.info("pane", ownSize ? "own size: claims the pty" : "fit: mirrors the owner", ["pane": current.pane])
     }
 
     private func zoom(_ direction: Int) {
@@ -1042,8 +1046,9 @@ struct ReceiptsSection: View {
     @ObservedObject var receipts: VigilReceipts
     var body: some View {
         Section("Receipts") {
-            ForEach(Array(receipts.lines.suffix(60).reversed().enumerated()), id: \.offset) { _, line in
-                Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary)
+            ForEach(receipts.all.suffix(60).reversed()) { receipt in
+                Text(receipt.line).font(.caption2.monospaced())
+                    .foregroundStyle(receipt.level == .info ? Color.secondary : receipt.level == .warn ? Color.orange : Color.red)
             }
         }
     }

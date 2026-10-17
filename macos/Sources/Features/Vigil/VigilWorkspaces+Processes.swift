@@ -136,12 +136,9 @@ extension VigilWorkspaces {
     }
 
     func startStateDirWatcher() {
-        VigilVoice.trace = { [weak self] line in self?.vlog(line) }
-        VigilCortex.trace = { [weak self] line in self?.vlog(line) }
-        VigilRemote.trace = { [weak self] line in self?.vlog(line) }
-        // The warm tap's receipts (mic_warm/mic_cool) land beside the
-        // gate's. ONE owner for the process-global sink, wired here with
-        // the traces; consumers (dictation, the pump's prewarm, the ask's
+        // The warm tap's receipts (mic_warm/mic_cool) land in the voice
+        // scope. ONE owner for the process-global sink, wired here at
+        // startup; consumers (dictation, the pump's prewarm, the ask's
         // VoiceSource) subscribe, they never re-point receipts.
         MicTap.shared.sink = VoiceLogSink()
         // No voice processor on a Bluetooth output: it builds an aggregate
@@ -152,13 +149,11 @@ extension VigilWorkspaces {
         // half-duplex fallback is echo-free there by construction - the
         // same fact `selfNarrating()` already relies on.
         MicTap.shared.voiceProcessingPolicy = { !AudioRoute.outputIsBluetooth }
-        VigilWatchdog.trace = { Self.vlogSync($0) }
         VigilWatchdog.arm()
         // Asks are Authz.app's: this app hosts no narration voice (no Kokoro
-        // resident here), only dictation's recognizers.
-        Announcer.trace = { [weak self] line in
-            Task { @MainActor in self?.vlog(line) }
-        }
+        // resident here), only dictation's recognizers. Say reports in
+        // sentences; each rides one field until it speaks the contract.
+        Announcer.trace = { line in sayLog.info("announcer", ["line": line]) }
         factsLoader.start()
     }
 
@@ -172,7 +167,7 @@ extension VigilWorkspaces {
         }
         guard let file = facts.files["state/\(pane).state"] else { return nil }
         guard let token = StateToken(file.text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            vlog("!! state: \(pane).state reads '\(file.text)', not a state")
+            attentionLog.error("state file holds no state", ["pane": pane, "text": file.text])
             return nil
         }
         return PaneState(state: token.state, flavor: token.flavor, since: file.since, revision: file.revision)
@@ -288,7 +283,7 @@ extension VigilWorkspaces {
         let matches = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
             .filter { $0.vigilAttachId == attachId && !$0.vigilMirror }
         if matches.count > 1 {
-            vlog("!! liveView: \(matches.count) surfaces attached to '\(attachId)' - TWIN clients on one daemon")
+            invariantsLog.error("twin surfaces on one daemon", ["pane": attachId, "surfaces": matches.count])
         }
         return matches.first { $0.window != nil } ?? matches.first
     }
@@ -346,11 +341,11 @@ extension VigilWorkspaces {
             var held = workspaces[owner]!.held
             let runtime = held.remove(at: index)
             workspaces[owner]!.held = held
-            vlog("adopt: warm tab of '\(owner)' \(runtime.tree.compactMap(\.vigilAttachId)) taken by the mount")
+            viewportLog.info("warm tab adopted", ["workspace": owner, "panes": runtime.tree.compactMap(\.vigilAttachId)])
         } else if placed(view) {
             return nil
         } else {
-            vlog("adopt: live surface '\(id)' reused by the mount (no second attach)")
+            viewportLog.info("live surface adopted", ["pane": id])
         }
         // Rendering resumes for the view going on screen, whichever way it
         // was released (a warm tab, a moved or merged pane are occluded);
@@ -414,12 +409,12 @@ extension VigilWorkspaces {
         let byPane = Dictionary(grouping: diedProcesses(of: name), by: \.pane)
         for (pane, procs) in byPane {
             guard paneIdleAtShell(pane), let view = liveView(attachId: pane) else {
-                vlog("relaunch: pane '\(pane)' busy or unattached, tombstone kept")
+                daemonLog.info("relaunch deferred: pane busy or unattached", ["pane": pane])
                 continue
             }
             for died in procs {
                 view.surfaceModel?.sendText(died.command + "\r")
-                vlog("relaunch: '\(died.command)' -> \(pane)")
+                daemonLog.info("relaunched", ["pane": pane, "command": died.command])
             }
             try? FileManager.default.removeItem(
                 at: vigildStateDir.appendingPathComponent("\(pane).died"))

@@ -27,7 +27,6 @@ final class VigilRemote: ObservableObject {
     }
 
     @Published private(set) var hosts: [Host] = []
-    static var trace: ((String) -> Void)?
 
     private nonisolated static let hub = Local.Client(socket: VigilPaths.hub)
     private var started = false
@@ -70,7 +69,7 @@ final class VigilRemote: ObservableObject {
         hubWatch?.cancel()
         hubWatch = nil
         unfollowAll()
-        Self.trace?("remote: directories no longer followed")
+        remoteLog.info("directories no longer followed")
     }
 
     private func unfollowAll() {
@@ -81,7 +80,7 @@ final class VigilRemote: ObservableObject {
     private func followPeers() {
         guard !stopped else { return }
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let why: String
+            let failure: (any Error)?
             do {
                 let fd = try Self.hub.request(.peers)
                 defer { close(fd) }
@@ -90,13 +89,17 @@ final class VigilRemote: ObservableObject {
                     let peers = try JSONDecoder().decode([Local.Peer].self, from: line)
                     Task { @MainActor [weak self] in self?.peers(peers) }
                 }
-                why = "the hub closed the Macs stream"
+                failure = nil
             } catch {
-                why = "hub: \(error)"
+                failure = error
             }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                Self.trace?("remote: \(why); asking again when the hub's socket changes")
+                if let failure {
+                    remoteLog.warn("macs stream failed; waiting for the hub", ["err": failure])
+                } else {
+                    remoteLog.info("macs stream closed by the hub; waiting for the hub")
+                }
                 self.unfollowAll()
                 self.awaitHub()
             }
@@ -112,7 +115,7 @@ final class VigilRemote: ObservableObject {
         let dir = (VigilPaths.hub as NSString).deletingLastPathComponent
         let fd = open(dir, O_EVTONLY)
         guard fd >= 0 else {
-            Self.trace?("!! remote: cannot watch \(dir) (errno \(errno)); the other Macs stay out of reach until relaunch")
+            remoteLog.error("hub folder not watched; other Macs out of reach until relaunch", ["path": dir, "errno": errno])
             return
         }
         let watch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
@@ -145,7 +148,7 @@ final class VigilRemote: ObservableObject {
             }
             follow(peer.id)
         }
-        Self.trace?("remote: Macs \(peers.map(\.name))")
+        remoteLog.info("macs", ["macs": peers.map(\.name)])
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
@@ -178,7 +181,7 @@ final class VigilRemote: ObservableObject {
 
     private func stepped(_ device: String, _ step: Local.Following) {
         switch step.step {
-        case .open: Self.trace?("remote: \(host(device)?.name ?? device) following")
+        case .open: remoteLog.info("following", ["host": host(device)?.name ?? device])
         case .directory: if let directory = step.directory { apply(device, directory) }
         case .waiting: failed(device, step.reason ?? "out of reach")
         }
@@ -186,7 +189,7 @@ final class VigilRemote: ObservableObject {
 
     private func failed(_ device: String, _ why: String) {
         guard let index = hosts.firstIndex(where: { $0.device == device }), hosts[index].error != why else { return }
-        Self.trace?("remote: \(hosts[index].name): \(why)")
+        remoteLog.warn("out of reach", ["host": hosts[index].name, "why": why])
         hosts[index].error = why
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
@@ -234,7 +237,9 @@ final class VigilRemote: ObservableObject {
         VigilWorkspaces.shared.syncOwnerGrids()
         hosts[index].error = nil
         if before.map({ $0 != shape }) ?? true {
-            Self.trace?("remote: \(hosts[index].name) = \(dir.host), \(dir.workspaces.count) workspaces, \(dir.panes.count) panes")
+            remoteLog.info("directory", [
+                "host": hosts[index].name, "home": dir.host, "workspaces": dir.workspaces.count, "panes": dir.panes.count,
+            ])
         }
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
@@ -340,7 +345,11 @@ final class VigilRemote: ObservableObject {
                     self.hosts[index].directory?.panes[pane]?.seen = truth.seen
                     NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
                 }
-                Self.trace?("remote: seen \(key)" + (failure.map { " FAILED (\($0))" } ?? ""))
+                if let failure {
+                    remoteLog.warn("seen not written", ["pane": key, "err": failure])
+                } else {
+                    remoteLog.info("seen", ["pane": key])
+                }
             }
         }
     }

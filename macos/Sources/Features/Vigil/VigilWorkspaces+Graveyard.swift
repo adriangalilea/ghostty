@@ -20,8 +20,8 @@ extension VigilWorkspaces {
     /// remains); false = the window closes. `viewport` names that window
     /// when the caller has it.
     func kill(name: String, keepViewport: Bool = true, viewport: TerminalController? = nil) {
-        guard workspaces[name] != nil else { vlog("kill: '\(name)' NOT in workspaces (noop)"); return }
-        vlog("kill: '\(name)' at \(placeTag(name)) -> graveyard")
+        guard workspaces[name] != nil else { graveyardLog.warn("kill of an unknown workspace ignored", ["workspace": name]); return }
+        graveyardLog.info("killed to the graveyard", ["workspace": name, "place": placeTag(name)])
         if workspaces[name]!.float != nil, let quick = quickController(create: false) {
             quick.animateOut()
             reclaim(name, from: quick)
@@ -45,7 +45,7 @@ extension VigilWorkspaces {
         bury(session)
         if let kept {
             if let next = successor(excluding: name), let ghostty = ghosttyApp {
-                vlog("kill: viewport of '\(name)' -> '\(next)'")
+                graveyardLog.info("killed workspace's viewport handed on", ["workspace": name, "target": next])
                 mount(next, into: kept, ghostty: ghostty)
                 touchRecent(next)
             } else {
@@ -161,11 +161,15 @@ extension VigilWorkspaces {
 
     private func sendToBurialHome(_ device: String, _ burial: SidebarBurial, operation: String) {
         let request = WorkspaceCommand.Request.burial(burial.name, operation)
-        vlog("remote command: \(request.id) \(operation) -> \(device)/\(burial.name)")
+        sessionLog.info("remote command sent", ["request": request.id, "operation": operation, "device": device, "workspace": burial.name])
         Task {
             do {
                 let reply = try await VigilRemote.shared.command(device, request: request)
-                vlog("remote command: \(request.id) \(reply.ok ? "committed" : "refused \(reply.code)")")
+                if reply.ok {
+                    sessionLog.info("remote command committed", ["request": request.id])
+                } else {
+                    sessionLog.warn("remote command refused", ["request": request.id, "code": reply.code])
+                }
                 guard reply.ok else {
                     let alert = NSAlert()
                     alert.messageText = operation == "exhume" ? "It could not be brought back" : "It could not be ended now"
@@ -175,7 +179,7 @@ extension VigilWorkspaces {
                 }
                 remoteDirectoryChanged(device)
             } catch {
-                vlog("remote command: \(request.id) outcome unknown: \(error.localizedDescription)")
+                sessionLog.error("remote command outcome unknown", ["request": request.id, "err": error])
             }
         }
     }
@@ -293,7 +297,7 @@ extension VigilWorkspaces {
             workspaces[origin.workspace] = home
             reconcileViews(of: origin.workspace)
             persist()
-            vlog("exhume: '\(name)' back into '\(origin.workspace)' (tab \(origin.tab)\(origin.beside.map { ", beside \($0)" } ?? ""))")
+            graveyardLog.info("exhumed into its workspace", ["burial": name, "workspace": origin.workspace, "tab": origin.tab, "beside": origin.beside])
             return origin.workspace
         }
         burial.buriedFrom = nil
@@ -301,7 +305,7 @@ extension VigilWorkspaces {
         workspaces[name] = burial
         persist()
         open(name: name)
-        vlog("exhume: '\(name)' back as itself")
+        graveyardLog.info("exhumed as itself", ["workspace": name])
         return name
     }
 
@@ -355,7 +359,7 @@ extension VigilWorkspaces {
         let doomed = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
             .filter { $0.vigilHost == nil && $0.vigilAttachId.map(ids.contains) == true }
         for view in doomed { view.vigilDestroySurface() }
-        vlog("reap: '\(name)' -> destroyed \(doomed.count) surface(s), kill \(ids.sorted())")
+        graveyardLog.info("reaped", ["workspace": name, "surfaces": doomed.count, "panes": ids.sorted()])
         killDaemons(ids)
         persist()
     }
@@ -384,15 +388,10 @@ extension VigilWorkspaces {
                 try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).state"))
                 try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).seen"))
             }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    let manager = VigilWorkspaces.shared
-                    if survivors.isEmpty {
-                        manager.vlog("kill: \(sorted) dead (verified)")
-                    } else {
-                        manager.vlog("!! kill: \(survivors) STILL ALIVE after vigild kill (status \(p.terminationStatus))")
-                    }
-                }
+            if survivors.isEmpty {
+                graveyardLog.success("daemons dead, verified", ["panes": sorted])
+            } else {
+                graveyardLog.error("daemons still alive after vigild kill", ["panes": survivors, "status": p.terminationStatus])
             }
         }
     }
@@ -427,11 +426,13 @@ extension VigilWorkspaces {
             let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
             let respawned = lines.filter { $0.hasSuffix(" up") }.count
             if respawned > 0 || proc.terminationStatus != 0 {
-                vlog("restore(daemons): \(respawned) machine-killed daemon(s) respawned from their specs (exit \(proc.terminationStatus))")
-                for line in lines where !line.hasSuffix(" up") { vlog("restore(daemons): \(line)") }
+                daemonLog.info("machine-killed daemons respawned from their specs", [
+                    "respawned": respawned, "status": proc.terminationStatus,
+                    "output": lines.filter { !$0.hasSuffix(" up") },
+                ])
             }
         } catch {
-            vlog("!! restore(daemons): vigild restore could not run (\(error))")
+            daemonLog.error("vigild restore could not run", ["err": error])
         }
     }
 
@@ -446,7 +447,7 @@ extension VigilWorkspaces {
                 && $0.processIdentifier != me
         }
         guard rivals.isEmpty else {
-            vlog("collect: skipped, another instance of this bundle is running")
+            daemonLog.warn("orphan collection skipped: another instance of this bundle is running")
             return
         }
 
@@ -462,14 +463,14 @@ extension VigilWorkspaces {
             if !owned.contains(id), Self.daemonAlive(id) { orphans.insert(id) }
         }
         if !orphans.isEmpty {
-            vlog("collect: orphan daemons \(orphans.sorted()) -> kill")
+            daemonLog.warn("orphan daemons killed", ["panes": orphans.sorted()])
             killDaemons(orphans)
         }
         for entry in entries where entry.hasSuffix(".resume") && entry.hasPrefix("vigil-") {
             let id = String(entry.dropLast(".resume".count))
             guard !owned.contains(id), !Self.daemonAlive(id) else { continue }
             try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry))
-            vlog("collect: stale resume pointer '\(id)' removed")
+            daemonLog.info("stale resume pointer removed", ["pane": id])
         }
         for entry in (try? fm.contentsOfDirectory(atPath: agentStateDir.path)) ?? []
         where entry.hasSuffix(".state") || entry.hasSuffix(".seen") {

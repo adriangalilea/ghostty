@@ -100,9 +100,9 @@ final class VigilHarnessCoordinator {
             DispatchQueue.global(qos: .utility).async {
                 do {
                     let response = try HarnessWire.call(RPCRequest("context", .from(context)))
-                    if !response.ok { VigilWorkspaces.vlogSync("authz context: broker refused (\(response.value))") }
+                    if !response.ok { authzLog.warn("context refused by the broker", ["reply": "\(response.value)"]) }
                 } catch {
-                    VigilWorkspaces.vlogSync("authz context: broker unreachable (\(error))")
+                    authzLog.error("context not sent: broker unreachable", ["err": error])
                 }
             }
         }
@@ -114,7 +114,7 @@ final class VigilHarnessCoordinator {
             // Through this Mac's hub to that Mac's; a blocking call, off main.
             DispatchQueue.global(qos: .utility).async {
                 do { _ = try Local.Client(socket: VigilPaths.hub).call(device: home, .context(now)) } catch {
-                    VigilWorkspaces.vlogSync("authz context: \(home.prefix(10)) not told what is on screen here (\(error))")
+                    authzLog.warn("context not sent to a home", ["home": String(home.prefix(10)), "err": error])
                 }
             }
         }
@@ -148,7 +148,7 @@ final class VigilHarnessCoordinator {
               let url = URL(string: text), url.scheme == "vigil", url.host == "pane",
               let pane = url.pathComponents.dropFirst().first, !pane.isEmpty
         else {
-            VigilWorkspaces.vlogSync("handoff: unreadable link")
+            handoffLog.warn("unreadable link")
             return
         }
         let manager = VigilWorkspaces.shared
@@ -156,15 +156,15 @@ final class VigilHarnessCoordinator {
         if let name = manager.owner(ofPane: pane) {
             let controller = (NSApp.keyWindow?.windowController as? TerminalController) ?? TerminalController.lastMain
             manager.activatePane(name: name, paneId: pane, in: controller)
-            manager.vlog("handoff: link -> local \(name)/\(pane)")
+            handoffLog.info("link to a local pane", ["workspace": name, "pane": pane])
             return
         }
         for host in VigilRemote.shared.hosts where host.directory?.panes[pane] != nil {
-            manager.vlog("handoff: link -> \(host.device)/\(pane)")
+            handoffLog.info("link to a remote pane", ["host": host.device, "pane": pane])
             manager.openRemotePane(device: host.device, pane: pane)
             return
         }
-        manager.vlog("handoff: link to \(pane), which no session here or on another Mac lists")
+        handoffLog.warn("link to a pane no Mac lists", ["pane": pane])
     }
 
     // MARK: broker
@@ -181,14 +181,14 @@ final class VigilHarnessCoordinator {
         process.terminationHandler = { process in
             Task { @MainActor in
                 VigilHarnessCoordinator.shared.starters.removeAll { $0 === process }
-                VigilWorkspaces.shared.vlog("broker: \(binary) \(arguments.joined(separator: " ")) exited \(process.terminationStatus)")
+                daemonLog.info("agent process exited", ["binary": binary, "arguments": arguments, "status": process.terminationStatus])
             }
         }
         do {
             try process.run()
             starters.append(process)
         } catch {
-            VigilWorkspaces.shared.vlog("broker: installed \(binary) unavailable (\(error))")
+            daemonLog.error("agent binary unavailable", ["binary": binary, "err": error])
         }
     }
 }

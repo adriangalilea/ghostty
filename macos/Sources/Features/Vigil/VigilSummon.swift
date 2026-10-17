@@ -105,7 +105,7 @@ final class VigilSummon {
         let manager = VigilWorkspaces.shared
         return manager.summonQueue().filter { c in
             if c.since <= snoozeDate {
-                manager.vlog("summon: drop \(c.pane) (snoozed)")
+                summonLog.info("dropped: snoozed", ["pane": c.pane])
                 return false
             }
             if c.pane == current?.pane { return false }
@@ -113,7 +113,7 @@ final class VigilSummon {
                 // The full visibility breakdown rides the log line: "it said
                 // in-place but I could not see it" must be decidable from
                 // this receipt alone.
-                manager.vlog("summon: in-place \(c.pane) (\(manager.paneOnScreenReceipt(c.pane)))")
+                summonLog.info("in place: on screen", ["pane": c.pane, "visibility": manager.paneOnScreenReceipt(c.pane)])
                 return false
             }
             return true
@@ -134,7 +134,7 @@ final class VigilSummon {
     /// voice is the earcon family.
     static func chime() {
         if !Earcon.waiting.play() {
-            VigilWorkspaces.shared.vlog("summon: waiting cue SILENT - output player refused")
+            summonLog.error("waiting cue silent: output player refused")
         }
     }
 
@@ -142,7 +142,7 @@ final class VigilSummon {
     /// cannot see (a visible ending is seen; news is what you cannot see).
     static func doneChime() {
         if !Earcon.ended.play() {
-            VigilWorkspaces.shared.vlog("summon: ended cue SILENT - output player refused")
+            summonLog.error("ended cue silent: output player refused")
         }
     }
 
@@ -157,7 +157,7 @@ final class VigilSummon {
         let open = Set(asks.map(\.pane))
         chimed = chimed.filter { open.contains($0.key) }
         // ONE chime per tick however many asks landed together — three
-        // overlapping dings are noise about noise. The vlog makes every
+        // overlapping dings are noise about noise. The log makes every
         // chime auditable: "I heard nothing" vs "nothing fired" must be
         // distinguishable from the log alone.
         var fresh = false
@@ -175,7 +175,7 @@ final class VigilSummon {
             fresh = true
         }
         if fresh {
-            manager.vlog("summon: waiting cue")
+            summonLog.info("waiting cue")
             Self.chime()
         }
         // Ended turns ring softer — news, not interruption — and news is
@@ -191,7 +191,7 @@ final class VigilSummon {
             freshDone = true
         }
         if freshDone {
-            manager.vlog("summon: done chime")
+            summonLog.info("ended cue")
             Self.doneChime()
         }
     }
@@ -250,7 +250,7 @@ final class VigilSummon {
         let q = queue()
         let all = manager.summonQueue()
         if q.isEmpty, !all.isEmpty {
-            manager.vlog("summon: \(all.count) ask(s) standing, none float-eligible")
+            summonLog.info("asks standing, none float-eligible", ["asks": all.count])
             return
         }
         guard let head = q.first else { return }
@@ -264,7 +264,7 @@ final class VigilSummon {
         let appearing = !manager.quickTerminalVisible
         manager.float(name: candidate.name, landOn: candidate.pane)
         guard manager.panelWorkspace == candidate.name else {
-            manager.vlog("summon: float REFUSED for '\(candidate.name)'")
+            summonLog.warn("float refused", ["workspace": candidate.name])
             return
         }
         // One claim for the whole summon flow: chained asks inside it each
@@ -276,7 +276,7 @@ final class VigilSummon {
         snoozeDate = .distantPast
         current = candidate
         engaged = false
-        manager.vlog("summon: '\(candidate.name)' pane \(candidate.pane)")
+        summonLog.info("summoned", ["workspace": candidate.name, "pane": candidate.pane])
         // The content under the cursor just changed (or appeared): shield
         // the panel's terminal briefly, and the pill names the arrival.
         VigilBars.shared.shield(window: manager.quickTerminalWindow)
@@ -299,7 +299,7 @@ final class VigilSummon {
             summon(next)
         } else if manager.quickTerminalVisible {
             if !engaged {
-                manager.vlog("summon: drained, unengaged -> dismiss now")
+                summonLog.info("drained unengaged; dismissed")
                 engineDismiss = true
                 manager.dismissQuickTerminal()
                 return
@@ -347,7 +347,7 @@ final class VigilSummon {
         if !wasEngine,
            VigilWorkspaces.shared.paneAgentState(cur.pane)?.state == .blocked {
             snoozeDate = Date()
-            VigilWorkspaces.shared.vlog("summon: snoozed (manual dismissal mid-ask)")
+            summonLog.info("snoozed: dismissed mid-ask")
         }
         Hush.release("summon")
     }

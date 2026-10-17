@@ -955,7 +955,7 @@ class BaseTerminalController: NSWindowController,
             alert.messageText = "Cannot Move a Mirrored Pane"
             alert.informativeText = "Moving panes into or out of a mirrored session is not supported yet. The sessions have not changed."
             if let window { alert.beginSheetModal(for: window) }
-            VigilWorkspaces.vlogSync("session edit: refused native pane drop involving a mirror")
+            sessionLog.warn("native pane drop involving a mirror refused", ["source": source.vigilAttachId, "target": destination.vigilAttachId])
             return
         }
         // Map drop zone to split direction

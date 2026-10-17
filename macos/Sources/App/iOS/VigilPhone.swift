@@ -6,13 +6,64 @@ import VigilActivity
 import VigilLink
 import VigilWire
 
-/// Receipts, observed by the settings sheet ALONE.
+/// One receipt as the in-app list shows it: the event's time, scope,
+/// level, message and fields rendered `key=value`.
+struct Receipt: Identifiable {
+    enum Level { case info, warn, error }
+    let id: Int
+    let time: Date
+    let scope: String
+    let level: Level
+    let message: String
+    let fields: String
+
+    var line: String {
+        let mark = level == .error ? "!! " : level == .warn ? "! " : ""
+        let stamp = time.formatted(date: .omitted, time: .standard)
+        return "\(stamp) \(mark)[\(scope)] \(message)" + (fields.isEmpty ? "" : " \(fields)")
+    }
+}
+
+/// Every receipt of this app, observed by the settings sheet ALONE. A
+/// receipt is a `Log` event (scope, message, fields): the unified log,
+/// stderr (`devicectl … launch --console` over the cable) and the app's
+/// event file (`Library/Logs/vigil-phone.jsonl`, `EventFile`, which
+/// `authz trace` reads), and the same values make the list's row.
 @MainActor
 final class VigilReceipts: ObservableObject {
-    @Published private(set) var lines: [String] = []
-    func append(_ line: String) {
-        lines.append(line)
-        if lines.count > 400 { lines.removeFirst(lines.count - 400) }
+    @Published private(set) var all: [Receipt] = []
+    private var count = 0
+
+    func info(_ scope: String, _ message: String, _ fields: Fields = [:]) {
+        Log.log.scope(scope).info(message, fields)
+        show(scope, .info, message, fields)
+    }
+    func warn(_ scope: String, _ message: String, _ fields: Fields = [:]) {
+        Log.log.scope(scope).warn(message, fields)
+        show(scope, .warn, message, fields)
+    }
+    func error(_ scope: String, _ message: String, _ fields: Fields = [:]) {
+        Log.log.scope(scope).error(message, fields)
+        show(scope, .error, message, fields)
+    }
+
+    /// In the list only: an event another component records itself.
+    func show(_ scope: String, _ level: Receipt.Level, _ message: String, _ fields: Fields) {
+        count += 1
+        let rendered = fields.sorted { $0.key < $1.key }.map { "\($0.key)=\(Self.text($0.value))" }
+        all.append(Receipt(id: count, time: Date(), scope: scope, level: level, message: message,
+                           fields: rendered.joined(separator: " ")))
+        if all.count > 400 { all.removeFirst(all.count - 400) }
+    }
+
+    private static func text(_ value: any Sendable) -> String {
+        switch value {
+        case let error as any Error: VigilLink.reason(error)
+        case let date as Date: date.formatted(date: .omitted, time: .standard)
+        case let duration as Duration: duration.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow))
+        case let list as [String]: list.joined(separator: ",")
+        default: "\(value)"
+        }
     }
 }
 
@@ -36,7 +87,6 @@ struct PaneRef: Hashable {
 @MainActor
 final class VigilPhone: ObservableObject {
     static let shared = VigilPhone()
-    private static let phoneLog = Log.log.scope("phone")
 
     /// A Mac: a paired device running vigil, named by its tether root.
     struct Host: Identifiable, Hashable {
@@ -98,7 +148,7 @@ final class VigilPhone: ObservableObject {
             view.screenSeen = daemon
             if mine == daemon {
                 view.screenStrikes = 0
-                if !view.screenProven { view.screenProven = true; log("screen: \(pane) in sync (\(mine))") }
+                if !view.screenProven { view.screenProven = true; receipts.info("screen", "in sync", ["pane": pane, "hash": mine]) }
                 continue
             }
             guard stable else { continue }
@@ -106,10 +156,12 @@ final class VigilPhone: ObservableObject {
             if view.screenStrikes == 2 {
                 view.screenResyncs += 1
                 if view.screenResyncs <= 2 {
-                    log("!! screen mismatch: \(pane) daemon \(daemon) view \(mine); re-syncing (\(view.screenResyncs)/2)")
+                    receipts.error("screen", "mismatch; re-syncing", [
+                        "pane": pane, "daemon": daemon, "view": mine, "resync": view.screenResyncs,
+                    ])
                     view.refreshFromDaemon()
                 } else if view.screenResyncs == 3 {
-                    log("!! screen mismatch: \(pane) persists after 2 re-syncs; silenced")
+                    receipts.error("screen", "mismatch persists after 2 re-syncs; silenced", ["pane": pane])
                 }
                 view.screenStrikes = -3
             }
@@ -125,8 +177,8 @@ final class VigilPhone: ObservableObject {
     }
     private(set) var down: [String: Down] = [:] { didSet { rebuildTree() } }
     @Published private(set) var nodes: [Node] = []
+    /// Nothing happens in this app without a receipt here.
     let receipts = VigilReceipts()
-    var trace: [String] { receipts.lines }
     /// vigil's tether node (the one its authz endpoint runs), once up.
     private var node: TetherNode?
     /// Why vigil has no tether node (it could not start one): the home
@@ -138,18 +190,9 @@ final class VigilPhone: ObservableObject {
     private var followWatches: [String: Task<Void, Never>] = [:]
 
     private init() {
-        Ghostty.SurfaceView.trace = { [weak self] line in Task { @MainActor in self?.log(line) } }
-    }
-
-    /// Every receipt is a `Log` event (scope `phone`): the unified log,
-    /// stderr (`devicectl … launch --console` over the cable) and the app's
-    /// event file (`Library/Logs/vigil-phone.jsonl`, `EventFile`, which
-    /// `authz trace` reads), plus the in-app list. Nothing happens in this
-    /// app without a line here.
-    func log(_ line: String) {
-        let stamp = Date().formatted(date: .omitted, time: .standard)
-        Self.phoneLog.info(line)
-        receipts.append("\(stamp) \(line)")
+        Ghostty.SurfaceView.report = { [weak self] message, fields in
+            Task { @MainActor in self?.receipts.info("surface", message, fields) }
+        }
     }
 
     // MARK: Macs (paired devices serving vigil/1)
@@ -161,7 +204,7 @@ final class VigilPhone: ObservableObject {
         guard self.node == nil else { return }
         self.node = node
         unlinked = nil
-        log("tether: node up (root \(node.root().prefix(10)))")
+        receipts.info("tether", "node up", ["root": String(node.root().prefix(10))])
         VigilAgents.begin()
         readPeers()
         Task { [weak self] in
@@ -170,7 +213,7 @@ final class VigilPhone: ObservableObject {
                 case .paired, .revoked, .offersChanged: self?.readPeers()
                 // Events were missed: any of them may have changed the Macs.
                 case .lagged:
-                    self?.log("tether: \(event); reading the Macs again")
+                    self?.receipts.warn("tether", "events missed; reading the Macs again", ["event": "\(event)"])
                     self?.readPeers()
                 // How this phone reaches anything: its network, its relay,
                 // each connection's start, end and path, each Mac met. The
@@ -178,7 +221,7 @@ final class VigilPhone: ObservableObject {
                 // hours, none of this was on the phone.
                 // In the in-app list only: tether's own record has each.
                 case .network, .relay, .localNetwork, .connected, .disconnected, .path, .met:
-                    self?.receipts.append("\(Date().formatted(date: .omitted, time: .standard)) tether: \(event)")
+                    self?.receipts.show("tether", .info, "event", ["event": "\(event)"])
                 default: break
                 }
             }
@@ -191,11 +234,11 @@ final class VigilPhone: ObservableObject {
         do { next = try VigilLink.macs(node).map { Host(id: $0.root, name: $0.name) } } catch {
             // Who the Macs are could not be read: the list stays as it was
             // and says why, never an empty "no Macs".
-            return log("!! macs: paired devices not readable: \(error)")
+            return receipts.error("macs", "paired devices not readable", ["err": error])
         }
         if next != hosts {
             hosts = next
-            log("macs: \(next.map(\.name))")
+            receipts.info("macs", "paired macs changed", ["macs": next.map(\.name)])
             let ids = Set(next.map(\.id))
             directories = directories.filter { ids.contains($0.key) }
             down = down.filter { ids.contains($0.key) }
@@ -223,7 +266,7 @@ final class VigilPhone: ObservableObject {
     /// vigil could not start its tether node: nothing reaches a Mac.
     func unlinked(_ why: String) {
         unlinked = why
-        log("tether: no node (\(why))")
+        receipts.error("tether", "no node", ["why": why])
     }
 
     /// vigil's node, or why there is none yet.
@@ -257,15 +300,19 @@ final class VigilPhone: ObservableObject {
                 switch step.step {
                 case .open:
                     if let was = self.down[host.id] {
-                        self.log("dir: \(host.name) following again after \(was.attempts) failed attempt(s), out of reach since \(Self.clock(was.since))")
+                        self.receipts.info("dir", "following again", [
+                            "mac": host.name, "attempts": was.attempts, "down_since": was.since,
+                        ])
                     } else {
-                        self.log("dir: \(host.name) following")
+                        self.receipts.info("dir", "following", ["mac": host.name])
                     }
                     self.down[host.id] = nil
                 case .directory:
                     guard let dir = step.directory else { continue }
                     if self.directories[host.id] == nil {
-                        self.log("dir: \(host.name) = \(dir.host), \(dir.workspaces.count) workspaces, \(dir.panes.count) panes")
+                        self.receipts.info("dir", "first directory", [
+                            "mac": host.name, "host": dir.host, "workspaces": dir.workspaces.count, "panes": dir.panes.count,
+                        ])
                     }
                     self.down[host.id] = nil
                     self.directories[host.id] = dir
@@ -277,13 +324,15 @@ final class VigilPhone: ObservableObject {
                     now.attempts += 1
                     now.reason = why
                     self.down[host.id] = now
-                    self.log("dir: \(host.name) attempt \(now.attempts) failed: \(why) (out of reach since \(Self.clock(now.since)))")
+                    self.receipts.warn("dir", "attempt failed", [
+                        "mac": host.name, "attempt": now.attempts, "why": why, "down_since": now.since,
+                    ])
                 }
             }
             // Only the node closing ends a follow: said, and the Mac followed
             // afresh the next time its peers are read.
             guard !Task.isCancelled, let self else { return }
-            self.log("dir: \(host.name) follow ended")
+            self.receipts.warn("dir", "follow ended", ["mac": host.name])
             self.watches[host.id] = nil
         }
     }
@@ -364,7 +413,7 @@ final class VigilPhone: ObservableObject {
     func follow(_ node: Node, _ on: Bool) {
         guard let key = node.followKey, let pane = node.followPane else { return }
         if on { followed.insert(key) } else { followed.remove(key) }
-        log("follow: \(node.title) \(on ? "followed" : "no longer followed")")
+        receipts.info("follow", on ? "followed" : "no longer followed", ["pane": pane, "title": node.title])
         if on {
             own(node, panes: livePanes(node), until: Date().addingTimeInterval(Self.ownSpan))
         } else {
@@ -383,7 +432,7 @@ final class VigilPhone: ObservableObject {
         guard keys != mine else { return }
         let dropped = nodes.flatMap(\.all).filter { $0.followKey.map { mine.contains($0) && !keys.contains($0) } == true }
         followed = followed.subtracting(mine).union(keys)
-        log("follow: \(mac.prefix(10)) follows \(keys.count) there (its board's record)")
+        receipts.info("follow", "board's record taken", ["mac": String(mac.prefix(10)), "followed": keys.count])
         let kept = Set(followedNodes.flatMap(livePanes))
         for node in dropped { own(node, panes: livePanes(node).filter { !kept.contains($0) }, until: Date()) }
         renewOwnership()
@@ -406,7 +455,7 @@ final class VigilPhone: ObservableObject {
         guard let home = runtime.macs.first(where: { $0.id == node.root }).flatMap({ mac -> String? in
             if case .answering(let homeID, _) = mac.state { homeID } else { nil }
         }) else {
-            return log("follow: \(node.title): its Mac does not let vigil answer yet; its questions stay with Authz")
+            return receipts.warn("follow", "its mac does not let vigil answer yet; questions stay with authz", ["title": node.title])
         }
         for pane in panes {
             if until > Date() { ownedPanes.insert(pane) } else { ownedPanes.remove(pane) }
@@ -463,10 +512,15 @@ final class VigilPhone: ObservableObject {
                 let request = WorkspaceCommand.Request.burial(burial.name, operation)
                 let data = try await VigilLink.call(linked(), device: burial.host.id, .session(try request.line))
                 let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
-                log("burial: \(operation) \(burial.host.name)/\(burial.name) \(outcome.ok ? "committed" : "refused: \(outcome.message)")")
+                let fields: Fields = ["op": operation, "mac": burial.host.name, "workspace": burial.name]
+                if outcome.ok {
+                    receipts.info("burial", "committed", fields)
+                } else {
+                    receipts.warn("burial", "refused", fields.merging(["why": outcome.message]) { a, _ in a })
+                }
                 burialError = outcome.ok ? nil : outcome.message
             } catch {
-                log("burial: \(operation) \(burial.host.name)/\(burial.name) failed: \(VigilLink.reason(error))")
+                receipts.error("burial", "failed", ["op": operation, "mac": burial.host.name, "workspace": burial.name, "err": error])
                 burialError = VigilLink.reason(error)
             }
         }
@@ -484,7 +538,7 @@ final class VigilPhone: ObservableObject {
         let leaves = fresh.flatMap(\.leaves)
         let gridded = leaves.filter { $0.pane != nil && $0.rows > 0 }.count
         let folded = collapsed.count
-        log("tree: \(leaves.count) pane rows, \(gridded) with a grid (previewable), \(folded) nodes folded")
+        receipts.info("tree", "rebuilt", ["panes": leaves.count, "previewable": gridded, "folded": folded])
     }
 
     private func deriveTree() -> [Node] {
@@ -550,25 +604,27 @@ final class VigilPhone: ObservableObject {
         if url.host == "session" {
             let parts = url.pathComponents.filter { $0 != "/" }
             guard parts.count == 2, let session = nodes.flatMap(\.children).first(where: { $0.id == "\(parts[0])/\(parts[1])" }) else {
-                log("url: \(url) names no session listed here"); return nil
+                receipts.warn("url", "names no session listed here", ["url": url.absoluteString]); return nil
             }
             let leaves = session.leaves.compactMap { leaf in leaf.pane.map { (leaf, $0) } }
             return (leaves.first { $0.0.state == .blocked } ?? leaves.first)?.1
         }
-        guard url.host == "pane" else { log("url: \(url) is not vigil://pane/<id> or vigil://session/<mac>/<session>"); return nil }
+        guard url.host == "pane" else {
+            receipts.warn("url", "not a pane or session link", ["url": url.absoluteString]); return nil
+        }
         let id = url.lastPathComponent
-        guard Open.validPane(id) else { log("url: \(url) names no pane"); return nil }
+        guard Open.validPane(id) else { receipts.warn("url", "names no pane", ["url": url.absoluteString]); return nil }
         let deadline = Date().addingTimeInterval(5)
         while true {
             if let ref = nodes.flatMap(\.leaves).compactMap(\.pane).first(where: { $0.pane == id }) {
-                log("url: vigil://pane/\(id) -> \(ref.host.name)")
+                receipts.info("url", "pane found", ["pane": id, "mac": ref.host.name])
                 return ref
             }
             let left = deadline.timeIntervalSinceNow
             guard left > 0 else { break }
             await nextDirectory(within: left)
         }
-        log("url: no Mac lists pane \(id)")
+        receipts.warn("url", "no mac lists the pane", ["pane": id])
         return nil
     }
 
@@ -605,9 +661,9 @@ final class VigilPhone: ObservableObject {
         Task.detached { [weak self] in
             let how = await VigilLink.bridge(stream, read: ours, write: ours)
             close(ours)
-            await self?.log("stream: \(host.name) \(pane) ended: \(how)")
+            await self?.receipts.info("stream", "ended", ["mac": host.name, "pane": pane, "how": "\(how)"])
         }
-        log("\(preview ? "preview" : "attach"): \(host.name) \(pane) fd \(fds[0])")
+        receipts.info("stream", preview ? "preview attached" : "attached", ["mac": host.name, "pane": pane, "fd": fds[0]])
         return fds[0]
     }
 
@@ -639,14 +695,16 @@ final class VigilPhone: ObservableObject {
     @Published private(set) var previewed = Set<String>()
 
     func rowFrame(_ ref: PaneRef, _ frame: CGRect) {
-        if rowFrames[ref.pane] == nil { log("row: \(ref.pane) at y \(Int(frame.minY))..\(Int(frame.maxY))") }
+        if rowFrames[ref.pane] == nil {
+            receipts.info("tree", "row reported", ["pane": ref.pane, "top": Int(frame.minY), "bottom": Int(frame.maxY)])
+        }
         rowFrames[ref.pane] = frame
         allocatePreviews()
     }
 
     func treeSize(_ size: CGSize) {
         treeViewport = size
-        log("tree: viewport \(Int(size.width))x\(Int(size.height))")
+        receipts.info("tree", "viewport", ["width": Int(size.width), "height": Int(size.height)])
         allocatePreviews()
     }
 
@@ -668,7 +726,10 @@ final class VigilPhone: ObservableObject {
         let set = Set(wanted)
         guard set != previewed else { return }
         previewed = set
-        log("previews: \(wanted.joined(separator: " ")) (\(rowFrames.count) rows reported, viewport \(Int(treeViewport.width))x\(Int(treeViewport.height)))")
+        receipts.info("tree", "previews", [
+            "panes": Array(wanted), "rows": rowFrames.count,
+            "width": Int(treeViewport.width), "height": Int(treeViewport.height),
+        ])
         if presenting == nil { sweepUnwanted() }
     }
 
@@ -704,10 +765,10 @@ final class VigilPhone: ObservableObject {
         guard !dialing.contains(ref.pane) else { return nil }
         if surfaces.count + dialing.count >= Self.surfaceCap {
             guard screen, let victim = surfaces.keys.first(where: { $0 != ref.pane && $0 != presenting?.pane }) else {
-                log("surface: cap \(Self.surfaceCap) reached, \(ref.pane) not shown")
+                receipts.info("surface", "cap reached; not shown", ["pane": ref.pane, "cap": Self.surfaceCap])
                 return nil
             }
-            log("surface: cap reached, evicting \(victim) for the screen")
+            receipts.info("surface", "cap reached; evicted for the screen", ["pane": victim, "for": ref.pane])
             endSurface(victim)
         }
         dialing.insert(ref.pane)
@@ -725,7 +786,7 @@ final class VigilPhone: ObservableObject {
         let view = Ghostty.SurfaceView(app, baseConfig: config)
         view.onStreamEnd = { [weak self, weak view] in
             guard let self, let view, self.surfaces[ref.pane] === view else { return }
-            self.log("surface: \(ref.pane) stream died, dropping it; the screen re-dials")
+            self.receipts.warn("surface", "stream died; dropped, the screen re-dials", ["pane": ref.pane])
             self.endSurface(ref.pane)
             self.streamGeneration += 1
         }
@@ -740,7 +801,7 @@ final class VigilPhone: ObservableObject {
     func endSurface(_ pane: String) {
         guard let view = surfaces.removeValue(forKey: pane) else { return }
         view.detach()
-        log("surface: \(pane) ended (\(surfaces.count) live)")
+        receipts.info("surface", "ended", ["pane": pane, "live": surfaces.count])
     }
 
     /// The pane screen is showing `ref` (nil = the tree). Occlusion
@@ -749,7 +810,7 @@ final class VigilPhone: ObservableObject {
     func present(_ ref: PaneRef?) {
         guard presenting != ref else { return }
         presenting = ref
-        log("present: \(ref?.pane ?? "tree")")
+        receipts.info("pane", "present", ["pane": ref?.pane ?? "tree"])
         for (pane, view) in surfaces {
             view.visible = ref == nil || pane == ref?.pane
         }
@@ -768,7 +829,7 @@ final class VigilPhone: ObservableObject {
     func scene(active: Bool) {
         guard self.active != active else { return }
         self.active = active
-        log("scene: \(active ? "active" : "not active")")
+        receipts.info("scene", active ? "active" : "not active")
         reportShown()
     }
 
@@ -794,7 +855,7 @@ final class VigilPhone: ObservableObject {
             if let before, before.home != now?.home { await runtime.shows(context: nil, home: before.home) }
             if let now { await runtime.shows(context: now.pane, home: now.home) }
         }
-        log("shows: \(now.map { "\($0.pane) to its Mac's authz" } ?? "nothing")")
+        receipts.info("authz", "shows", ["pane": now?.pane ?? "nothing"])
     }
 
     /// A pane shown full screen here was seen: the fact belongs to ITS Mac
@@ -808,12 +869,12 @@ final class VigilPhone: ObservableObject {
             guard let self else { return }
             do {
                 _ = try await VigilLink.call(linked(), device: ref.host.id, .seen(ref.pane, revision: revision))
-                log("seen: \(ref.pane) marked on \(ref.host.name)")
+                receipts.info("seen", "marked", ["pane": ref.pane, "mac": ref.host.name])
             } catch {
                 if directories[ref.host.id]?.panes[ref.pane]?.stateRevision == revision {
                     directories[ref.host.id]?.panes[ref.pane]?.seen = truth.seen
                 }
-                log("seen: \(ref.pane) on \(ref.host.name) FAILED: \(error)")
+                receipts.error("seen", "not marked", ["pane": ref.pane, "mac": ref.host.name, "err": error])
             }
         }
     }

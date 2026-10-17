@@ -38,7 +38,7 @@ class VigilOverview: NSObject {
         // become a card. Then scream if any impossible state slipped through.
         manager.reconcile()
         manager.assertInvariants("buildEntries")
-        manager.vlog("overview: " + manager.workspaces.keys.sorted().joined(separator: " "))
+        overviewLog.info("entries built", ["workspaces": manager.workspaces.keys.sorted()])
         // Every rebuild refreshes live thumbnails: p/u/undo change what a
         // card IS mid-showing, and a freshly born session has no frozen
         // snapshot to fall back on.
@@ -329,11 +329,11 @@ class VigilOverview: NSObject {
         // Windowed already has a window: just focus it. Background needs
         // open() to re-embed or resurrect. Place decides, not the class.
         if entry.place == .windowed, let controller = entry.controller {
-            VigilWorkspaces.shared.vlog("overview: focus '\(entry.name)'")
+            overviewLog.info("focus", ["workspace": entry.name])
             controller.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {
-            VigilWorkspaces.shared.vlog("overview: open '\(entry.name)'")
+            overviewLog.info("open", ["workspace": entry.name])
             VigilWorkspaces.shared.open(name: entry.name)
         }
     }

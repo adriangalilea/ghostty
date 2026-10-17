@@ -39,7 +39,7 @@ extension VigilWorkspaces {
         session.paneSeq = 1 // index 0 consumed at birth
         workspaces[name] = session
         registerMember(controller, name: name)
-        vlog("born(window): '\(name)' cwd=\(cwd)")
+        lifecycleLog.info("born from a window", ["workspace": name, "cwd": cwd])
         persist()
     }
 
@@ -53,7 +53,7 @@ extension VigilWorkspaces {
         session.tabs = [Registry.Tab(panes: [Registry.Pane(id: "vigil-\(name)-0", cwd: cwd, command: command)], layout: nil)]
         session.paneSeq = 1 // index 0 consumed at birth
         workspaces[name] = session
-        vlog("born(create): '\(name)' cwd=\(cwd)\(command.map { " command=\($0)" } ?? "")")
+        lifecycleLog.info("born", ["workspace": name, "cwd": cwd, "command": command])
         return name
     }
 
@@ -72,7 +72,7 @@ extension VigilWorkspaces {
         for pane in workspaces[name]!.tabs.flatMap(\.panes) {
             startDaemon(pane: pane, session: name)
         }
-        vlog("born(api): '\(name)' label=\(label ?? "-") window=\(openWindow)")
+        lifecycleLog.info("born through the api", ["workspace": name, "label": label, "window": openWindow])
         if openWindow { open(name: name) } else { persist() }
         return name
     }
@@ -106,13 +106,13 @@ extension VigilWorkspaces {
             try proc.run()
             proc.waitUntilExit()
             if proc.terminationStatus == 0 {
-                vlog("daemon: \(pane.id) up (created running)")
+                daemonLog.info("daemon up", ["pane": pane.id])
                 return true
             } else {
-                vlog("!! daemon: \(pane.id) spawn FAILED (exit \(proc.terminationStatus))")
+                daemonLog.error("daemon spawn failed", ["pane": pane.id, "status": proc.terminationStatus])
             }
         } catch {
-            vlog("!! daemon: \(pane.id) spawn FAILED (\(error))")
+            daemonLog.error("daemon spawn failed", ["pane": pane.id, "err": error])
         }
         return false
     }
@@ -263,14 +263,14 @@ extension VigilWorkspaces {
                 // runtime would mount verbatim forever with those panes
                 // unreachable. Released instead: the tab keeps only its
                 // capture and rebuilds whole.
-                vlog("vacate: '\(name)' tab \(registered.sorted()) half-live \(liveIds.sorted()) -> released to capture")
+                registryLog.warn("half-live tab released to its capture", ["workspace": name, "panes": registered.sorted(), "live": liveIds.sorted()])
                 dockMap.object(forKey: member)?.unmount()
                 continue
             }
             held.append(TabRuntime(tree: member.surfaceTree, dock: dockMap.object(forKey: member)))
         }
         for stray in pool {
-            vlog("!! vacate: '\(name)' member tree \(stray.surfaceTree.compactMap(\.vigilAttachId)) missing from its registry (appended + registered)")
+            registryLog.error("member tree missing from its registry; appended and registered", ["workspace": name, "panes": stray.surfaceTree.compactMap(\.vigilAttachId)])
             // Register the stray's capture too: a pane no registry lists is
             // a daemon collectOrphans kills at the next launch, silently.
             let (strayPanes, strayLayout) = capture(stray.surfaceTree, carrying: [])
@@ -415,9 +415,9 @@ extension VigilWorkspaces {
     /// ONE window with all its tabs regrouped (session scope = the
     /// window).
     func open(name: String) {
-        guard let session = workspaces[name] else { vlog("open: '\(name)' UNKNOWN session (noop)"); return }
-        guard let ghostty = ghosttyApp else { vlog("open: '\(name)' no ghosttyApp (noop)"); return }
-        vlog("open: '\(name)' at \(placeTag(name))")
+        guard let session = workspaces[name] else { lifecycleLog.warn("open of an unknown workspace ignored", ["workspace": name]); return }
+        guard let ghostty = ghosttyApp else { lifecycleLog.warn("open ignored: no ghostty app", ["workspace": name]); return }
+        lifecycleLog.info("open", ["workspace": name, "place": placeTag(name)])
 
         // No manual acknowledge: presence (ackVisiblePanes at the focus
         // chokepoints) resolves attention once the asking console is
@@ -433,7 +433,7 @@ extension VigilWorkspaces {
             // ONE window, first held tab mounted, the rest kept warm (the
             // sidebar adopts them on click).
             let held = session.held
-            vlog("open: '\(name)' held tabs=\(held.count) -> mount first, \(held.count - 1) warm")
+            lifecycleLog.info("open from held tabs: first mounted, the rest warm", ["workspace": name, "held": held.count])
             let controller = TerminalController.newWindow(ghostty, tree: first.tree, confirmUndo: false)
             registerMember(controller, name: name)
             if let dock = first.dock { dockMap.setObject(dock, forKey: controller) }
@@ -479,7 +479,7 @@ extension VigilWorkspaces {
         /// Splits and subsequent tabs wait for their window to actually
         /// present (next runloop tick); building against an unpresented
         /// window drops splits and births invisible tabs.
-        vlog("resurrect: '\(name)' tabs=\(tabs.count) panes=\(tabs.map(\.panes.count)) -> native tabs")
+        lifecycleLog.info("resurrected as native tabs", ["workspace": name, "tabs": tabs.count, "panes": tabs.map(\.panes.count)])
 
         // First tab gets the window; the rest come back as NATIVE tabs
         // behind it (ghostty's regular tab UX, exactly).
@@ -575,19 +575,19 @@ extension VigilWorkspaces {
     ) {
         let panes = tab.panes
         guard panes.count > 1 else { return }
-        guard let app = ghosttyApp?.app else { vlog("!! materialize: no ghostty app"); return }
+        guard let app = ghosttyApp?.app else { viewportLog.error("splits dropped: no ghostty app"); return }
         guard let anchor = controller.surfaceTree.root?.leftmostLeaf() else {
-            vlog("!! materialize: splits DROPPED (no anchor surface)")
+            viewportLog.error("splits dropped: no anchor surface", ["panes": panes.map(\.id)])
             return
         }
         let layout = tab.layout ?? Self.chainLayout(count: panes.count)
         let anchorIndex = layout.firstLeaf
         guard Self.leaves(layout).sorted() == Array(panes.indices) else {
-            vlog("!! materialize: layout leaves \(Self.leaves(layout)) do not cover \(panes.count) panes - splits DROPPED")
+            viewportLog.error("splits dropped: layout does not cover the panes", ["leaves": Self.leaves(layout), "panes": panes.count])
             return
         }
         guard anchor.vigilAttachId == panes[anchorIndex].id else {
-            vlog("!! materialize: anchor '\(anchor.vigilAttachId ?? "-")' is not the layout's first pane '\(panes[anchorIndex].id)' - splits DROPPED")
+            viewportLog.error("splits dropped: anchor is not the layout's first pane", ["anchor": anchor.vigilAttachId, "first": panes[anchorIndex].id])
             return
         }
         func view(_ index: Int) -> Ghostty.SurfaceView {
@@ -635,11 +635,11 @@ extension VigilWorkspaces {
     /// handled (the close must be swallowed by the caller).
     func handleWindowClose(controller: TerminalController) -> Bool {
         guard let name = workspaceName(of: controller) else {
-            vlog("handleWindowClose: controller has NO session -> not handled (window closes plain)")
+            lifecycleLog.info("window with no workspace closes plain")
             return false
         }
         let empty = members(of: name).allSatisfy { $0.surfaceTree.isEmpty }
-        vlog("handleWindowClose: '\(name)' emptyTrees=\(empty)")
+        lifecycleLog.info("window close", ["workspace": name, "empty": empty])
         if empty {
             for member in members(of: name) { memberships.removeObject(forKey: member) }
             persist()
@@ -694,7 +694,7 @@ extension VigilWorkspaces {
         memberships.removeObject(forKey: controller)
         dockMap.removeObject(forKey: controller)
         swapTree(controller, SplitTree())
-        vlog("closeTab: one tab leaves '\(name)'")
+        graveyardLog.info("tab closed", ["workspace": name, "panes": tree.compactMap(\.vigilAttachId)])
         guard !tree.isEmpty else { persist(); return }
         buryTab(tree: tree, dock: dock, from: name)
         persist()
@@ -713,7 +713,7 @@ extension VigilWorkspaces {
             index = found
             tab = session.tabs.remove(at: found)
         } else {
-            vlog("!! buryTab: '\(name)' tab \(ids) was not in its registry")
+            graveyardLog.error("buried tab was not in its registry", ["workspace": name, "panes": ids.sorted()])
             let (panes, layout) = capture(tree, carrying: [])
             tab = Registry.Tab(panes: panes, layout: layout, dock: dock.flatMap { captureDock($0, carrying: []) })
             index = session.tabs.count
@@ -803,7 +803,7 @@ extension VigilWorkspaces {
         session.emoji = old.emoji // visual lineage, renameable like the label
         workspaces[name] = session
         for controller in controllers { registerMember(controller, name: name) }
-        vlog("mint(drag-out): '\(name)' ('\(session.label)') from '\(old.name)' tabs=\(controllers.count)")
+        lifecycleLog.info("minted by a drag-out", ["workspace": name, "label": session.label, "source": old.name, "tabs": controllers.count])
         // No async label refinement here: the lineage label is already
         // meaningful (unlike an id seed), and silently replacing it would
         // erase exactly the breadcrumb the mint just created. Rename wins.
@@ -829,7 +829,7 @@ extension VigilWorkspaces {
         workspaces[other] = nil
         recent.removeAll { $0 == other }
         try? FileManager.default.removeItem(at: dumpsDir(other))
-        vlog("absorb(drag-in): '\(other)' -> '\(absorberName)'")
+        lifecycleLog.info("absorbed by a drag-in", ["source": other, "target": absorberName])
         persist()
         onAttentionChange?()
     }
@@ -893,7 +893,7 @@ extension VigilWorkspaces {
             // safe.
             killController(controller)
             open(name: target)
-            vlog("move viewport: target '\(target)' already displayed -> closed source viewport")
+            moveLog.info("source viewport closed: target already displayed", ["target": target])
             return
         }
         // The registry is the durable representation of any held tabs.
@@ -905,7 +905,7 @@ extension VigilWorkspaces {
         registerMember(controller, name: target)
         setOcclusion(true, views: Array(controller.surfaceTree))
         focusLanding(controller)
-        vlog("move viewport: unclaimed controller -> background target '\(target)'")
+        moveLog.info("vacated viewport handed to the target", ["target": target])
     }
 
     /// A source emptied by moves clears: identity through the tray
@@ -916,7 +916,7 @@ extension VigilWorkspaces {
         workspaces[name] = session
         let liveMembers = members(of: name).filter { !$0.surfaceTree.isEmpty }
         guard session.tabs.isEmpty, liveMembers.isEmpty else { return }
-        vlog("clearIfEmpty: '\(name)' emptied by a move -> buried")
+        moveLog.info("source emptied by a move; buried", ["workspace": name])
         for member in members(of: name) {
             memberships.removeObject(forKey: member)
             killController(member)
@@ -934,7 +934,7 @@ extension VigilWorkspaces {
     /// session, where it lands as a captured tab.
     func moveTab(anchor: String, from source: String, to target: String) {
         guard source != target, workspaces[source] != nil, workspaces[target] != nil else {
-            vlog("!! moveTab: \(anchor): '\(source)' -> '\(target)' refused (same workspace or unknown here)")
+            moveLog.error("tab move refused: same workspace or unknown here", ["tab": anchor, "source": source, "target": target])
             return
         }
         var moved: Registry.Tab?
@@ -946,7 +946,7 @@ extension VigilWorkspaces {
             moved = workspaces[source]!.tabs.remove(at: index)
         }
         guard let moved else {
-            vlog("!! moveTab: tab \(anchor) not found in '\(source)' - refused")
+            moveLog.error("tab move refused: tab not found", ["tab": anchor, "source": source])
             return
         }
         // A warm tab moves warm: its running surfaces belong to the target now.
@@ -958,7 +958,7 @@ extension VigilWorkspaces {
            let controller = view.window?.windowController as? TerminalController {
             settleVacatedController(controller, movedTo: target)
         }
-        vlog("moveTab: \(anchor): '\(source)' -> '\(target)'")
+        moveLog.info("tab moved", ["tab": anchor, "source": source, "target": target])
         clearIfEmpty(source)
         persist()
         assertInvariants("moveTab")
@@ -969,11 +969,11 @@ extension VigilWorkspaces {
     /// first tab, live-appended when the target is mounted).
     func movePane(paneId: String, from source: String, to target: String, isDock: Bool) {
         guard workspaces[source] != nil, workspaces[target] != nil else {
-            vlog("!! movePane: \(paneId): '\(source)' -> '\(target)' refused: workspace unknown here")
+            moveLog.error("pane move refused: workspace unknown here", ["pane": paneId, "source": source, "target": target])
             return
         }
         if source == target {
-            isDock ? vlog("movePane: dock tenant \(paneId) already in '\(source)' - nothing to do")
+            isDock ? moveLog.info("dock tenant already in its workspace", ["pane": paneId, "workspace": source])
                 : splitOut(paneId: paneId, in: source)
             return
         }
@@ -1033,7 +1033,7 @@ extension VigilWorkspaces {
             inheritedEmoji = taken.tabEmoji
         }
         guard let pane else {
-            vlog("!! movePane: \(paneId) is registered nowhere - refused")
+            moveLog.error("pane move refused: pane registered nowhere", ["pane": paneId])
             return
         }
         chown(paneId, to: target)
@@ -1056,7 +1056,7 @@ extension VigilWorkspaces {
                 let hostIds = Set(host.surfaceTree.compactMap(\.vigilAttachId))
                 let index = workspaces[target]!.tabs.firstIndex { !Set($0.paneIds).isDisjoint(with: hostIds) }
                     ?? {
-                        vlog("!! movePane: host tab \(hostIds.sorted()) of '\(target)' not in its registry - tenant appended as a new tab")
+                        moveLog.error("host tab not in its registry; tenant appended as a new tab", ["workspace": target, "panes": hostIds.sorted()])
                         workspaces[target]!.tabs.append(Registry.Tab(panes: [], layout: nil))
                         return workspaces[target]!.tabs.count - 1
                     }()
@@ -1082,7 +1082,7 @@ extension VigilWorkspaces {
         if let vacatedController {
             settleVacatedController(vacatedController, movedTo: target)
         }
-        vlog("movePane: \(paneId): '\(source)' -> '\(target)' dock=\(isDock)")
+        moveLog.info("pane moved", ["pane": paneId, "source": source, "target": target, "dock": isDock])
         clearIfEmpty(source)
         persist()
         assertInvariants("movePane")
@@ -1093,7 +1093,7 @@ extension VigilWorkspaces {
     /// its capture.
     func movePane(paneId: String, from source: String, intoTabAnchoredBy anchor: String, of target: String) {
         guard workspaces[target] != nil else {
-            vlog("!! movePane: \(paneId) -> tab \(anchor) of '\(target)' refused: workspace unknown here")
+            moveLog.error("pane move into a tab refused: workspace unknown here", ["pane": paneId, "tab": anchor, "target": target])
             return
         }
         if source == target {
@@ -1153,11 +1153,11 @@ extension VigilWorkspaces {
         guard let tabs = workspaces[name]?.tabs,
               let from = tabs.firstIndex(where: { $0.panes.contains { $0.id == paneId } }),
               tabs.contains(where: { $0.paneIds.contains(anchor) }) else {
-            vlog("!! movePane: \(paneId) -> tab \(anchor) of '\(name)' refused: pane or tab not registered there")
+            moveLog.error("pane move into a tab refused: pane or tab not registered there", ["pane": paneId, "tab": anchor, "workspace": name])
             return
         }
         guard !tabs[from].paneIds.contains(anchor) else {
-            vlog("movePane: \(paneId) already in tab \(anchor) of '\(name)' - nothing to do")
+            moveLog.info("pane already in that tab", ["pane": paneId, "tab": anchor, "workspace": name])
             return
         }
         let view = liveView(attachId: paneId)
@@ -1166,7 +1166,7 @@ extension VigilWorkspaces {
         let anchorHome = anchorView.flatMap(treeHome(of:))
         guard let taken = takePane(paneId),
               let into = workspaces[name]!.tabs.firstIndex(where: { $0.paneIds.contains(anchor) }) else {
-            vlog("!! movePane: \(paneId) could not be taken out of '\(name)' - refused")
+            moveLog.error("pane move refused: pane could not be taken out", ["pane": paneId, "workspace": name])
             return
         }
         workspaces[name]!.tabs[into].panes.append(taken.pane)
@@ -1188,7 +1188,7 @@ extension VigilWorkspaces {
                 swapTree(anchorHome, tree)
                 focusLanding(anchorHome, on: paneId)
             }
-            vlog("movePane: \(paneId) -> tab \(anchor) of '\(name)' (split in live)")
+            moveLog.info("pane moved into a tab, split in live", ["pane": paneId, "tab": anchor, "workspace": name])
         } else if let view, let home, let node = home.surfaceTree.root?.node(view: view) {
             // The pane was on screen, its new tab is not: this viewport shows
             // the new tab, the old tab's remaining panes stay warm.
@@ -1205,12 +1205,12 @@ extension VigilWorkspaces {
             } else if let dock = outgoing.dock {
                 dockMap.setObject(dock, forKey: home)
             }
-            vlog("movePane: \(paneId) -> tab \(anchor) of '\(name)' (viewport now shows it)")
+            moveLog.info("pane moved into a tab the viewport now shows", ["pane": paneId, "tab": anchor, "workspace": name])
         } else {
             // Neither is on screen: the registry is the whole move; the next
             // mount of the tab adopts or mints the pane.
             workspaces[name]!.tabs[into].layout = nil
-            vlog("movePane: \(paneId) -> tab \(anchor) of '\(name)' (captured)")
+            moveLog.info("pane moved into a captured tab", ["pane": paneId, "tab": anchor, "workspace": name])
         }
         persist()
         assertInvariants("movePaneWithin")
@@ -1220,17 +1220,17 @@ extension VigilWorkspaces {
     /// becomes a tab of its own (the tab it left keeps the rest).
     private func splitOut(paneId: String, in name: String) {
         guard let tab = workspaces[name]?.tabs.first(where: { $0.panes.contains { $0.id == paneId } }) else {
-            vlog("!! movePane: \(paneId) is no split pane of '\(name)' - refused")
+            moveLog.error("split-out refused: not a split pane of the workspace", ["pane": paneId, "workspace": name])
             return
         }
         guard tab.panes.count > 1 else {
-            vlog("movePane: \(paneId) is already its own tab in '\(name)' - nothing to do")
+            moveLog.info("pane already its own tab", ["pane": paneId, "workspace": name])
             return
         }
         let view = liveView(attachId: paneId)
         let home = view.flatMap(treeHome(of:))
         guard let taken = takePane(paneId) else {
-            vlog("!! movePane: \(paneId) could not be taken out of '\(name)' - refused")
+            moveLog.error("pane move refused: pane could not be taken out", ["pane": paneId, "workspace": name])
             return
         }
         workspaces[name]!.tabs.append(Registry.Tab(panes: [taken.pane], layout: nil))
@@ -1238,7 +1238,7 @@ extension VigilWorkspaces {
             swapTree(home, home.surfaceTree.removing(node))
             setOcclusion(false, views: [view])
         }
-        vlog("movePane: \(paneId) split out of its tab into its own tab of '\(name)'")
+        moveLog.info("pane split out into its own tab", ["pane": paneId, "workspace": name])
         persist()
         assertInvariants("splitOut")
     }
@@ -1249,14 +1249,14 @@ extension VigilWorkspaces {
     func reorderTab(anchor: String, in name: String, onto target: String?) {
         guard var tabs = workspaces[name]?.tabs,
               let from = tabs.firstIndex(where: { $0.paneIds.contains(anchor) }) else {
-            vlog("!! reorderTab: tab \(anchor) not registered in '\(name)' - refused")
+            moveLog.error("tab reorder refused: tab not registered", ["tab": anchor, "workspace": name])
             return
         }
         let to = target.flatMap { t in tabs.firstIndex { $0.paneIds.contains(t) } } ?? 0
         guard from != to else { return }
         tabs.insert(tabs.remove(at: from), at: to)
         workspaces[name]!.tabs = tabs
-        vlog("reorderTab: '\(name)' tab \(anchor) \(from) -> \(to)")
+        moveLog.info("tab reordered", ["workspace": name, "tab": anchor, "from": from, "to": to])
         persist()
     }
 
@@ -1290,7 +1290,7 @@ extension VigilWorkspaces {
         workspaces[source] = nil
         recent.removeAll { $0 == source }
         bury(buried)
-        vlog("merge: '\(source)' -> '\(target)' (\(workspaces[target]!.tabs.count) tabs)")
+        lifecycleLog.info("merged", ["source": source, "target": target, "tabs": workspaces[target]!.tabs.count])
         // The source's windows shapeshift to the merged target (first one)
         // or close (the rest).
         var first = true
@@ -1318,7 +1318,7 @@ extension VigilWorkspaces {
         // froze and persisted the workspace at willPowerOff; anything that
         // cancels here stalls the shutdown (see the observer in init).
         guard !systemPoweringOff else {
-            vlog("quit(intercept): power-off in flight -> terminate now")
+            lifecycleLog.info("quit during power-off: terminate now")
             return false
         }
         reconcile()
@@ -1330,7 +1330,7 @@ extension VigilWorkspaces {
         var frozen: [String: Bool] = [:]
         for (name, session) in workspaces { frozen[name] = isForeground(session) }
         shutdownForeground = frozen
-        vlog("quit(intercept): froze \(frozen.filter(\.value).count)/\(frozen.count) foreground -> \(frozen.filter(\.value).keys.sorted().joined(separator: ","))")
+        lifecycleLog.info("quit intercepted; foreground frozen", ["foreground": frozen.filter(\.value).keys.sorted(), "workspaces": frozen.count])
         defer { DispatchQueue.main.async { self.shutdownForeground = nil } }
 
         if let name = floatingName, let quick = quickController(create: false) {
@@ -1382,7 +1382,7 @@ extension VigilWorkspaces {
         var frozen: [String: Bool] = [:]
         for (name, session) in workspaces { frozen[name] = isForeground(session) }
         shutdownForeground = frozen
-        vlog("shutdown(system): froze \(frozen.filter(\.value).count)/\(frozen.count) foreground -> \(frozen.filter(\.value).keys.sorted().joined(separator: ","))")
+        lifecycleLog.info("shutdown; foreground frozen", ["foreground": frozen.filter(\.value).keys.sorted(), "workspaces": frozen.count])
         persist()
     }
 
@@ -1398,7 +1398,7 @@ extension VigilWorkspaces {
             .map(\.name)
         for name in names {
             workspaces[name]!.foreground = false
-            vlog("restore(launch): '\(name)' -> window")
+            lifecycleLog.info("restored to a window at launch", ["workspace": name])
             open(name: name)
         }
         return !names.isEmpty

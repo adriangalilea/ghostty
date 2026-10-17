@@ -15,9 +15,9 @@ import Say
 /// keywords as grounding.
 @MainActor
 enum VigilVoice {
-    /// Receipts land in vigil.log: "I spoke and nothing happened" vs
-    /// "nothing fired" must be distinguishable from the log alone.
-    static var trace: ((String) -> Void)?
+    /// Receipts land in the unified log's voice scope: "I spoke and
+    /// nothing happened" vs "nothing fired" must be distinguishable from
+    /// the log alone.
     /// Fires on start/stop so the status item can show the mic.
     static var onStateChange: (() -> Void)?
 
@@ -41,7 +41,7 @@ enum VigilVoice {
     }()
 
     /// ^⌥M system-wide, with Carbon's release event so a held key IS
-    /// push-to-talk. Registration failure (combo owned elsewhere) traces.
+    /// push-to-talk. Registration failure (combo owned elsewhere) is logged.
     static let hotkeyHint = "⌃⌥M"
     private static var hotkey: PressReleaseHotkey?
     static func armHotkey() {
@@ -51,7 +51,7 @@ enum VigilVoice {
             onPress: { talk.pressBegan() },
             onRelease: { talk.pressEnded() })
         if hotkey?.registered != true {
-            trace?("voice: hotkey \(hotkeyHint) not registered (owned elsewhere)")
+            voiceLog.warn("hotkey not registered: owned elsewhere", ["hotkey": hotkeyHint])
         }
     }
 
@@ -81,7 +81,7 @@ enum VigilVoice {
                 ?? TerminalController.preferredParent)?.focusedSurface,
             let pane = surface.vigilAttachId
         else {
-            trace?("voice: no focused vigil pane to dictate into")
+            voiceLog.warn("no focused pane to dictate into")
             talk.stop()
             return
         }
@@ -91,7 +91,7 @@ enum VigilVoice {
     static func start(pane: String) {
         guard !isActive else { return }
         guard available else {
-            trace?("voice: no microphone")
+            voiceLog.warn("no microphone")
             return
         }
         activePane = pane
@@ -113,7 +113,7 @@ enum VigilVoice {
                 // Generation-guarded teardown: a stale denial that raced a
                 // stop + fresh start must not kill the successor's session.
                 guard await MicCapture.requestAccess() else {
-                    trace?("voice: microphone DENIED - System Settings > Privacy > Microphone")
+                    voiceLog.error("microphone denied", ["fix": "System Settings > Privacy > Microphone"])
                     if generation == gen { stop(reason: "mic denied") }
                     return
                 }
@@ -126,18 +126,22 @@ enum VigilVoice {
                     if let ready = try? await AssetStore.resolveInstalled(locale) {
                         locales.append(ready)
                     } else {
-                        trace?("voice: \(locale.identifier(.bcp47)) has no speech model installed, skipped (ask settings > Languages)")
+                        voiceLog.warn("language skipped: no speech model installed", [
+                            "locale": locale.identifier(.bcp47), "fix": "ask settings > Languages",
+                        ])
                     }
                 }
                 guard !locales.isEmpty else {
-                    trace?("voice: no installed model for \(wanted.map { $0.identifier(.bcp47) }.joined(separator: "+")) - download one in ask settings > Languages")
+                    voiceLog.error("no installed speech model", [
+                        "locales": wanted.map { $0.identifier(.bcp47) }, "fix": "ask settings > Languages",
+                    ])
                     if generation == gen { stop(reason: "no language model") }
                     return
                 }
-                trace?(
-                    "voice: dictation -> \(pane)"
-                        + " locales=\(locales.map { $0.identifier(.bcp47) }.joined(separator: "+"))"
-                        + " grounding=\(grounding.totalCount) mic=\"\(MicCapture.inputName)\"")
+                voiceLog.info("dictation started", [
+                    "pane": pane, "locales": locales.map { $0.identifier(.bcp47) },
+                    "grounding": grounding.totalCount, "mic": MicCapture.inputName,
+                ])
                 // Volatiles feed the floating HUD (wet-ink preview); only
                 // FINALS ever reach the pane.
                 let session: any SpeechSession
@@ -165,15 +169,12 @@ enum VigilVoice {
                 // The shared warm tap: consecutive dictations (and the ask
                 // gate) reuse one hot voice-processed engine instead of
                 // paying VPIO construction per start. Its receipts sink has
-                // ONE owner, wired at startup with the traces - never here.
+                // ONE owner, wired at startup - never here.
                 Self.subscription = try MicTap.shared.subscribe { buffer in
                     session.feed(buffer)
                     spectrum.ingest(buffer)
                 }
-                trace?(
-                    "voice: capture voiceProcessed=\(MicTap.shared.voiceProcessed)"
-                        + " (OS AEC \(MicTap.shared.voiceProcessed ? "on - self-audio subtracted" : "OFF"))"
-                )
+                voiceLog.info("capture", ["voice_processed":MicTap.shared.voiceProcessed])
                 VigilDictationHUD.shared.begin(pane: pane)
                 Self.drain = Task {
                     do {
@@ -208,7 +209,7 @@ enum VigilVoice {
                     }
                 }
             } catch {
-                trace?("voice: session failed to start: \(error)")
+                voiceLog.error("session failed to start", ["err": error])
                 // Generation-guarded like the drain's error path: a stale
                 // failure must not null a successor's activePane. stop() is
                 // the ONE teardown - it finishes a session a subscribe
@@ -222,7 +223,7 @@ enum VigilVoice {
 
     static func stop(reason: String) {
         guard isActive else { return }
-        trace?("voice: dictation stopped (\(reason))")
+        voiceLog.info("dictation stopped", ["reason": reason])
         generation += 1
         activePane = nil
         VigilDictationHUD.shared.end()
@@ -251,31 +252,21 @@ enum VigilVoice {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         process.terminationHandler = { proc in
-            DispatchQueue.main.async {
-                trace?(
-                    "voice: injected \(clean.count) chars -> \(pane)"
-                        + " exit=\(proc.terminationStatus)")
-            }
+            voiceLog.info("injected", ["pane": pane, "chars": clean.count, "status": proc.terminationStatus])
         }
         do { try process.run() } catch {
-            trace?("voice: sendraw failed to launch: \(error.localizedDescription)")
+            voiceLog.error("sendraw failed to launch", ["err": error])
         }
     }
 }
 
-/// Listen instrumentation into vigil.log with a stable prefix.
+/// Listen's instrumentation into the voice scope, one event per receipt.
 struct VoiceLogSink: ListenSink {
     func emit(_ event: ListenEvent) {
-        var parts = ["voice:", event.kind]
-        if let ms = event.ms { parts.append(String(format: "%.0fms", ms)) }
-        if let confidence = event.confidence {
-            parts.append(String(format: "conf=%.2f", confidence))
-        }
-        if let count = event.count { parts.append("n=\(count)") }
-        if let note = event.note { parts.append(note) }
-        DispatchQueue.main.async {
-            VigilVoice.trace?(parts.joined(separator: " "))
-        }
+        voiceLog.info("listen", [
+            "kind": event.kind, "locale": event.locale, "elapsed": event.ms.map { Duration.milliseconds($0) },
+            "confidence": event.confidence, "count": event.count, "note": event.note,
+        ])
     }
 }
 #endif

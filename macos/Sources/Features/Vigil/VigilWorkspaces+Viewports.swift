@@ -62,7 +62,7 @@ extension VigilWorkspaces {
             quickTreeSwap = true; quick.surfaceTree = SplitTree(view: view); quickTreeSwap = false
             quick.animateIn()
             DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
-            vlog("float: remote mirror \(pane) -> quick terminal")
+            viewportLog.info("remote mirror floated", ["pane": pane])
             return
         }
         guard let session = workspaces[name] else { return }
@@ -73,7 +73,7 @@ extension VigilWorkspaces {
         var floatedIndex = 0
         if windowed(name) {
             guard let target = pane ?? focusedPane(of: name) else {
-                vlog("float: windowed '\(name)' has no pane to mirror - refused")
+                viewportLog.warn("float refused: no pane to mirror", ["workspace": name])
                 return
             }
             // WINDOWED view or bust: a windowless view would skip the
@@ -87,13 +87,13 @@ extension VigilWorkspaces {
                 // is never the panel.
                 guard let tabIndex = workspaces[name]!.tabs.firstIndex(where: { $0.panes.contains { $0.id == target } }),
                       let host = anchorController(of: name) else {
-                    vlog("float: pane \(target) of windowed '\(name)' has no view and no captured tab - refused")
+                    viewportLog.warn("float refused: pane has no view and no captured tab", ["workspace": name, "pane": target])
                     return
                 }
                 materializeCapturedTab(name: name, tabIndex: tabIndex, host: host)
             }
             guard let home = liveView(attachId: target), home.window != nil else {
-                vlog("float: pane \(target) of windowed '\(name)' has no windowed view - refused")
+                viewportLog.warn("float refused: pane has no windowed view", ["workspace": name, "pane": target])
                 return
             }
             mirror(name: name, pane: target, home: home, quick: quick)
@@ -235,12 +235,12 @@ extension VigilWorkspaces {
     /// first). Its current occupant leaves as any shapeshift's does.
     func mirrorInto(_ controller: TerminalController, name: String, anchor: String?) {
         guard let app = ghosttyApp?.app, let session = workspaces[name], !session.tabs.isEmpty else {
-            vlog("mirror: '\(name)' has no tabs to show - refused")
+            viewportLog.warn("mirror refused: no tabs to show", ["workspace": name])
             return
         }
         let tab = anchor.flatMap { a in session.tabs.first { $0.paneIds.contains(a) } } ?? session.tabs[0]
         guard !tab.panes.isEmpty else {
-            vlog("mirror: '\(name)' tab has no panes - refused")
+            viewportLog.warn("mirror refused: tab has no panes", ["workspace": name])
             return
         }
         if mirroredWorkspace(of: controller) != nil {
@@ -260,7 +260,7 @@ extension VigilWorkspaces {
         remoteLayouts[ObjectIdentifier(controller)] = VigilSessionControl.revision([tab])
         materializeSplits(controller, tab: tab, configFor: configFor)
         land(controller, anchor: anchor, fallback: view)
-        vlog("mirror: window of '\(workspaceName(of: controller) ?? "-")' -> viewport onto '\(name)' (\(tab.panes.count) panes)")
+        viewportLog.info("mirror viewport opened", ["window": workspaceName(of: controller), "workspace": name, "panes": tab.panes.count])
         touchRecent(name)
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
@@ -272,7 +272,7 @@ extension VigilWorkspaces {
         let landing: Ghostty.SurfaceView
         if let anchor {
             guard let found = controller.surfaceTree.first(where: { $0.vigilAttachId == anchor }) else {
-                vlog("handoff: landing refused; pane \(anchor) absent from window \(controller.window?.windowNumber ?? -1)")
+                handoffLog.warn("landing refused: pane absent from window", ["pane": anchor, "window": controller.window?.windowNumber])
                 return
             }
             landing = found
@@ -284,7 +284,7 @@ extension VigilWorkspaces {
         if takeSize, NSApp.isActive, controller.window?.isKeyWindow == false { controller.window?.makeKey() }
         DispatchQueue.main.async { Ghostty.moveFocus(to: landing) }
         if takeSize { landing.vigilRequestSize(reason: "sidebar pane selected") }
-        vlog("handoff: landed \(landing.vigilHost ?? "local")/\(landing.vigilAttachId ?? "unknown") in window \(controller.window?.windowNumber ?? -1)")
+        handoffLog.info("landed", ["host": landing.vigilHost, "pane": landing.vigilAttachId, "window": controller.window?.windowNumber])
     }
 
     /// A REMOTE session (another Mac, VigilRemote) in this viewport: the
@@ -295,7 +295,7 @@ extension VigilWorkspaces {
     func openRemotePane(device: String, pane: String) -> TerminalController? {
         guard let directory = VigilRemote.shared.host(device)?.directory,
               let session = directory.workspaces.first(where: { session in (session.tabs ?? []).contains { $0.paneIds.contains(pane) } }) else {
-            vlog("handoff: remote \(device)/\(pane) refused; pane absent from directory")
+            handoffLog.warn("remote refused: pane absent from directory", ["host": device, "pane": pane])
             return nil
         }
         // A request panel may be key. The main/last-main terminal remains the
@@ -309,7 +309,7 @@ extension VigilWorkspaces {
         }
         guard let controller = mountRemote(viewport, composite: VigilRemote.compositeId(device, session.name),
                                            anchor: VigilRemote.compositeId(device, pane)) else { return nil }
-        vlog("handoff: remote \(device)/\(pane) -> session \(session.name), window \(controller.window?.windowNumber ?? -1), \(viewport == nil ? "created" : "reused")")
+        handoffLog.info("remote landed", ["host": device, "pane": pane, "workspace": session.name, "window": controller.window?.windowNumber, "reused": viewport != nil])
         if controller.window?.isMiniaturized == true { controller.window?.deminiaturize(nil) }
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -327,7 +327,7 @@ extension VigilWorkspaces {
               let composite = mirroredWorkspace(of: controller), let device = view.vigilHost,
               let pane = view.vigilAttachId,
               VigilRemote.shared.session(composite) != nil else { return }
-        vlog("transport: reconnect viewport \(composite) from \(pane); home processes preserved")
+        remoteLog.info("viewport reconnecting", ["workspace": composite, "pane": pane])
         endMirrorViewport(controller)
         mountRemote(controller, composite: composite, anchor: VigilRemote.compositeId(device, pane))
     }
@@ -336,7 +336,7 @@ extension VigilWorkspaces {
     func mountRemote(_ viewport: TerminalController?, composite: String, anchor: String?) -> TerminalController? {
         guard let ghostty = ghosttyApp, let app = ghostty.app,
               let (device, session) = VigilRemote.shared.session(composite) else {
-            vlog("remote: '\(composite)' unknown or unreachable - refused")
+            remoteLog.warn("mount refused: workspace unknown or unreachable", ["workspace": composite])
             return nil
         }
         let rawAnchor = anchor.flatMap { VigilRemote.split($0)?.name }
@@ -380,7 +380,7 @@ extension VigilWorkspaces {
         remoteLayouts[ObjectIdentifier(controller)] = VigilSessionControl.revision([tab])
         materializeSplits(controller, tab: tab, configFor: configFor)
         land(controller, anchor: rawAnchor, fallback: view, takeSize: rawAnchor != nil)
-        vlog("remote: window -> viewport onto '\(composite)' via the hub to \(VigilRemote.shared.host(device)?.name ?? device) (\(tab.panes.count) panes)")
+        remoteLog.info("remote viewport opened", ["workspace": composite, "host": VigilRemote.shared.host(device)?.name ?? device, "panes": tab.panes.count])
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
         return controller
     }
@@ -399,7 +399,7 @@ extension VigilWorkspaces {
         if let dock = dockMap.object(forKey: controller) {
             for view in dock.views where view.vigilMirror { view.vigilDestroySurface() }
         }
-        vlog("mirror: viewport onto '\(name)' ended, clients closed")
+        viewportLog.info("mirror viewport ended", ["workspace": name])
         return true
     }
 
@@ -432,7 +432,7 @@ extension VigilWorkspaces {
             return
         }
         guard let app = ghosttyApp?.app, let registered = registered(pane) else {
-            vlog("float: pane \(pane) of '\(name)' not registered - mirror refused")
+            viewportLog.warn("mirror refused: pane not registered", ["workspace": name, "pane": pane])
             return
         }
         if let current = floatingName {
@@ -451,7 +451,7 @@ extension VigilWorkspaces {
         quickTreeSwap = false
         quick.animateIn()
         DispatchQueue.main.async { Ghostty.moveFocus(to: view) }
-        vlog("float: mirror \(pane) of '\(name)' -> quick terminal")
+        viewportLog.info("mirror floated", ["workspace": name, "pane": pane])
         touchRecent(name)
     }
 
@@ -471,7 +471,7 @@ extension VigilWorkspaces {
         // size on this EOF, and a mirror view retained past its panel
         // must never keep a second client alive.
         current.view.vigilDestroySurface()
-        vlog("float: mirror of \(current.pane) ended, client closed")
+        viewportLog.info("float mirror ended", ["pane": current.pane])
     }
 
     /// A registered CAPTURED tab of a windowed session materializes as a
@@ -491,7 +491,7 @@ extension VigilWorkspaces {
         // onto its daemon's socket.
         let adopted = adoptable(first.id)
         if adopted == nil, let existing = liveView(attachId: first.id), placed(existing) {
-            vlog("!! materialize: '\(first.id)' is already displayed elsewhere - ABORTED (never mint a twin)")
+            viewportLog.error("materialize aborted: pane already displayed elsewhere", ["pane": first.id])
             return
         }
         let view = adopted ?? Ghostty.SurfaceView(app, baseConfig: configFor(first))
@@ -500,7 +500,7 @@ extension VigilWorkspaces {
         materializeSplits(controller, tab: tab, configFor: configFor)
         materializeDockCapture(controller, tab.dock, configFor: configFor)
         focusLanding(controller)
-        vlog("float: captured tab \(tabIndex) of '\(name)' materialized as a silent native tab")
+        viewportLog.info("captured tab materialized silently", ["workspace": name, "tab": tabIndex])
         persist()
     }
 
@@ -510,7 +510,7 @@ extension VigilWorkspaces {
     /// when nothing exists to reopen.
     func reopen() -> Bool {
         guard let name = successor(excluding: "") else { return false }
-        vlog("reopen: no live window -> '\(name)'")
+        lifecycleLog.info("reopened with no live window", ["workspace": name])
         open(name: name)
         return true
     }
@@ -545,7 +545,7 @@ extension VigilWorkspaces {
             stashedQuickTree = quick.surfaceTree
         }
 
-        vlog("float: resurrect tab \(tabIndex) of '\(name)' into the quick terminal")
+        viewportLog.info("captured tab floated", ["workspace": name, "tab": tabIndex])
         // The tab's dock resurrects ALIVE-unshown, exactly like a live
         // float's (the quick terminal shows no docks anywhere): reclaim
         // then hands the runtime on, so a later mount shows the tenants
@@ -599,7 +599,7 @@ extension VigilWorkspaces {
             return
         }
         guard workspaces[targetName] != nil, let ghostty = ghosttyApp else {
-            vlog("shapeshift: '\(targetName)' is no session here - refused")
+            viewportLog.warn("shapeshift refused: unknown workspace", ["workspace": targetName])
             return
         }
         if place(targetName) != .background {
@@ -607,7 +607,7 @@ extension VigilWorkspaces {
             // (a mirror viewport), never a jump to its home window. Its
             // own home window clicking itself is a no-op.
             if members(of: targetName).contains(controller) {
-                vlog("shapeshift: '\(targetName)' already lives in this window (\(placeTag(targetName))) - no-op")
+                viewportLog.info("shapeshift skipped: workspace lives in this window", ["workspace": targetName, "place": placeTag(targetName)])
                 return
             }
             guard controller.window != nil else { open(name: targetName); return }
@@ -615,11 +615,11 @@ extension VigilWorkspaces {
             return
         }
         guard workspaceName(of: controller) != targetName else {
-            vlog("shapeshift: window already shows '\(targetName)' - no-op")
+            viewportLog.info("shapeshift skipped: window already shows it", ["workspace": targetName])
             return
         }
         guard controller.window != nil else { open(name: targetName); return }
-        vlog("shapeshift: window of '\(workspaceName(of: controller) ?? "stray")' -> '\(targetName)'")
+        viewportLog.info("shapeshift", ["from": workspaceName(of: controller), "workspace": targetName])
 
         let t0 = Date()
         releaseOccupant(of: controller)
@@ -639,12 +639,12 @@ extension VigilWorkspaces {
         // The click's latency receipt, staged: "not snappy" must be a
         // number with a culprit in the log, never a feeling.
         let now = Date()
-        vlog(String(
-            format: "shapeshift: '%@' mounted in %.0fms (release %.0f, mount %.0f, persist %.0f)",
-            targetName, now.timeIntervalSince(t0) * 1000,
-            tRelease.timeIntervalSince(t0) * 1000,
-            tMount.timeIntervalSince(tRelease) * 1000,
-            now.timeIntervalSince(tMount) * 1000))
+        viewportLog.info("shapeshift mounted", [
+            "workspace": targetName, "total": Duration.seconds(now.timeIntervalSince(t0)),
+            "release": Duration.seconds(tRelease.timeIntervalSince(t0)),
+            "mount": Duration.seconds(tMount.timeIntervalSince(tRelease)),
+            "persist": Duration.seconds(now.timeIntervalSince(tMount)),
+        ])
     }
 
     /// The current occupant leaves the window WITHOUT the window closing:
@@ -700,7 +700,7 @@ extension VigilWorkspaces {
             let (panes, layout) = capture(tree, carrying: [])
             stray.tabs = [Registry.Tab(panes: panes, layout: layout)]
             workspaces[stray.name] = stray
-            vlog("!! release: session-less window minted as stray '\(stray.name)'")
+            viewportLog.error("session-less window minted as stray", ["workspace": stray.name])
             setOcclusion(false, [runtime])
         }
     }
@@ -728,7 +728,7 @@ extension VigilWorkspaces {
             // the original's panes. Callers route
             // displayed targets to their home window or pick a background
             // session.
-            vlog("mount REFUSED: '\(name)' is \(placeTag(name)) - window left as-is")
+            viewportLog.error("mount refused: workspace not mountable", ["workspace": name, "place": placeTag(name)])
             return
         }
         // A held runtime mounts only when it IS the asked-for tab. An
@@ -764,7 +764,7 @@ extension VigilWorkspaces {
                 // Sidebar mode: sibling tabs stay WARM, held with their
                 // surfaces running; a row click adopts them into this
                 // viewport. No window is created.
-                vlog("mount: '\(name)' keeps \(rest.count) sibling tab(s) warm (vigil.tabs=sidebar)")
+                viewportLog.info("mounted, sibling tabs kept warm", ["workspace": name, "warm": rest.count])
             } else if !rest.isEmpty {
                 // This window is PRESENTED (it is the live viewport), so
                 // the rest attach in ONE next tick - no stagger, no
@@ -872,17 +872,17 @@ extension VigilWorkspaces {
         guard workspaceName(of: controller) == name, let session = workspaces[name] else { return }
         let t0 = Date()
         defer {
-            let ms = Date().timeIntervalSince(t0) * 1000
-            if ms > 25 { vlog(String(format: "shapeshiftTab: '%@' in %.0fms", anchor, ms)) }
+            let elapsed = Duration.seconds(Date().timeIntervalSince(t0))
+            if elapsed > .milliseconds(25) { viewportLog.info("tab shapeshift slow", ["tab": anchor, "took": elapsed]) }
         }
         let live = liveAttachIds(of: name)
         guard let target = session.tabs.first(where: { $0.paneIds.contains(anchor) }),
               !target.panes.isEmpty else {
-            vlog("shapeshiftTab: '\(name)' anchor \(anchor) matches NO registered tab - refused loud")
+            viewportLog.error("tab shapeshift refused: no registered tab", ["workspace": name, "tab": anchor])
             return
         }
         guard Set(target.paneIds).isDisjoint(with: live) else { return } // already showing
-        vlog("shapeshiftTab: '\(name)' -> tab anchored at \(anchor)")
+        viewportLog.info("tab shapeshift", ["workspace": name, "tab": anchor])
 
         // The tab leaving the viewport stays WARM: held by its session with
         // its surfaces running, so coming back adopts them instead of
@@ -934,7 +934,7 @@ extension VigilWorkspaces {
         let first = panes[firstIndex]
         let adopted = adoptable(first.id)
         if adopted == nil, let existing = liveView(attachId: first.id), placed(existing) {
-            vlog("!! mount: '\(first.id)' is already displayed elsewhere - mount ABORTED (never mint a twin)")
+            viewportLog.error("mount aborted: pane already displayed elsewhere", ["pane": first.id])
             return false
         }
         let view = adopted ?? Ghostty.SurfaceView(app, baseConfig: configFor(first))
@@ -974,7 +974,7 @@ extension VigilWorkspaces {
         }
 
         // The LAST tab: the session dies; the viewport moves on.
-        vlog("closeViewportTab: last tab of '\(name)' -> kill, viewport moves on")
+        graveyardLog.info("last tab closed: workspace killed, viewport moves on", ["workspace": name])
         confirmKill(name: name) { [weak self, weak controller] in
             guard let self, let controller else { return }
             self.kill(name: name, viewport: controller)
@@ -1067,7 +1067,7 @@ extension VigilWorkspaces {
                 }
                 return
             }
-            vlog("!! closePane(sidebar): live view '\(paneId)' held by no dock, no window, no registry - refused loud")
+            graveyardLog.error("pane close refused: live view held by nothing", ["pane": paneId])
             return
         }
         guard workspaces[name] != nil else { return }

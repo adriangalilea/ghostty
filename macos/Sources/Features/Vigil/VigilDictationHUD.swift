@@ -45,8 +45,7 @@ final class VigilDictationHUD: ObservableObject {
             row["confidence"] = line.confidence
             if !line.alternatives.isEmpty { row["alternatives"] = line.alternatives }
             Self.corrections.append(row)
-            VigilVoice.trace?(
-                "voice: corrected \"\(line.original.prefix(40))\" -> \"\(line.text.prefix(40))\"")
+            voiceLog.info("corrected", ["original": String(line.original.prefix(40)), "corrected": String(line.text.prefix(40))])
         }
         model.onIdle = { [weak self] in
             guard let self, closing else { return }
@@ -64,7 +63,7 @@ final class VigilDictationHUD: ObservableObject {
         if doubt > 0 { model.doubtBelow = doubt }
         model.onDoubtChange = { value in
             UserDefaults.standard.set(value, forKey: Self.doubtKey)
-            VigilVoice.trace?("voice: doubt threshold -> \(value)")
+            voiceLog.info("doubt threshold", ["value": value])
         }
     }
 
@@ -108,7 +107,7 @@ final class VigilDictationHUD: ObservableObject {
     func select(locale: String?) {
         forcedLocale = locale
         Languages.pinned = locale
-        VigilVoice.trace?("voice: language -> \(locale ?? "auto")")
+        voiceLog.info("language", ["locale": locale ?? "auto"])
         if let pane, VigilVoice.isActive {
             VigilVoice.stop(reason: "language changed")
             VigilVoice.start(pane: pane)

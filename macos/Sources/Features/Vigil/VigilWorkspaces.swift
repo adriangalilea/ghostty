@@ -4,6 +4,7 @@ import Listen
 import Say
 import SwiftUI
 import GhosttyKit
+import Log
 import VigilHarness
 import VigilWire
 
@@ -54,7 +55,13 @@ import VigilWire
 class VigilWorkspaces {
     static let shared = VigilWorkspaces()
     var facts = VigilFacts.Snapshot()
-    lazy var factsLoader = VigilFacts(trace: { Self.vlogSync($0) }) { [weak self] snapshot in
+    lazy var factsLoader = VigilFacts(report: { event in
+        switch event {
+        case .seenUnwritable(let pane, let error): factsLog.error("seen mark not written", ["pane": pane, "err": error])
+        case .unwatchable(let folder): factsLog.error("folder not watched", ["folder": folder])
+        case .slowRead(let revision, let elapsed): factsLog.warn("slow read", ["revision": revision, "elapsed": elapsed])
+        }
+    }) { [weak self] snapshot in
         Task { @MainActor [weak self] in
             guard let self, snapshot.revision > self.facts.revision else { return }
             let sidebarChanged = snapshot.sidebarRevision != self.facts.sidebarRevision
@@ -257,7 +264,7 @@ class VigilWorkspaces {
         }
         // A name the user typed must never vanish quietly.
         if !landed {
-            vlog("!! rename: nothing owns '\(key)' - the name was NOT stored")
+            registryLog.error("rename not stored: nothing owns it", ["key": key])
         }
         persist()
         // A tab renamed anywhere (sidebar row, tab bar, ⌘-rename) repaints
@@ -520,6 +527,7 @@ class VigilWorkspaces {
     var reportedLeaks = Set<String>()
 
     private init() {
+        setLogService("vigil")
         _ = Self.launchedAt // a static is lazy: stamp it at launch, not at the first status read
         acquireInstanceLock()
         load()
@@ -658,7 +666,7 @@ class VigilWorkspaces {
         } else {
             workspaces[name]!.tabs.append(tab)
         }
-        vlog("register: '\(name)' += tab \(ids) (\(carried.count) claimed)")
+        registryLog.info("tab registered", ["workspace": name, "panes": ids, "claimed": carried.count])
     }
 
     /// A session window's tree EMPTIED by ghostty (its only pane dragged
@@ -916,7 +924,7 @@ class VigilWorkspaces {
     ) -> (panes: [Registry.Pane], layout: Registry.Layout?) {
         let panes = tree.compactMap { view -> Registry.Pane? in
             guard let id = view.vigilAttachId else {
-                vlog("!! capture: a surface with NO daemon id in a session tree - skipped")
+                registryLog.error("capture skipped a surface with no daemon id")
                 return nil
             }
             return capturedPane(view, id: id, previous: previous.first { $0.id == id } ?? registered(id))
@@ -980,14 +988,14 @@ class VigilWorkspaces {
         var inheritedEmoji: String?
         for id in after.subtracting(before) where !listedHere.contains(id) {
             guard let taken = takePane(id) else {
-                vlog("tree: fresh pane '\(id)' joins '\(name)'")
+                registryLog.info("fresh pane joins", ["pane": id, "workspace": name])
                 continue
             }
             carried.append(taken.pane)
             inheritedLabel = inheritedLabel ?? taken.tabLabel
             inheritedEmoji = inheritedEmoji ?? taken.tabEmoji
             chown(id, to: name)
-            vlog("tree: pane '\(id)' claimed by '\(name)'")
+            registryLog.info("pane claimed", ["pane": id, "workspace": name])
         }
 
         var session = workspaces[name]!
@@ -1009,7 +1017,7 @@ class VigilWorkspaces {
                 session.tabs.remove(at: index)
             }
         } else if !panes.isEmpty {
-            vlog("!! tree: '\(name)' has a live tree with no registry tab -> appended")
+            registryLog.error("live tree with no registry tab appended", ["workspace": name])
             session.tabs.append(Registry.Tab(panes: panes, layout: layout, label: inheritedLabel, emoji: inheritedEmoji))
         }
         workspaces[name] = session
@@ -1032,7 +1040,7 @@ class VigilWorkspaces {
             cwd: pane.cwd)
         buried.tabs = [Registry.Tab(panes: [pane], layout: nil)]
         buried.buriedFrom = origin
-        vlog("close: pane '\(pane.id)' leaves '\(owner)' -> buried as '\(buried.name)'")
+        graveyardLog.info("pane buried", ["pane": pane.id, "workspace": owner, "burial": buried.name])
         bury(buried)
     }
 
@@ -1051,7 +1059,7 @@ class VigilWorkspaces {
         buried.tabs = [tab]
         buried.thumbnail = thumbnail
         buried.buriedFrom = Registry.Origin(workspace: owner, tab: index, beside: nil)
-        vlog("close: tab \(tab.paneIds) leaves '\(owner)' -> buried as '\(buried.name)'")
+        graveyardLog.info("tab buried", ["panes": tab.paneIds, "workspace": owner, "burial": buried.name])
         bury(buried)
     }
 
@@ -1179,7 +1187,7 @@ class VigilWorkspaces {
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
-            vlog("persist: failed to encode session registry")
+            registryLog.error("registry not encoded")
             return
         }
         if onlyIfChanged, data == lastSaved { return }
@@ -1197,7 +1205,7 @@ class VigilWorkspaces {
         do {
             try data.write(to: persistURL, options: .atomic)
         } catch {
-            vlog("persist: failed to save session registry: \(error.localizedDescription)")
+            registryLog.error("registry not saved", ["err": error])
             return
         }
         lastSaved = data
@@ -1236,7 +1244,7 @@ class VigilWorkspaces {
             // tabs - no hover feedback, dead clicks on the whole strip.
             // Keep the newest (add order),
             // strip the rest; re-sync next tick re-forces if needed.
-            vlog("enforceTabBar: \(bars.count) tab bars stacked on one titlebar - healing")
+            viewportLog.warn("stacked tab bars healed", ["bars": bars.count])
             for (index, _) in bars.dropLast().reversed() {
                 tw.removeTitlebarAccessoryViewController(at: index)
             }
@@ -1257,7 +1265,7 @@ class VigilWorkspaces {
                     Self.collectDescendants(of: bar, className: "NSTabButton", into: &buttons)
                     return "\(bar.frame) buttons=\(buttons.count) host=\(bar.superview?.className ?? "?")"
                 }
-                vlog("enforceTabBar: \(tabBars.count) NSTabBar views on one titlebar: \(census.joined(separator: " | "))")
+                viewportLog.warn("several tab bar views on one titlebar", ["bars": census])
                 let expected = group.windows.count
                 let live = tabBars.filter { bar in
                     var buttons: [NSView] = []
@@ -1266,11 +1274,11 @@ class VigilWorkspaces {
                 }
                 if live.count == 1 {
                     for bar in tabBars where bar !== live[0] {
-                        vlog("enforceTabBar: removing corpse bar \(bar.frame)")
+                        viewportLog.warn("corpse tab bar removed", ["frame": "\(bar.frame)"])
                         bar.removeFromSuperview()
                     }
                 } else {
-                    vlog("enforceTabBar: cannot pick the live bar (expected \(expected) tabs) - left alone")
+                    viewportLog.warn("live tab bar not identified; left alone", ["tabs": expected])
                 }
                 return
             }
@@ -1315,7 +1323,7 @@ class VigilWorkspaces {
         let raw = UserDefaults.standard.string(forKey: "vigil.tabs")
         if let raw, raw != "native", raw != "sidebar", !Self.tabsModeWarned {
             Self.tabsModeWarned = true
-            vlog("!! vigil.tabs '\(raw)' is neither native nor sidebar - reading as sidebar")
+            viewportLog.error("unknown vigil.tabs value; reading as sidebar", ["value": raw])
         }
         return raw == "native"
     }
@@ -1348,7 +1356,7 @@ class VigilWorkspaces {
         let t0 = Date()
         defer {
             let ms = Date().timeIntervalSince(t0) * 1000
-            if ms > 25 { vlog(String(format: "syncWindowMarks took %.0fms", ms)) }
+            if ms > 25 { viewportLog.warn("slow window marks sync", ["elapsed": Duration.milliseconds(ms)]) }
         }
         for controller in TerminalController.all {
             guard let window = controller.window else { continue }
@@ -1445,7 +1453,7 @@ class VigilWorkspaces {
             payload = try? Data(contentsOf: persistBackupURL)
             decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Workspace].self, from: $0) }
             if decoded != nil {
-                vlog("!! load: vigil.json unreadable, recovered the workspace from vigil.json.bak")
+                registryLog.error("registry unreadable; recovered from backup")
             }
         }
         guard let entries = decoded else { return }
@@ -1463,7 +1471,7 @@ class VigilWorkspaces {
             // garbage). The writer cannot produce this; a file that has it
             // screams.
             for id in session.tabs.flatMap(\.paneIds) where !seen.insert(id).inserted {
-                vlog("!! load: '\(entry.name)' lists '\(id)' which another entry already lists")
+                registryLog.error("pane listed twice", ["workspace": entry.name, "pane": id])
             }
             // The counter must clear every index this session has ever
             // used: a mint that reuses an index inherits a dead pane's

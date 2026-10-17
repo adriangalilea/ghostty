@@ -133,7 +133,7 @@ extension VigilWorkspaces {
             FileManager.default.createFile(atPath: eventsURL.path, contents: nil)
         }
         let fd = Darwin.open(eventsURL.path, O_EVTONLY)
-        guard fd >= 0 else { vlog("!! events watcher failed to open \(eventsURL.path)"); return }
+        guard fd >= 0 else { attentionLog.error("events not watched", ["path": eventsURL.path]); return }
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .delete, .rename], queue: .main)
         source.setEventHandler { [weak self] in
             guard let self else { return }
@@ -190,7 +190,11 @@ extension VigilWorkspaces {
                 // takeover would silence the pane it exists for).
                 view.vigilScreenStrikes = -3
                 view.vigilScreenResyncs = 0
-                vlog("owner grid: \(id) \(grid.map { "\($0.rows)x\($0.cols) owned by '\(owner)'; letterboxed" } ?? "own")")
+                if let grid {
+                    sizeLog.info("letterboxed to the owner's grid", ["pane": id, "rows": grid.rows, "cols": grid.cols, "owner": owner])
+                } else {
+                    sizeLog.info("own grid", ["pane": id])
+                }
                 // The frame lands on the next runloop; then re-sync the
                 // screen from the daemon: a non-owner that reflowed bytes
                 // parsed at the old grid shows garbage otherwise.
@@ -198,7 +202,7 @@ extension VigilWorkspaces {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak view] in
                         guard let view, view.surface == surface else { return }
                         ghostty_surface_vigil_dump(surface)
-                        Self.vlogSync("letterbox: \(id) re-synced from the daemon")
+                        sizeLog.info("letterbox re-synced from the daemon", ["pane": id])
                     }
                 }
             }
@@ -249,14 +253,16 @@ extension VigilWorkspaces {
         if mine == daemon {
             view.vigilScreenStrikes = 0
             view.vigilScreenProvenHash = daemon
-            if !view.vigilScreenProven { view.vigilScreenProven = true; vlog("screen: \(id) in sync (\(mine))") }
+            if !view.vigilScreenProven { view.vigilScreenProven = true; sizeLog.info("screen in sync", ["pane": id, "hash": mine]) }
             return
         }
         view.vigilScreenStrikes += 1
         if view.vigilScreenStrikes == 2 {
             view.vigilScreenResyncs += 1
             if view.vigilScreenResyncs <= 2 {
-                vlog("!! screen mismatch: \(id) daemon \(daemon) view \(mine); re-syncing (\(view.vigilScreenResyncs)/2)")
+                sizeLog.error("screen mismatch; re-syncing", [
+                    "pane": id, "daemon": daemon, "view": mine, "resync": view.vigilScreenResyncs,
+                ])
                 ghostty_surface_vigil_dump(surface)
             } else if view.vigilScreenResyncs == 3 {
                 // Leave the evidence: this view's text on disk, the
@@ -266,7 +272,9 @@ extension VigilWorkspaces {
                 if let p = s.ptr { try? String(cString: p).write(to: out, atomically: true, encoding: .utf8) }
                 ghostty_string_free(s)
                 s = .init()
-                vlog("!! screen mismatch: \(id) persists after 2 re-syncs; not a desync. Silenced. Diff: vigild screen \(id) | diff - \(out.path)")
+                sizeLog.error("screen mismatch persists after re-syncs; silenced", [
+                    "pane": id, "diff": "vigild screen \(id) | diff - \(out.path)",
+                ])
             }
             view.vigilScreenStrikes = -3 // grace for the dump to land
         }
@@ -281,7 +289,7 @@ extension VigilWorkspaces {
         guard let surface = view.surface else { return }
         func act(_ a: String) { _ = a.withCString { ghostty_surface_binding_action(surface, $0, UInt(a.utf8.count)) } }
         guard let grid else {
-            if view.vigilFontStep != 0 { act("reset_font_size"); view.vigilFontStep = 0; vlog("letterbox: \(view.vigilAttachId ?? "?") font reset") }
+            if view.vigilFontStep != 0 { act("reset_font_size"); view.vigilFontStep = 0; sizeLog.info("letterbox font reset", ["pane": view.vigilAttachId]) }
             return
         }
         guard let pts = view.vigilPoints(for: grid) else { return }
@@ -289,14 +297,17 @@ extension VigilWorkspaces {
         if pts.width > b.width || pts.height > b.height {
             guard view.vigilFontStep > -8 else { return }
             act("decrease_font_size:1"); view.vigilFontStep -= 1
-            vlog("letterbox: \(view.vigilAttachId ?? "?") \(Int(pts.width))x\(Int(pts.height)) > \(Int(b.width))x\(Int(b.height)), font -1 (step \(view.vigilFontStep))")
+            sizeLog.info("letterbox font down", [
+                "pane": view.vigilAttachId, "points": "\(Int(pts.width))x\(Int(pts.height))",
+                "view": "\(Int(b.width))x\(Int(b.height))", "step": view.vigilFontStep,
+            ])
         } else if view.vigilFontStep < 0 {
             // Would one step up still fit? Cells scale ~linearly in points.
             let base: CGFloat = 13, cur = base + CGFloat(view.vigilFontStep)
             let f = (cur + 1) / cur
             if pts.width * f <= b.width && pts.height * f <= b.height {
                 act("increase_font_size:1"); view.vigilFontStep += 1
-                vlog("letterbox: \(view.vigilAttachId ?? "?") font +1 (step \(view.vigilFontStep))")
+                sizeLog.info("letterbox font up", ["pane": view.vigilAttachId, "step": view.vigilFontStep])
             }
         }
     }
@@ -683,7 +694,7 @@ extension VigilWorkspaces {
             return
         }
         if let pane = askingPane(name) {
-            vlog("follow: '\(name)' -> asking pane \(pane)")
+            followLog.info("to the asking pane", ["workspace": name, "pane": pane])
             activatePane(name: name, paneId: pane, in: controller)
         } else if let controller {
             shapeshift(in: controller, to: name)

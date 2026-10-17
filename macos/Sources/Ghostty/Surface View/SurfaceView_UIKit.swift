@@ -24,10 +24,12 @@ extension Ghostty {
         // MARK: Receipts
 
         /// Every fact this view learns or decides goes through here; the
-        /// app routes it to its receipts (stderr over the cable, os_log,
-        /// the in-app list).
-        static var trace: (String) -> Void = { FileHandle.standardError.write(Data("vigil: \($0)\n".utf8)) }
-        private func receipt(_ line: String) { Self.trace("surface \(paneId): \(line)") }
+        /// app routes it to its receipts (a `surface` event: a fixed
+        /// message and its fields, this surface's pane among them).
+        static var report: (_ message: String, _ fields: [String: any Sendable]) -> Void = { _, _ in }
+        private func receipt(_ message: String, _ fields: [String: any Sendable] = [:]) {
+            Self.report(message, fields.merging(["pane": paneId]) { mine, _ in mine })
+        }
         /// The pane this surface shows, for receipts.
         private(set) var paneId: String = "?"
 
@@ -46,7 +48,7 @@ extension Ghostty {
                 ghostty_surface_new(app, &surface_cfg_c)
             }
             guard let surface else {
-                receipt("ghostty_surface_new FAILED")
+                receipt("ghostty_surface_new failed")
                 return
             }
             _surface = surface
@@ -57,7 +59,7 @@ extension Ghostty {
             installScrollGesture()
             NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive),
                                                    name: UIApplication.willResignActiveNotification, object: nil)
-            receipt("born (explicit claim \(surface_cfg.vigilExplicitClaim))")
+            receipt("born", ["explicit_claim": surface_cfg.vigilExplicitClaim])
         }
 
         required init?(coder: NSCoder) {
@@ -134,7 +136,7 @@ extension Ghostty {
             ghostty_surface_set_content_scale(surface, scale, scale)
             appliedScale = scale
             contentScaleFactor = scale
-            receipt("content scale \(scale)")
+            receipt("content scale", ["scale": Double(scale)])
             return scale
         }
 
@@ -171,7 +173,7 @@ extension Ghostty {
                 if !attended { claimSize(false) }
                 guard attended != oldValue, let surface else { return }
                 ghostty_surface_set_focus(surface, attended)
-                receipt("attended \(attended)")
+                receipt("attended", ["attended": attended])
                 syncResponder()
             }
         }
@@ -181,7 +183,7 @@ extension Ghostty {
             didSet {
                 guard visible != oldValue, let surface else { return }
                 ghostty_surface_set_occlusion(surface, visible)
-                receipt("visible \(visible)")
+                receipt("visible", ["visible": visible])
             }
         }
 
@@ -261,7 +263,7 @@ extension Ghostty {
         @Published var keyboardWanted = false {
             didSet {
                 guard keyboardWanted != oldValue else { return }
-                receipt("keyboard wanted \(keyboardWanted)")
+                receipt("keyboard wanted", ["wanted": keyboardWanted])
                 syncResponder()
             }
         }
@@ -365,7 +367,7 @@ extension Ghostty {
         func pasteClipboard() {
             guard let s = UIPasteboard.general.string, !s.isEmpty else { return }
             sendKeys(s.replacingOccurrences(of: "\n", with: "\r"))
-            receipt("paste \(s.count) chars")
+            receipt("pasted", ["chars": s.count])
         }
 
         /// A view point in the TERMINAL's logical space. The render is the
@@ -397,7 +399,7 @@ extension Ghostty {
                 receipt("tap cleared selection")
                 return
             }
-            receipt("tap at \(Int(p.x)),\(Int(p.y))")
+            receipt("tap", ["x": Int(p.x), "y": Int(p.y)])
             keyboardWanted = true
         }
 
@@ -434,7 +436,7 @@ extension Ghostty {
             case .ended, .cancelled:
                 _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
                 let sel = ghostty_surface_has_selection(surface)
-                receipt("long-press select -> selection=\(sel)")
+                receipt("long-press select", ["selection": sel])
                 if sel {
                     // The menu anchors in VIEW space; the selection used
                     // terminal space.
@@ -458,7 +460,7 @@ extension Ghostty {
         override func copy(_ sender: Any?) {
             guard let s = selectionText else { return }
             UIPasteboard.general.string = s
-            receipt("copied \(s.count) chars")
+            receipt("copied", ["chars": s.count])
         }
 
         override func paste(_ sender: Any?) { pasteClipboard() }
@@ -517,7 +519,7 @@ extension Ghostty {
             guard let surface else { return }
             let action = direction > 0 ? "increase_font_size:1" : direction < 0 ? "decrease_font_size:1" : "reset_font_size"
             let ok = action.withCString { ghostty_surface_binding_action(surface, $0, UInt(action.utf8.count)) }
-            receipt("zoom \(action) -> \(ok)")
+            receipt("zoom", ["action": action, "ok": ok])
         }
 
         // MARK: Scroll: a UIScrollView as the physics engine
@@ -562,7 +564,7 @@ extension Ghostty {
             lastOffset = sv.contentOffset
             guard dy != 0 else { return }
             scrollReceipts += 1
-            if scrollReceipts % 20 == 1 { receipt("scroll dy \(Int(dy))pt (finger)") }
+            if scrollReceipts % 20 == 1 { receipt("finger scroll", ["dy": Int(dy)]) }
             // The core resolves scroll against the pointer: the finger is
             // the pointer, placed before every delta — in TERMINAL space
             // (a fit view's finger travels presentation.scale × the grid).
@@ -586,7 +588,7 @@ extension Ghostty {
         /// every fit layout depends on them.
         func cellMetricsDidChange(px: CGSize) {
             cellSize = CGSize(width: px.width / appliedScale, height: px.height / appliedScale)
-            receipt("cell \(Int(px.width))x\(Int(px.height))px")
+            receipt("cell metrics", ["width": Int(px.width), "height": Int(px.height)])
             setNeedsLayout()
         }
 
@@ -595,7 +597,7 @@ extension Ghostty {
         var onStreamEnd: (() -> Void)?
 
         func streamDidEnd(exitCode: Int, runtimeMs: Int) {
-            receipt("stream ended exit \(exitCode) after \(runtimeMs)ms")
+            receipt("stream ended", ["exit": exitCode, "runtime": Duration.milliseconds(runtimeMs)])
             onStreamEnd?()
         }
 
@@ -640,8 +642,11 @@ extension Ghostty {
                 // attach may speak, and the daemon's replay lands in it.
                 if first { ghostty_surface_vigil_viewport(surface); receipt("viewport declared") }
                 let s = ghostty_surface_size(surface)
-                let mode = presentation.grid.map { "fit \($0.rows)x\($0.cols)" } ?? "own"
-                receipt("size \(px.w)x\(px.h)px @\(scale) \(mode) x\(presentation.scale) -> core \(s.rows)x\(s.columns)")
+                receipt("size reported", [
+                    "width": Int(px.w), "height": Int(px.h), "scale": Double(scale),
+                    "mode": presentation.grid.map { "fit \($0.rows)x\($0.cols)" } ?? "own",
+                    "picture": Double(presentation.scale), "rows": Int(s.rows), "cols": Int(s.columns),
+                ])
                 // A mirror that just took a NEW owner grid holds bytes
                 // parsed at the old one, reflowed: garbage. Re-sync from
                 // the daemon (only a claimant is dumped otherwise).
