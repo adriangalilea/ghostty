@@ -93,10 +93,9 @@ class VigilWorkspaces {
 
     /// Where a session is displayed RIGHT NOW. DERIVED for display
     /// surfaces (overview, menu, logs), never stored: window truth is
-    /// membership, quick-terminal truth is `float`. The old four-state
-    /// enum stored display beside membership — "embedded with no
-    /// members" was an impossible state the invariant checker existed to
-    /// heal; derived, it cannot exist. Whether warm runtimes are held is
+    /// membership, quick-terminal truth is `float`. Stored display beside
+    /// membership would allow "windowed with no members"; derived, that
+    /// state cannot exist. Whether warm runtimes are held is
     /// a cache detail, invisible here: a background session runs either
     /// way.
     enum Place: String {
@@ -589,20 +588,7 @@ class VigilWorkspaces {
             MainActor.assumeIsolated {
                 guard notification.object is NSWindow else { return }
                 VigilWorkspaces.shared.reconcileTabs()
-                VigilWorkspaces.shared.ackVisiblePanes()
                 VigilWorkspaces.shared.syncWindowMarks()
-            }
-        }
-        // Focus moves WITHIN the key window (split clicks, follow landing
-        // on the asking pane) ride the focus chokepoint: presence acks the
-        // pane the moment it is actually on screen.
-        NotificationCenter.default.addObserver(
-            forName: Self.focusDidChange,
-            object: nil,
-            queue: .main
-        ) { _ in
-            MainActor.assumeIsolated {
-                VigilWorkspaces.shared.ackVisiblePanes()
             }
         }
         // The quick terminal dismissing (any way: toggle, esc-out, focus

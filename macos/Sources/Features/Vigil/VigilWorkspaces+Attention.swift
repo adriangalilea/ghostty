@@ -657,20 +657,6 @@ extension VigilWorkspaces {
         }
     }
 
-    /// The attention QUEUE's eligibility, ONE rule:
-    /// something happened here that has NOT BEEN SEEN - a pane finished
-    /// (done) or asked (blocked) after its console was last on screen.
-    /// Seen workspaces are never queue material, however blocked they look
-    /// (a drafted-but-unsent reply reads as blocked forever).
-    func unseenNeedy(_ name: String) -> Bool {
-        guard let session = workspaces[name] else { return false }
-        return ownedPaneIds(session).contains { pane in
-            guard let s = paneAgentState(pane),
-                  s.state == .blocked || s.state == .done else { return false }
-            return (lastAck(pane) ?? .distantPast) < s.since
-        }
-    }
-
     /// WHERE the ask lives: the most recently blocked pane in the session
     /// (state-file truth; session attention only knows WHO asked). Nil
     /// when nothing is blocked (a done, or the ask was answered since).

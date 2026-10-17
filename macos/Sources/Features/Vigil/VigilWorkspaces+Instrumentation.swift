@@ -54,8 +54,7 @@ extension VigilWorkspaces {
 
     /// Scream (loudly, in the log) when a session is in a state that must never
     /// exist, so the impossible state is caught the moment it appears instead
-    /// of guessed at. Does not crash: the caller self-heals and the app stays
-    /// usable for repeated repro.
+    /// of guessed at. Does not crash: the app stays usable for repeated repro.
     func assertInvariants(_ site: String) {
         #if DEBUG
         // Display is derived, so "windowed with no members" cannot exist;
@@ -118,10 +117,8 @@ extension VigilWorkspaces {
         #endif
     }
 
-    /// Self-heal: membership vs tabGroup divergence; empty-tree corpse
-    /// windows. (Sessions whose member windows silently died need no
-    /// healing any more: display is derived from membership, so they
-    /// simply read as background.)
+    /// Membership vs tabGroup divergence, and empty-tree windows left open,
+    /// closed here.
     func reconcile() {
         reconcileTabs()
         for controller in TerminalController.all

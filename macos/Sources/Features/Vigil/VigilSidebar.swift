@@ -812,8 +812,8 @@ struct VigilHitRow: Equatable {
 
 /// THE drop delegate: attached once to the whole tree, resolving targets
 /// through the geometry map. No other drop surface exists in the bar, so
-/// no drag can ever land on a refusing delegate (the old stuck-dim
-/// cancel) or on a gap nobody claimed.
+/// no drag can ever land on a refusing delegate (a cancelled drag left the
+/// bar dimmed) or on a gap nobody claimed.
 struct VigilTreeDrop: DropDelegate {
     let model: VigilSidebarModel
 

@@ -873,10 +873,8 @@ struct VigilSidebarView: View {
             } else {
                 // Per-PANE dots: duplicates are the point, so identity is
                 // positional, not by state. Plain overlap - the ring
-                // borders keep overlapping same-colour dots countable
-                // (the old destinationOut punch-out cannot composite the
-                // CA-layer dots, and the borders were already doing the
-                // work).
+                // borders keep overlapping same-colour dots countable (a
+                // destinationOut punch-out cannot composite CA-layer dots).
                 ForEach(Array(states.enumerated()), id: \.offset) { _, state in
                     VigilStateDot(state: state)
                 }

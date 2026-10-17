@@ -225,34 +225,4 @@ extension VigilWorkspaces {
         return out
     }
 
-    /// Ask the on-device model for a nicer identity (emoji + label as one
-    /// coherent pair), from what the session is doing. Fire-and-forget: if
-    /// the model is unavailable or slow the seeds stand, and a manual choice
-    /// always wins (label applied only if untouched since the seed, emoji
-    /// only if still unset at both ends).
-    private func refineIdentity(name: String) {
-        guard VigilIdentity.modelAvailable else { return }
-        guard let session = workspaces[name] else { return }
-        let seedLabel = session.label
-        let hadEmoji = session.emoji != nil
-        let context = identityContext(name: name)
-
-        Task {
-            guard let suggestion = await VigilIdentity.suggest(context: context, avoiding: []) else { return }
-            await MainActor.run {
-                guard let current = self.workspaces[name] else { return }
-                var changed = false
-                if current.label == seedLabel {
-                    self.workspaces[name]!.label = suggestion.label
-                    changed = true
-                }
-                if !hadEmoji, current.emoji == nil, !suggestion.emoji.isEmpty {
-                    self.workspaces[name]!.emoji = suggestion.emoji
-                    changed = true
-                }
-                if changed { self.persist() }
-            }
-        }
-    }
-
 }

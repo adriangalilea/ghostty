@@ -91,10 +91,6 @@ final class VigilSummon {
         }
     }
 
-    /// The pane whose ask the panel is showing right now; the nod gate
-    /// follows THIS, never its own ordering. One queue, one head.
-    var currentAskPane: String? { current?.pane }
-
     private func schedule() {
         work?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.evaluate() }

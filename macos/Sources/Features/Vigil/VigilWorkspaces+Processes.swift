@@ -186,12 +186,6 @@ extension VigilWorkspaces {
         return state.state
     }
 
-    /// The tree rollup: max state over every pane the session owns.
-    func workspaceAgentState(_ name: String) -> AgentState? {
-        guard let session = workspaces[name] else { return nil }
-        return ownedPaneIds(session).compactMap { paneDisplayState($0) }.max()
-    }
-
     /// What a session is RUNNING right now, compact and deduped, straight
     /// from the daemons' live tree files.
     func runningSummary(of name: String) -> [String] {
