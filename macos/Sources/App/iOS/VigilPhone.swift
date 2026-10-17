@@ -176,8 +176,9 @@ final class VigilPhone: ObservableObject {
                 // each connection's start, end and path, each Mac met. The
                 // night the phone left home Wi-Fi and reached nothing for
                 // hours, none of this was on the phone.
+                // In the in-app list only: tether's own record has each.
                 case .network, .relay, .localNetwork, .connected, .disconnected, .path, .met:
-                    self?.log("tether: \(event)")
+                    self?.receipts.append("\(Date().formatted(date: .omitted, time: .standard)) tether: \(event)")
                 default: break
                 }
             }

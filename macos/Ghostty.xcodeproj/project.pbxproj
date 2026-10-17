@@ -48,6 +48,7 @@
 		0DAA1111000000000000E030 /* VigilActivity in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E017 /* VigilActivity */; };
 		0DAA1111000000000000E031 /* VigilWire in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E018 /* VigilWire */; };
 		0DAA1111000000000000E032 /* AuthzGlance in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E027 /* AuthzGlance */; };
+		0DAA111100000000000002C7 /* Log in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000002C6 /* Log */; };
 		0DAA1111000000000000E041 /* VigilLive.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0DAA1111000000000000E001 /* VigilLive.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0DAA1111000000000000E042 /* VigilNotify.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0DAA1111000000000000E002 /* VigilNotify.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0DAA1111000000000000E052 /* AuthzGlance in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E050 /* AuthzGlance */; };
@@ -452,6 +453,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0DAA1111000000000000E032 /* AuthzGlance in Frameworks */,
+				0DAA111100000000000002C7 /* Log in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -697,6 +699,7 @@
 			name = VigilNotify;
 			packageProductDependencies = (
 				0DAA1111000000000000E027 /* AuthzGlance */,
+				0DAA111100000000000002C6 /* Log */,
 			);
 			productName = VigilNotify;
 			productReference = 0DAA1111000000000000E002 /* VigilNotify.appex */;
@@ -1933,6 +1936,11 @@
 			productName = Keymap;
 		};
 		0DAA111100000000000002C4 /* Log */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */;
+			productName = Log;
+		};
+		0DAA111100000000000002C6 /* Log */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */;
 			productName = Log;

@@ -1,12 +1,19 @@
 import AuthzGlance
-import OSLog
+import Log
 import UserNotifications
 
 /// Opens a followed session's question on the phone, where its key is
 /// (`RequestNotification.open`, shared with Authz for iPhone): who asks, on
-/// which Mac, and Allow / Deny when it can be answered right there.
+/// which Mac, and Allow / Deny when it can be answered right there. Its own
+/// process: its events are kept in the App Group
+/// (`Library/Logs/vigil-notify.jsonl`), where `authz trace` reads them.
 final class NotificationService: UNNotificationServiceExtension {
-    private let log = Logger(subsystem: "com.adriangalilea.vigil", category: "notify")
+    private let noteLog = log.scope("note")
+
+    override init() {
+        EventFile.start(service: "vigil-notify", appGroup: "group.com.adriangalilea.vigil")
+        super.init()
+    }
 
     override func didReceive(
         _ request: UNNotificationRequest, withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
@@ -16,9 +23,9 @@ final class NotificationService: UNNotificationServiceExtension {
         }
         do {
             _ = try RequestNotification.open(content, seal: SealKey(group: "G387QW47LV.com.adriangalilea.vigil.notify"))
-            log.notice("opened note \(request.identifier.prefix(8), privacy: .public)")
+            noteLog.info("opened", ["push": String(request.identifier.prefix(8))])
         } catch {
-            log.notice("note \(request.identifier.prefix(8), privacy: .public) stays generic: \(String(describing: error), privacy: .public)")
+            noteLog.warn("stays generic", ["push": String(request.identifier.prefix(8)), "err": error])
         }
         contentHandler(content)
     }

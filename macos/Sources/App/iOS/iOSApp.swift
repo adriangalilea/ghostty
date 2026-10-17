@@ -1,4 +1,4 @@
-import AuthzEndpoint
+import AuthzGlance
 import SwiftUI
 import GhosttyKit
 
