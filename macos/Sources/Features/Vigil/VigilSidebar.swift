@@ -608,8 +608,14 @@ final class VigilSidebarModel: ObservableObject {
             if isPastEnd(point) { moveSessionToEnd() }
             dropTarget = nil
             return DropProposal(operation: .move)
-        case .tab:
-            dropTarget = row?.sessionName
+        case .tab(let from, _):
+            // Over its own workspace: the tab under the point is the place
+            // it takes. Over another workspace: that workspace.
+            if row?.sessionName == from, let anchor = row?.tabAnchor {
+                dropTarget = "tab-\(anchor)"
+            } else {
+                dropTarget = row?.sessionName
+            }
             return DropProposal(operation: .move)
         case .pane:
             // A tab-bearing row targets that tab; a session row targets
@@ -638,10 +644,19 @@ final class VigilSidebarModel: ObservableObject {
         case .tab(let from, let anchor):
             endDrag()
             if let to = row?.sessionName {
-                DispatchQueue.main.async { manager.moveTab(anchor: anchor, from: from, to: to) }
+                manager.vlog("drop: tab \(anchor) of '\(from)' on \(row?.id ?? "?")")
+                if to == from {
+                    let onto = row?.tabAnchor
+                    DispatchQueue.main.async { manager.reorderTab(anchor: anchor, in: from, onto: onto) }
+                } else {
+                    DispatchQueue.main.async { manager.moveTab(anchor: anchor, from: from, to: to) }
+                }
+            } else {
+                manager.vlog("drop: tab \(anchor) of '\(from)' on no row - nothing to do")
             }
         case .pane(let from, let paneId, let isDock):
             endDrag()
+            manager.vlog("drop: pane \(paneId) of '\(from)' on \(row?.id ?? "no row")")
             if let row, let session = row.sessionName {
                 if let tabAnchor = row.tabAnchor {
                     DispatchQueue.main.async {

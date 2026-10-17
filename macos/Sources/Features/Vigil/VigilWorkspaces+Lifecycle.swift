@@ -933,7 +933,10 @@ extension VigilWorkspaces {
     /// Move a whole TAB (anchored by any of its pane ids) to another
     /// session, where it lands as a captured tab.
     func moveTab(anchor: String, from source: String, to target: String) {
-        guard source != target, workspaces[source] != nil, workspaces[target] != nil else { return }
+        guard source != target, workspaces[source] != nil, workspaces[target] != nil else {
+            vlog("!! moveTab: \(anchor): '\(source)' -> '\(target)' refused (same workspace or unknown here)")
+            return
+        }
         var moved: Registry.Tab?
         if let view = liveView(attachId: anchor),
            let controller = view.window?.windowController as? TerminalController,
@@ -942,7 +945,10 @@ extension VigilWorkspaces {
         } else if let index = workspaces[source]!.tabs.firstIndex(where: { $0.paneIds.contains(anchor) }) {
             moved = workspaces[source]!.tabs.remove(at: index)
         }
-        guard let moved else { return }
+        guard let moved else {
+            vlog("!! moveTab: tab \(anchor) not found in '\(source)' - refused")
+            return
+        }
         // A warm tab moves warm: its running surfaces belong to the target now.
         let warm = takeWarm(moved, from: source)
         workspaces[target]!.held += warm
@@ -962,7 +968,15 @@ extension VigilWorkspaces {
     /// captured tab there; a dock tenant stays a dock tenant (of the target's
     /// first tab, live-appended when the target is mounted).
     func movePane(paneId: String, from source: String, to target: String, isDock: Bool) {
-        guard source != target, workspaces[source] != nil, workspaces[target] != nil else { return }
+        guard workspaces[source] != nil, workspaces[target] != nil else {
+            vlog("!! movePane: \(paneId): '\(source)' -> '\(target)' refused: workspace unknown here")
+            return
+        }
+        if source == target {
+            isDock ? vlog("movePane: dock tenant \(paneId) already in '\(source)' - nothing to do")
+                : splitOut(paneId: paneId, in: source)
+            return
+        }
         var vacatedController: TerminalController?
         var vacated: Registry.Tab?
 
@@ -1018,7 +1032,10 @@ extension VigilWorkspaces {
             inheritedLabel = taken.tabLabel
             inheritedEmoji = taken.tabEmoji
         }
-        guard let pane else { return }
+        guard let pane else {
+            vlog("!! movePane: \(paneId) is registered nowhere - refused")
+            return
+        }
         chown(paneId, to: target)
 
         if isDock {
@@ -1075,7 +1092,14 @@ extension VigilWorkspaces {
     /// a mounted target splits live (native reattach); a captured one grows
     /// its capture.
     func movePane(paneId: String, from source: String, intoTabAnchoredBy anchor: String, of target: String) {
-        guard workspaces[target] != nil else { return }
+        guard workspaces[target] != nil else {
+            vlog("!! movePane: \(paneId) -> tab \(anchor) of '\(target)' refused: workspace unknown here")
+            return
+        }
+        if source == target {
+            movePaneWithin(target, paneId: paneId, intoTabAnchoredBy: anchor)
+            return
+        }
         // Lift the pane out exactly as a session-level move does...
         movePane(paneId: paneId, from: source, to: target, isDock: false)
         // ...then fold the fresh single-pane tab into the anchored tab.
@@ -1116,6 +1140,123 @@ extension VigilWorkspaces {
             session.tabs.append(fresh) // anchor gone: stay a new tab
             workspaces[target] = session
         }
+        persist()
+    }
+
+    // MARK: Moves inside one workspace (registry first, then the views)
+
+    /// A pane into ANOTHER tab of its own workspace. The target tab live in a
+    /// window splits right of its anchor there; otherwise the viewport the
+    /// pane was in mounts the target tab with the pane in it (you see where
+    /// it went), the rest of its old tab staying warm.
+    private func movePaneWithin(_ name: String, paneId: String, intoTabAnchoredBy anchor: String) {
+        guard let tabs = workspaces[name]?.tabs,
+              let from = tabs.firstIndex(where: { $0.panes.contains { $0.id == paneId } }),
+              tabs.contains(where: { $0.paneIds.contains(anchor) }) else {
+            vlog("!! movePane: \(paneId) -> tab \(anchor) of '\(name)' refused: pane or tab not registered there")
+            return
+        }
+        guard !tabs[from].paneIds.contains(anchor) else {
+            vlog("movePane: \(paneId) already in tab \(anchor) of '\(name)' - nothing to do")
+            return
+        }
+        let view = liveView(attachId: paneId)
+        let home = view.flatMap(treeHome(of:))
+        let anchorView = liveView(attachId: anchor)
+        let anchorHome = anchorView.flatMap(treeHome(of:))
+        guard let taken = takePane(paneId),
+              let into = workspaces[name]!.tabs.firstIndex(where: { $0.paneIds.contains(anchor) }) else {
+            vlog("!! movePane: \(paneId) could not be taken out of '\(name)' - refused")
+            return
+        }
+        workspaces[name]!.tabs[into].panes.append(taken.pane)
+
+        if let anchorView, let anchorHome, let app = ghosttyApp?.app {
+            // The target tab is on screen: lift the view out of its own tree,
+            // then split it in right of the anchor.
+            if let view, let home, let node = home.surfaceTree.root?.node(view: view) {
+                if home.surfaceTree.root == node {
+                    memberships.removeObject(forKey: home)
+                    killController(home) // a native tab window holding only this pane
+                } else {
+                    swapTree(home, home.surfaceTree.removing(node))
+                }
+            }
+            let moved = view.flatMap { placed($0) ? nil : $0 } ?? adoptable(paneId)
+                ?? Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: name, pane: taken.pane))
+            if let tree = try? anchorHome.surfaceTree.inserting(view: moved, at: anchorView, direction: .right) {
+                swapTree(anchorHome, tree)
+                focusLanding(anchorHome, on: paneId)
+            }
+            vlog("movePane: \(paneId) -> tab \(anchor) of '\(name)' (split in live)")
+        } else if let view, let home, let node = home.surfaceTree.root?.node(view: view) {
+            // The pane was on screen, its new tab is not: this viewport shows
+            // the new tab, the old tab's remaining panes stay warm.
+            workspaces[name]!.tabs[into].layout = nil
+            let rest = home.surfaceTree.removing(node)
+            let outgoing = TabRuntime(tree: rest, dock: dockMap.object(forKey: home))
+            outgoing.dock?.unmount()
+            dockMap.removeObject(forKey: home)
+            if mountCapturedTab(workspaces[name]!.tabs[into], name: name, in: home, landOn: paneId) {
+                if !rest.isEmpty {
+                    setOcclusion(false, [outgoing])
+                    workspaces[name]!.held += [outgoing]
+                }
+            } else if let dock = outgoing.dock {
+                dockMap.setObject(dock, forKey: home)
+            }
+            vlog("movePane: \(paneId) -> tab \(anchor) of '\(name)' (viewport now shows it)")
+        } else {
+            // Neither is on screen: the registry is the whole move; the next
+            // mount of the tab adopts or mints the pane.
+            workspaces[name]!.tabs[into].layout = nil
+            vlog("movePane: \(paneId) -> tab \(anchor) of '\(name)' (captured)")
+        }
+        persist()
+        assertInvariants("movePaneWithin")
+    }
+
+    /// A pane dropped on its own workspace's row: it leaves its tab and
+    /// becomes a tab of its own (the tab it left keeps the rest).
+    private func splitOut(paneId: String, in name: String) {
+        guard let tab = workspaces[name]?.tabs.first(where: { $0.panes.contains { $0.id == paneId } }) else {
+            vlog("!! movePane: \(paneId) is no split pane of '\(name)' - refused")
+            return
+        }
+        guard tab.panes.count > 1 else {
+            vlog("movePane: \(paneId) is already its own tab in '\(name)' - nothing to do")
+            return
+        }
+        let view = liveView(attachId: paneId)
+        let home = view.flatMap(treeHome(of:))
+        guard let taken = takePane(paneId) else {
+            vlog("!! movePane: \(paneId) could not be taken out of '\(name)' - refused")
+            return
+        }
+        workspaces[name]!.tabs.append(Registry.Tab(panes: [taken.pane], layout: nil))
+        if let view, let home, let node = home.surfaceTree.root?.node(view: view) {
+            swapTree(home, home.surfaceTree.removing(node))
+            setOcclusion(false, views: [view])
+        }
+        vlog("movePane: \(paneId) split out of its tab into its own tab of '\(name)'")
+        persist()
+        assertInvariants("splitOut")
+    }
+
+    /// A tab dropped on a row of its own workspace takes that tab's place
+    /// (on the workspace row itself: the first place). Order is the
+    /// registry's, so every sidebar and the phone follow.
+    func reorderTab(anchor: String, in name: String, onto target: String?) {
+        guard var tabs = workspaces[name]?.tabs,
+              let from = tabs.firstIndex(where: { $0.paneIds.contains(anchor) }) else {
+            vlog("!! reorderTab: tab \(anchor) not registered in '\(name)' - refused")
+            return
+        }
+        let to = target.flatMap { t in tabs.firstIndex { $0.paneIds.contains(t) } } ?? 0
+        guard from != to else { return }
+        tabs.insert(tabs.remove(at: from), at: to)
+        workspaces[name]!.tabs = tabs
+        vlog("reorderTab: '\(name)' tab \(anchor) \(from) -> \(to)")
         persist()
     }
 
