@@ -5,15 +5,10 @@ import UserNotifications
 /// Opens a followed session's question on the phone, where its key is
 /// (`RequestNotification.open`, shared with Authz for iPhone): who asks, on
 /// which Mac, and Allow / Deny when it can be answered right there. Its own
-/// process: its events are kept in the App Group
-/// (`Library/Logs/vigil-notify.jsonl`), where `authz trace` reads them.
+/// process: its events are in the phone's unified log (its App ID has no
+/// App Group, so it keeps no event file of its own).
 final class NotificationService: UNNotificationServiceExtension {
     private let noteLog = log.scope("note")
-
-    override init() {
-        EventFile.start(service: "vigil-notify", appGroup: "group.com.adriangalilea.vigil")
-        super.init()
-    }
 
     override func didReceive(
         _ request: UNNotificationRequest, withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
