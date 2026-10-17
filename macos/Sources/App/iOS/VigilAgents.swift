@@ -1,17 +1,24 @@
 import ActivityKit
 import Foundation
+import UIKit
 import VigilActivity
 import VigilLink
 import VigilWire
 
 /// Each Mac's agents as one Live Activity on this phone (`AgentsActivity`):
-/// what needs you there and what you follow. Its Mac's hub draws it
-/// (`Board`); this app tells each Mac where it is reached (`AgentsRoute`:
-/// the app's push-to-start token, so the Mac can start it, the running
+/// what needs you there and what you follow. Its Mac's hub alone starts it
+/// (by push) and draws it (`Board`); this app tells each Mac where it is
+/// reached (`AgentsRoute`: the app's push-to-start token, the running
 /// activity's own token, the key it seals to) and what you follow there.
-/// Following starts the Mac's activity here at once when none runs (no
-/// push needed); one started twice for a Mac (its hub restarted and
-/// started another) keeps the newest.
+///
+/// The activity's token is the one fact only this phone has, and the Mac
+/// starts nothing else until it hears it, so it is delivered for sure: iOS
+/// wakes the app for a push-started activity, and the app holds itself
+/// awake (a background task) while it brings tether up and tells the Mac,
+/// trying again until it is taken or iOS's time runs out; the next launch
+/// or return to the screen tells every Mac again. A second activity for one
+/// Mac is a bug the Mac's one-start rule exists to prevent: seen here, it
+/// is said, and the older ends.
 @MainActor
 enum VigilAgents {
     /// The app's push-to-start token (iOS gives one per app; it rotates).
@@ -31,7 +38,7 @@ enum VigilAgents {
             for await data in Activity<AgentsActivity>.pushToStartTokenUpdates {
                 startToken = data.map { String(format: "%02x", $0) }.joined()
                 VigilPhone.shared.log("agents: push-to-start token \(startToken!.prefix(8))")
-                for mac in macs.keys { await tell(mac) }
+                for mac in macs.keys { await deliver(mac) }
             }
         }
         Task {
@@ -51,13 +58,11 @@ enum VigilAgents {
         for mac in fresh { Task { await tell(mac, force: true) } }
     }
 
-    /// Follows a pane on a Mac, or stops. Following shows the Mac's
-    /// activity at once (started here when none runs, with what the phone's
-    /// directory already says); the Mac draws it from there.
-    static func follow(pane: String, on mac: String, _ on: Bool, state: AgentState, since: Double) {
+    /// Follows a pane on a Mac, or stops: the Mac shows it (starting its
+    /// activity when none runs).
+    static func follow(pane: String, on mac: String, _ on: Bool) {
         if on {
             macs[mac, default: []].append(pane)
-            if activity(of: mac) == nil { start(mac, state: state, since: since) }
         } else {
             macs[mac]?.removeAll { $0 == pane }
         }
@@ -68,74 +73,88 @@ enum VigilAgents {
         Activity<AgentsActivity>.activities.first { $0.attributes.mac == mac }
     }
 
-    private static func start(_ mac: String, state: AgentState, since: Double) {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-            return VigilPhone.shared.log("agents: Live Activities are off for vigil (Settings > vigil)")
-        }
-        do {
-            let activity = try Activity.request(
-                attributes: AgentsActivity(mac: mac, born: Date().timeIntervalSince1970),
-                content: ActivityContent(state: AgentsActivity.ContentState(state: state, since: since), staleDate: nil),
-                pushType: .token)
-            VigilPhone.shared.log("agents: \(mac.prefix(10))'s activity started here (\(activity.id.prefix(8)))")
-        } catch {
-            VigilPhone.shared.log("agents: no Live Activity for \(mac.prefix(10)) (\(error))")
-        }
-    }
-
-    /// One activity per Mac: an older one for the same Mac ends. Its token,
-    /// as iOS gives and rotates it, goes to its Mac.
+    /// One activity per Mac: a second is said, and the older ends. Its
+    /// token, as iOS gives and rotates it, goes to its Mac for sure.
     private static func adopt(_ activity: Activity<AgentsActivity>) async {
         let mac = activity.attributes.mac
-        for older in Activity<AgentsActivity>.activities where older.attributes.mac == mac && older.id != activity.id {
+        let others = Activity<AgentsActivity>.activities.filter { $0.attributes.mac == mac && $0.id != activity.id }
+        for older in others where older.attributes.born <= activity.attributes.born {
+            VigilPhone.shared.log("agents: !! two activities for \(mac.prefix(10)); the older ends (\(older.id.prefix(8)))")
             await older.end(nil, dismissalPolicy: .immediate)
-            VigilPhone.shared.log("agents: ended an older activity of \(mac.prefix(10))")
         }
         guard observed.insert(activity.id).inserted else { return }
         Task {
             for await data in activity.pushTokenUpdates {
                 tokens[mac] = (data.map { String(format: "%02x", $0) }.joined(), activity.attributes.born)
-                await tell(mac)
+                await deliver(mac)
             }
         }
         Task {
             for await state in activity.activityStateUpdates where state == .ended || state == .dismissed {
                 if tokens[mac] != nil, Self.activity(of: mac) == nil {
                     tokens[mac] = nil
-                    await tell(mac)
+                    await deliver(mac)
                 }
             }
         }
     }
 
+    /// Tells a Mac what runs here, surely: awake on iOS's background time,
+    /// tether brought up, tried until the Mac takes it (every 2 s, as long
+    /// as iOS gives time), then tether let go again if the app is still in
+    /// the background.
+    private static func deliver(_ mac: String) async {
+        let app = UIApplication.shared
+        let task = app.beginBackgroundTask(withName: "agents route to \(mac.prefix(10))")
+        defer { app.endBackgroundTask(task) }
+        let background = app.applicationState == .background
+        if background { await VigilAuthz.shared.runtime.start() }
+        var attempt = 1
+        while !(await tell(mac)) {
+            guard app.applicationState != .background || app.backgroundTimeRemaining > 4 else {
+                VigilPhone.shared.log("agents: \(mac.prefix(10)) not told what runs before iOS's time ran out; told at the next launch")
+                break
+            }
+            attempt += 1
+            try? await Task.sleep(for: .seconds(2))
+        }
+        if attempt > 1 { VigilPhone.shared.log("agents: \(mac.prefix(10)) told after \(attempt) attempts") }
+        if background, app.applicationState == .background { await VigilAuthz.shared.runtime.leave() }
+    }
+
     /// Each Mac's tellings, one at a time in order: two sent together (the
     /// one before iOS gave the start token, the one after) could land in
     /// either order, the older overwriting the newer at the Mac.
-    private static var chains: [String: Task<Void, Never>] = [:]
+    private static var chains: [String: Task<Bool, Never>] = [:]
 
     /// Tells a Mac where this phone's activity is reached, after whatever
     /// it was told before, from the facts as they are when it goes (only
-    /// when that changed since it was last told).
-    private static func tell(_ mac: String, force: Bool = false) async {
+    /// when that changed since it was last told): true once the Mac has it.
+    @discardableResult
+    private static func tell(_ mac: String, force: Bool = false) async -> Bool {
         let previous = chains[mac]
         let telling = Task { @MainActor in
-            await previous?.value
-            await send(mac, force: force)
+            _ = await previous?.value
+            return await send(mac, force: force)
         }
         chains[mac] = telling
-        await telling.value
+        return await telling.value
     }
 
-    private static func send(_ mac: String, force: Bool) async {
+    private static func send(_ mac: String, force: Bool) async -> Bool {
         let route: AgentsRoute
         do {
             route = AgentsRoute(start: startToken, token: tokens[mac]?.token, born: tokens[mac]?.born,
-                                environment: VigilAuthz.apns.rawValue, key: try AgentsActivity.routeKey())
+                                at: Date().timeIntervalSince1970, environment: VigilAuthz.apns.rawValue,
+                                key: try AgentsActivity.routeKey())
         } catch {
-            return VigilPhone.shared.log("agents: no key to give \(mac.prefix(10)) (\(error))")
+            VigilPhone.shared.log("agents: no key to give \(mac.prefix(10)) (\(error))")
+            return false
         }
-        guard force || told[mac] != route, await call(mac, .agents(route)) != nil else { return }
+        if !force, let last = told[mac], last.reaches(route) { return true }
+        guard await call(mac, .agents(route)) != nil else { return false }
         told[mac] = route
+        return true
     }
 
     /// What a Mac's board says is followed there, as it changes (its

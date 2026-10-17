@@ -6,11 +6,13 @@ import VigilWire
 import WidgetKit
 
 /// A Mac's agents on the Lock Screen and in the Dynamic Island: the first
-/// row in full, shaped by what it needs from you (the question and wide
-/// Allow / Deny; the question its turn ended on and Reply; what it does
-/// now, its last lines), and under it the others needing you as one line
-/// each (a tap opens the pane), ‹ › turning through the rest. Nothing
-/// needing you: one quiet line until the Mac ends it.
+/// row in full, in three lines at most (`Header`: the state's glyph, the
+/// pane's name once, the state and its clock; then what it needs from
+/// you: the question and wide Allow / Deny, the question its turn ended
+/// on, the tool call it runs exactly, its last words; then its context bar
+/// and Reply / Open), and under it the others needing you as one line each
+/// (a tap opens the pane), ‹ › turning through the rest. Nothing needing
+/// you: one quiet line until the Mac ends it.
 ///
 /// Every word beyond the leading state arrives sealed to this phone
 /// (`Agents`) and is opened here with the app's key; without it the
@@ -68,26 +70,18 @@ struct AgentsActivityWidget: Widget {
             let shown = Shown(context)
             let state = shown.top?.state ?? shown.state.state
             return DynamicIsland {
-                DynamicIslandExpandedRegion(.leading) {
-                    Badge(emoji: shown.top?.emoji, state: state, size: 40).padding(.leading, 4)
-                }
-                DynamicIslandExpandedRegion(.trailing) {
-                    if shown.count > 1 {
-                        Text("\(shown.count)").font(.title3.weight(.semibold)).monospacedDigit()
-                            .foregroundStyle(.secondary).padding(.trailing, 6)
-                    }
-                }
-                DynamicIslandExpandedRegion(.center) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(shown.top?.label ?? shown.note?.mac ?? "vigil").font(.subheadline.weight(.semibold)).lineLimit(1)
-                        if let top = shown.top { Subtitle(row: top, mac: nil).font(.caption2) }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                // The Lock Screen's own lines, across the whole island: the
+                // header, then what it needs.
                 DynamicIslandExpandedRegion(.bottom) {
-                    if let top = shown.top {
-                        Needs(row: top, mac: shown.mac, compact: true).padding(.top, 4)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let top = shown.top {
+                            Header(row: top).font(.subheadline.weight(.semibold))
+                            Needs(row: top, mac: shown.mac, compact: true)
+                        } else {
+                            Text(shown.note?.mac ?? "vigil").font(.subheadline.weight(.semibold))
+                        }
                     }
+                    .padding(.horizontal, 6)
                 }
             } compactLeading: {
                 Badge(emoji: shown.top?.emoji, state: state, size: 22)
@@ -113,16 +107,9 @@ private struct LockScreen: View {
     let stale: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             if let top = shown.top {
-                HStack(alignment: .center, spacing: 10) {
-                    Badge(emoji: top.emoji, state: top.state, size: 34)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(top.label).font(.headline).lineLimit(1)
-                        Subtitle(row: top, mac: shown.note?.mac).font(.caption)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                Header(row: top).font(.headline)
                 Needs(row: top, mac: shown.mac, compact: false)
             } else {
                 // Not opened yet: the leading state alone.
@@ -192,11 +179,8 @@ private struct Needs: View {
                 }
             case .blocked where row.flavor == .ask:
                 // Its turn ended on a question: the question, and Reply.
-                HStack(alignment: .top, spacing: 8) {
-                    Text(row.line ?? "Asked you something").font(.subheadline).lineLimit(compact ? 1 : 2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: true), wide: false)
-                }
+                Text(row.line ?? "Asked you something").font(.subheadline).lineLimit(compact ? 1 : 2)
+                Footer(row: row, open: false)
             case .blocked:
                 if let question = detail?.question {
                     // The evidence is the question (the command, the edit);
@@ -220,31 +204,25 @@ private struct Needs: View {
                     Text(row.line ?? "Waiting for you in the terminal").font(.subheadline.weight(.medium)).lineLimit(1)
                 }
             case .working, .interrupting, .unknown:
-                HStack(spacing: 6) {
-                    if let now = detail?.now { Now(text: now, tint: row.state.tint) } else { Facts(detail: detail) }
-                    Spacer(minLength: 4)
-                    Pill(title: nil, symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: true), wide: false)
-                    Pill(title: nil, symbol: "terminal.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: false), wide: false)
+                // The tool call it runs, exactly; between tools, the last
+                // line its screen shows.
+                if let action = detail?.action {
+                    ActionLine(action: action, tint: row.state.tint, lines: compact ? 1 : 2)
+                } else if let last = detail?.tail.last {
+                    Text(last).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
                 }
-                if let tail = detail?.tail, !tail.isEmpty, !compact {
-                    Well(text: tail.joined(separator: "\n"), lines: 1)
-                }
+                Footer(row: row, open: true)
             case .done, .idle:
-                HStack(alignment: .top, spacing: 8) {
-                    if let said = detail?.said ?? row.line, !said.isEmpty {
-                        // Its words as one paragraph: the message's own line
-                        // breaks are layout for a terminal, not a Lock Screen.
-                        Text(said.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-                                .filter { !$0.isEmpty }.joined(separator: " "))
-                            .font(.footnote)
-                            .foregroundStyle(row.state == .idle ? .secondary : .primary)
-                            .lineLimit(2)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        Spacer(minLength: 0)
-                    }
-                    Pill(title: "Reply", symbol: "arrowshape.turn.up.left.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: true), wide: false)
+                if let said = detail?.said ?? row.line, !said.isEmpty {
+                    // Its words as one paragraph: the message's own line
+                    // breaks are layout for a terminal, not a Lock Screen.
+                    Text(said.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+                            .filter { !$0.isEmpty }.joined(separator: " "))
+                        .font(.footnote)
+                        .foregroundStyle(row.state == .idle ? .secondary : .primary)
+                        .lineLimit(compact ? 1 : 2)
                 }
+                Footer(row: row, open: false)
             }
         }
     }
@@ -299,35 +277,54 @@ private struct Pager: View {
     }
 }
 
-/// What it does now: the status line's verb in the state's color, its
-/// facts ("↓ 9.4k tokens", "thinking"; two at most) as chips; a tool line
-/// ("$ bun test") whole, monospaced when it is a command.
-private struct Now: View {
-    let text: String
+/// The tool call it runs, as the agent made it: the tool's name in the
+/// state's color, then what it acts on (a command monospaced, as typed),
+/// flowing on under the name for up to `lines` lines.
+private struct ActionLine: View {
+    let action: Detail.Action
     let tint: Color
+    let lines: Int
 
     var body: some View {
-        let parts = text.components(separatedBy: " · ")
-        HStack(spacing: 6) {
-            Text(parts[0])
-                .font(parts[0].hasPrefix("$ ") ? .subheadline.monospaced().weight(.medium) : .subheadline.weight(.semibold))
-                .foregroundStyle(tint)
-                .lineLimit(1)
-                .layoutPriority(1)
-            ForEach(Array(parts.dropFirst().prefix(2).enumerated()), id: \.offset) { _, fact in
-                Chip(text: fact)
+        let subject = action.subject.map { Text(" " + $0).font(action.shell ? .footnote.monospaced() : .footnote) }
+        (Text(action.tool).font(.footnote.weight(.semibold)).foregroundStyle(tint) + (subject ?? Text("")))
+            .lineLimit(lines)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The row's last line: its context in use as a bar (when its agent says),
+/// then Reply and, while it works, Open.
+private struct Footer: View {
+    let row: Agents.Row
+    let open: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let context = row.detail?.context { ContextBar(percent: context) }
+            Spacer(minLength: 4)
+            Pill(title: open ? nil : "Reply", symbol: "arrowshape.turn.up.left.fill",
+                 intent: OpenPaneIntent(pane: row.pane, keyboard: true), wide: false)
+            if open {
+                Pill(title: nil, symbol: "terminal.fill", intent: OpenPaneIntent(pane: row.pane, keyboard: false), wide: false)
             }
         }
     }
 }
 
-/// Context and how many panes work, as chips.
-private struct Facts: View {
-    let detail: Detail?
+/// How full the agent's context window is: a bar and its percent, amber
+/// past 70, red past 90 (where it compacts or stops).
+private struct ContextBar: View {
+    let percent: Int
     var body: some View {
+        let fill = Double(min(max(percent, 0), 100)) / 100
+        let tint: Color = percent >= 90 ? AnswerLook.refuse : percent >= 70 ? .orange : .white.opacity(0.7)
         HStack(spacing: 6) {
-            if let context = detail?.context { Chip(text: "\(context)% ctx", symbol: "brain") }
-            if let detail, detail.panes > 1 { Chip(text: "\(detail.working)/\(detail.panes) working", symbol: "square.stack") }
+            Capsule().fill(.white.opacity(0.14))
+                .frame(width: 72, height: 5)
+                .overlay(alignment: .leading) { Capsule().fill(tint).frame(width: 72 * fill, height: 5) }
+            Text("\(percent)%").font(.caption2.weight(.semibold).monospacedDigit()).foregroundStyle(.secondary)
         }
     }
 }
@@ -356,29 +353,34 @@ private struct Badge: View {
     }
 }
 
-/// "Working 1:04 · rebuild-authz-on-tether · mbp-m5-max": the state in its
-/// color with how long it has held (`Clock`: a sentence, never a bare
-/// number), the conversation's name, the Mac; a followed row wears a pin.
-private struct Subtitle: View {
+/// One line: the state's glyph in its color, the pane's face and name
+/// (said once), a pin when followed; on the right, the state's word and
+/// how long it has held (`Clock`), or how long a finished command ran. The
+/// font is the caller's.
+private struct Header: View {
     let row: Agents.Row
-    let mac: String?
 
     var body: some View {
         let words = row.commandWords ?? (row.state == .blocked && row.flavor == .ask ? "Asked you" : row.state.words)
-        let what = row.agent ? row.detail?.name ?? row.detail?.agent.map(\.capitalized) : nil
-        HStack(spacing: 4) {
-            if row.pinned { Image(systemName: "pin.fill").foregroundStyle(.secondary) }
-            Text(words).foregroundStyle(row.tint).fontWeight(.semibold)
-            if let ran = row.ran {
-                // A finished command: how long it ran, a fact, never ticking.
-                Text(ran).monospacedDigit().foregroundStyle(row.tint).fontWeight(.semibold)
-            } else {
-                Clock(row: row).fontWeight(.semibold)
+        HStack(spacing: 6) {
+            Image(systemName: row.state.symbol).foregroundStyle(row.tint).imageScale(.small)
+            if let emoji = row.emoji { Text(emoji) }
+            Text(row.label).lineLimit(1).layoutPriority(1)
+            if row.pinned { Image(systemName: "pin.fill").imageScale(.small).foregroundStyle(.secondary) }
+            Spacer(minLength: 6)
+            HStack(spacing: 4) {
+                Text(words)
+                if let ran = row.ran {
+                    // A finished command: how long it ran, a fact, never ticking.
+                    Text(ran).monospacedDigit()
+                } else {
+                    Clock(row: row)
+                }
             }
-            Text([what, mac].compactMap { $0 }.map { "·  \($0)" }.joined(separator: "  ")).foregroundStyle(.secondary)
-                .lineLimit(1)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(row.tint)
+            .layoutPriority(2)
         }
-        .lineLimit(1)
     }
 }
 
@@ -442,22 +444,6 @@ private struct Well: View {
             .padding(.vertical, 5)
             .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.08), lineWidth: 1))
-    }
-}
-
-private struct Chip: View {
-    let text: String
-    var symbol: String? = nil
-    var body: some View {
-        HStack(spacing: 3) {
-            if let symbol { Image(systemName: symbol) }
-            Text(text).lineLimit(1)
-        }
-        .font(.caption2.weight(.medium))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background(.white.opacity(0.1), in: Capsule())
     }
 }
 

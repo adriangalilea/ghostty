@@ -114,7 +114,7 @@ private let authzLog = Logger(subsystem: "com.adriangalilea.vigil", category: "a
 final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().setNotificationCategories([RequestNotification.quickCategory])
+        UNUserNotificationCenter.current().setNotificationCategories(RequestNotification.categories)
         // A Live Activity's Allow/Deny runs here, in the app's process.
         AnswerIntent.answer = { device, request, action, shown in
             await VigilAuthz.shared.answer(device: device, request: request, action: action, shown: shown)

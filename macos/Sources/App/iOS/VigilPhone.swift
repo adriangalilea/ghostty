@@ -365,14 +365,13 @@ final class VigilPhone: ObservableObject {
         guard let key = node.followKey, let pane = node.followPane else { return }
         if on { followed.insert(key) } else { followed.remove(key) }
         log("follow: \(node.title) \(on ? "followed" : "no longer followed")")
-        let lead = lead(node)
         if on {
             own(node, panes: livePanes(node), until: Date().addingTimeInterval(Self.ownSpan))
         } else {
             let kept = Set(followedNodes.flatMap(livePanes))
             own(node, panes: livePanes(node).filter { !kept.contains($0) }, until: Date())
         }
-        VigilAgents.follow(pane: pane, on: node.root, on, state: lead.state, since: lead.since)
+        VigilAgents.follow(pane: pane, on: node.root, on)
     }
 
     /// What a Mac's board says is followed there (its record: a follow made
@@ -413,14 +412,6 @@ final class VigilPhone: ObservableObject {
             if until > Date() { ownedPanes.insert(pane) } else { ownedPanes.remove(pane) }
             Task { await runtime.own(context: pane, home: home, until: until) }
         }
-    }
-
-    /// The leading state of a row's panes and since when, read from its
-    /// Mac's directory the way the Mac reads it (`AgentState.lead`).
-    private func lead(_ node: Node) -> (state: AgentState, since: Double) {
-        let panes = directories[node.root]?.panes ?? [:]
-        let lead = AgentState.lead(node.leaves.compactMap(\.followPane).map { (panes[$0]?.shown ?? .idle, panes[$0]?.since) })
-        return (lead.state, lead.since ?? Date().timeIntervalSince1970)
     }
 
     /// The tree moved: a follow that gained a pane owns it (the agents
