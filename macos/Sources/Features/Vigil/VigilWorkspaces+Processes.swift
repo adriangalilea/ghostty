@@ -150,10 +150,6 @@ extension VigilWorkspaces {
         // same fact `selfNarrating()` already relies on.
         MicTap.shared.voiceProcessingPolicy = { !AudioRoute.outputIsBluetooth }
         VigilWatchdog.arm()
-        // Asks are Authz.app's: this app hosts no narration voice (no Kokoro
-        // resident here), only dictation's recognizers. Say reports in
-        // sentences; each rides one field until it speaks the contract.
-        Announcer.trace = { line in sayLog.info("announcer", ["line": line]) }
         factsLoader.start()
     }
 

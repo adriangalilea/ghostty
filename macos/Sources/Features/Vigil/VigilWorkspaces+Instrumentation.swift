@@ -32,7 +32,6 @@ let authzLog = Log.log.scope("authz")
 let factsLog = Log.log.scope("facts")
 let voiceLog = Log.log.scope("voice")
 let cortexLog = Log.log.scope("cortex")
-let sayLog = Log.log.scope("say")
 let watchdogLog = Log.log.scope("watchdog")
 let invariantsLog = Log.log.scope("invariants")
 
