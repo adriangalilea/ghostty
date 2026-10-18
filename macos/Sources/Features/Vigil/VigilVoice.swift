@@ -70,19 +70,32 @@ enum VigilVoice {
     static var isActive: Bool { activePane != nil }
     static var available: Bool { MicCapture.available }
 
-    private static var subscription: MicTap.Subscription?
-    private static var session: (any SpeechSession)?
-    private static var drain: Task<Void, Never>?
+    /// Listen's `Dictation`, the suite's one way to dictate (utter runs the
+    /// same): one session per utterance, built ahead; a release flushes
+    /// everything said and `.ended` says the utterance is over. Kept while
+    /// its recipe holds (the languages, and the words: the pane's cortex
+    /// keywords first, then the suite's `Vocabulary`).
+    private static var dictation: Dictation?
+    private static var builtFor: Recipe?
+    private static var events: Task<Void, Never>?
+    /// The utterance in flight (`Dictation.listen`'s number): its segments
+    /// go to the HUD, its `.ended` closes the HUD's flow.
+    private static var utterance: Int?
     private static var generation = 0
+
+    struct Recipe: Equatable {
+        let languages: [String]
+        let words: [String]
+    }
 
     /// Dictate into the focused pane; toggling while active stops. The
     /// focused pane is resolved at START and injection sticks to it - a
     /// focus change mid-dictation must not spray text into another pane.
     static func startFocused() {
         guard !isActive else { return }
-        // ⌃⌥M is system-wide: with Ghostty inactive there is no key window,
-        // so the target falls back to the last-main terminal - the surface
-        // the human last worked in (the same resolution every other
+        // The talk key is system-wide: with vigil inactive there is no key
+        // window, so the target falls back to the last-main terminal - the
+        // surface the human last worked in (the same resolution every other
         // inactive-app action uses).
         guard
             let surface = ((NSApp.keyWindow?.windowController as? TerminalController)
@@ -107,143 +120,98 @@ enum VigilVoice {
         let gen = generation
         onStateChange?()
 
-        let identity = VigilWorkspaces.shared.cortexIdentity(ofPane: pane)
-        let wanted = Languages.activeLocales
-        var grounding = GroundingSet()
-        if let keywords = identity?.keywords, !keywords.isEmpty {
-            grounding[.session] = keywords
-        }
+        // The pane's own proper nouns first (the 100-word cap keeps the
+        // head of the list), then the suite's words.
+        let keywords = VigilWorkspaces.shared.cortexIdentity(ofPane: pane)?.keywords ?? []
+        let recipe = Recipe(languages: Languages.active, words: keywords + Vocabulary.words)
 
         Task {
             do {
-                // The grant precedes everything: an unauthorized engine
-                // "runs" delivering zeros and MicCapture.start throws.
-                // Generation-guarded teardown: a stale denial that raced a
-                // stop + fresh start must not kill the successor's session.
-                guard await MicCapture.requestAccess() else {
-                    voiceLog.error("microphone denied", ["fix": "System Settings > Privacy > Microphone"])
-                    if generation == gen { stop(reason: "mic denied") }
-                    return
-                }
-                // Only a language whose model is on disk can listen: a
-                // chosen one without its model is skipped with a receipt,
-                // never handed to a session that would fail at its first
-                // word (dictation that "initiates then stops").
-                var locales: [Locale] = []
-                for locale in wanted {
-                    if let ready = try? await AssetStore.resolveInstalled(locale) {
-                        locales.append(ready)
-                    } else {
-                        voiceLog.warn("language skipped: no speech model installed", [
-                            "locale": locale.identifier(.bcp47), "fix": "ask settings > Languages",
-                        ])
-                    }
-                }
-                guard !locales.isEmpty else {
-                    voiceLog.error("no installed speech model", [
-                        "locales": wanted.map { $0.identifier(.bcp47) }, "fix": "ask settings > Languages",
-                    ])
-                    if generation == gen { stop(reason: "no language model") }
-                    return
-                }
-                voiceLog.info("dictation started", [
-                    "pane": pane, "locales": locales.map { $0.identifier(.bcp47) },
-                    "grounding": grounding.totalCount, "mic": MicCapture.inputName,
-                ])
-                // Volatiles feed the floating HUD (wet-ink preview); only
-                // FINALS ever reach the pane.
-                let session: any SpeechSession
-                if locales.count > 1 {
-                    var configuration = ArbitratedSession.Configuration(locales: locales)
-                    configuration.grounding = grounding
-                    configuration.volatileResults = true
-                    configuration.reportAlternatives = true
-                    configuration.sink = VoiceLogSink()
-                    session = try await ArbitratedSession(configuration: configuration)
-                } else {
-                    var configuration = TranscriptionSession.Configuration(locale: locales[0])
-                    configuration.fastResults = true
-                    configuration.volatileResults = true
-                    configuration.reportAlternatives = true
-                    configuration.grounding = grounding
-                    configuration.sink = VoiceLogSink()
-                    session = try await TranscriptionSession(configuration: configuration)
-                }
-                guard generation == gen, activePane == pane else {
-                    await session.finish()
-                    return
-                }
-                Self.session = session
-                // The shared warm tap: consecutive dictations (and the ask
-                // gate) reuse one hot voice-processed engine instead of
-                // paying VPIO construction per start. Its receipts sink has
-                // ONE owner, wired at startup - never here.
-                Self.subscription = try MicTap.shared.subscribe { buffer in
-                    session.feed(buffer)
-                    spectrum.ingest(buffer)
-                }
-                voiceLog.info("capture", ["voice_processed":MicTap.shared.voiceProcessed])
+                let dictation = try await ready(recipe)
+                // Generation-guarded: a stop (or a fresh start) that came
+                // while the session was being built wins.
+                guard generation == gen, activePane == pane else { return }
                 VigilDictationHUD.shared.begin(pane: pane)
-                Self.drain = Task {
-                    do {
-                        for try await segment in session.segments {
-                            if segment.isFinal {
-                                // The HUD holds the line through its edit
-                                // window; injection happens at expiry (or
-                                // when the human seals a correction).
-                                await MainActor.run {
-                                    VigilDictationHUD.shared.commit(
-                                        segment.text, locale: segment.locale,
-                                        confidence: segment.confidence,
-                                        alternatives: segment.alternatives)
-                                }
-                            } else {
-                                await MainActor.run {
-                                    VigilDictationHUD.shared.preview(
-                                        segment.text, locale: segment.locale)
-                                }
-                            }
-                        }
-                    } catch {
-                        await MainActor.run {
-                            // A mid-stream failure tears down through the ONE
-                            // path: a mic left hot with a claimed floor and a
-                            // lit glyph is a lying UI. Generation-guarded - a
-                            // deliberate stop that raced this error already
-                            // tore down a successor's session.
-                            guard generation == gen else { return }
-                            stop(reason: "session error: \(error.localizedDescription)")
-                        }
-                    }
-                }
+                utterance = dictation.listen()
+                voiceLog.info("dictation started", [
+                    "pane": pane, "locales": dictation.locales.map { $0.identifier(.bcp47) },
+                    "model": dictation.module.label, "words": recipe.words.count,
+                    "words_applied": dictation.wordsApplied, "mic": MicCapture.inputName,
+                ])
             } catch {
-                voiceLog.error("session failed to start", ["err": error])
-                // Generation-guarded like the drain's error path: a stale
-                // failure must not null a successor's activePane. stop() is
-                // the ONE teardown - it finishes a session a subscribe
-                // failure left behind, unlatches push-to-talk, and re-pumps
-                // the deferred ask gate.
+                voiceLog.error("dictation failed to start", ["err": "\(error)"])
                 guard generation == gen else { return }
                 stop(reason: "start failed")
             }
         }
     }
 
+    /// The `Dictation` for `recipe`: the one already built when it holds,
+    /// else a new one (the old one's last utterance still finishes).
+    private static func ready(_ recipe: Recipe) async throws -> Dictation {
+        if let dictation, builtFor == recipe { return dictation }
+        if let old = dictation {
+            dictation = nil
+            builtFor = nil
+            Task { await old.stop() }
+        }
+        let made = try await Dictation.start(
+            locales: recipe.languages.map(Locale.init(identifier:)), words: recipe.words,
+            spectrum: spectrum, sink: VoiceLogSink())
+        for locale in made.skipped {
+            voiceLog.warn("language skipped: its model is not installed", [
+                "locale": locale.identifier(.bcp47), "model": made.module.label, "fix": "settings > Languages",
+            ])
+        }
+        dictation = made
+        builtFor = recipe
+        events = Task {
+            for await event in made.events { handle(event) }
+        }
+        return made
+    }
+
+    /// The utterance's events: wet ink and finals to the HUD (it holds each
+    /// final through its edit window, injection at expiry), and its end
+    /// closes the HUD's flow, after every final of the release has landed.
+    private static func handle(_ event: Dictation.Event) {
+        switch event {
+        case .segment(let segment, let number):
+            guard number == utterance else { return }
+            if segment.isFinal {
+                VigilDictationHUD.shared.commit(
+                    segment.text, locale: segment.locale, confidence: segment.confidence,
+                    alternatives: segment.alternatives)
+            } else {
+                VigilDictationHUD.shared.preview(segment.text, locale: segment.locale)
+            }
+        case .ended(let number):
+            guard number == utterance else { return }
+            utterance = nil
+            spectrum.reset()
+            VigilDictationHUD.shared.end()
+        case .failed(let why, let number):
+            voiceLog.error("dictation failed", ["err": why])
+            guard number == utterance else { return }
+            utterance = nil
+            VigilDictationHUD.shared.end()
+            stop(reason: "session error")
+        }
+    }
+
+    /// The mic closes: what was said is finalized and still lands (the
+    /// release's finals arrive before `.ended`), nothing said after it.
     static func stop(reason: String) {
         guard isActive else { return }
         voiceLog.info("dictation stopped", ["reason": reason])
         generation += 1
         activePane = nil
-        VigilDictationHUD.shared.end()
-        spectrum.reset()
         if talk.engaged { talk.stop() }
-        subscription?.cancel()
-        subscription = nil
-        let session = self.session
-        self.session = nil
-        drain = nil
-        if let session {
-            Task { await session.finish() }
+        if let dictation, utterance != nil {
+            Task { await dictation.pause() }
+        } else {
+            spectrum.reset()
+            VigilDictationHUD.shared.end()
         }
         onStateChange?()
     }
