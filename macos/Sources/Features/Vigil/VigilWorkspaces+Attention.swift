@@ -426,8 +426,10 @@ extension VigilWorkspaces {
     /// pane changed, or every question that lands on screen there reads as
     /// answered-by-eye and nothing rings anywhere.
     nonisolated static func personActed(after moment: Date) -> Bool {
+        // The HID system's clock: events a program posts never reset it,
+        // so an agent cannot make a pane read as seen.
         let idle = CGEventSource.secondsSinceLastEventType(
-            .combinedSessionState, eventType: CGEventType(rawValue: UInt32.max)!)
+            .hidSystemState, eventType: CGEventType(rawValue: UInt32.max)!)
         return Date(timeIntervalSinceNow: -idle) > moment
     }
 
