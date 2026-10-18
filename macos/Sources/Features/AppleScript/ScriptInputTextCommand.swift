@@ -29,6 +29,8 @@ final class ScriptInputTextCommand: NSScriptCommand {
             return nil
         }
 
+        guard !refusesMirrored(surfaceView) else { return nil }
+
         guard let surface = surfaceView.surfaceModel else {
             scriptErrorNumber = errAEEventFailed
             scriptErrorString = "Terminal surface model is not available."
@@ -37,5 +39,18 @@ final class ScriptInputTextCommand: NSScriptCommand {
 
         surface.sendText(text)
         return nil
+    }
+}
+
+extension NSScriptCommand {
+    /// A pane shown here but living on another Mac (`vigilHost`), or a
+    /// second view of a pane (`vigilMirror`): scripted input would reach its
+    /// home without the consent `vigil-agent send` asks there, so it is
+    /// refused, like `split`. Every scripted input path asks this.
+    @MainActor func refusesMirrored(_ view: Ghostty.SurfaceView) -> Bool {
+        guard view.vigilHost != nil || view.vigilMirror else { return false }
+        scriptErrorNumber = errAEEventFailed
+        scriptErrorString = "This pane lives on another Mac or is a mirror: send to it with vigil send, which asks its home."
+        return true
     }
 }

@@ -50,9 +50,13 @@ struct TerminalEntity: AppEntity {
         Self.defaultQuery.all.first { $0.id == self.id }
     }
 
+    /// The surface a Shortcut types, presses or runs an action into: never a
+    /// pane living on another Mac or a mirror of one (input there goes
+    /// through `vigil send`, which asks its home), so those read as gone.
     @MainActor
     var surfaceModel: Ghostty.Surface? {
-        surfaceView?.surfaceModel
+        guard let view = surfaceView, view.vigilHost == nil, !view.vigilMirror else { return nil }
+        return view.surfaceModel
     }
 
     static var defaultQuery = TerminalQuery()

@@ -30,6 +30,8 @@ final class ScriptMouseButtonCommand: NSScriptCommand {
             return nil
         }
 
+        guard !refusesMirrored(surfaceView) else { return nil }
+
         guard let surface = surfaceView.surfaceModel else {
             scriptErrorNumber = errAEEventFailed
             scriptErrorString = "Terminal surface model is not available."

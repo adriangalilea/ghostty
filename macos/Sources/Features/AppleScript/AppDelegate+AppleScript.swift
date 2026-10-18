@@ -140,6 +140,8 @@ extension NSApplication {
             return nil
         }
 
+        if let view = terminal.surfaceView, command.refusesMirrored(view) { return nil }
+
         return NSNumber(value: terminal.perform(action: action))
     }
 
