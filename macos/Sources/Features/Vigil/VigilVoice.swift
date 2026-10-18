@@ -1,9 +1,7 @@
 // macOS only: dictation binds to the fork's daemon panes.
 #if os(macOS)
 import AppKit
-import Carbon.HIToolbox
 import Ink
-import Keymap
 import Listen
 import Say
 
@@ -30,8 +28,7 @@ enum VigilVoice {
     /// suite's keys.
 
     /// THE interaction state machine (swift-utils Ink): hold-to-talk or
-    /// tap-to-latch, shared by the sidebar MicButton's gesture and the
-    /// global hotkey below.
+    /// tap-to-latch, the sidebar MicButton's gesture.
     static let talk: PushToTalk = {
         let talk = PushToTalk()
         talk.onChange = { engaged in
@@ -40,18 +37,29 @@ enum VigilVoice {
         return talk
     }()
 
-    /// ^⌥M system-wide, with Carbon's release event so a held key IS
-    /// push-to-talk. Registration failure (combo owned elsewhere) is logged.
-    static let hotkeyHint = "⌃⌥M"
-    private static var hotkey: PressReleaseHotkey?
-    static func armHotkey() {
-        guard hotkey == nil else { return }
-        hotkey = PressReleaseHotkey(
-            keyCode: 46, carbonModifiers: UInt32(controlKey | optionKey),
-            onPress: { talk.pressBegan() },
-            onRelease: { talk.pressEnded() })
-        if hotkey?.registered != true {
-            voiceLog.warn("hotkey not registered: owned elsewhere", ["hotkey": hotkeyHint])
+    /// The Mac's one talk key, Caps Lock: Authz.app owns it (swift-utils'
+    /// `CapsLockKey`, hold to talk, tap to latch, its light on while
+    /// engaged) and posts its state on Listen's `TalkBus`. While it is
+    /// engaged and no question or form claims the words, the focused pane
+    /// takes dictation; its release, or a question starting to listen,
+    /// stops it.
+    static let hotkeyHint = "⇪"
+    private static var bus: NSObjectProtocol?
+    /// The running dictation was started by the key (so the key's release
+    /// ends it; one started by the button is the button's).
+    private static var byKey = false
+    static func followTalkKey() {
+        guard bus == nil else { return }
+        bus = TalkBus.observe { state in
+            let ours = state.engaged && state.claimedBy == nil
+            if ours, !isActive {
+                voiceLog.info("talk key engaged", ["latched": state.latched])
+                byKey = true
+                startFocused()
+            } else if !ours, byKey {
+                byKey = false
+                stop(reason: state.engaged ? "the words are \(state.claimedBy ?? "")'s" : "talk key released")
+            }
         }
     }
 

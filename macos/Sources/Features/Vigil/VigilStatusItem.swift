@@ -43,7 +43,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         VigilVoice.onStateChange = { [weak self] in
             self?.updateBadge()
         }
-        VigilVoice.armHotkey()
+        VigilVoice.followTalkKey()
         updateBadge()
         installMainMenu()
 

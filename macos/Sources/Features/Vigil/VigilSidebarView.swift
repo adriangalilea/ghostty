@@ -258,7 +258,7 @@ struct VigilSidebarView: View {
                                 .help("Dictation language: auto races every chosen language; a pin runs one recognizer. Languages are chosen in ask settings.")
                             }
                         }
-                        .help("Dictate into the focused pane: hold to talk, tap to lock on (tap again to stop), or \(VigilVoice.hotkeyHint) from anywhere. Speech lands in the input line - no Enter, you submit.")
+                        .help("Dictate into the focused pane: hold to talk, tap to lock on (tap again to stop), or Caps Lock (\(VigilVoice.hotkeyHint)) from anywhere, the same way, while Authz runs and no question is listening. Speech lands in the input line - no Enter, you submit.")
                     } else {
                         Text("no microphone")
                             .font(.system(size: 9))
