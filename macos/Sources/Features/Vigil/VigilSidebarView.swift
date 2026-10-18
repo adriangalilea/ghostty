@@ -21,8 +21,8 @@ struct VigilSidebarView: View {
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
     /// The suite's languages, read live: the footer's picker exists only
     /// when there is more than one to pick from.
-    @AppStorage(Languages.key) private var languagesRaw = ""
-    @AppStorage(Languages.pinnedKey) private var pinnedLanguage: String?
+    @AppStorage(Languages.key, store: Languages.store) private var languagesRaw = ""
+    @AppStorage(Languages.pinnedKey, store: Languages.store) private var pinnedLanguage: String?
 
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
