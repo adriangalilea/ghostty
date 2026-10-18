@@ -324,7 +324,9 @@ final class VigilRemote: ObservableObject {
     func seen(device: String, pane: String) {
         guard let index = hosts.firstIndex(where: { $0.device == device }),
               let truth = hosts[index].directory?.panes[pane],
-              let revision = truth.unseenRevision else { return }
+              let revision = truth.unseenRevision,
+              let since = truth.since,
+              VigilWorkspaces.personActed(after: Date(timeIntervalSince1970: since)) else { return }
         let key = "\(device)/\(pane)"
         guard !seenInFlight.contains(key) else { return }
         seenInFlight.insert(key)

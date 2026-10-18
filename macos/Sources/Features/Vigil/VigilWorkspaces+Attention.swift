@@ -419,6 +419,18 @@ extension VigilWorkspaces {
     /// still targets it). Fired by key-window changes and focus syncs
     /// (instant) and the 1s events tick (presence is continuous; the tick
     /// is its pulse).
+    /// Whether a person touched this Mac's keyboard, mouse or trackpad after
+    /// `moment` (the HID system's own clock of the last input). A key window
+    /// on a Mac nobody sits at (one served only remotely, its display kept
+    /// awake) shows a pane no one sees: seen needs a person here since the
+    /// pane changed, or every question that lands on screen there reads as
+    /// answered-by-eye and nothing rings anywhere.
+    nonisolated static func personActed(after moment: Date) -> Bool {
+        let idle = CGEventSource.secondsSinceLastEventType(
+            .combinedSessionState, eventType: CGEventType(rawValue: UInt32.max)!)
+        return Date(timeIntervalSinceNow: -idle) > moment
+    }
+
     func ackVisiblePanes() {
         guard NSApp.isActive, let window = NSApp.keyWindow else { return }
         var name: String?
@@ -446,7 +458,8 @@ extension VigilWorkspaces {
             }
             if let s = paneAgentState(pane),
                s.state == .blocked || s.state == .done,
-               (lastAck(pane) ?? .distantPast) < s.since {
+               (lastAck(pane) ?? .distantPast) < s.since,
+               Self.personActed(after: s.since) {
                 // Written off main: the seen file landing is the change (the
                 // facts reload posts it). Posting here too re-entered this
                 // function through `onPresenceInputs` before the mark existed,
