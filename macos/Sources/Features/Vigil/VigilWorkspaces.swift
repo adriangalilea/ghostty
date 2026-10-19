@@ -543,6 +543,7 @@ class VigilWorkspaces {
         shutdownForeground = nil
         sessionControlSource = VigilSessionControl.start()
         dictationSource = VigilDictation.start()
+        VigilRemotePaste.install()
         // A logout/restart/shutdown is starting. THE signal, and the only
         // reliable one: the AppleEvent probe in applicationShouldTerminate
         // (kAEShutDown/kAERestart) does not arrive on macOS 26, and without
