@@ -40,10 +40,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         VigilWorkspaces.shared.onAttentionChange = { [weak self] in
             self?.updateBadge()
         }
-        VigilVoice.onStateChange = { [weak self] in
-            self?.updateBadge()
-        }
-        VigilVoice.followTalkKey()
         updateBadge()
         installMainMenu()
 
@@ -90,18 +86,6 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     /// open-menu highlight (the Apple-clean way; a raw colour would not adapt).
     private func updateBadge() {
         guard let button = statusItem.button else { return }
-        // Dictation owns the glyph while live: the mic is the one honest
-        // "this machine is listening" signal, and it is a foreground act -
-        // the eye returns the moment it stops.
-        if VigilVoice.isActive {
-            let mic = NSImage(
-                systemSymbolName: "mic.fill", accessibilityDescription: "dictating")
-            mic?.isTemplate = true
-            button.image = mic
-            button.title = ""
-            button.setAccessibilityLabel("vigil dictating")
-            return
-        }
         let count = VigilWorkspaces.shared.pendingCount
         let eye = NSImage(
             systemSymbolName: count > 0 ? "eye.fill" : "eye",

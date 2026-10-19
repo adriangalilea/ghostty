@@ -136,19 +136,6 @@ extension VigilWorkspaces {
     }
 
     func startStateDirWatcher() {
-        // The warm tap's receipts (mic_warm/mic_cool) land in the voice
-        // scope. ONE owner for the process-global sink, wired here at
-        // startup; consumers (dictation, the pump's prewarm, the ask's
-        // VoiceSource) subscribe, they never re-point receipts.
-        MicTap.shared.sink = VoiceLogSink()
-        // No voice processor on a Bluetooth output: it builds an aggregate
-        // over mic + output and forces the earbuds into SCO for the warm
-        // window (a system-wide route flip per ask, a 1.2s stream timeout
-        // on every start, and a crash when the flap runs long). In-ear
-        // narration is inaudible to the Mac's mic, so the
-        // half-duplex fallback is echo-free there by construction - the
-        // same fact `selfNarrating()` already relies on.
-        MicTap.shared.voiceProcessingPolicy = { !AudioRoute.outputIsBluetooth }
         VigilWatchdog.arm()
         factsLoader.start()
     }

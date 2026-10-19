@@ -312,7 +312,7 @@
 				Features/Vigil/VigilHarnessCoordinator.swift,
 				Features/Vigil/VigilBars.swift,
 				Features/Vigil/VigilCortex.swift,
-				Features/Vigil/VigilDictationHUD.swift,
+				Features/Vigil/VigilDictation.swift,
 				Features/Vigil/VigilDock.swift,
 				Features/Vigil/VigilFaceButton.swift,
 				Features/Vigil/VigilFollowSplash.swift,
@@ -336,7 +336,6 @@
 				Features/Vigil/VigilStatusItem.swift,
 				Features/Vigil/VigilSummon.swift,
 				Features/Vigil/VigilTabFaceControl.swift,
-				Features/Vigil/VigilVoice.swift,
 				Features/Vigil/VigilWatchdog.swift,
 				Features/Vigil/VigilWindowMark.swift,
 			);

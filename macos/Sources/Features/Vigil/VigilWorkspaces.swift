@@ -408,6 +408,7 @@ class VigilWorkspaces {
     /// survivor behind a dev restart.
     private var sigtermSource: DispatchSourceSignal?
     private var sessionControlSource: DispatchSourceRead?
+    private var dictationSource: DispatchSourceRead?
 
     /// Status item hook: called whenever attention state changes.
     var onAttentionChange: (() -> Void)?
@@ -541,6 +542,7 @@ class VigilWorkspaces {
         persist(publish: false)
         shutdownForeground = nil
         sessionControlSource = VigilSessionControl.start()
+        dictationSource = VigilDictation.start()
         // A logout/restart/shutdown is starting. THE signal, and the only
         // reliable one: the AppleEvent probe in applicationShouldTerminate
         // (kAEShutDown/kAERestart) does not arrive on macOS 26, and without
@@ -1073,8 +1075,8 @@ class VigilWorkspaces {
         runFireAndForget(Self.vigildBin, ["chown", id, owner])
     }
 
-    /// THE vigild path: every spawn (chown, sendraw, restore) and
-    /// VigilVoice's inject derive it here, nowhere else.
+    /// THE vigild path: every spawn (chown, sendraw, restore) derives it
+    /// here (`VigilDictation` reads the same `VigilPaths.vigild`).
     static let vigildBin = VigilPaths.vigild.path
 
     // MARK: Persistence (identity + cwd + captured tabs; trees are runtime)

@@ -74,7 +74,7 @@ extension VigilWorkspaces {
 
     /// The session owning this pane daemon right now (live surfaces or
     /// captured sentinels). Ownership is derived, never parsed from the id.
-    private func workspaceOwning(pane: String) -> String? {
+    func workspaceOwning(pane: String) -> String? {
         workspaces.first { ownedPaneIds($0.value).contains(pane) }?.key
     }
 

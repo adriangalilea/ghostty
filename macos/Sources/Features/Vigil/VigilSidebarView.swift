@@ -1,7 +1,6 @@
 import AppKit
 import Face
 import Ink
-import Say
 import SwiftUI
 import UniformTypeIdentifiers
 import VigilWire
@@ -19,10 +18,6 @@ struct VigilSidebarView: View {
     private var scale: CGFloat { CGFloat(VigilSidebarSize.bounded(sidebarFontSize) / VigilSidebarSize.compact) }
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
-    /// The suite's languages, read live: the footer's picker exists only
-    /// when there is more than one to pick from.
-    @AppStorage(Languages.key, store: Languages.store) private var languagesRaw = ""
-    @AppStorage(Languages.pinnedKey, store: Languages.store) private var pinnedLanguage: String?
 
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
 
@@ -225,45 +220,6 @@ struct VigilSidebarView: View {
                 }
             }
             .help("Do nothing: it waits in the queue (the orange keycap, the badge, ⌘⇧J). Summon it: a permission prompt or a question mid-turn brings the floating terminal in on that pane; answering moves to the next. Jump to it: this window switches to anything waiting that you haven't seen.")
-            // Asks are Authz's, switched in its menu bar and Settings alone.
-            // The rail below is this Mac's dictation into the focused pane.
-                    if VigilVoice.available {
-                        HStack(spacing: 5) {
-                            MicButton(
-                                talk: VigilVoice.talk,
-                                spectrum: { VigilVoice.spectrum.frame().bands },
-                                voiceActive: { VigilVoice.spectrum.frame().voiceActive },
-                                hint: VigilVoice.hotkeyHint,
-                                size: 22)
-                            Spacer()
-                            // `languagesRaw` is observed only so the rail
-                            // re-renders when the set changes; the set
-                            // itself is the suite's.
-                            let chosen = Languages.chosen
-                            if chosen.count > 1 {
-                                Menu {
-                                    Picker("Language", selection: $pinnedLanguage) {
-                                        Text("Auto (every language, arbitrated)").tag(String?.none)
-                                        ForEach(chosen, id: \.self) { id in
-                                            Text("\(LocaleFlag.emoji(id) ?? "") \(Languages.name(id))").tag(String?.some(id))
-                                        }
-                                    }
-                                } label: {
-                                    Text(pinnedLanguage.map { LocaleFlag.emoji($0) ?? $0 } ?? "auto")
-                                        .font(.system(size: 9, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                }
-                                .menuStyle(.borderlessButton)
-                                .fixedSize()
-                                .help("Dictation language: auto races every chosen language; a pin runs one recognizer. Languages are chosen in ask settings.")
-                            }
-                        }
-                        .help("Dictate into the focused pane: hold to talk, tap to lock on (tap again to stop), or Caps Lock (\(VigilVoice.hotkeyHint)) from anywhere, the same way, while Authz runs and no question is listening. Speech lands in the input line - no Enter, you submit.")
-                    } else {
-                        Text("no microphone")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 6)
