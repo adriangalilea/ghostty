@@ -317,6 +317,9 @@ fn spawnDaemon(self: *Attach) !void {
     var argv: std.ArrayListUnmanaged([]const u8) = .{};
     defer argv.deinit(self.alloc);
     try argv.appendSlice(self.alloc, &.{ bin, "new", self.id });
+    // The folder is vigild's to resolve (a missing one falls back to its
+    // nearest existing parent): a spawn in a folder that is gone fails.
+    if (self.cwd) |cwd| try argv.appendSlice(self.alloc, &.{ "--cwd", cwd });
     if (self.command) |cmd| switch (cmd) {
         // The daemon picks the login shell for a shell string (it owns
         // shell identity; /bin/sh -l never sees a fish login's PATH).
@@ -329,7 +332,6 @@ fn spawnDaemon(self: *Attach) !void {
 
     var child = std.process.Child.init(argv.items, self.alloc);
     child.env_map = &env;
-    child.cwd = self.cwd;
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;

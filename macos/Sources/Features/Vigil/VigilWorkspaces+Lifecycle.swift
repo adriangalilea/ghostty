@@ -86,7 +86,9 @@ extension VigilWorkspaces {
     func startDaemon(pane: Registry.Pane, session: String) -> Bool {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: Self.vigildBin)
-        var args = ["new", pane.id]
+        // The folder is vigild's to resolve (a missing one falls back to its
+        // nearest existing parent), never this process's working directory.
+        var args = ["new", pane.id, "--cwd", pane.cwd]
         if let cmd = pane.command {
             if cmd.hasPrefix("direct:") {
                 // ghostty's command syntax: `direct:` argv, space-separated.
@@ -98,7 +100,6 @@ extension VigilWorkspaces {
             }
         }
         proc.arguments = args
-        proc.currentDirectoryURL = URL(fileURLWithPath: pane.cwd)
         var env = ProcessInfo.processInfo.environment
         env["VIGIL_WORKSPACE"] = session
         proc.environment = env
