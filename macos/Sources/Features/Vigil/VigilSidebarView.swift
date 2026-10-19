@@ -220,6 +220,7 @@ struct VigilSidebarView: View {
                 }
             }
             .help("Do nothing: it waits in the queue (the orange keycap, the badge, ⌘⇧J). Summon it: a permission prompt or a question mid-turn brings the floating terminal in on that pane; answering moves to the next. Jump to it: this window switches to anything waiting that you haven't seen.")
+            VigilAsksRow()
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 6)

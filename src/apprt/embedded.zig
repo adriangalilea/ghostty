@@ -605,6 +605,11 @@ pub const Surface = struct {
             }
         }
         if (opts.vigil_fd >= 0) config.@"vigil-fd" = opts.vigil_fd;
+        // A pane living on another device never reads this one's
+        // clipboard (OSC 52 read): its program is not on this Mac. Writes
+        // and notifications stay, they are what copying there means here
+        // (review V-L6).
+        if (config.@"vigil-host" != null or opts.vigil_fd >= 0) config.@"clipboard-read" = .deny;
         config.@"vigil-explicit-claim" = opts.vigil_explicit_claim;
 
         // Initialize our surface right away. We're given a view that is
