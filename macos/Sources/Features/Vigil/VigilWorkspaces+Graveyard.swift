@@ -480,4 +480,35 @@ extension VigilWorkspaces {
         }
     }
 
+    /// A program that FINISHED closes its pane, whether or not a window
+    /// shows it. Its daemon ended and took its spec along (`exit`, a
+    /// one-shot command done: the spec is the first file vigild removes),
+    /// so the ids given are panes whose daemon is not starting: at launch,
+    /// or one whose pidfile just left. A spec still on disk is machine
+    /// death, restore's to answer. A placed pane learns the end from its
+    /// stream and ghostty's exit path buries it; this is the same close for
+    /// a pane no window shows, whose command would otherwise run again at
+    /// its next mount. A workspace whose every pane finished is killed whole.
+    func closeFinished(_ ids: some Sequence<String>) {
+        var finished: [String: [String]] = [:]
+        for id in ids where !FileManager.default.fileExists(atPath: VigilPaths.panes.appendingPathComponent("\(id).spec").path) {
+            if let view = liveView(attachId: id), placed(view) { continue }
+            guard let at = locate(id), !at.buried else { continue }
+            finished[at.owner, default: []].append(id)
+        }
+        guard !finished.isEmpty else { return }
+        for (name, ids) in finished {
+            graveyardLog.info("finished panes closed", ["workspace": name, "panes": ids])
+            if Set(ownedPaneIds(workspaces[name]!)).isSubset(of: ids), !windowed(name) {
+                kill(name: name)
+                continue
+            }
+            for id in ids {
+                guard let taken = takePane(id) else { continue }
+                buryPane(taken.pane, from: name, origin: taken.origin)
+            }
+        }
+        persist()
+    }
+
 }

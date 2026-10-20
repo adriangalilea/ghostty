@@ -67,7 +67,11 @@ class VigilWorkspaces {
             guard let self, snapshot.revision > self.facts.revision else { return }
             let sidebarChanged = snapshot.sidebarRevision != self.facts.sidebarRevision
             let ended = self.facts.revision == 0 ? [] : Self.commandsEnded(from: self.facts, to: snapshot)
+            // A daemon that just ended: its pidfile left the folder.
+            let gone = self.facts.files.keys.filter { $0.hasPrefix("panes/") && $0.hasSuffix(".pid") && snapshot.files[$0] == nil }
+                .map { String($0.dropFirst("panes/".count).dropLast(".pid".count)) }
             self.facts = snapshot
+            self.closeFinished(gone)
             // Owner grids and the content receipt read these facts.
             self.syncOwnerGrids()
             // A long command that just ended is news, the same as an
@@ -541,6 +545,7 @@ class VigilWorkspaces {
         acquireInstanceLock()
         load()
         respawnMachineKilledDaemons()
+        closeFinished(workspaces.values.flatMap(ownedPaneIds))
         collectOrphans()
         // Publish revisions for older registries without changing their
         // saved login-restoration intent before any windows are restored.
