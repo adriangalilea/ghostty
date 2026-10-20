@@ -181,6 +181,9 @@ final class VigilPhone: ObservableObject {
     let receipts = VigilReceipts()
     /// vigil's tether node (the one its authz endpoint runs), once up.
     private var node: TetherNode?
+    /// What this phone changes on a Mac (a pane seen, followed, where its
+    /// activity is reached), kept until that Mac can be reached (`VigilActs`).
+    private(set) var acts: VigilActs?
     /// Why vigil has no tether node (it could not start one): the home
     /// screen says so instead of an empty list.
     @Published private(set) var unlinked: String?
@@ -204,6 +207,14 @@ final class VigilPhone: ObservableObject {
         guard self.node == nil else { return }
         self.node = node
         unlinked = nil
+        let receipts = receipts
+        acts = VigilActs(
+            node: node,
+            file: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("tether/vigil-acts.json")
+        ) { what, facts in
+            Task { @MainActor in receipts.info("act", what, facts) }
+        }
         receipts.info("tether", "node up", ["root": String(node.root().prefix(10))])
         VigilAgents.begin()
         readPeers()
@@ -868,8 +879,17 @@ final class VigilPhone: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                _ = try await VigilLink.call(linked(), device: ref.host.id, .seen(ref.pane, revision: revision))
-                receipts.info("seen", "marked", ["pane": ref.pane, "mac": ref.host.name])
+                guard let acts else { throw WireError.refused("vigil is not connected to tether yet") }
+                switch try await acts.send(device: ref.host.id, .seen(ref.pane, revision: revision)) {
+                case .delivered:
+                    receipts.info("seen", "marked", ["pane": ref.pane, "mac": ref.host.name])
+                case .waiting(let why):
+                    // Kept: the Mac takes it when it is back (a newer state
+                    // there by then refuses it, as it should).
+                    receipts.info("seen", "marked when the mac is back", ["pane": ref.pane, "mac": ref.host.name, "why": why])
+                case .refused(let why):
+                    throw WireError.refused(why)
+                }
             } catch {
                 if directories[ref.host.id]?.panes[ref.pane]?.stateRevision == revision {
                     directories[ref.host.id]?.panes[ref.pane]?.seen = truth.seen

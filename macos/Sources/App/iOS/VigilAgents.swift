@@ -12,11 +12,11 @@ import VigilWire
 /// activity's own token, the key it seals to) and what you follow there.
 ///
 /// The activity's token is the one fact only this phone has, and the Mac
-/// starts nothing else until it hears it, so it is delivered for sure: iOS
-/// wakes the app for a push-started activity, and the app holds itself
-/// awake (a background task) while it brings tether up and tells the Mac,
-/// trying again until it is taken or iOS's time runs out; the next launch
-/// or return to the screen tells every Mac again. A second activity for one
+/// starts nothing else until it hears it, so it is delivered for sure: it is
+/// an act (`VigilActs`, kept on disk until the Mac takes it); iOS wakes the
+/// app for a push-started activity, and the app holds itself awake (a
+/// background task) while it brings tether up and the act lands, or until
+/// iOS's time runs out, and the outbox delivers it at the next launch. A second activity for one
 /// Mac is a bug the Mac's one-start rule exists to prevent: seen here, it
 /// is said, and the older ends.
 @MainActor
@@ -59,14 +59,15 @@ enum VigilAgents {
     }
 
     /// Follows a pane on a Mac, or stops: the Mac shows it (starting its
-    /// activity when none runs).
+    /// activity when none runs), now or when it is back (an act: followed,
+    /// then let go before it landed, the letting go is what arrives).
     static func follow(pane: String, on mac: String, _ on: Bool) {
         if on {
             macs[mac, default: []].append(pane)
         } else {
             macs[mac]?.removeAll { $0 == pane }
         }
-        Task { await call(mac, on ? .follow(Follow(pane: pane)) : .unfollow(Follow(pane: pane))) }
+        Task { await send(mac, on ? .follow(Follow(pane: pane)) : .unfollow(Follow(pane: pane))) }
     }
 
     private static func activity(of mac: String) -> Activity<AgentsActivity>? {
@@ -101,64 +102,52 @@ enum VigilAgents {
         }
     }
 
-    /// Tells a Mac what runs here, surely: awake on iOS's background time,
-    /// tether brought up, tried until the Mac takes it (every 2 s, as long
-    /// as iOS gives time), then tether let go again if the app is still in
-    /// the background.
+    /// Tells a Mac what runs here, surely: the route is an act (kept until
+    /// the Mac takes it, the newest replacing an older one still waiting, so
+    /// the order they were made in is the order that counts). Woken in the
+    /// background, the app holds iOS's time while tether is up and the act
+    /// lands, and lets tether go after; what iOS's time did not cover lands
+    /// at the next launch, from the outbox on disk.
     private static func deliver(_ mac: String) async {
         let app = UIApplication.shared
         let task = app.beginBackgroundTask(withName: "agents route to \(mac.prefix(10))")
         defer { app.endBackgroundTask(task) }
         let background = app.applicationState == .background
         if background { await VigilAuthz.shared.runtime.start() }
-        var attempt = 1
-        while !(await tell(mac)) {
-            guard app.applicationState != .background || app.backgroundTimeRemaining > 4 else {
-                VigilPhone.shared.receipts.warn("agents", "not told before ios's time ran out; told at the next launch", [
-                    "mac": String(mac.prefix(10)), "attempts": attempt,
-                ])
-                break
+        await tell(mac)
+        guard background, let acts = VigilPhone.shared.acts else { return }
+        let landed = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await acts.drained(mac); return true }
+            group.addTask {
+                let left = await MainActor.run { app.backgroundTimeRemaining }
+                try? await Task.sleep(for: .seconds(max(left - 4, 0)))
+                return false
             }
-            attempt += 1
-            try? await Task.sleep(for: .seconds(2))
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
         }
-        if attempt > 1 { VigilPhone.shared.receipts.info("agents", "told after retries", ["mac": String(mac.prefix(10)), "attempts": attempt]) }
-        if background, app.applicationState == .background { await VigilAuthz.shared.runtime.leave() }
+        if !landed {
+            VigilPhone.shared.receipts.warn("agents", "not told before ios's time ran out; told at the next launch", ["mac": String(mac.prefix(10))])
+        }
+        if app.applicationState == .background { await VigilAuthz.shared.runtime.leave() }
     }
 
-    /// Each Mac's tellings, one at a time in order: two sent together (the
-    /// one before iOS gave the start token, the one after) could land in
-    /// either order, the older overwriting the newer at the Mac.
-    private static var chains: [String: Task<Bool, Never>] = [:]
-
-    /// Tells a Mac where this phone's activity is reached, after whatever
-    /// it was told before, from the facts as they are when it goes (only
-    /// when that changed since it was last told): true once the Mac has it.
-    @discardableResult
-    private static func tell(_ mac: String, force: Bool = false) async -> Bool {
-        let previous = chains[mac]
-        let telling = Task { @MainActor in
-            _ = await previous?.value
-            return await send(mac, force: force)
-        }
-        chains[mac] = telling
-        return await telling.value
-    }
-
-    private static func send(_ mac: String, force: Bool) async -> Bool {
+    /// Tells a Mac where this phone's activity is reached, from the facts as
+    /// they are now (only when that changed since it was last told, or
+    /// `force`d: a Mac newly listed, whose hub may have restarted without it).
+    private static func tell(_ mac: String, force: Bool = false) async {
         let route: AgentsRoute
         do {
             route = AgentsRoute(start: startToken, token: tokens[mac]?.token, born: tokens[mac]?.born,
                                 at: Date().timeIntervalSince1970, environment: VigilAuthz.apns.rawValue,
                                 key: try AgentsActivity.routeKey())
         } catch {
-            VigilPhone.shared.receipts.error("agents", "no key to give", ["mac": String(mac.prefix(10)), "err": error])
-            return false
+            return VigilPhone.shared.receipts.error("agents", "no key to give", ["mac": String(mac.prefix(10)), "err": error])
         }
-        if !force, let last = told[mac], last.reaches(route) { return true }
-        guard await call(mac, .agents(route)) != nil else { return false }
+        if !force, let last = told[mac], last.reaches(route) { return }
         told[mac] = route
-        return true
+        await send(mac, .agents(route))
     }
 
     /// What a Mac's board says is followed there, as it changes (its
@@ -168,14 +157,20 @@ enum VigilAgents {
         macs[mac] = panes
     }
 
-    @discardableResult
-    private static func call(_ mac: String, _ open: Open) async -> Data? {
+    /// One act for a Mac, through the outbox: refused there, it is said and
+    /// dropped (the next change tells it again).
+    private static func send(_ mac: String, _ open: Open) async {
         do {
-            guard let node = VigilAuthz.shared.runtime.node else { throw WireError.refused("vigil is not connected to tether yet") }
-            return try await VigilLink.call(node, device: mac, open)
+            guard let acts = VigilPhone.shared.acts else { throw WireError.refused("vigil is not connected to tether yet") }
+            switch try await acts.send(device: mac, open) {
+            case .delivered: break
+            case .waiting(let why):
+                VigilPhone.shared.receipts.info("agents", "told when the mac is back", ["mac": String(mac.prefix(10)), "op": open.op.rawValue, "why": why])
+            case .refused(let why): throw WireError.refused(why)
+            }
         } catch {
+            if open.op == .agents { told[mac] = nil }
             VigilPhone.shared.receipts.warn("agents", "not told", ["mac": String(mac.prefix(10)), "op": open.op.rawValue, "err": error])
-            return nil
         }
     }
 }
