@@ -1,5 +1,6 @@
 import AppKit
 import AskKit
+import AuthzClient
 import Listen
 import Say
 import SwiftUI
@@ -530,7 +531,7 @@ class VigilWorkspaces {
     var reportedLeaks = Set<String>()
 
     private init() {
-        setLogService("vigil")
+        Record.keep(service: "vigil")
         _ = Self.launchedAt // a static is lazy: stamp it at launch, not at the first status read
         acquireInstanceLock()
         load()

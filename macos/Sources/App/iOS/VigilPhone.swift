@@ -27,8 +27,8 @@ struct Receipt: Identifiable {
 /// Every receipt of this app, observed by the settings sheet ALONE. A
 /// receipt is a `Log` event (scope, message, fields): the unified log,
 /// stderr (`devicectl … launch --console` over the cable) and the app's
-/// event file (`Library/Logs/vigil-phone.jsonl`, `EventFile`, which
-/// `authz trace` reads), and the same values make the list's row.
+/// record (`Library/Logs/vigil-phone.jsonl`, `Record`, shipped to the Macs
+/// where `authz trace` reads it), and the same values make the list's row.
 @MainActor
 final class VigilReceipts: ObservableObject {
     @Published private(set) var all: [Receipt] = []
