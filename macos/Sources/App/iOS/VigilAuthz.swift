@@ -52,13 +52,14 @@ import VigilWire
         }
     }
 
-    /// Allow or Deny under a question's notification: answered by the
-    /// runtime; what happened is a receipt (an answer that failed becomes a
-    /// notification saying so).
-    func answer(_ target: (id: String, home: String), action: String, shown: String) async {
-        switch await runtime.answer(target, action: action) {
+    /// An answer given under a question's notification (Allow, Deny, a typed
+    /// reply): answered by the runtime; what happened is a receipt (an answer
+    /// that failed becomes a notification saying so).
+    func answer(_ target: (id: String, home: String), _ decision: Decision, shown: String) async {
+        switch await runtime.answer(target, decision) {
         case .answered:
-            VigilPhone.shared.receipts.info("authz", "answered", ["request": String(target.id.prefix(8)), "action": action])
+            VigilPhone.shared.receipts.info(
+                "authz", "answered", ["request": String(target.id.prefix(8)), "action": decision.action ?? "answers"])
         case .alreadySettled, .gone:
             VigilPhone.shared.receipts.info("authz", "no longer waits", ["request": String(target.id.prefix(8))])
         case .failed(let why):
@@ -82,7 +83,7 @@ import VigilWire
                 "request": String(request.prefix(8)),
             ])
         }
-        await answer((request, home), action: action, shown: shown)
+        await answer((request, home), .action(action, feedback: nil), shown: shown)
     }
 
     /// A tapped question: the pane that asks, once its home's view is current.
@@ -149,7 +150,8 @@ final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         DispatchQueue.main.async { completion([.list]) }
     }
 
-    /// Allow or Deny answers from here; a tap opens the pane that asks.
+    /// An answer under it (Allow, Deny, a typed reply) answers from here; a
+    /// tap opens the pane that asks.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
         withCompletionHandler completion: @escaping @Sendable () -> Void
@@ -157,8 +159,8 @@ final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         let chosen = RequestNotification.read(response)
         Task { @MainActor in
             if let target = chosen.target {
-                if let action = chosen.action {
-                    await VigilAuthz.shared.answer(target, action: action, shown: chosen.shown)
+                if let answer = chosen.answer {
+                    await VigilAuthz.shared.answer(target, answer, shown: chosen.shown)
                 } else {
                     await VigilAuthz.shared.open(target)
                 }

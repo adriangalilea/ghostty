@@ -192,9 +192,9 @@ private struct Needs: View {
                     }
                     HStack(spacing: 8) {
                         if let answers = question.answers {
-                            AnswerButton(title: answers.denyLabel, symbol: AnswerLook.symbol(.no), tint: AnswerLook.refuse,
+                            AnswerButton(title: answers.denyLabel, symbol: AnswerLook.symbol(.no), tint: .primary,
                                          intent: AnswerIntent(device: mac, request: question.request, action: answers.deny, shown: question.title))
-                            AnswerButton(title: answers.allowLabel, symbol: AnswerLook.symbol(.yes), tint: AnswerLook.approve,
+                            AnswerButton(title: answers.allowLabel, symbol: AnswerLook.symbol(.yes), tint: Hue.yes,
                                          intent: AnswerIntent(device: mac, request: question.request, action: answers.allow, shown: question.title))
                         } else {
                             Pill(title: "Answer in vigil", symbol: "arrow.up.forward.app", intent: OpenPaneIntent(pane: row.pane, keyboard: false), wide: true)
@@ -319,7 +319,8 @@ private struct ContextBar: View {
     let percent: Int
     var body: some View {
         let fill = Double(min(max(percent, 0), 100)) / 100
-        let tint: Color = percent >= 90 ? AnswerLook.refuse : percent >= 70 ? .orange : .white.opacity(0.7)
+        // Care from 70%: the context running out is worth reading before the turn goes on.
+        let tint: Color = percent >= 70 ? Hue.care : .white.opacity(0.7)
         HStack(spacing: 6) {
             Capsule().fill(.white.opacity(0.14))
                 .frame(width: 72, height: 5)
@@ -385,8 +386,8 @@ private struct Header: View {
 }
 
 extension Agents.Row {
-    /// Its state's color; a failed command wears the refusal hue.
-    var tint: Color { failed ? AnswerLook.refuse : state.tint }
+    /// Its state's color; a failed command is care.
+    var tint: Color { failed ? Hue.care : state.tint }
 }
 
 /// How long the state has held: working, this turn (since your last
