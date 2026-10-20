@@ -1,5 +1,6 @@
 import ActivityKit
 import Foundation
+import TetherKit
 import UIKit
 import VigilActivity
 import VigilLink
@@ -164,9 +165,9 @@ enum VigilAgents {
             guard let acts = VigilPhone.shared.acts else { throw WireError.refused("vigil is not connected to tether yet") }
             switch try await acts.send(device: mac, open) {
             case .delivered: break
-            case .waiting(let why):
+            case .kept(let why):
                 VigilPhone.shared.receipts.info("agents", "told when the mac is back", ["mac": String(mac.prefix(10)), "op": open.op.rawValue, "why": why])
-            case .refused(let why): throw WireError.refused(why)
+            case .dropped(let why): throw WireError.refused(why)
             }
         } catch {
             if open.op == .agents { told[mac] = nil }

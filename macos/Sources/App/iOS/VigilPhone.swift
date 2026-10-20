@@ -883,11 +883,11 @@ final class VigilPhone: ObservableObject {
                 switch try await acts.send(device: ref.host.id, .seen(ref.pane, revision: revision)) {
                 case .delivered:
                     receipts.info("seen", "marked", ["pane": ref.pane, "mac": ref.host.name])
-                case .waiting(let why):
+                case .kept(let why):
                     // Kept: the Mac takes it when it is back (a newer state
                     // there by then refuses it, as it should).
                     receipts.info("seen", "marked when the mac is back", ["pane": ref.pane, "mac": ref.host.name, "why": why])
-                case .refused(let why):
+                case .dropped(let why):
                     throw WireError.refused(why)
                 }
             } catch {
