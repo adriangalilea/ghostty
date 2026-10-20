@@ -665,15 +665,19 @@ struct VigilSidebarView: View {
                 }
                 // Any pane, whatever runs in it: an agent's stall or a
                 // command's end rings on the phone, as loud as its priority.
-                let following = VigilWorkspaces.shared.phoneFollows.contains(paneId)
-                Button(following ? "Stop Following on iPhone" : "Follow on iPhone") {
-                    VigilWorkspaces.shared.followOnPhones(pane: paneId, !following)
-                }
-                Menu("Priority") {
-                    ForEach(Registry.Priority.allCases, id: \.self) { priority in
-                        Toggle(priority.rawValue.capitalized, isOn: Binding(
-                            get: { VigilWorkspaces.shared.priority(ofPane: paneId) == priority },
-                            set: { if $0 { VigilWorkspaces.shared.setPriority(pane: paneId, priority) } }))
+                // Only with a phone registered here: following and priority
+                // are what the phone shows and how loudly it rings.
+                if VigilWorkspaces.shared.phonesRegistered {
+                    let following = VigilWorkspaces.shared.phoneFollows.contains(paneId)
+                    Button(following ? "Stop Following on iPhone" : "Follow on iPhone") {
+                        VigilWorkspaces.shared.followOnPhones(pane: paneId, !following)
+                    }
+                    Menu("Priority") {
+                        ForEach(Registry.Priority.allCases, id: \.self) { priority in
+                            Toggle(priority.rawValue.capitalized, isOn: Binding(
+                                get: { VigilWorkspaces.shared.priority(ofPane: paneId) == priority },
+                                set: { if $0 { VigilWorkspaces.shared.setPriority(pane: paneId, priority) } }))
+                        }
                     }
                 }
             }

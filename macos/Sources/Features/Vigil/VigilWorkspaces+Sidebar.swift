@@ -309,10 +309,13 @@ extension VigilWorkspaces {
         let watch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .global(qos: .utility))
         let read: @Sendable () -> Void = {
             struct Phone: Decodable { var follows: [String] }
-            let follows = (try? Data(contentsOf: VigilPaths.agent.appendingPathComponent("board-status.json")))
-                .flatMap { try? JSONDecoder().decode([Phone].self, from: $0) }
-                .map { Set($0.flatMap(\.follows)) } ?? []
-            DispatchQueue.main.async { VigilWorkspaces.shared.phoneFollows = follows }
+            let phones = (try? Data(contentsOf: VigilPaths.agent.appendingPathComponent("board-status.json")))
+                .flatMap { try? JSONDecoder().decode([Phone].self, from: $0) } ?? []
+            let follows = Set(phones.flatMap(\.follows))
+            DispatchQueue.main.async {
+                VigilWorkspaces.shared.phoneFollows = follows
+                VigilWorkspaces.shared.phonesRegistered = !phones.isEmpty
+            }
         }
         watch.setEventHandler(handler: read)
         watch.setCancelHandler { close(fd) }

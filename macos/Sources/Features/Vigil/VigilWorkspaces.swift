@@ -519,6 +519,11 @@ class VigilWorkspaces {
     var phoneFollows: Set<String> = [] {
         didSet { if phoneFollows != oldValue { NotificationCenter.default.post(name: Self.stateDidChange, object: nil) } }
     }
+    /// Some phone is registered with this Mac's hub: only then is there
+    /// anything to follow on or ring on (the same read as `phoneFollows`).
+    var phonesRegistered = false {
+        didSet { if phonesRegistered != oldValue { NotificationCenter.default.post(name: Self.stateDidChange, object: nil) } }
+    }
     var boardWatch: DispatchSourceFileSystemObject?
 
     /// True while quitting should mean "become a menu bar service" instead of
