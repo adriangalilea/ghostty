@@ -1034,6 +1034,7 @@ struct SettingsView: View {
     private func requests(_ mac: EndpointRuntime.Mac) -> String {
         switch mac.state {
         case .onAccount, .pairing: "Requests: after pairing"
+        case .connecting: "Requests: connecting…"
         case .waiting: "Requests: allow vigil on the Mac"
         case .answering: "Requests: answered here"
         case .refused: "Requests: refused on the Mac"
