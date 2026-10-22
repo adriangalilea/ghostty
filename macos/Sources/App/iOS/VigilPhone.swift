@@ -327,6 +327,14 @@ final class VigilPhone: ObservableObject {
                         ])
                     }
                     self.down[host.id] = nil
+                    // A glance that did not travel or did not read: said
+                    // once per reason; its row is the terminal meanwhile.
+                    for (pane, facts) in dir.panes
+                    where facts.glanceError != nil && facts.glanceError != self.directories[host.id]?.panes[pane]?.glanceError {
+                        self.receipts.warn("dir", "glance not read; its row shows the terminal", [
+                            "mac": host.name, "pane": pane, "err": facts.glanceError ?? "",
+                        ])
+                    }
                     self.directories[host.id] = dir
                 case .waiting:
                     // Every attempt is a receipt: a repeat is evidence (how
@@ -370,6 +378,11 @@ final class VigilPhone: ObservableObject {
         /// An agent (Claude, Codex) runs in the pane: it has a conversation
         /// to draw, and its screen opens on it.
         var agent: Bool = false
+        /// What its agent means right now (its Mac's `PaneGlance`, believed
+        /// only while that agent is the pane's program): its row draws it
+        /// instead of a live terminal. nil: a shell, a command, a Mac whose
+        /// broker publishes none; its row is the terminal, as ever.
+        var glance: PaneGlance? = nil
         /// A pane's state in the words every surface uses.
         var words: String { alive ? (state ?? .idle).words(flavor) : "Not running" }
         var pane: PaneRef? = nil
@@ -421,6 +434,10 @@ final class VigilPhone: ObservableObject {
     }
 
     func tree() -> [Node] { nodes }
+
+    /// A made-up tree, for review only (`VigilFixture`): nothing is
+    /// followed or dialed for it.
+    func fixture(_ tree: [Node]) { nodes = tree }
 
     // MARK: Following: a pane on the Lock Screen
 
@@ -813,7 +830,21 @@ final class VigilPhone: ObservableObject {
         let leaves = fresh.flatMap(\.leaves)
         let gridded = leaves.filter { $0.pane != nil && $0.rows > 0 }.count
         let folded = collapsed.count
-        receipts.info("tree", "rebuilt", ["panes": leaves.count, "previewable": gridded, "folded": folded])
+        // How each pane row draws, so "why is this row a terminal" is a read
+        // of this line: its agent's glance, or the terminal (no glance: a
+        // shell, a command, a broker that publishes none, one that did not
+        // read; `glance_unread` names those).
+        let glanced = leaves.filter { $0.glance != nil }
+        let unread = leaves.filter { $0.glance == nil && $0.agent }.compactMap { leaf -> String? in
+            guard let pane = leaf.followPane, let host = host(of: leaf) else { return nil }
+            return directories[host.id]?.panes[pane]?.glanceError.map { _ in pane }
+        }
+        receipts.info("tree", "rebuilt", [
+            "panes": leaves.count, "previewable": gridded, "folded": folded,
+            "glance_rows": glanced.count, "terminal_rows": leaves.count - glanced.count,
+            "agents_without_glance": leaves.filter { $0.glance == nil && $0.agent }.map { $0.followPane ?? $0.id },
+            "glance_unread": unread,
+        ])
     }
 
     private func deriveTree() -> [Node] {
@@ -846,6 +877,7 @@ final class VigilPhone: ObservableObject {
                                 flavor: truth?.shown == .blocked ? truth?.token?.flavor : nil,
                                 alive: alive,
                                 agent: alive && Program.runsAgent(truth?.tree ?? []),
+                                glance: alive ? truth?.meaning : nil,
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: path) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
                                 sizeOwner: truth?.owner ?? "",

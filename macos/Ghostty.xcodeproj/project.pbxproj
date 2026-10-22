@@ -55,6 +55,7 @@
 		0DAA1111000000000000E052 /* AuthzGlance in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E050 /* AuthzGlance */; };
 		0DAA1111000000000000E053 /* VigilActivity in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E051 /* VigilActivity */; };
 		0DAA1111000000000000E061 /* MarkdownText in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E060 /* MarkdownText */; };
+		0DAA1111000000000000E071 /* Ink in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E070 /* Ink */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -442,6 +443,7 @@
 				0DAA1111000000000000E052 /* AuthzGlance in Frameworks */,
 				0DAA1111000000000000E053 /* VigilActivity in Frameworks */,
 				0DAA1111000000000000E061 /* MarkdownText in Frameworks */,
+				0DAA1111000000000000E071 /* Ink in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -662,6 +664,7 @@
 				0DAA1111000000000000E050 /* AuthzGlance */,
 				0DAA1111000000000000E051 /* VigilActivity */,
 				0DAA1111000000000000E060 /* MarkdownText */,
+				0DAA1111000000000000E070 /* Ink */,
 			);
 			productName = "Ghostty-iOS";
 			productReference = A5D4499D2B53AE7B000F5B83 /* Ghostty-iOS.app */;
@@ -1964,6 +1967,7 @@
 		0DAA1111000000000000E050 /* AuthzGlance */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000002A1; productName = AuthzGlance; };
 		0DAA1111000000000000E051 /* VigilActivity */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */; productName = VigilActivity; };
 		0DAA1111000000000000E060 /* MarkdownText */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = MarkdownText; };
+		0DAA1111000000000000E070 /* Ink */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = Ink; };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A5B30529299BEAAA0047F10C /* Project object */;

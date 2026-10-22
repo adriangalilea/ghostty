@@ -19,6 +19,8 @@ struct VigilPhoneApp: App {
             preconditionFailure("Initialize ghostty backend failed")
         }
         _ghostty = StateObject(wrappedValue: Ghostty.App())
+        // A made-up tree is in place before the first frame.
+        if VigilFixture.asked == .home { VigilPhone.shared.fixture(VigilFixtureView.home) }
     }
 
     var body: some Scene {
@@ -27,6 +29,7 @@ struct VigilPhoneApp: App {
                 // Review only: made-up state in the system's appearance,
                 // nothing started (no tether, no Mac).
                 VigilFixtureView(fixture: fixture)
+                    .environmentObject(ghostty)
             } else {
                 root
             }

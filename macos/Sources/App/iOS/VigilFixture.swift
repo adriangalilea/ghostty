@@ -23,6 +23,10 @@ enum VigilFixture: String {
     /// The other kinds of rows (a plan, a subagent, a compaction, a
     /// failure, a tool vigil does not type), working.
     case conversationLong = "conversation-long"
+    /// The home tree: agent panes drawn by their glance (waiting, asked,
+    /// working, done long ago), a shell and an agent with no glance beside
+    /// them, drawn as terminals.
+    case home
 
     /// The fixture this launch asked for, if any.
     static var asked: VigilFixture? {
@@ -50,6 +54,11 @@ struct VigilFixtureView: View {
                 ConversationFixture(conversation: Self.conversation(Self.questioning, live: Self.questionLive, offer: Self.question))
             case .conversationLong: ConversationFixture(conversation: Self.conversation(Self.long, live: Self.workingLive, earlier: true))
             case .activity, .activityMore, .activityIsland: activity
+            case .home:
+                // As the app shows it: dark, its tree from `VigilPhone`.
+                NavigationStack { HomeView() }
+                    .environmentObject(VigilPhone.shared)
+                    .preferredColorScheme(.dark)
             }
         }
         .task {
@@ -187,6 +196,63 @@ struct VigilFixtureView: View {
         shown([permission], stale: true),
         shown([permission], opened: false),
     ]
+}
+
+// MARK: - The home tree, made up
+
+extension VigilFixtureView {
+    static let host = VigilPhone.Host(id: "fixture", name: mac)
+
+    private static func agent(_ pane: String, _ title: String, _ state: AgentState, flavor: BlockFlavor? = nil,
+                              glance: PaneGlance?) -> VigilPhone.Node {
+        VigilPhone.Node(id: "fixture/lively-harbor/\(pane)", kind: .pane, title: title, state: state, flavor: flavor,
+                        agent: true, glance: glance, pane: PaneRef(host: host, pane: pane, title: "minerlab › \(title)"),
+                        rows: glance == nil ? 40 : 0, cols: glance == nil ? 120 : 0, path: "minerlab › \(title)",
+                        followPane: pane, anchor: pane)
+    }
+
+    private static func tab(_ index: Int, _ title: String, _ panes: [VigilPhone.Node]) -> VigilPhone.Node {
+        VigilPhone.Node(id: "fixture/lively-harbor/t\(index)", kind: .tab, title: title, anchor: panes.first?.followPane,
+                        children: panes)
+    }
+
+    /// Minerlab as the M5 shows it: a codex scoring, two claudes in one tab
+    /// (one waiting on a permission, one that asked a question), a claude
+    /// done an hour and a half ago beside a shell, and a claude whose Mac
+    /// publishes no glance (an older broker): a terminal, as before.
+    static let home: [VigilPhone.Node] = {
+        let codex = agent("vigil-lively-harbor-88", "Score the qubic miners", .working, glance: PaneGlance(
+            agent: "codex", conversation: "0199f3c2-7d41-7a10-9c2e-5b8e1f0a3d77", name: "Score the qubic miners",
+            action: .init(tool: "Bash", subject: "python3 score.py --epoch 142 --top 20", shell: true), actionAt: now - 12,
+            context: 33, turn: now - 340))
+        let waiting = agent("vigil-lively-harbor-90", "Urgent qubic/core commit", .blocked, flavor: .permission, glance: PaneGlance(
+            agent: "claude", conversation: "00f4d5db-1c3e-4b9a-8f2d-6a7e9b0c1d2e", name: "Urgent qubic/core commit",
+            question: "Run git push origin core-fix", context: 58, turn: now - 95))
+        let asked = agent("vigil-lively-harbor-91", "pgbot infra integration", .blocked, flavor: .ask, glance: PaneGlance(
+            agent: "claude", conversation: "7b2e0a41-93c8-4d6f-a1b5-2c9e8d7f6a50", name: "pgbot infra integration",
+            said: "The bot now reads its pool from the infra registry and the health check passes.",
+            saidAt: now - 600, question: "Should I also move the staging bot over, or keep it on the old config for now?",
+            context: 71))
+        let done = agent("vigil-lively-harbor-92", "Fix the hashrate chart", .done, glance: PaneGlance(
+            agent: "claude", conversation: "c41d77e0-5a2b-4e19-b8f3-90d1e2a3b4c5", name: "Fix the hashrate chart",
+            said: "Fixed: the chart now plots the 1h average instead of raw samples, so the spikes are gone. The tests pass.",
+            saidAt: now - 5_400, context: 24))
+        let shell = VigilPhone.Node(id: "fixture/lively-harbor/vigil-lively-harbor-93", kind: .pane, title: "fish", state: .idle,
+                                    pane: PaneRef(host: host, pane: "vigil-lively-harbor-93", title: "minerlab › fish"),
+                                    rows: 40, cols: 120, path: "minerlab › fish", followPane: "vigil-lively-harbor-93",
+                                    anchor: "vigil-lively-harbor-93")
+        let older = agent("vigil-lively-harbor-94", "claude", .working, glance: nil)
+        var workspace = VigilPhone.Node(id: "fixture/lively-harbor", kind: .workspace, title: "minerlab", emoji: "⛏️",
+                                        anchor: "vigil-lively-harbor-93")
+        workspace.children = [
+            tab(0, "scorer", [codex]),
+            tab(1, "minerlab 1", [waiting, asked]),
+            tab(2, "minerlab 2", [done, shell, older]),
+        ]
+        var mac = VigilPhone.Node(id: "host:fixture", kind: .host, title: Self.mac)
+        mac.children = [workspace]
+        return [mac]
+    }()
 }
 
 // MARK: - A conversation, made up

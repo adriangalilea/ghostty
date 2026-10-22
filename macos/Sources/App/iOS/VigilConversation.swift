@@ -38,12 +38,13 @@ final class Conversation: ObservableObject {
     /// live state), never with a page prepended: what keeps a reader at
     /// the newest row there.
     @Published private(set) var revision = 0
-    /// How many of the newest rows are drawn. A snapshot holds a long tail
-    /// (200 rows, every one laid out to anchor the view at its bottom, which
-    /// held the screen blank for seconds): the screen draws a page of it and
-    /// reveals the rest as the top comes into view, before asking the Mac.
-    @Published private(set) var drawn = Conversation.page
-    static let page = 30
+    /// How many of the newest rows are drawn: a page (`Feed.page`, the
+    /// Mac's own: a snapshot is its first page, an earlier page the next),
+    /// every row laid out to anchor the view at its bottom. Rows held beyond
+    /// those drawn (a Mac older than the paged snapshot sends 200) are
+    /// revealed as the top comes into view, before asking the Mac.
+    @Published private(set) var drawn = Feed.page
+    static let page = Feed.page
     /// The rows drawn, oldest first.
     var visible: ArraySlice<FeedEntry> { entries.suffix(drawn) }
     /// Rows older than those drawn exist, here or on the Mac.

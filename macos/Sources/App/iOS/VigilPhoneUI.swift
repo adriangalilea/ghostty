@@ -1,6 +1,7 @@
 import AuthzEndpoint
 import AuthzGlance
 import AuthzUI
+import Ink
 import SwiftUI
 import GhosttyKit
 import VigilActivity
@@ -302,7 +303,9 @@ struct TreeNodeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             row
-            if let ref = node.pane, node.rows > 0, node.cols > 0 {
+            // An agent pane with a glance is drawn by its meaning (`row`):
+            // no live terminal, so no surface, no stream, no renderer.
+            if let ref = node.pane, node.glance == nil, node.rows > 0, node.cols > 0 {
                 NavigationLink(value: ref) {
                     PanePreview(ref: ref, grid: .init(rows: node.rows, cols: node.cols))
                         .padding(.leading, CGFloat(depth) * Self.indent + Self.chevron + 6)
@@ -335,26 +338,31 @@ struct TreeNodeView: View {
                 Spacer().frame(width: Self.chevron)
             }
             icon
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 5) {
-                    if let e = node.emoji { Text(e).font(font) }
-                    Text(node.title)
-                        .font(font)
-                        .foregroundStyle(node.alive ? .primary : .secondary)
-                        .lineLimit(1)
-                    marks
-                }
-                if let sub = node.subtitle {
-                    Text(sub).font(.caption2)
-                        .foregroundStyle(sub.hasPrefix("connecting") ? .secondary : Hue.care)
-                        .lineLimit(1)
+            if let glance = node.glance {
+                GlanceRow(node: node, glance: glance) { marks }
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 5) {
+                        if let e = node.emoji { Text(e).font(font) }
+                        Text(node.title)
+                            .font(font)
+                            .foregroundStyle(node.alive ? .primary : .secondary)
+                            .lineLimit(1)
+                        marks
+                    }
+                    if let sub = node.subtitle {
+                        Text(sub).font(.caption2)
+                            .foregroundStyle(sub.hasPrefix("connecting") ? .secondary : Hue.care)
+                            .lineLimit(1)
+                    }
                 }
             }
             Spacer(minLength: 4)
             if node.kind == .pane && !node.alive {
                 Text("Not running").font(.caption2).foregroundStyle(.tertiary)
             }
-            cluster
+            // A glance row wears its state as its glyph.
+            if node.glance == nil { cluster }
             // A Mac's own `+`: a workspace there, its Mac obvious.
             if node.kind == .host, let host = model.host(of: node), model.reachable(host) {
                 Menu { QuickCreateItems(host: host) } label: {
@@ -384,6 +392,14 @@ struct TreeNodeView: View {
             }
         }
         .contextMenu {
+            // The ids we communicate by, each where it exists.
+            if let pane = node.followPane {
+                Section {
+                    CopyItem(label: "Copy Pane ID", value: pane)
+                    if let name = node.glance?.title { CopyItem(label: "Copy Conversation Name", value: name) }
+                    if let id = node.glance?.conversation { CopyItem(label: "Copy Conversation ID", value: id) }
+                }
+            }
             if node.followPane != nil {
                 Button { model.follow(node, !following) } label: {
                     Label(following ? "Unfollow" : "Follow on this iPhone",
@@ -481,6 +497,93 @@ struct TreeNodeView: View {
         .frame(minWidth: 8)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(states.map(\.words).joined(separator: ", "))
+    }
+}
+
+// MARK: - Glance row: an agent pane by its meaning
+
+/// An agent pane drawn as what it means (its Mac's `PaneGlance`): its
+/// state's glyph, its conversation's name, the mark of a conversation (it
+/// opens as one), then one or two lines: the question while it waits for
+/// you, the tool call while it works, else its last words with how long ago
+/// it said them. Its pane id, dim, under it. Each line only when the glance
+/// has it; the state's words otherwise, never a blank row.
+struct GlanceRow<Marks: View>: View {
+    let node: VigilPhone.Node
+    let glance: PaneGlance
+    @ViewBuilder let marks: () -> Marks
+
+    private var state: AgentState { node.state ?? .idle }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                Image(systemName: state.symbol)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(state.tint)
+                    .frame(width: 16)
+                    .accessibilityLabel(state.words(node.flavor))
+                if let e = node.emoji { Text(e).font(.subheadline) }
+                Text(node.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                Image(systemName: "bubble.left.and.text.bubble.right")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("A conversation with \(glance.agent)")
+                marks()
+            }
+            line.padding(.leading, 21)
+            if let pane = node.followPane {
+                MiddleTruncate(pane, tail: "-")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 21)
+            }
+        }
+    }
+
+    @ViewBuilder private var line: some View {
+        switch state {
+        case .blocked:
+            Text(glance.question ?? state.words(node.flavor))
+                .font(.footnote).foregroundStyle(state.tint).lineLimit(2)
+        case .working, .interrupting, .unknown:
+            if let action = glance.action {
+                Text(action.line)
+                    .font(action.shell ? .footnote.monospaced() : .footnote)
+                    .foregroundStyle(.secondary).lineLimit(1)
+            } else {
+                Text(state.words(node.flavor)).font(.footnote).foregroundStyle(.secondary)
+            }
+        case .done, .idle:
+            if let said = glance.said {
+                let age = Text(glance.saidAt.map { "  · " + Self.ago($0) } ?? "").foregroundStyle(.tertiary)
+                Text("\(said)\(age)").font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+            } else {
+                Text(state.words(node.flavor)).font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// How long ago, said plainly: last words are the past, and an hour-old
+    /// line must not pass for one said now.
+    static func ago(_ time: Double) -> String {
+        Date(timeIntervalSince1970: time).formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
+    }
+}
+
+/// One Copy item of a row's menu: Ink's copy action (the pasteboard is the
+/// receipt; a menu has no place to show its confirmation), and a receipt.
+struct CopyItem: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        Button {
+            CopyFeedback().copy(value)
+            VigilPhone.shared.receipts.info("copy", label, ["value": value])
+        } label: {
+            Label(label, systemImage: "doc.on.doc")
+        }
     }
 }
 
