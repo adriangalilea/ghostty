@@ -553,14 +553,12 @@ struct GlanceRow<Marks: View>: View {
         case .blocked:
             Text(glance.question ?? state.words(node.flavor))
                 .font(.footnote).foregroundStyle(state.tint).lineLimit(2)
-        case .working, .interrupting, .unknown where glance.action != nil:
+        case .working, .interrupting, .unknown, .done, .idle:
             if let action = glance.action {
                 Text(action.line)
                     .font(action.shell ? .footnote.monospaced() : .footnote)
                     .foregroundStyle(.secondary).lineLimit(1)
-            }
-        case .working, .interrupting, .unknown, .done, .idle:
-            if let said = glance.said {
+            } else if let said = glance.said {
                 // Where it ended: its last lines as written (markdown), in a
                 // card, then when and how full its context is.
                 VStack(alignment: .leading, spacing: 6) {
