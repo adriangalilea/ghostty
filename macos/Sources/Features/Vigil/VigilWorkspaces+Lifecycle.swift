@@ -57,24 +57,32 @@ extension VigilWorkspaces {
         return name
     }
 
-    /// The session API (`vigil new`, AppleScript `new session`): CREATE
-    /// means the session exists AND runs — its pane daemon spawns
-    /// headless at birth (the shape the whole fleet has after ⌘Q), never
-    /// a registry row waiting for a click. No window opens unless asked
-    /// (`openWindow`): the session appears in every sidebar and the
-    /// viewport under Adrian's hands is never touched. Returns the
-    /// minted id.
+    /// A workspace born through the api: its id, its one pane, and whether
+    /// that pane's daemon started.
+    struct Birth {
+        let name: String
+        let pane: Registry.Pane
+        let running: Bool
+    }
+
+    /// The workspace API (`vigil new`, AppleScript `new workspace`, a
+    /// `create` or `new_session` from another device): CREATE means the
+    /// workspace exists AND runs — its pane daemon spawns headless at birth
+    /// (the shape the whole fleet has after ⌘Q), never a registry row
+    /// waiting for a click. No window opens unless asked (`openWindow`):
+    /// the workspace appears in every sidebar and the viewport under
+    /// Adrian's hands is never touched.
     @discardableResult
-    func apiNewWorkspace(label: String?, cwd: String?, command: String?, openWindow: Bool) -> String {
+    func apiNewWorkspace(label: String?, cwd: String?, command: String?, openWindow: Bool) -> Birth {
         let cwd = cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
         let name = createWorkspace(cwd: cwd, command: command)
         if let label, !label.isEmpty { rename(name: name, label: label, emoji: nil) }
-        for pane in workspaces[name]!.tabs.flatMap(\.panes) {
-            startDaemon(pane: pane, session: name)
-        }
-        lifecycleLog.info("born through the api", ["workspace": name, "label": label, "window": openWindow])
+        let panes = workspaces[name]!.tabs.flatMap(\.panes)
+        assert(panes.count == 1, "a workspace is born with one pane")
+        let running = startDaemon(pane: panes[0], session: name)
+        lifecycleLog.info("born through the api", ["workspace": name, "label": label, "window": openWindow, "running": running])
         if openWindow { open(name: name) } else { persist() }
-        return name
+        return Birth(name: name, pane: panes[0], running: running)
     }
 
     /// Start a pane's daemon headless (`vigild new <id> [-c cmd]`): the

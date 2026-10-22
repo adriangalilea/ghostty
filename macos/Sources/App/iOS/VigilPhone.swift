@@ -372,6 +372,11 @@ final class VigilPhone: ObservableObject {
         /// The pane following this row follows (pane rows only: a follow is
         /// a pane, whatever runs in it).
         var followPane: String? = nil
+        /// The pane a new tab or split made from this row stands beside (a
+        /// workspace's: its last tab's first pane, so a new tab goes last;
+        /// a tab's: its first pane; a pane's: itself). nil for a dock
+        /// tenant, which anchors neither, and for a Mac.
+        var anchor: String? = nil
         var children: [Node] = []
 
         /// The Mac's tether root (every id below a Mac starts with it).
@@ -538,6 +543,255 @@ final class VigilPhone: ObservableObject {
     }
     @Published private(set) var burialError: String?
 
+    // MARK: Creating: a workspace, a tab or a pane, on its Mac
+
+    /// What to create. A workspace is the receiving Mac's (`create`: its
+    /// folder, its program, its label); a tab or a split is the anchor's
+    /// workspace's, in the anchor's folder (`new_tab`, `split`). `command`
+    /// is the new pane's program (nil: a shell), shown before it is sent.
+    enum Birth: Equatable {
+        case workspace(cwd: String, command: String?, label: String?)
+        case tab(beside: String, command: String?)
+        case split(beside: String, direction: String, command: String?)
+
+        var command: String? {
+            switch self {
+            case .workspace(_, let command, _), .tab(_, let command), .split(_, _, let command): command
+            }
+        }
+
+        /// What it is, in the words a receipt and the progress line use.
+        var noun: String {
+            switch self {
+            case .workspace: "workspace"
+            case .tab: "tab"
+            case .split: "pane"
+            }
+        }
+    }
+
+    /// Why a creation did not happen, in the words the screen shows.
+    enum CreateError: Error, CustomStringConvertible {
+        /// The home said no (its own words).
+        case refused(String)
+        /// The anchor is in no workspace its Mac lists, or that Mac's vigil
+        /// publishes no revision to edit against.
+        case unplaced(String)
+        /// The home committed it; its directory has not listed the pane yet.
+        case unlisted(mac: String)
+        /// It may or may not have happened (the call failed on the way).
+        case unknown(String, id: UUID)
+
+        var description: String {
+            switch self {
+            case .refused(let why): why
+            case .unplaced(let why): why
+            case .unlisted(let mac): "Created on \(mac), but it isn't listed yet. It appears in the list once it is."
+            case .unknown(let why, let id): "\(why). It may have been created: check the list before trying again (command \(id.uuidString.prefix(8)))."
+            }
+        }
+    }
+
+    /// The creation in flight (one at a time: the home compares revisions,
+    /// and a second edit against the same one would be refused anyway).
+    @Published private(set) var creating: Birth?
+
+    /// The last Mac something was created on: where a terminal goes when
+    /// you just need one (`Scratch`).
+    @Published var lastMac: String? = UserDefaults.standard.string(forKey: "vigil.create.mac") {
+        didSet { UserDefaults.standard.set(lastMac, forKey: "vigil.create.mac") }
+    }
+
+    /// Creates `birth` on `host` and returns the new pane once its Mac's
+    /// directory lists it (the screen then opens it, keyboard up). Never
+    /// retried: an identical command could only be its own receipt, and a
+    /// new one could make a second workspace.
+    func create(_ birth: Birth, on host: Host) async throws -> PaneRef {
+        precondition(creating == nil, "one creation at a time")
+        let request: WorkspaceCommand.Request
+        switch birth {
+        case .workspace(let cwd, let command, let label):
+            request = .create(cwd: cwd, command: command, label: label)
+        case .tab(let anchor, let command), .split(let anchor, _, let command):
+            guard let place = directories[host.id]?.place(of: anchor) else {
+                throw CreateError.unplaced("That pane is no longer in a workspace on \(host.name).")
+            }
+            guard let revision = place.workspace.layoutRevision else {
+                throw CreateError.unplaced("vigil on \(host.name) is too old to add tabs or panes from here. Update it there.")
+            }
+            let direction: String? = if case .split(_, let d, _) = birth { d } else { nil }
+            request = .birth(in: place.workspace.name, revision: revision, anchor: anchor, split: direction, command: command)
+        }
+        if let why = request.refusal { throw CreateError.refused(why) }
+        creating = birth
+        defer { creating = nil }
+        let fields: Fields = ["id": request.id.uuidString, "what": birth.noun, "mac": host.name,
+                              "command": birth.command ?? "shell", "anchor": request.anchor]
+        receipts.info("create", "sent", fields)
+        // Not connected is nothing sent: said as a refusal, never "may have".
+        let node: TetherNode
+        do { node = try linked() } catch { throw CreateError.refused(VigilLink.reason(error)) }
+        let outcome: WorkspaceCommand.Outcome
+        do {
+            let data = try await VigilLink.call(node, device: host.id, .session(try request.line))
+            outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+        } catch {
+            receipts.error("create", "outcome unknown", fields.merging(["err": error]) { a, _ in a })
+            throw CreateError.unknown(VigilLink.reason(error), id: request.id)
+        }
+        guard outcome.ok, let pane = outcome.pane else {
+            receipts.warn("create", "refused", fields.merging(["code": outcome.code, "why": outcome.message]) { a, _ in a })
+            throw CreateError.refused(outcome.message)
+        }
+        lastMac = host.id
+        receipts.info("create", "committed", fields.merging(["pane": pane, "workspace": outcome.session ?? request.session]) { a, _ in a })
+        guard let ref = await listed(pane, within: 10) else {
+            receipts.warn("create", "not listed in time", ["pane": pane, "mac": host.name])
+            throw CreateError.unlisted(mac: host.name)
+        }
+        return ref
+    }
+
+    /// The folders `host` works in, most recently active first: every
+    /// folder its live panes started in, by the latest state change of a
+    /// pane there. What a new workspace is most likely to want.
+    func recentFolders(on host: Host) -> [String] {
+        guard let dir = directories[host.id] else { return [] }
+        var latest: [String: Double] = [:]
+        for workspace in dir.live {
+            for pane in (workspace.tabs ?? []).flatMap(\.members) {
+                latest[pane.cwd] = max(latest[pane.cwd] ?? 0, dir.panes[pane.id]?.since ?? 0)
+            }
+        }
+        return latest.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
+    }
+
+    /// The programs `host`'s panes were born to run (`Pane.command`), most
+    /// used first: offered beside a shell when creating.
+    func knownCommands(on host: Host) -> [String] {
+        guard let dir = directories[host.id] else { return [] }
+        let counts = dir.live.flatMap { ($0.tabs ?? []).flatMap(\.members) }.compactMap(\.command)
+            .reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 }
+        return counts.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
+    }
+
+    /// The Mac a terminal goes to when you just need one: the last one
+    /// something was created on while it is listed and reachable, else
+    /// the first reachable one.
+    var scratchMac: Host? {
+        let reachable = hosts.filter { directories[$0.id] != nil && down[$0.id] == nil }
+        return reachable.first { $0.id == lastMac } ?? reachable.first
+    }
+
+    /// Whether `host` can take a creation now (its directory followed).
+    func reachable(_ host: Host) -> Bool { directories[host.id] != nil && down[host.id] == nil }
+
+    /// Creates `birth` on `host` from a gesture: `landed` gets the new pane
+    /// (the caller opens it), a failure is said once (`failure`), whichever
+    /// screen asked.
+    func begin(_ birth: Birth, on host: Host, landed: @escaping @MainActor (PaneRef) -> Void) {
+        guard creating == nil else {
+            failure = .init(title: "Not created", message: "Still creating the last one. Wait for it to open.")
+            return
+        }
+        Task {
+            do { landed(try await create(birth, on: host)) } catch {
+                failure = .init(title: "Not created", message: "\(error)")
+            }
+        }
+    }
+
+    /// Why the last edit (a creation, a close) did not happen, until it
+    /// is read: the new-workspace sheet says it while it is up, the root's
+    /// alert anywhere else.
+    struct Failure: Equatable {
+        let title: String
+        let message: String
+    }
+    @Published var failure: Failure?
+
+    // MARK: Closing: a pane or a tab, on its Mac
+
+    /// A close waiting for your yes: something runs there (`Facts.busy`,
+    /// the Mac's one close rule), and closing kills it.
+    struct Closing: Identifiable {
+        let id = UUID()
+        let host: Host
+        let anchor: String
+        let tab: Bool
+        let busy: [String]
+        let done: @MainActor () -> Void
+    }
+    @Published var closing: Closing?
+
+    /// Closes the pane `anchor` (or its whole tab) on its Mac, which buries
+    /// it: it waits in Recently closed, undoable, like a close made there.
+    /// Asked first only when something runs in it; `done` once its Mac
+    /// committed it.
+    func bury(_ anchor: String, tab: Bool, on host: Host, done: @escaping @MainActor () -> Void = {}) {
+        guard let dir = directories[host.id], let place = dir.place(of: anchor) else {
+            failure = .init(title: "Not closed", message: "That pane is no longer in a workspace on \(host.name).")
+            return
+        }
+        let busy = (tab ? place.tab.paneIds : [anchor]).compactMap { dir.panes[$0]?.busy }
+        let closing = Closing(host: host, anchor: anchor, tab: tab, busy: busy, done: done)
+        if busy.isEmpty { confirm(closing) } else { self.closing = closing }
+    }
+
+    /// Sends a close (asked, or nothing to ask).
+    func confirm(_ closing: Closing) {
+        let host = closing.host
+        guard let place = directories[host.id]?.place(of: closing.anchor), let revision = place.workspace.layoutRevision else {
+            failure = .init(title: "Not closed", message: "That pane is no longer in a workspace on \(host.name).")
+            return
+        }
+        let request = WorkspaceCommand.Request(session: place.workspace.name, revision: revision,
+                                               operation: closing.tab ? "close_tab" : "close_pane", anchor: closing.anchor)
+        let fields: Fields = ["id": request.id.uuidString, "op": request.operation, "mac": host.name, "anchor": closing.anchor]
+        receipts.info("close", "sent", fields)
+        Task {
+            do {
+                let data = try await VigilLink.call(linked(), device: host.id, .session(try request.line))
+                let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+                guard outcome.ok else {
+                    receipts.warn("close", "refused", fields.merging(["code": outcome.code, "why": outcome.message]) { a, _ in a })
+                    failure = .init(title: "Not closed", message: outcome.message)
+                    return
+                }
+                receipts.info("close", "committed", fields)
+                closing.done()
+            } catch {
+                receipts.error("close", "outcome unknown", fields.merging(["err": error]) { a, _ in a })
+                failure = .init(title: "Not closed",
+                                message: "\(VigilLink.reason(error)). It may have closed: check the list before trying again.")
+            }
+        }
+    }
+
+    /// The new-workspace sheet, when it is up: on which Mac and in which
+    /// folder it starts (the pane you were in, else the Mac you last used).
+    struct Compose: Identifiable {
+        let id = UUID()
+        var host: Host?
+        var folder: String?
+    }
+    @Published var composing: Compose?
+
+    /// Whether closing `pane` closes its whole tab, dock and all: it is the
+    /// tab's only pane (the home's rule for `close_pane`).
+    func closesTab(_ pane: String, on host: Host) -> Bool {
+        directories[host.id]?.place(of: pane)?.tab.panes.map(\.id) == [pane]
+    }
+
+    /// The folder a pane started in, as its Mac lists it.
+    func folder(of pane: String, on host: Host) -> String? { directories[host.id]?.place(of: pane)?.pane.cwd }
+
+    /// The Mac a tree row belongs to.
+    func host(of node: Node) -> Host? {
+        let root = node.kind == .host ? String(node.id.dropFirst("host:".count)) : node.root
+        return hosts.first { $0.id == root }
+    }
+
     private func rebuildTree() {
         let closed = deriveBurials()
         if closed != burials { burials = closed }
@@ -568,7 +822,9 @@ final class VigilPhone: ObservableObject {
             node.children = dir.ordered.map { s in
                 let tabs = s.tabs ?? []
                 let sid = "\(host.id)/\(s.name)"
-                var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji)
+                var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji,
+                                anchor: tabs.last?.panes.first?.id)
+                let docked = Set(tabs.flatMap { $0.dock?.panes.map(\.id) ?? [] })
                 func paneNode(_ p: Registry.Pane) -> Node {
                     let truth = dir.panes[p.id]
                     let program = truth?.program
@@ -581,14 +837,16 @@ final class VigilPhone: ObservableObject {
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
                                 sizeOwner: truth?.owner ?? "",
-                                followPane: p.id)
+                                followPane: p.id,
+                                anchor: docked.contains(p.id) ? nil : p.id)
                 }
                 for (ti, t) in tabs.enumerated() {
                     let all = t.members
                     let showTab = tabs.count > 1 || t.label != nil || t.emoji != nil
                     if showTab {
                         let name = t.label ?? URL(fileURLWithPath: t.panes.first?.cwd ?? "").lastPathComponent
-                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji)
+                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji,
+                                       anchor: t.panes.first?.id)
                         tab.children = all.map(paneNode)
                         sess.children.append(tab)
                     } else {
@@ -625,18 +883,25 @@ final class VigilPhone: ObservableObject {
         }
         let id = url.lastPathComponent
         guard Open.validPane(id) else { receipts.warn("url", "names no pane", ["url": url.absoluteString]); return nil }
-        let deadline = Date().addingTimeInterval(5)
+        guard let ref = await listed(id, within: 5) else {
+            receipts.warn("url", "no mac lists the pane", ["pane": id])
+            return nil
+        }
+        receipts.info("url", "pane found", ["pane": id, "mac": ref.host.name])
+        return ref
+    }
+
+    /// The live pane `id` once a Mac's directory lists it, awaiting the
+    /// documents that arrive within `seconds` (a pane born a moment ago
+    /// arrives with its Mac's next one).
+    private func listed(_ id: String, within seconds: TimeInterval) async -> PaneRef? {
+        let deadline = Date().addingTimeInterval(seconds)
         while true {
-            if let ref = nodes.flatMap(\.leaves).compactMap(\.pane).first(where: { $0.pane == id }) {
-                receipts.info("url", "pane found", ["pane": id, "mac": ref.host.name])
-                return ref
-            }
+            if let ref = nodes.flatMap(\.leaves).compactMap(\.pane).first(where: { $0.pane == id }) { return ref }
             let left = deadline.timeIntervalSinceNow
-            guard left > 0 else { break }
+            guard left > 0 else { return nil }
             await nextDirectory(within: left)
         }
-        receipts.warn("url", "no mac lists the pane", ["pane": id])
-        return nil
     }
 
     /// A pane to show now (a tapped question): the root view navigates to
@@ -832,6 +1097,18 @@ final class VigilPhone: ObservableObject {
         // visible row wants by then ends. Deferred, never at the pop
         // itself, so a return never re-dials what the rows still show.
         if ref == nil { sweepUnwanted(after: 0.5) }
+    }
+
+    /// The screen showing `ref` went away. Only that screen's presentation
+    /// ends: a screen replacing it (a pane just created, opened over this
+    /// one) may already present its own, and a late disappearance must
+    /// not take it back to the tree (whose sweep would end its surface).
+    func dismissed(_ ref: PaneRef) {
+        guard presenting == ref else {
+            receipts.info("pane", "dismissed after another took the screen", ["pane": ref.pane])
+            return
+        }
+        present(nil)
     }
 
     /// The app is in front (its scene active): what it presents is in front

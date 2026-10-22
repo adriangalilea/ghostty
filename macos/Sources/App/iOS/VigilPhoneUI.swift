@@ -1,4 +1,5 @@
 import AuthzEndpoint
+import AuthzGlance
 import AuthzUI
 import SwiftUI
 import GhosttyKit
@@ -44,11 +45,85 @@ struct VigilPhoneRoot: View {
                 if let ref = await model.resolve(url: url) { path = [ref] }
             }
         }
-        // A tapped question's pane.
+        // A tapped question's pane, a pane just created.
         .onChange(of: model.opening) { _, ref in
             guard let ref else { return }
             path = [ref]
             model.opening = nil
+        }
+        // The new-workspace sheet, from wherever it was asked for; the
+        // workspace opens over whatever was on screen.
+        .sheet(item: $model.composing) { compose in
+            NewWorkspaceSheet(compose: compose) { ref in
+                model.typeInto = ref
+                model.opening = ref
+            }
+            .environmentObject(model)
+        }
+        // A creation in flight, said wherever you are: they take a moment
+        // (the Mac spawns, then its directory lists the pane).
+        .overlay(alignment: .top) {
+            if let birth = model.creating, model.composing == nil {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Creating \(birth.noun)…").font(.callout)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .glassEffect(.regular, in: Capsule())
+                .padding(.top, 4)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: model.creating != nil)
+        // The sheet says its own failure; anywhere else, this does.
+        .alert(model.failure?.title ?? "", isPresented: Binding(
+            get: { model.failure != nil && model.composing == nil },
+            set: { if !$0 { model.failure = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.failure?.message ?? "")
+        }
+        // The Mac's one close question: asked only when something runs,
+        // naming it (undo stays in Recently closed either way).
+        .alert(closeTitle, isPresented: Binding(
+            get: { model.closing != nil },
+            set: { if !$0 { model.closing = nil } }
+        ), presenting: model.closing) { closing in
+            Button("Close", role: .destructive) { model.confirm(closing) }
+            Button("Cancel", role: .cancel) {}
+        } message: { closing in
+            Text("\(closing.busy.joined(separator: ", ")) still running on \(closing.host.name). Closing the \(closing.tab ? "tab" : "pane") kills it; Recently closed can bring it back for a while.")
+        }
+    }
+
+    private var closeTitle: String { model.closing?.tab == true ? "Close tab?" : "Close pane?" }
+}
+
+/// The close items for a pane and its tab: the same on a row's long
+/// press and in the pane screen's menu. A workspace is never closed from
+/// here (that is a kill, the Mac's own gesture).
+struct CloseItems: View {
+    let host: VigilPhone.Host
+    let anchor: String
+    /// Offer closing the pane itself (a tab row offers only its tab).
+    var pane = true
+    var done: @MainActor () -> Void = {}
+    @EnvironmentObject private var model: VigilPhone
+
+    /// Closing the tab's only pane closes the tab: then one item says so.
+    private var whole: Bool { model.closesTab(anchor, on: host) }
+
+    var body: some View {
+        if pane {
+            Button(role: .destructive) { model.bury(anchor, tab: false, on: host, done: done) } label: {
+                Label(whole ? "Close tab" : "Close pane", systemImage: "xmark")
+            }
+        }
+        if !whole || !pane {
+            Button(role: .destructive) { model.bury(anchor, tab: true, on: host, done: done) } label: {
+                Label("Close tab", systemImage: "xmark.rectangle")
+            }
         }
     }
 }
@@ -94,6 +169,26 @@ struct HomeView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { settings = true } label: { Image(systemName: "gearshape") }
             }
+            // A terminal now: on the Mac you last used (its items first),
+            // or on any other; the sheet for a folder or a program.
+            if !model.hosts.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        if let mac = model.scratchMac {
+                            Section { QuickCreateItems(host: mac) }
+                        }
+                        ForEach(model.hosts.filter { $0 != model.scratchMac && model.reachable($0) }) { host in
+                            Menu(host.name) { QuickCreateItems(host: host) }
+                        }
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("New")
+                    // No Mac can be reached: nowhere to create (each Mac's
+                    // row says why).
+                    .disabled(model.creating != nil || model.scratchMac == nil)
+                }
+            }
         }
         .sheet(isPresented: $settings) { SettingsView() }
     }
@@ -108,7 +203,7 @@ struct BurialTray: View {
         VStack(alignment: .leading, spacing: 4) {
             Label("Recently closed", systemImage: "trash").font(.caption).foregroundStyle(.secondary)
             if let error = model.burialError {
-                Text(error).font(.caption2).foregroundStyle(.orange)
+                Text(error).font(.caption2).foregroundStyle(Hue.care)
             }
             ForEach(model.burials) { burial in
                 HStack(spacing: 8) {
@@ -197,7 +292,7 @@ struct TreeNodeView: View {
                 }
                 if let sub = node.subtitle {
                     Text(sub).font(.caption2)
-                        .foregroundStyle(sub.hasPrefix("connecting") ? .secondary : Color.orange)
+                        .foregroundStyle(sub.hasPrefix("connecting") ? .secondary : Hue.care)
                         .lineLimit(1)
                 }
             }
@@ -206,6 +301,16 @@ struct TreeNodeView: View {
                 Text("not running").font(.caption2).foregroundStyle(.tertiary)
             }
             cluster
+            // A Mac's own `+`: a terminal there in one more tap.
+            if node.kind == .host, let host = model.host(of: node), model.reachable(host) {
+                Menu { QuickCreateItems(host: host) } label: {
+                    Image(systemName: "plus").font(.body.weight(.medium))
+                        .frame(width: 32, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .disabled(model.creating != nil)
+                .accessibilityLabel("New on \(host.name)")
+            }
         }
         .padding(.vertical, node.kind == .host ? 8 : 6)
         .padding(.horizontal, 8)
@@ -226,6 +331,26 @@ struct TreeNodeView: View {
             if node.followPane != nil {
                 Button { model.follow(node, !following) } label: {
                     Label(following ? "Stop following" : "Follow on this iPhone", systemImage: following ? "bell.slash" : "bell")
+                }
+            }
+            if let host = model.host(of: node), model.reachable(host) {
+                Section {
+                    if node.kind == .host {
+                        QuickCreateItems(host: host)
+                    } else {
+                        CreateItems(host: host, anchor: node.anchor,
+                                    folder: node.anchor.flatMap { model.folder(of: $0, on: host) }) { ref in
+                            model.typeInto = ref
+                            model.opening = ref
+                        }
+                    }
+                }
+                switch node.kind {
+                case .pane:
+                    if let pane = node.followPane { Section { CloseItems(host: host, anchor: pane) } }
+                case .tab:
+                    if let anchor = node.anchor { Section { CloseItems(host: host, anchor: anchor, pane: false) } }
+                case .host, .session: EmptyView()
                 }
             }
         }
@@ -803,7 +928,7 @@ struct PaneScreen: View {
                         SurfaceHost(view: surfaceView, purpose: "own screen", interactive: true, visible: true) { _, _ in .own }
                     }
                 } else if let error {
-                    Text(error).foregroundStyle(.orange).padding()
+                    Text(error).foregroundStyle(Hue.care).padding()
                 } else {
                     ProgressView("attaching…")
                 }
@@ -852,11 +977,29 @@ struct PaneScreen: View {
                 Button { zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
                 Button { zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
                 Menu {
-                    ForEach(model.livePanes(on: current.host).filter { $0.ref != current }) { other in
-                        Button { switchTo(other.ref) } label: {
-                            Label("\(other.session) \(other.ref.title)", systemImage: "terminal")
+                    // Beside this pane, opened here in its place with the
+                    // keyboard up; or a workspace in this pane's folder.
+                    Section {
+                        CreateItems(host: current.host, anchor: node?.anchor,
+                                    folder: model.folder(of: current.pane, on: current.host)) { ref in
+                            model.typeInto = ref
+                            switchTo(ref)
                         }
                     }
+                    .disabled(model.creating != nil || !model.reachable(current.host))
+                    Section("Switch to") {
+                        ForEach(model.livePanes(on: current.host).filter { $0.ref != current }) { other in
+                            Button { switchTo(other.ref) } label: {
+                                Label("\(other.session) \(other.ref.title)", systemImage: "terminal")
+                            }
+                        }
+                    }
+                    // Closed on its Mac, which keeps it in Recently closed;
+                    // the screen goes back to the list.
+                    Section {
+                        CloseItems(host: current.host, anchor: current.pane) { dismiss() }
+                    }
+                    .disabled(!model.reachable(current.host))
                 } label: { Image(systemName: "rectangle.stack") }
             }
         }
@@ -882,7 +1025,7 @@ struct PaneScreen: View {
             error = nil
             Task { await enter(current, claim: held) }
         }
-        .onDisappear { screenVisible = false; leave(); model.present(nil) }
+        .onDisappear { screenVisible = false; leave(); model.dismissed(current) }
         // Leaving the active scene yields (nobody looks at the phone).
         // Bringing the app back on this pane is opening it again: it claims.
         .onChange(of: phase) { _, now in
@@ -1049,7 +1192,7 @@ struct ReceiptsSection: View {
         Section("Receipts") {
             ForEach(receipts.all.suffix(60).reversed()) { receipt in
                 Text(receipt.line).font(.caption2.monospaced())
-                    .foregroundStyle(receipt.level == .info ? Color.secondary : receipt.level == .warn ? Color.orange : Color.red)
+                    .foregroundStyle(receipt.level == .info ? Color.secondary : receipt.level == .warn ? Hue.care : Color.red)
             }
         }
     }
