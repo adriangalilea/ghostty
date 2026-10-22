@@ -1158,7 +1158,7 @@ private struct LimitMeter: View {
 
 /// How full the agent's context window is: a bar and its percent, care
 /// from 70 (where it compacts or stops soon), as the activity draws it.
-private struct ContextMeter: View {
+struct ContextMeter: View {
     let percent: Int
     var body: some View {
         let fill = Double(min(max(percent, 0), 100)) / 100

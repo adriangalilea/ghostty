@@ -2,6 +2,7 @@ import AuthzEndpoint
 import AuthzGlance
 import AuthzUI
 import Ink
+import MarkdownText
 import SwiftUI
 import GhosttyKit
 import VigilActivity
@@ -562,7 +563,17 @@ struct GlanceRow<Marks: View>: View {
             }
         case .done, .idle:
             if let said = glance.said {
-                Text(said).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+                // Where it ended: its last lines as written (markdown), in a
+                // card, then when and how full its context is.
+                VStack(alignment: .leading, spacing: 6) {
+                    MarkdownView(said)
+                        .markdownStyle(MarkdownStyle(textStyle: .footnote, ink: .secondary, measure: nil).preview(lines: 4))
+                    if let context = glance.context { ContextMeter(percent: context) }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             } else {
                 Text(state.words(node.flavor)).font(.footnote).foregroundStyle(.secondary)
             }
