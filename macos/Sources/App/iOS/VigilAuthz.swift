@@ -160,7 +160,8 @@ final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         Task { @MainActor in
             if let target = chosen.target {
                 if let answer = chosen.answer {
-                    await VigilAuthz.shared.answer(target, answer, shown: chosen.shown)
+                    // Named as its notification named it, should the answer fail.
+                    await VigilAuthz.shared.answer(target, answer, shown: response.notification.request.content.body)
                 } else {
                     await VigilAuthz.shared.open(target)
                 }
