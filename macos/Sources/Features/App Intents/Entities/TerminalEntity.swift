@@ -51,11 +51,12 @@ struct TerminalEntity: AppEntity {
     }
 
     /// The surface a Shortcut types, presses or runs an action into: never a
-    /// pane living on another Mac or a mirror of one (input there goes
-    /// through `vigil send`, which asks its home), so those read as gone.
+    /// Vigil pane, local, mirrored or another Mac's (typing into a pane is
+    /// `vigil send`'s decision, free from inside that pane and asked
+    /// otherwise, never an automation's), so those read as gone.
     @MainActor
     var surfaceModel: Ghostty.Surface? {
-        guard let view = surfaceView, view.vigilHost == nil, !view.vigilMirror else { return nil }
+        guard let view = surfaceView, view.vigilAttachId == nil, view.vigilHost == nil, !view.vigilMirror else { return nil }
         return view.surfaceModel
     }
 
