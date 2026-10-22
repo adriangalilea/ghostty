@@ -221,6 +221,13 @@ private struct Needs: View {
                         .font(.footnote)
                         .foregroundStyle(row.state == .idle ? .secondary : .primary)
                         .lineLimit(compact ? 1 : 2)
+                } else if let tail = detail?.tail, !tail.isEmpty {
+                    // No last words carried: what its terminal shows last,
+                    // never an empty card between its name and Reply.
+                    Well(text: tail.suffix(compact ? 1 : 2).joined(separator: "\n"), lines: compact ? 1 : 2)
+                } else {
+                    Text(row.state == .done ? "Finished its turn" : "At its prompt")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
                 Footer(row: row, open: false)
             }
@@ -241,9 +248,14 @@ private struct OneLine: View {
                 Text(row.line ?? row.commandWords.map { [$0, row.commandLine].compactMap { $0 }.joined(separator: " · ") } ?? row.state.words)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 4)
-                Text(Date(timeIntervalSince1970: row.since), style: .relative)
-                    .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary).lineLimit(1)
-                    .frame(width: 52, alignment: .trailing)
+                // The header's clock, small: "1:03:12" ticking, never a
+                // relative date cut to "1 hr, 3…".
+                Text("0:00:00").font(.caption2.monospacedDigit()).hidden()
+                    .overlay(alignment: .trailing) {
+                        Text(timerInterval: Date(timeIntervalSince1970: row.since)...Date(timeIntervalSince1970: row.since + Clock.lifetime),
+                             countsDown: false)
+                            .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary).multilineTextAlignment(.trailing)
+                    }
             }
         }
         .buttonStyle(.plain)
