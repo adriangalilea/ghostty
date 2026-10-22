@@ -83,7 +83,7 @@ struct PaneRef: Hashable {
 /// Mac's directory (the `dir` stream, the same document the Mac's own
 /// remote sidebar reads) rendered as the sidebar's tree, and the attach
 /// path (a pane's `proxy` stream, handed to the surface as an fd). Nothing
-/// here owns a session: the phone is a viewport, every fact stays on the Mac.
+/// here owns a workspace: the phone is a viewport, every fact stays on the Mac.
 @MainActor
 final class VigilPhone: ObservableObject {
     static let shared = VigilPhone()
@@ -201,7 +201,7 @@ final class VigilPhone: ObservableObject {
     // MARK: Macs (paired devices serving vigil/1)
 
     /// vigil's node is up (VigilAuthz started it): the Macs are the paired
-    /// devices serving sessions (tether's offers), read again whenever
+    /// devices serving vigil (tether's offers), read again whenever
     /// tether says who is paired or what a device serves changed.
     func attach(node: TetherNode) {
         guard self.node == nil else { return }
@@ -350,12 +350,12 @@ final class VigilPhone: ObservableObject {
 
     static func clock(_ date: Date) -> String { date.formatted(date: .omitted, time: .shortened) }
 
-    /// The home tree: hosts → sessions → tabs → panes, one collapsible
+    /// The home tree: Macs → workspaces → tabs → panes, one collapsible
     /// tree with the sidebar's rollup semantics (a collapsed node wears
     /// its descendants' state cluster: distinct active states, blocked
     /// first, capped at 4; idle only when idle is all there is).
     struct Node: Identifiable, Equatable {
-        enum Kind: Equatable { case host, session, tab, pane }
+        enum Kind: Equatable { case host, workspace, tab, pane }
         let id: String
         let kind: Kind
         let title: String
@@ -363,12 +363,25 @@ final class VigilPhone: ObservableObject {
         var emoji: String? = nil
         /// A pane's own state as shown; nodes above carry the cluster.
         var state: AgentState? = nil
+        /// Why a pane waits, when it waits.
+        var flavor: BlockFlavor? = nil
         var alive: Bool = true
+        /// A pane's state in the words every surface uses.
+        var words: String { alive ? (state ?? .idle).words(flavor) : "Not running" }
         var pane: PaneRef? = nil
         /// The owner's grid, for the row's live preview.
         var rows: Int = 0
         var cols: Int = 0
         var sizeOwner: String = ""
+        /// A pane's place in words that tell it apart from every other pane
+        /// on its Mac (`Directory.path`, the one rule): what a row outside the
+        /// tree (Following, Switch to, the pane screen) calls it.
+        var path: String? = nil
+        /// A pane's priority when it is not normal (high rings through
+        /// Focus, low never rings), as the Mac's sidebar marks it.
+        var priority: Registry.Priority? = nil
+        /// A pane open on another Mac right now.
+        var onAnotherMac: Bool = false
         /// The pane following this row follows (pane rows only: a follow is
         /// a pane, whatever runs in it).
         var followPane: String? = nil
@@ -412,8 +425,9 @@ final class VigilPhone: ObservableObject {
         didSet { UserDefaults.standard.set(Array(followed), forKey: "vigil.followed") }
     }
 
-    /// Every followed row in the tree as it stands.
-    private var followedNodes: [Node] {
+    /// Every followed pane in the tree as it stands, in tree order: the
+    /// home's Following list and the ownership of their questions.
+    var followedNodes: [Node] {
         nodes.flatMap(\.all).filter { $0.followKey.map(followed.contains) == true }
     }
 
@@ -596,12 +610,6 @@ final class VigilPhone: ObservableObject {
     /// and a second edit against the same one would be refused anyway).
     @Published private(set) var creating: Birth?
 
-    /// The last Mac something was created on: where a terminal goes when
-    /// you just need one (`Scratch`).
-    @Published var lastMac: String? = UserDefaults.standard.string(forKey: "vigil.create.mac") {
-        didSet { UserDefaults.standard.set(lastMac, forKey: "vigil.create.mac") }
-    }
-
     /// Creates `birth` on `host` and returns the new pane once its Mac's
     /// directory lists it (the screen then opens it, keyboard up). Never
     /// retried: an identical command could only be its own receipt, and a
@@ -643,7 +651,6 @@ final class VigilPhone: ObservableObject {
             receipts.warn("create", "refused", fields.merging(["code": outcome.code, "why": outcome.message]) { a, _ in a })
             throw CreateError.refused(outcome.message)
         }
-        lastMac = host.id
         receipts.info("create", "committed", fields.merging(["pane": pane, "workspace": outcome.session ?? request.session]) { a, _ in a })
         guard let ref = await listed(pane, within: 10) else {
             receipts.warn("create", "not listed in time", ["pane": pane, "mac": host.name])
@@ -675,16 +682,15 @@ final class VigilPhone: ObservableObject {
         return counts.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
     }
 
-    /// The Mac a terminal goes to when you just need one: the last one
-    /// something was created on while it is listed and reachable, else
-    /// the first reachable one.
-    var scratchMac: Host? {
-        let reachable = hosts.filter { directories[$0.id] != nil && down[$0.id] == nil }
-        return reachable.first { $0.id == lastMac } ?? reachable.first
-    }
-
     /// Whether `host` can take a creation now (its directory followed).
     func reachable(_ host: Host) -> Bool { directories[host.id] != nil && down[host.id] == nil }
+
+    /// The Mac a new workspace goes to without asking: the only one that
+    /// can take it. With several, which one is yours to choose.
+    var onlyReachable: Host? {
+        let reachable = hosts.filter(reachable)
+        return reachable.count == 1 ? reachable[0] : nil
+    }
 
     /// Creates `birth` on `host` from a gesture: `landed` gets the new pane
     /// (the caller opens it), a failure is said once (`failure`), whichever
@@ -822,7 +828,7 @@ final class VigilPhone: ObservableObject {
             node.children = dir.ordered.map { s in
                 let tabs = s.tabs ?? []
                 let sid = "\(host.id)/\(s.name)"
-                var sess = Node(id: sid, kind: .session, title: s.label, emoji: s.emoji,
+                var sess = Node(id: sid, kind: .workspace, title: s.label, emoji: s.emoji,
                                 anchor: tabs.last?.panes.first?.id)
                 let docked = Set(tabs.flatMap { $0.dock?.panes.map(\.id) ?? [] })
                 func paneNode(_ p: Registry.Pane) -> Node {
@@ -830,12 +836,17 @@ final class VigilPhone: ObservableObject {
                     // The one rule every surface names a pane by (VigilWire's `title`).
                     let title = dir.title(of: p)
                     let alive = truth?.alive ?? false
+                    let path = dir.path(of: p.id) ?? title
                     return Node(id: "\(sid)/\(p.id)", kind: .pane, title: title, emoji: p.emoji,
                                 state: truth?.shown,
+                                flavor: truth?.shown == .blocked ? truth?.token?.flavor : nil,
                                 alive: alive,
-                                pane: alive ? PaneRef(host: host, pane: p.id, title: title) : nil,
+                                pane: alive ? PaneRef(host: host, pane: p.id, title: path) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
                                 sizeOwner: truth?.owner ?? "",
+                                path: path,
+                                priority: p.priority == .normal ? nil : p.priority,
+                                onAnotherMac: truth?.lookers.contains(.mac) ?? false,
                                 followPane: p.id,
                                 anchor: docked.contains(p.id) ? nil : p.id)
                 }
@@ -843,7 +854,7 @@ final class VigilPhone: ObservableObject {
                     let all = t.members
                     let showTab = tabs.count > 1 || t.label != nil || t.emoji != nil
                     if showTab {
-                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: Directory.title(of: t, at: ti), emoji: t.emoji,
+                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: Directory.title(ofTab: ti, in: s), emoji: t.emoji,
                                        anchor: t.panes.first?.id)
                         tab.children = all.map(paneNode)
                         sess.children.append(tab)
@@ -865,19 +876,8 @@ final class VigilPhone: ObservableObject {
     /// born a moment ago arrives with its Mac's next document: up to five
     /// seconds of them are awaited.
     func resolve(url: URL) async -> PaneRef? {
-        guard url.scheme == "vigil" else { return nil }
-        // vigil://session/<mac>/<session> (a followed session's Live
-        // Activity): the pane asking for you, else its first.
-        if url.host == "session" {
-            let parts = url.pathComponents.filter { $0 != "/" }
-            guard parts.count == 2, let session = nodes.flatMap(\.children).first(where: { $0.id == "\(parts[0])/\(parts[1])" }) else {
-                receipts.warn("url", "names no session listed here", ["url": url.absoluteString]); return nil
-            }
-            let leaves = session.leaves.compactMap { leaf in leaf.pane.map { (leaf, $0) } }
-            return (leaves.first { $0.0.state == .blocked } ?? leaves.first)?.1
-        }
-        guard url.host == "pane" else {
-            receipts.warn("url", "not a pane or session link", ["url": url.absoluteString]); return nil
+        guard url.scheme == "vigil", url.host == "pane" else {
+            receipts.warn("url", "not a pane link", ["url": url.absoluteString]); return nil
         }
         let id = url.lastPathComponent
         guard Open.validPane(id) else { receipts.warn("url", "names no pane", ["url": url.absoluteString]); return nil }
@@ -1177,35 +1177,21 @@ final class VigilPhone: ObservableObject {
     // MARK: Index (derived with the tree, never walked in a body)
 
     private(set) var paneNodes: [PaneRef: Node] = [:]
-    private(set) var sessionTitles: [PaneRef: String] = [:]
 
     func node(for ref: PaneRef) -> Node? { paneNodes[ref] }
-    func sessionTitle(for ref: PaneRef) -> String { sessionTitles[ref] ?? "" }
-    struct LivePane: Identifiable {
-        let ref: PaneRef
-        let session: String
-        var id: PaneRef { ref }
-    }
-    /// Every live pane on a Mac, labelled by its session.
-    func livePanes(on host: Host) -> [LivePane] {
-        paneNodes.keys.filter { $0.host.id == host.id }
-            .sorted { ($0.pane) < ($1.pane) }
-            .map { LivePane(ref: $0, session: sessionTitles[$0] ?? "") }
+
+    /// Every live pane on a Mac, in the tree's order (each named by its
+    /// `path`).
+    func livePanes(on host: Host) -> [Node] {
+        nodes.first { $0.id == "host:\(host.id)" }?.leaves.filter { $0.pane != nil } ?? []
     }
 
     private func indexTree() {
         var panes: [PaneRef: Node] = [:]
-        var titles: [PaneRef: String] = [:]
-        for host in nodes {
-            for session in host.children {
-                for leaf in session.leaves {
-                    guard let ref = leaf.pane else { continue }
-                    panes[ref] = leaf
-                    titles[ref] = session.title
-                }
-            }
+        for leaf in nodes.flatMap(\.leaves) {
+            guard let ref = leaf.pane else { continue }
+            panes[ref] = leaf
         }
         paneNodes = panes
-        sessionTitles = titles
     }
 }

@@ -6,7 +6,7 @@ import GhosttyKit
 import VigilActivity
 import VigilWire
 
-/// The phone's screens: ONE home tree (Macs → sessions → tabs → panes,
+/// The phone's screens: ONE home tree (Macs → workspaces → tabs → panes,
 /// collapsible, the sidebar's rollup dots on every folded row) and a pane,
 /// full screen. The pane IS a Ghostty surface (Metal, the Mac's renderer)
 /// attached over tether (`vigil/1`); the model owns every surface, the
@@ -38,8 +38,7 @@ struct VigilPhoneRoot: View {
             HomeView()
         }
         .environmentObject(model)
-        // vigil://pane/<id> (a request's Go there, a followed pane's activity)
-        // and vigil://session/<mac>/<session> (a followed session's).
+        // vigil://pane/<id> (a request's Go there, a row of the activity).
         .onOpenURL { url in
             Task { @MainActor in
                 if let ref = await model.resolve(url: url) { path = [ref] }
@@ -151,47 +150,105 @@ struct HomeView: View {
                                            description: Text("A Mac shows up here once it is paired with this iPhone and runs vigil. Pair it in Settings (⚙︎)."))
                         .padding(.top, 80)
                 }
+                let following = model.followedNodes
+                if !following.isEmpty { FollowingList(nodes: following) }
                 ForEach(tree) { node in
                     TreeNodeView(node: node, depth: 0)
                 }
                 if !model.burials.isEmpty { BurialTray() }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
         }
         .coordinateSpace(name: Self.treeSpace)
         .onGeometryChange(for: CGSize.self) { $0.size } action: { model.treeSize($0) }
         .background(Color(ghostty.config.backgroundColor).ignoresSafeArea())
-        .navigationTitle("vigil")
-        .navigationBarTitleDisplayMode(.large)
+        // The bar carries the buttons only: the app's name on its own line
+        // took the space of three rows.
+        .toolbarTitleDisplayMode(.inline)
         .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref) }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .topBarLeading) {
                 Button { settings = true } label: { Image(systemName: "gearshape") }
+                    .accessibilityLabel("Settings")
             }
-            // A terminal now: on the Mac you last used (its items first),
-            // or on any other; the sheet for a folder or a program.
-            if !model.hosts.isEmpty {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        if let mac = model.scratchMac {
-                            Section { QuickCreateItems(host: mac) }
-                        }
-                        ForEach(model.hosts.filter { $0 != model.scratchMac && model.reachable($0) }) { host in
-                            Menu(host.name) { QuickCreateItems(host: host) }
-                        }
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel("New")
-                    // No Mac can be reached: nowhere to create (each Mac's
-                    // row says why).
-                    .disabled(model.creating != nil || model.scratchMac == nil)
+            // A new workspace, said in full in the sheet: which Mac (chosen
+            // there unless only one can take it), which folder, what runs.
+            // A Mac's own row and every row's long press create in context.
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { model.composing = .init(host: model.onlyReachable, folder: nil) } label: {
+                    Image(systemName: "plus")
                 }
+                .accessibilityLabel("New workspace")
+                // No Mac can be reached: nowhere to create (each Mac's row
+                // says why).
+                .disabled(model.creating != nil || !model.hosts.contains(where: model.reachable))
             }
         }
         .sheet(isPresented: $settings) { SettingsView() }
     }
+}
+
+/// The panes this phone follows (their stalls and ends ring here, they
+/// lead their Mac's activity on the Lock Screen), above the tree: each
+/// named in full with its Mac, opened by a tap, let go by its pin.
+struct FollowingList: View {
+    let nodes: [VigilPhone.Node]
+    @EnvironmentObject private var model: VigilPhone
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Label("Following", systemImage: FollowMark.symbol)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 2)
+            ForEach(nodes) { node in
+                HStack(spacing: 8) {
+                    Group {
+                        if let ref = node.pane {
+                            NavigationLink(value: ref) { label(node) }.buttonStyle(.plain)
+                        } else {
+                            label(node)
+                        }
+                    }
+                    Button { model.follow(node, false) } label: {
+                        Image(systemName: FollowMark.unfollowSymbol)
+                            .frame(width: 36, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Unfollow \(node.path ?? node.title)")
+                }
+                .padding(.horizontal, 8)
+            }
+        }
+        .padding(.vertical, 6)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.bottom, 6)
+    }
+
+    private func label(_ node: VigilPhone.Node) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(node.alive ? (node.state ?? .idle).tint : Color.gray.opacity(0.3)).frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(node.path ?? node.title).font(.subheadline).lineLimit(1)
+                Text([model.host(of: node)?.name, node.words].compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Following, in one symbol on every surface: the pin the Lock Screen
+/// wears on a followed row, the tree's mark, the Following list.
+enum FollowMark {
+    static let symbol = "pin.fill"
+    static let unfollowSymbol = "pin.slash"
 }
 
 /// What was closed on any Mac and still waits out its grace, as on the
@@ -227,7 +284,7 @@ struct BurialTray: View {
                 .accessibilityHint("Brings it back where it was")
             }
         }
-        .padding(.top, 16)
+        .padding(.top, 10)
         .padding(.horizontal, 8)
     }
 }
@@ -243,13 +300,13 @@ struct TreeNodeView: View {
     private var foldable: Bool { !node.children.isEmpty }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 0) {
             row
             if let ref = node.pane, node.rows > 0, node.cols > 0 {
                 NavigationLink(value: ref) {
                     PanePreview(ref: ref, grid: .init(rows: node.rows, cols: node.cols))
-                        .padding(.leading, CGFloat(depth) * 18 + 24)
-                        .padding(.trailing, 8)
+                        .padding(.leading, CGFloat(depth) * Self.indent + Self.chevron + 6)
+                        .padding(.trailing, 4)
                         .padding(.bottom, 4)
                 }
                 .buttonStyle(.plain)
@@ -264,31 +321,28 @@ struct TreeNodeView: View {
     }
 
     @ViewBuilder private var row: some View {
-        let content = HStack(spacing: 8) {
-            Spacer().frame(width: CGFloat(depth) * 18)
+        let content = HStack(spacing: 6) {
+            Spacer().frame(width: CGFloat(depth) * Self.indent)
             if foldable {
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
+                    .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(folded ? 0 : 90))
-                    .frame(width: 16)
+                    .frame(width: Self.chevron)
                     .contentShape(Rectangle())
                     .onTapGesture { toggle() }
             } else {
-                Spacer().frame(width: 16)
+                Spacer().frame(width: Self.chevron)
             }
             icon
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    if let e = node.emoji { Text(e) }
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 5) {
+                    if let e = node.emoji { Text(e).font(font) }
                     Text(node.title)
                         .font(font)
                         .foregroundStyle(node.alive ? .primary : .secondary)
                         .lineLimit(1)
-                    if following {
-                        Image(systemName: "bell.fill").font(.caption2).foregroundStyle(.secondary)
-                            .accessibilityLabel("Followed on this iPhone")
-                    }
+                    marks
                 }
                 if let sub = node.subtitle {
                     Text(sub).font(.caption2)
@@ -298,24 +352,26 @@ struct TreeNodeView: View {
             }
             Spacer(minLength: 4)
             if node.kind == .pane && !node.alive {
-                Text("not running").font(.caption2).foregroundStyle(.tertiary)
+                Text("Not running").font(.caption2).foregroundStyle(.tertiary)
             }
             cluster
-            // A Mac's own `+`: a terminal there in one more tap.
+            // A Mac's own `+`: a workspace there, its Mac obvious.
             if node.kind == .host, let host = model.host(of: node), model.reachable(host) {
                 Menu { QuickCreateItems(host: host) } label: {
                     Image(systemName: "plus").font(.body.weight(.medium))
-                        .frame(width: 32, height: 28)
+                        .frame(width: 36, height: 28)
                         .contentShape(Rectangle())
                 }
                 .disabled(model.creating != nil)
-                .accessibilityLabel("New on \(host.name)")
+                .accessibilityLabel("New workspace on \(host.name)")
             }
         }
-        .padding(.vertical, node.kind == .host ? 8 : 6)
-        .padding(.horizontal, 8)
+        .padding(.vertical, node.kind == .host ? 5 : 4)
+        .padding(.horizontal, 6)
+        .frame(minHeight: 32)
         .background(node.kind == .host ? Color.secondary.opacity(0.08) : .clear,
-                    in: RoundedRectangle(cornerRadius: 10))
+                    in: RoundedRectangle(cornerRadius: 8))
+        .padding(.top, node.kind == .host ? 6 : 0)
         .contentShape(Rectangle())
 
         Group {
@@ -330,15 +386,16 @@ struct TreeNodeView: View {
         .contextMenu {
             if node.followPane != nil {
                 Button { model.follow(node, !following) } label: {
-                    Label(following ? "Stop following" : "Follow on this iPhone", systemImage: following ? "bell.slash" : "bell")
+                    Label(following ? "Unfollow" : "Follow on this iPhone",
+                          systemImage: following ? FollowMark.unfollowSymbol : FollowMark.symbol)
                 }
             }
             if let host = model.host(of: node), model.reachable(host) {
-                Section {
-                    if node.kind == .host {
-                        QuickCreateItems(host: host)
-                    } else {
-                        CreateItems(host: host, anchor: node.anchor,
+                if node.kind == .host {
+                    QuickCreateItems(host: host)
+                } else {
+                    Section {
+                        CreateItems(host: host, anchor: node.anchor, splits: node.kind == .pane,
                                     folder: node.anchor.flatMap { model.folder(of: $0, on: host) }) { ref in
                             model.typeInto = ref
                             model.opening = ref
@@ -350,14 +407,42 @@ struct TreeNodeView: View {
                     if let pane = node.followPane { Section { CloseItems(host: host, anchor: pane) } }
                 case .tab:
                     if let anchor = node.anchor { Section { CloseItems(host: host, anchor: anchor, pane: false) } }
-                case .host, .session: EmptyView()
+                case .host, .workspace: EmptyView()
                 }
             }
         }
     }
 
+    /// Steps of the tree: each level indents this much, after a chevron
+    /// column this wide.
+    static let indent: CGFloat = 12
+    static let chevron: CGFloat = 14
+
     /// Followed on this phone (its activity on the Lock Screen).
     private var following: Bool { node.followKey.map(model.followed.contains) == true }
+
+    /// What a pane is beyond this tree, each only when it differs from the
+    /// default, as the Mac's sidebar marks it: open on another Mac right
+    /// now, followed here, its priority.
+    @ViewBuilder private var marks: some View {
+        if node.onAnotherMac {
+            Image(systemName: "laptopcomputer").font(.caption2.weight(.bold)).foregroundStyle(.cyan)
+                .accessibilityLabel("Open on another Mac right now")
+        }
+        if following {
+            Image(systemName: FollowMark.symbol).font(.caption2).foregroundStyle(.primary.opacity(0.75))
+                .accessibilityLabel("Followed on this iPhone")
+        }
+        switch node.priority {
+        case .high?:
+            Image(systemName: "exclamationmark").font(.caption2.weight(.bold)).foregroundStyle(.orange)
+                .accessibilityLabel("High priority: rings through Focus")
+        case .low?:
+            Image(systemName: "moon.fill").font(.caption2).foregroundStyle(.secondary)
+                .accessibilityLabel("Low priority: never rings")
+        case .normal?, nil: EmptyView()
+        }
+    }
 
     private func toggle() {
         withAnimation(.snappy(duration: 0.2)) {
@@ -367,19 +452,20 @@ struct TreeNodeView: View {
 
     private var font: Font {
         switch node.kind {
-        case .host: return .headline
-        case .session: return .body.weight(.semibold)
+        case .host: return .subheadline.weight(.semibold)
+        case .workspace: return .subheadline.weight(.semibold)
         case .tab: return .subheadline
-        case .pane: return .body
+        case .pane: return .subheadline
         }
     }
 
+    /// A Mac and a tab wear a glyph; a workspace is its face and name, a
+    /// pane its name and state dot.
     @ViewBuilder private var icon: some View {
         switch node.kind {
-        case .host: Image(systemName: "desktopcomputer").foregroundStyle(.secondary)
-        case .session: EmptyView()
-        case .tab: Image(systemName: "rectangle.on.rectangle").font(.caption).foregroundStyle(.secondary)
-        case .pane: Image(systemName: "terminal").font(.caption).foregroundStyle(.secondary)
+        case .host: Image(systemName: "desktopcomputer").font(.footnote).foregroundStyle(.secondary)
+        case .tab: Image(systemName: "rectangle.on.rectangle").font(.caption2).foregroundStyle(.secondary)
+        case .workspace, .pane: EmptyView()
         }
     }
 
@@ -387,12 +473,14 @@ struct TreeNodeView: View {
     /// descendants' cluster; an unfolded node nothing (its children speak).
     @ViewBuilder private var cluster: some View {
         let states: [AgentState] = node.kind == .pane || folded ? node.cluster : []
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             ForEach(Array(states.enumerated()), id: \.offset) { _, s in
                 Circle().fill(s.tint).frame(width: 8, height: 8)
             }
         }
         .frame(minWidth: 8)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(states.map(\.words).joined(separator: ", "))
     }
 }
 
@@ -483,7 +571,9 @@ struct PanePreview: View {
     @State private var surfaceView: Ghostty.SurfaceView?
     @State private var denied = false
 
-    private let height: CGFloat = 150
+    /// The pane's last lines, where the action is, without one row taking
+    /// a third of the screen.
+    private let height: CGFloat = 120
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -951,12 +1041,13 @@ struct PaneScreen: View {
                 Button { dismiss() } label: { Image(systemName: "chevron.left") }
             }
             ToolbarItem(placement: .principal) {
+                // Where it is (the one naming rule), then its Mac and state.
                 VStack(spacing: 1) {
-                    Text(current.title).font(.headline)
+                    Text(node?.path ?? current.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                     HStack(spacing: 4) {
                         Circle().fill(node?.alive == false ? Color.gray.opacity(0.3) : (node?.state ?? .idle).tint).frame(width: 6, height: 6)
-                        Text("\(current.host.name) · \(model.sessionTitle(for: current))")
-                            .font(.caption2).foregroundStyle(.secondary)
+                        Text([current.host.name, node?.words].compactMap { $0 }.joined(separator: " · "))
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 6)
@@ -980,7 +1071,7 @@ struct PaneScreen: View {
                     // Beside this pane, opened here in its place with the
                     // keyboard up; or a workspace in this pane's folder.
                     Section {
-                        CreateItems(host: current.host, anchor: node?.anchor,
+                        CreateItems(host: current.host, anchor: node?.anchor, splits: true,
                                     folder: model.folder(of: current.pane, on: current.host)) { ref in
                             model.typeInto = ref
                             switchTo(ref)
@@ -988,9 +1079,13 @@ struct PaneScreen: View {
                     }
                     .disabled(model.creating != nil || !model.reachable(current.host))
                     Section("Switch to") {
-                        ForEach(model.livePanes(on: current.host).filter { $0.ref != current }) { other in
-                            Button { switchTo(other.ref) } label: {
-                                Label("\(other.session) \(other.ref.title)", systemImage: "terminal")
+                        ForEach(model.livePanes(on: current.host).filter { $0.pane != current }) { other in
+                            if let ref = other.pane {
+                                // A menu item's second text is its subtitle.
+                                Button { switchTo(ref) } label: {
+                                    Text(other.path ?? other.title)
+                                    Text(other.words)
+                                }
                             }
                         }
                     }
@@ -1132,7 +1227,7 @@ struct KeyboardButton: View {
 // MARK: - Sheets
 
 /// The Macs on your Apple Account, each with what it does for this phone
-/// (its sessions here, its requests answered here), pairing for the ones
+/// (its workspaces here, its requests answered here), pairing for the ones
 /// not paired yet, and the receipts.
 struct SettingsView: View {
     @EnvironmentObject private var model: VigilPhone
@@ -1148,7 +1243,7 @@ struct SettingsView: View {
                             Image(systemName: "laptopcomputer").font(.title3).foregroundStyle(.secondary).frame(width: 30)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(mac.name).font(.headline)
-                                Text(sessions(mac)).font(.caption).foregroundStyle(.secondary)
+                                Text(workspaces(mac)).font(.caption).foregroundStyle(.secondary)
                                 Text(requests(mac)).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -1169,7 +1264,7 @@ struct SettingsView: View {
         }
     }
 
-    private func sessions(_ mac: EndpointRuntime.Mac) -> String {
+    private func workspaces(_ mac: EndpointRuntime.Mac) -> String {
         if model.hosts.contains(where: { $0.id == mac.id }) { return "Workspaces: shown here" }
         return mac.state == .onAccount || mac.state == .pairing ? "Workspaces: after pairing" : "Workspaces: vigil is not running there"
     }

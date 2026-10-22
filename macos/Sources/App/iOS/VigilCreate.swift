@@ -7,12 +7,13 @@ import VigilWire
 /// `WorkspaceCommand` to the pane's home Mac (`VigilPhone.create`), and the
 /// new pane opens full screen with the keyboard up, at the phone's size.
 ///
-/// Where it is offered, so creating is one or two taps from anywhere:
-///  - the home's `+` (a terminal on the Mac you last used, now; a Claude;
-///    or the sheet),
-///  - each Mac's row (its own `+`),
-///  - a workspace's, tab's or pane's long press (a tab or split beside it,
-///    or a workspace in its folder),
+/// Where it is offered, the Mac always obvious or chosen, never assumed:
+///  - the home's `+`: the sheet, its Mac chosen there (preset only when one
+///    Mac alone can take it),
+///  - each Mac's row (its own `+`): a shell or a Claude in its home folder,
+///    or the sheet for that Mac,
+///  - a workspace's or tab's long press (a tab in it, or a workspace in its
+///    folder), a pane's (a tab or split beside it, the same workspace),
 ///  - the pane screen's stack menu (the same, beside the pane you are in).
 enum Create {
     /// What a new pane may run besides a shell, by name: Claude through
@@ -41,6 +42,9 @@ struct CreateItems: View {
     /// The pane a tab or split stands beside (nil: a dock tenant, which
     /// anchors neither; only a workspace is offered).
     let anchor: String?
+    /// Offer splitting the anchor (a pane's own row or screen; a workspace
+    /// or tab row offers a new tab only).
+    let splits: Bool
     /// The folder a new workspace starts in.
     let folder: String?
     let landed: @MainActor (PaneRef) -> Void
@@ -56,37 +60,41 @@ struct CreateItems: View {
                     Label("New \(preset.name) tab", systemImage: "sparkle")
                 }
             }
-            Button { model.begin(.split(beside: anchor, direction: "right", command: nil), on: host, landed: landed) } label: {
-                Label("Split right", systemImage: "rectangle.split.2x1")
-            }
-            Button { model.begin(.split(beside: anchor, direction: "down", command: nil), on: host, landed: landed) } label: {
-                Label("Split down", systemImage: "rectangle.split.1x2")
+            if splits {
+                Button { model.begin(.split(beside: anchor, direction: "right", command: nil), on: host, landed: landed) } label: {
+                    Label("Split right", systemImage: "rectangle.split.2x1")
+                }
+                Button { model.begin(.split(beside: anchor, direction: "down", command: nil), on: host, landed: landed) } label: {
+                    Label("Split down", systemImage: "rectangle.split.1x2")
+                }
             }
         }
         Button { model.composing = .init(host: host, folder: folder) } label: {
-            Label("New workspace…", systemImage: "macwindow.badge.plus")
+            Label("New workspace in this folder…", systemImage: "macwindow.badge.plus")
         }
     }
 }
 
-/// A Mac's quick creations: a terminal or a Claude in its home folder,
-/// now, and the sheet for anything else. The home's `+` (on the Mac you
-/// last used) and each Mac's row.
+/// A Mac's quick creations, offered on its own row (the Mac is the row's):
+/// a new workspace running a shell or a Claude in its home folder, now, and
+/// the sheet for another folder or program.
 struct QuickCreateItems: View {
     let host: VigilPhone.Host
     @EnvironmentObject private var model: VigilPhone
 
     var body: some View {
-        Button { open(nil) } label: {
-            Label("Terminal on \(host.name)", systemImage: "terminal")
-        }
-        ForEach(Create.presets, id: \.command) { preset in
-            Button { open(preset.command) } label: {
-                Label("\(preset.name) on \(host.name)", systemImage: "sparkle")
+        Section("New workspace on \(host.name)") {
+            Button { open(nil) } label: {
+                Label("Shell in Home", systemImage: "terminal")
             }
-        }
-        Button { model.composing = .init(host: host, folder: nil) } label: {
-            Label("New workspace…", systemImage: "macwindow.badge.plus")
+            ForEach(Create.presets, id: \.command) { preset in
+                Button { open(preset.command) } label: {
+                    Label("\(preset.name) in Home", systemImage: "sparkle")
+                }
+            }
+            Button { model.composing = .init(host: host, folder: nil) } label: {
+                Label("Choose folder and program…", systemImage: "folder")
+            }
         }
     }
 
@@ -146,7 +154,7 @@ struct NewWorkspaceSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                if model.hosts.count > 1 {
+                if model.hosts.count > 1 || host == nil {
                     Section("Mac") {
                         Picker("Mac", selection: $hostId) {
                             ForEach(model.hosts) { host in
@@ -180,7 +188,9 @@ struct NewWorkspaceSheet: View {
         .presentationDetents([.large])
         .onAppear {
             model.failure = nil
-            hostId = compose.host?.id ?? model.scratchMac?.id ?? model.hosts.first?.id ?? ""
+            // The Mac is the context's (a Mac's row, a pane's), else yours
+            // to pick; preset only when one Mac alone can take it.
+            hostId = compose.host?.id ?? model.onlyReachable?.id ?? ""
             if let start = compose.folder { folder = start }
         }
         // A failure said here is read here: it does not follow you out.
