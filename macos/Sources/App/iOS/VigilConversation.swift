@@ -44,8 +44,10 @@ final class Conversation: ObservableObject {
     init(ref: PaneRef) { self.ref = ref }
 
     /// Drawn from made-up rows (`VigilFixture`): nothing followed.
-    init(ref: PaneRef, entries: [FeedEntry], live: FeedLive?, earlier: Bool = false, waiting: String? = nil, offer: Offer? = nil) {
+    init(ref: PaneRef, entries: [FeedEntry], live: FeedLive?, earlier: Bool = false, waiting: String? = nil, offer: Offer? = nil,
+         reply: Reply? = nil) {
         self.ref = ref
+        self.reply = reply
         self.live = live
         self.earlier = earlier
         self.waiting = waiting
@@ -178,6 +180,7 @@ final class Conversation: ObservableObject {
                     entries.append(entry)
                 }
             }
+            if let reply, reply.failed == nil, changed.contains(where: { Self.carries($0, reply.text) }) { self.reply = nil }
             revision += 1
         case .live(let now):
             live = now
@@ -217,6 +220,55 @@ final class Conversation: ObservableObject {
 
     /// Where a tool call with no result stands, by the broker's word.
     enum Pending { case waiting, running, unfinished }
+
+    // MARK: A reply
+
+    /// A reply on its way: typed into the pane, not yet a prompt in the
+    /// feed (it is sent once the feed shows it), or why it was not sent.
+    struct Reply: Equatable {
+        let text: String
+        var failed: String?
+    }
+    @Published private(set) var reply: Reply?
+
+    /// Why a reply cannot be typed now (nil: the turn is yours).
+    var replyRefusal: String? {
+        // The placeholder of the reply box: one short line.
+        guard let live else { return "Not known yet if it can take a reply" }
+        switch live.state {
+        case .done, .idle: return nil
+        case .blocked where live.flavor == .ask: return nil
+        case .blocked: return "Answer its request first"
+        case .working, .interrupting: return "Working: reply when it's done"
+        case .unknown: return "Its state is not confirmed"
+        }
+    }
+
+    /// Types `text` into the pane; a refusal or failure is said in `reply`.
+    func send(_ text: String) {
+        guard replyRefusal == nil, reply == nil || reply?.failed != nil else { return }
+        guard Open.validText(text) else {
+            reply = Reply(text: text, failed: "Too long or not text: 4000 bytes of printable text at most.")
+            return
+        }
+        reply = Reply(text: text)
+        Task {
+            do {
+                // Shown as sent when the feed carries it as a prompt
+                // (`apply`), which may be before this returns.
+                try await VigilPhone.shared.send(text, to: ref)
+            } catch {
+                guard reply?.text == text else { return }
+                reply?.failed = VigilLink.reason(error)
+                VigilPhone.shared.receipts.warn("feed", "reply not sent", ["pane": ref.pane, "err": error])
+            }
+        }
+    }
+
+    private static func carries(_ entry: FeedEntry, _ text: String) -> Bool {
+        guard case .prompt(let prompt) = entry.body else { return false }
+        return prompt.text.text.trimmingCharacters(in: .whitespacesAndNewlines) == text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// The standing request names no row held here (a dialog with no
     /// tool, or its call not read yet): it is answered under the rows.
@@ -287,12 +339,17 @@ struct ConversationView: View {
                     .padding(10)
                     .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
+                if let reply = conversation.reply, reply.failed == nil {
+                    PromptRow(prompt: .init(text: Clip(text: reply.text)), sending: true)
+                }
                 LiveRow(live: conversation.live).id(Self.bottom)
             }
             .scrollTargetLayout()
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
         }
+        .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .bottom, spacing: 0) { Composer(conversation: conversation) }
         .scrollPosition($position)
         .defaultScrollAnchor(.bottom)
         .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -384,6 +441,8 @@ private struct EntryRow: View {
 /// the ground, as a message app draws your side.
 private struct PromptRow: View {
     let prompt: FeedEntry.Prompt
+    /// Typed into the pane, not yet in the feed.
+    var sending = false
     @State private var whole = false
 
     private var origin: String? {
@@ -417,6 +476,63 @@ private struct PromptRow: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .background(.primary.opacity(0.09), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .opacity(sending ? 0.55 : 1)
+            .overlay(alignment: .bottomTrailing) {
+                if sending {
+                    Text("Sending…").font(.caption2).foregroundStyle(.secondary).offset(y: 16)
+                }
+            }
+        }
+        .padding(.bottom, sending ? 14 : 0)
+    }
+}
+
+/// The reply box: what you type goes to the pane as one message, while the
+/// turn is yours; otherwise it says why not.
+private struct Composer: View {
+    @ObservedObject var conversation: Conversation
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let refusal = conversation.replyRefusal
+        let sending = conversation.reply.map { $0.failed == nil } ?? false
+        VStack(alignment: .leading, spacing: 6) {
+            if let failed = conversation.reply?.failed {
+                Label("Not sent: \(failed)", systemImage: "exclamationmark.triangle")
+                    .font(.footnote).foregroundStyle(Hue.care)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField(refusal ?? "Reply", text: $text, axis: .vertical)
+                    .lineLimit(1...6)
+                    .focused($focused)
+                    .disabled(refusal != nil)
+                    .padding(.horizontal, 12).padding(.vertical, 9)
+                    .background(.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                Button {
+                    conversation.send(text)
+                    if conversation.reply?.failed == nil { text = "" }
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
+                }
+                .tint(Hue.yes)
+                .disabled(refusal != nil || sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityLabel("Send")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .background(.bar)
+        // A failed reply comes back here to be sent again.
+        .onChange(of: conversation.reply?.failed) { _, failed in
+            if failed != nil, text.isEmpty, let back = conversation.reply?.text { text = back }
+        }
+        // An activity's Reply: the box takes the keyboard.
+        .onReceive(VigilPhone.shared.$typeInto) { ref in
+            guard ref == conversation.ref else { return }
+            VigilPhone.shared.typeInto = nil
+            focused = true
         }
     }
 }

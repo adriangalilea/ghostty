@@ -962,6 +962,13 @@ final class VigilPhone: ObservableObject {
         try await VigilLink.feedEarlier(linked(), device: ref.host.id, pane: ref.pane, request)
     }
 
+    /// Types `text` into the pane as one message (`send`: one paste, one
+    /// Enter), as a reply typed at its keyboard would be.
+    func send(_ text: String, to ref: PaneRef) async throws {
+        _ = try await VigilLink.call(linked(), device: ref.host.id, .send(ref.pane, text: text))
+        receipts.info("feed", "reply sent", ["mac": ref.host.name, "pane": ref.pane, "bytes": text.utf8.count])
+    }
+
     // MARK: Surfaces: the model owns every live stream
 
     /// One surface per pane, owned HERE (never by a view's @State): a
