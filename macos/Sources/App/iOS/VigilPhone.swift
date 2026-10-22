@@ -137,15 +137,15 @@ final class VigilPhone: ObservableObject {
         }
     }
 
-    /// The content receipt (the Mac's `checkScreen`, same rule): every
-    /// live surface hashes its viewport like the daemon does; a difference
-    /// while the daemon's hash held still across two directory reads is a
-    /// desync: logged, then re-synced with a dump.
     /// Every Mac's directory as its rows draw it: without content receipts.
     private static func rows(_ directories: [String: Directory]) -> [String: Directory] {
         directories.mapValues(\.unscreened)
     }
 
+    /// The content receipt (the Mac's `checkScreen`, same rule): every
+    /// live surface hashes its viewport like the daemon does; a difference
+    /// while the daemon's hash held still across two directory reads is a
+    /// desync: logged, then re-synced with a dump.
     private func checkScreens() {
         for (pane, view) in surfaces {
             guard let truth = directories.values.first(where: { $0.panes[pane] != nil })?.panes[pane],

@@ -16,7 +16,7 @@ extension VigilWorkspaces {
         /// Remote rows navigate by their full identity but have no local
         /// daemon id: local rename, drag and close paths must stay separate.
         var navigationId: String? { paneId ?? (VigilRemote.split(id) != nil ? id : nil) }
-        let title: String         // display: custom label, else program, else surface title
+        let title: String         // display: the one naming rule (`Directory.titles`)
         let program: String?      // the argv truth alone; nil = just a shell
         let state: AgentState?
         let isDock: Bool

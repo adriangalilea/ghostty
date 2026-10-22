@@ -10,9 +10,11 @@ import VigilWire
 
 /// The phone's screens: ONE home tree (Macs → workspaces → tabs → panes,
 /// collapsible, the sidebar's rollup dots on every folded row) and a pane,
-/// full screen. The pane IS a Ghostty surface (Metal, the Mac's renderer)
-/// attached over tether (`vigil/1`); the model owns every surface, the
-/// screens borrow.
+/// full screen: an agent pane opens on its conversation
+/// (`VigilConversation.swift`), any other on its terminal, one toggle
+/// between them. The terminal IS a Ghostty surface (Metal, the Mac's
+/// renderer) attached over tether (`vigil/1`); the model owns every
+/// surface, the screens borrow.
 ///
 /// Patterns, named once here and referenced below:
 ///  - HOSTING: a representable's container `addSubview`s the model's
@@ -506,8 +508,8 @@ struct TreeNodeView: View {
 /// An agent pane drawn as what it means (its Mac's `PaneGlance`): its
 /// state's glyph, its conversation's name, the mark of a conversation (it
 /// opens as one), then one or two lines: the question while it waits for
-/// you, the tool call while it works, else its last words with how long ago
-/// it said them. Its pane id, dim, under it. Each line only when the glance
+/// you, the tool call while it works, else its last words in a card with
+/// its context, and how long ago it said them. Its pane id, dim, under it. Each line only when the glance
 /// has it; the state's words otherwise, never a blank row.
 struct GlanceRow<Marks: View>: View {
     let node: VigilPhone.Node
@@ -559,8 +561,9 @@ struct GlanceRow<Marks: View>: View {
                     .font(action.shell ? .footnote.monospaced() : .footnote)
                     .foregroundStyle(.secondary).lineLimit(1)
             } else if let said = glance.said {
-                // Where it ended: its last lines as written (markdown), in a
-                // card, then when and how full its context is.
+                // Where it ended: its last words as the glance skims them
+                // (first and last paragraph, `PaneGlance.ending`, markdown),
+                // in a card, then how full its context is.
                 VStack(alignment: .leading, spacing: 6) {
                     MarkdownView(said)
                         .markdownStyle(MarkdownStyle(textStyle: .footnote, ink: .secondary, measure: nil).preview(lines: 10))
