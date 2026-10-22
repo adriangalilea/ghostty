@@ -273,7 +273,7 @@ extension VigilWorkspaces {
                 ghostty_string_free(s)
                 s = .init()
                 sizeLog.error("screen mismatch persists after re-syncs; silenced", [
-                    "pane": id, "diff": "vigild screen \(id) | diff - \(out.path)",
+                    "pane": id, "diff": "vigil-agent screen \(id) | diff - \(out.path)",
                 ])
             }
             view.vigilScreenStrikes = -3 // grace for the dump to land

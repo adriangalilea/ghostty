@@ -10,7 +10,7 @@ import VigilWire
 /// front: vigil names the focused pane and its workspace's words (the
 /// cortex keywords, proper nouns a recognizer would misspell), and utter
 /// sends every final of that press to the pane, wherever focus goes after.
-/// Delivery is raw keystrokes into the pane's daemon (`vigild sendraw`), NO
+/// Delivery is raw keystrokes into the pane's daemon (`PaneLink.type`), NO
 /// Enter: speech lands in the input line as if typed, and the human submits.
 ///
 /// The channel carries dictated text, so it is closed both ways: an
@@ -90,7 +90,7 @@ enum VigilDictation {
     }
 
     private static let accepting = DispatchQueue(label: "vigil.dictation", qos: .userInitiated)
-    /// Lines reach a pane in the order they were said: one `sendraw` at a time.
+    /// Lines reach a pane in the order they were said: one delivery at a time.
     private static let delivering = DispatchQueue(label: "vigil.dictation.deliver", qos: .userInitiated)
 
     /// Same user, and signed as utter by this team.

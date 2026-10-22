@@ -11,7 +11,7 @@ extension VigilWorkspaces {
     // MARK: Lifecycle
 
     /// Stamp a fresh window's config so it is daemon-backed from birth (a
-    /// vigild attach id + VIGIL_WORKSPACE). Returns nil when the config already
+    /// pane attach id + VIGIL_WORKSPACE). Returns nil when the config already
     /// carries vigil identity (attach id or VIGIL_WORKSPACE: create,
     /// resurrection and tab paths handled it), so this only augments plain
     /// windows (⌘N, the startup window, dock reopen). Pair with
