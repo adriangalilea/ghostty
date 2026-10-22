@@ -142,7 +142,7 @@ extension VigilWorkspaces {
                 ?? pane.command.flatMap(Program.label)
                 ?? liveTitle
                 ?? pane.title
-                ?? (pane.cwd as NSString).lastPathComponent
+                ?? Directory.folder(pane.cwd, home: NSHomeDirectory())
             return SidebarPane(
                 id: pane.id,
                 paneId: pane.id,
@@ -158,12 +158,13 @@ extension VigilWorkspaces {
                 priority: pane.priority ?? .normal)
         }
 
-        /// A tab's skim label: WHERE it lives (cwd basename), never an echo
-        /// of its first pane's program or title (the pane rows already say
-        /// that; a terminal title is the full path).
+        /// A tab's skim label: WHERE it lives (the folder rule every surface
+        /// shares, home as `~`), never an echo of its first pane's program
+        /// or title (the pane rows already say that; a terminal title is the
+        /// full path).
         func tabTitle(cwd: String?, fallback: String) -> String {
             guard let cwd, !cwd.isEmpty else { return fallback }
-            let base = (cwd as NSString).lastPathComponent
+            let base = Directory.folder(cwd, home: NSHomeDirectory())
             return base.isEmpty ? fallback : base
         }
 

@@ -854,7 +854,7 @@ final class VigilPhone: ObservableObject {
                     let all = t.members
                     let showTab = tabs.count > 1 || t.label != nil || t.emoji != nil
                     if showTab {
-                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: Directory.title(ofTab: ti, in: s), emoji: t.emoji,
+                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: dir.title(ofTab: ti, in: s), emoji: t.emoji,
                                        anchor: t.panes.first?.id)
                         tab.children = all.map(paneNode)
                         sess.children.append(tab)
