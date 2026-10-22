@@ -140,7 +140,13 @@ extension NSApplication {
             return nil
         }
 
-        if let view = terminal.surfaceView, command.refusesMirrored(view) { return nil }
+        // An action that types (`text:`, `csi:`, `esc:`, a paste) is scripted
+        // input; anything aimed at another Mac's pane or a mirror is too
+        // (its home decides, never this window).
+        let types = ["text:", "csi:", "esc:"].contains { action.hasPrefix($0) }
+            || ["paste_from_clipboard", "paste_from_selection"].contains(action)
+        if let view = terminal.surfaceView, types || view.vigilHost != nil || view.vigilMirror,
+           command.refusesScriptedInput(view) { return nil }
 
         return NSNumber(value: terminal.perform(action: action))
     }

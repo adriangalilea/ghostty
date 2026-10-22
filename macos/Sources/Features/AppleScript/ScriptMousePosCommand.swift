@@ -35,7 +35,7 @@ final class ScriptMousePosCommand: NSScriptCommand {
             return nil
         }
 
-        guard !refusesMirrored(surfaceView) else { return nil }
+        guard !refusesScriptedInput(surfaceView) else { return nil }
 
         guard let surface = surfaceView.surfaceModel else {
             scriptErrorNumber = errAEEventFailed
