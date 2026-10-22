@@ -1054,18 +1054,86 @@ private struct LiveRow: View {
 
     var body: some View {
         if let live {
-            HStack(spacing: 8) {
-                Image(systemName: live.state.symbol)
-                    .foregroundStyle(live.state.tint)
-                    .symbolEffect(.pulse, isActive: live.state == .working)
-                Text(live.state.words(live.flavor)).font(.footnote.weight(.medium))
-                Spacer(minLength: 6)
-                if let context = live.context { ContextMeter(percent: context) }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Image(systemName: live.state.symbol)
+                        .foregroundStyle(live.state.tint)
+                        .symbolEffect(.pulse, isActive: live.state == .working)
+                    Text(live.state.words(live.flavor)).font(.footnote.weight(.medium))
+                    Spacer(minLength: 6)
+                    if let context = live.context { ContextMeter(percent: context) }
+                }
+                if let status = live.status { StatusLine(status: status) }
             }
             .padding(.top, 4)
         } else {
             Color.clear.frame(height: 1)
         }
+    }
+}
+
+/// What the agent's own status line says: the model and its effort, the
+/// account it burns, and that account's windows with the time left until
+/// each resets (care from 80%, where the window is nearly spent).
+private struct StatusLine: View {
+    let status: FeedStatus
+
+    var body: some View {
+        let words = [status.model, status.effort].compactMap { $0 }.joined(separator: " · ")
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if !words.isEmpty { Text(words) }
+                if let account = status.account {
+                    if !words.isEmpty { Text("·") }
+                    Text(account).fontWeight(.medium)
+                }
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            if !status.limits.isEmpty {
+                TimelineView(.periodic(from: .now, by: 60)) { clock in
+                    HStack(spacing: 14) {
+                        ForEach(status.limits, id: \.name) { limit in
+                            LimitMeter(limit: limit, now: clock.date)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct LimitMeter: View {
+    let limit: FeedStatus.Limit
+    let now: Date
+
+    var body: some View {
+        let fill = Double(min(max(limit.used, 0), 100)) / 100
+        let left = limit.resets.map { Self.left(until: Date(timeIntervalSince1970: $0), from: now) }
+        HStack(spacing: 5) {
+            Text(limit.name).foregroundStyle(.secondary)
+            Capsule().fill(.primary.opacity(0.12))
+                .frame(width: 36, height: 4)
+                .overlay(alignment: .leading) {
+                    Capsule().fill(limit.used >= 80 ? AnyShapeStyle(Hue.care) : AnyShapeStyle(.secondary))
+                        .frame(width: 36 * fill, height: 4)
+                }
+            Text("\(limit.used)%").monospacedDigit().foregroundStyle(.secondary)
+            if let left { Text("↻\(left)").monospacedDigit().foregroundStyle(.tertiary) }
+        }
+        .font(.caption)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(limit.name) window \(limit.used)% used" + (left.map { ", resets in \($0)" } ?? ""))
+    }
+
+    /// "2d6h", "1h3m", "12m": the two largest units left.
+    static func left(until reset: Date, from now: Date) -> String {
+        let minutes = max(0, Int(reset.timeIntervalSince(now) / 60))
+        let (days, hours, mins) = (minutes / 1440, minutes % 1440 / 60, minutes % 60)
+        if days > 0 { return "\(days)d\(hours)h" }
+        if hours > 0 { return "\(hours)h\(mins)m" }
+        return "\(mins)m"
     }
 }
 
