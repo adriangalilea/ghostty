@@ -1,6 +1,7 @@
 import AuthzEndpoint
 import AuthzGlance
 import AuthzProtocol
+import Log
 import UIKit
 import UserNotifications
 import VigilActivity
@@ -72,13 +73,46 @@ import VigilWire
         }
     }
 
+    /// The authz home that answers `device`'s requests, while it lets vigil
+    /// answer there.
+    private func home(of device: String) -> String? {
+        runtime.macs.first(where: { $0.id == device }).flatMap { mac -> String? in
+            if case .answering(let home, _) = mac.state { home } else { nil }
+        }
+    }
+
+    /// Request `id` of `device` as its home holds it, while it waits (nil:
+    /// settled, gone, or that home not read here within seconds).
+    func request(device: String, id: String) async -> AskRequest? {
+        guard let home = home(of: device),
+              case .waiting(let snapshot)? = await runtime.readStanding((id, home), within: .seconds(5))
+        else { return nil }
+        return snapshot.request
+    }
+
+    /// An answer given in the app (a conversation's buttons): nil once its
+    /// home took it, else why not, in the words the screen shows.
+    func answer(device: String, request: String, _ decision: Decision) async -> String? {
+        guard let home = home(of: device) else { return "Its Mac does not let vigil answer yet." }
+        let fields: Fields = ["request": String(request.prefix(8)), "action": decision.action ?? "answers"]
+        switch await runtime.answer((request, home), decision) {
+        case .answered:
+            VigilPhone.shared.receipts.info("authz", "answered here", fields)
+            return nil
+        case .alreadySettled, .gone:
+            VigilPhone.shared.receipts.info("authz", "no longer waits", fields)
+            return nil
+        case .failed(let why):
+            VigilPhone.shared.receipts.error("authz", "not answered here", fields.merging(["why": why]) { a, _ in a })
+            return why
+        }
+    }
+
     /// Allow or Deny inside a followed session's Live Activity: the question
     /// names its Mac, whose authz home answers it (`AnswerIntent`).
     func answer(device: String, request: String, action: String, shown: String) async {
         await runtime.start()
-        guard let home = runtime.macs.first(where: { $0.id == device }).flatMap({ mac -> String? in
-            if case .answering(let home, _) = mac.state { home } else { nil }
-        }) else {
+        guard let home = home(of: device) else {
             return VigilPhone.shared.receipts.warn("authz", "not answered: its mac does not let vigil answer", [
                 "request": String(request.prefix(8)),
             ])

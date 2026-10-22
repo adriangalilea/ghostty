@@ -44,13 +44,87 @@ final class Conversation: ObservableObject {
     init(ref: PaneRef) { self.ref = ref }
 
     /// Drawn from made-up rows (`VigilFixture`): nothing followed.
-    init(ref: PaneRef, entries: [FeedEntry], live: FeedLive?, earlier: Bool = false, waiting: String? = nil) {
+    init(ref: PaneRef, entries: [FeedEntry], live: FeedLive?, earlier: Bool = false, waiting: String? = nil, offer: Offer? = nil) {
         self.ref = ref
         self.live = live
         self.earlier = earlier
         self.waiting = waiting
+        self.offer = live?.request.flatMap { request in offer.map { (request.id, $0) } }
         opened = !entries.isEmpty
         replace(entries)
+    }
+
+    // MARK: The request standing
+
+    /// How the standing request is answered from here, read from its authz
+    /// home (the feed names it by id only): its yes and no, its questions'
+    /// options, or the terminal.
+    enum Offer: Equatable {
+        /// Still being read from its home.
+        case reading
+        case consent(allow: String, allowLabel: String, deny: String, denyLabel: String)
+        /// Questions whose every answer is one of their options.
+        case choices([Ask])
+        /// Nothing this screen can answer: the terminal can.
+        case terminal
+    }
+
+    /// One question of a questionnaire, as its options answer it.
+    struct Ask: Equatable {
+        let id: String
+        let title: String
+        let multiple: Bool
+        let choices: [Choice]
+    }
+
+    /// The standing request's id and how it is answered here.
+    @Published private(set) var offer: (request: String, offer: Offer)?
+    /// An answer on its way to the request's home.
+    @Published private(set) var answering = false
+    /// Why the last answer was not taken.
+    @Published private(set) var answerError: String?
+
+    /// The live state named a request (or none): read it from its home.
+    private func readOffer() {
+        guard let id = live?.request?.id else {
+            offer = nil
+            answerError = nil
+            return
+        }
+        guard offer?.request != id else { return }
+        offer = (id, .reading)
+        answerError = nil
+        Task {
+            let request = await VigilAuthz.shared.request(device: ref.host.id, id: id)
+            guard live?.request?.id == id else { return }
+            let next = request.map(Self.offer) ?? .terminal
+            offer = (id, next)
+            VigilPhone.shared.receipts.info("feed", "request read", ["pane": ref.pane, "request": String(id.prefix(8)), "offer": "\(next)"])
+        }
+    }
+
+    private static func offer(_ request: AskRequest) -> Offer {
+        if case .buttons(let quick) = Answering(request) {
+            return .consent(allow: quick.allow, allowLabel: quick.allowLabel, deny: quick.deny, denyLabel: quick.denyLabel)
+        }
+        let asks = request.questions.map { Ask(id: $0.id, title: $0.title, multiple: $0.kind == .multipleChoice, choices: $0.choices) }
+        if request.kind == .question, !asks.isEmpty,
+           request.questions.allSatisfy({ ($0.kind == .singleChoice || $0.kind == .multipleChoice) && !$0.choices.isEmpty }) {
+            return .choices(asks)
+        }
+        return .terminal
+    }
+
+    /// Answers the standing request through authz, as its card would.
+    func answer(_ decision: Decision) {
+        guard let request = offer?.request, !answering else { return }
+        answering = true
+        answerError = nil
+        Task {
+            let why = await VigilAuthz.shared.answer(device: ref.host.id, request: request, decision)
+            answering = false
+            answerError = why
+        }
     }
 
     /// Follows the pane's feed until `stop`.
@@ -88,6 +162,7 @@ final class Conversation: ObservableObject {
             conversation = snapshot.conversation
             earlier = snapshot.earlier
             live = snapshot.live
+            readOffer()
             pageError = nil
             replace(snapshot.entries)
             opened = true
@@ -106,6 +181,7 @@ final class Conversation: ObservableObject {
             revision += 1
         case .live(let now):
             live = now
+            readOffer()
             revision += 1
         }
     }
@@ -141,6 +217,13 @@ final class Conversation: ObservableObject {
 
     /// Where a tool call with no result stands, by the broker's word.
     enum Pending { case waiting, running, unfinished }
+
+    /// The standing request names no row held here (a dialog with no
+    /// tool, or its call not read yet): it is answered under the rows.
+    var requestUnplaced: Bool {
+        guard let request = live?.request else { return false }
+        return request.toolUse.map { index[$0] == nil } ?? true
+    }
 
     func pending(_ call: ToolCall, turn: String?) -> Pending? {
         guard call.result == nil else { return nil }
@@ -181,6 +264,7 @@ struct ConversationView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ground.ignoresSafeArea())
+        .environment(\.showTerminal, showTerminal)
     }
 
     /// The terminal's own ground in dark (the app's appearance), the
@@ -193,6 +277,15 @@ struct ConversationView: View {
                 if conversation.earlier { EarlierRow(conversation: conversation) }
                 ForEach(conversation.entries) { entry in
                     EntryRow(entry: entry, conversation: conversation)
+                }
+                if conversation.requestUnplaced {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("It asks you something", systemImage: AgentState.blocked.symbol)
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(AgentState.blocked.tint)
+                        AnswerBar(conversation: conversation)
+                    }
+                    .padding(10)
+                    .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 LiveRow(live: conversation.live).id(Self.bottom)
             }
@@ -272,7 +365,12 @@ private struct EntryRow: View {
                 }
             }
         case .tool(let call):
-            ToolRow(call: call, pending: conversation.pending(call, turn: entry.turn))
+            let pending = conversation.pending(call, turn: entry.turn)
+            // A question answered by buttons here shows its options once: as them.
+            let buttons = if pending == .waiting, case .choices? = conversation.offer?.offer { true } else { false }
+            ToolRow(call: call, pending: pending, options: !buttons) {
+                if pending == .waiting { AnswerBar(conversation: conversation) }
+            }
         case .event(let event):
             EventRow(event: event)
         case .opaque:
@@ -353,9 +451,13 @@ private struct Folded<Content: View>: View {
 
 // MARK: Tool calls
 
-private struct ToolRow: View {
+private struct ToolRow<Answers: View>: View {
     let call: ToolCall
     let pending: Conversation.Pending?
+    /// A question's options drawn as written (not when its buttons are).
+    let options: Bool
+    /// The way to answer the request standing on this call, if one does.
+    @ViewBuilder let answers: () -> Answers
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -370,7 +472,8 @@ private struct ToolRow: View {
                 Spacer(minLength: 6)
                 StatusMark(result: call.result, pending: pending).frame(minHeight: 20)
             }
-            ToolBody(call: call)
+            ToolBody(call: call, options: options)
+            answers()
             if let output = call.result?.output, !output.text.isEmpty, !call.isRead {
                 Folded(title: "Output · \(output.text.lineCount) line\(output.text.lineCount == 1 ? "" : "s")", systemImage: "text.alignleft") {
                     Well {
@@ -511,6 +614,7 @@ private struct StatusMark: View {
 /// What a call does, drawn for its kind.
 private struct ToolBody: View {
     let call: ToolCall
+    let options: Bool
 
     var body: some View {
         switch call.call {
@@ -528,7 +632,7 @@ private struct ToolBody: View {
         case .question(let questions):
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
-                    QuestionView(question: question, answer: call.result?.answers?[question.question])
+                    QuestionView(question: question, answer: call.result?.answers?[question.question], options: options)
                 }
             }
         case .plan(let plan):
@@ -622,6 +726,7 @@ private struct DiffView: View {
 private struct QuestionView: View {
     let question: ToolCall.Question
     let answer: String?
+    let options: Bool
 
     /// The answer as the agent recorded it: an option's words, several
     /// joined by commas, or words of the person's own.
@@ -637,14 +742,14 @@ private struct QuestionView: View {
                 Text(header.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             }
             Text(question.question).font(.subheadline)
-            VStack(alignment: .leading, spacing: 4) {
+            if options { VStack(alignment: .leading, spacing: 4) {
                 ForEach(question.options, id: \.self) { option in
                     let chosen = picked.contains(option)
                     Label(option, systemImage: chosen ? "checkmark.circle.fill" : (question.multiple ? "square" : "circle"))
                         .font(.footnote)
                         .foregroundStyle(chosen ? .primary : .secondary)
                 }
-            }
+            } }
             if let answer, !picked.allSatisfy(question.options.contains) {
                 Label(answer, systemImage: "text.bubble").font(.footnote)
             }
@@ -664,6 +769,108 @@ private struct TodoLine: View {
                 .foregroundStyle(doing ? AgentState.working.tint : .secondary)
         }
         .font(.footnote)
+    }
+}
+
+// MARK: Answers
+
+extension EnvironmentValues {
+    /// Shows the pane's terminal instead of its conversation.
+    @Entry var showTerminal: @MainActor () -> Void = {}
+}
+
+/// How the standing request is answered from this screen, through authz by
+/// its id (as the Lock Screen and the HUD answer it): its no and its yes,
+/// its questions' options, or the terminal. Never a key typed into a dialog.
+private struct AnswerBar: View {
+    @ObservedObject var conversation: Conversation
+    @Environment(\.showTerminal) private var showTerminal
+    /// A questionnaire's picks so far, by question id.
+    @State private var picks: [String: [String]] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            switch conversation.offer?.offer {
+            case .reading?, nil:
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Reading the request…").font(.footnote).foregroundStyle(.secondary)
+                }
+            case .consent(let allow, let allowLabel, let deny, let denyLabel)?:
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    Button(denyLabel) { conversation.answer(.action(deny, feedback: nil)) }.buttonStyle(.ink)
+                    Button(allowLabel) { conversation.answer(.action(allow, feedback: nil)) }.buttonStyle(.inkProminent)
+                }
+                .tint(Hue.yes)
+            case .choices(let asks)?:
+                choices(asks)
+            case .terminal?:
+                HStack {
+                    Spacer(minLength: 0)
+                    Button { showTerminal() } label: { Label("Answer in the terminal", systemImage: "terminal") }
+                        .buttonStyle(.ink)
+                }
+            }
+            if conversation.answering {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Answering…").font(.footnote).foregroundStyle(.secondary)
+                }
+            } else if let why = conversation.answerError {
+                Label("Not answered: \(why)", systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(Hue.care)
+            }
+        }
+        .disabled(conversation.answering)
+    }
+
+    /// A lone one-of-n question answers on its tap (Authz's card rule);
+    /// anything more is picked, then sent.
+    @ViewBuilder private func choices(_ asks: [Conversation.Ask]) -> some View {
+        let lone = asks.count == 1 && !asks[0].multiple
+        ForEach(asks, id: \.id) { ask in
+            VStack(alignment: .leading, spacing: 6) {
+                if asks.count > 1 { Text(ask.title).font(.footnote.weight(.semibold)) }
+                ForEach(ask.choices) { choice in
+                    let picked = picks[ask.id, default: []].contains(choice.id)
+                    Button {
+                        if lone { return send([ask.id: [choice.id]]) }
+                        var now = ask.multiple ? picks[ask.id, default: []] : []
+                        if picked { now.removeAll { $0 == choice.id } } else { now.append(choice.id) }
+                        picks[ask.id] = now
+                    } label: {
+                        HStack(spacing: 8) {
+                            if !lone {
+                                Image(systemName: picked ? "checkmark.circle.fill" : (ask.multiple ? "square" : "circle"))
+                            }
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(choice.label)
+                                if let description = choice.description {
+                                    Text(description).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    // Authz's answer chip: a label of any height on its wash.
+                    .buttonStyle(AnswerButtonStyle(tint: nil, focused: picked))
+                }
+            }
+        }
+        if !lone {
+            HStack {
+                Spacer(minLength: 0)
+                Button("Send") { send(picks) }
+                    .buttonStyle(.inkProminent)
+                    .tint(Hue.yes)
+                    .disabled(asks.contains { picks[$0.id, default: []].isEmpty })
+            }
+        }
+    }
+
+    private func send(_ answers: [String: [String]]) {
+        conversation.answer(.answers(answers.mapValues { .choices($0, other: nil) }))
     }
 }
 
