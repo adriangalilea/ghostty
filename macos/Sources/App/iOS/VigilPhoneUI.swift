@@ -516,7 +516,7 @@ struct GlanceRow<Marks: View>: View {
 
     private var state: AgentState { node.state ?? .idle }
     /// The row's line is its last words (done or idle, and it has some).
-    private var saysLastWords: Bool { (state == .done || state == .idle) && glance.said != nil }
+    private var saysLastWords: Bool { state != .blocked && glance.action == nil && glance.said != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -553,21 +553,19 @@ struct GlanceRow<Marks: View>: View {
         case .blocked:
             Text(glance.question ?? state.words(node.flavor))
                 .font(.footnote).foregroundStyle(state.tint).lineLimit(2)
-        case .working, .interrupting, .unknown:
+        case .working, .interrupting, .unknown where glance.action != nil:
             if let action = glance.action {
                 Text(action.line)
                     .font(action.shell ? .footnote.monospaced() : .footnote)
                     .foregroundStyle(.secondary).lineLimit(1)
-            } else {
-                Text(state.words(node.flavor)).font(.footnote).foregroundStyle(.secondary)
             }
-        case .done, .idle:
+        case .working, .interrupting, .unknown, .done, .idle:
             if let said = glance.said {
                 // Where it ended: its last lines as written (markdown), in a
                 // card, then when and how full its context is.
                 VStack(alignment: .leading, spacing: 6) {
                     MarkdownView(said)
-                        .markdownStyle(MarkdownStyle(textStyle: .footnote, ink: .secondary, measure: nil).preview(lines: 4))
+                        .markdownStyle(MarkdownStyle(textStyle: .footnote, ink: .secondary, measure: nil).preview(lines: 10))
                     if let context = glance.context { ContextMeter(percent: context) }
                 }
                 .padding(.horizontal, 10)
