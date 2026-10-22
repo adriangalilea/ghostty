@@ -993,10 +993,23 @@ struct PaneScreen: View {
     @State private var fitZoom: CGFloat = 1
     @State private var screenVisible = false
     @State private var entryGeneration = UUID()
+    /// What the screen shows: an agent pane opens on its conversation, any
+    /// other on its terminal; the toggle switches.
+    @State private var mode: Mode
+    /// The current pane's feed, followed while its conversation can show.
+    @State private var conversation: Conversation?
+
+    enum Mode { case conversation, terminal }
 
     init(ref: PaneRef) {
         self.ref = ref
         _current = State(initialValue: ref)
+        _mode = State(initialValue: Self.opens(ref))
+    }
+
+    /// How a pane opens: its conversation when an agent runs in it.
+    private static func opens(_ ref: PaneRef) -> Mode {
+        VigilPhone.shared.node(for: ref)?.agent == true ? .conversation : .terminal
     }
 
     private var node: VigilPhone.Node? { model.node(for: current) }
@@ -1008,6 +1021,80 @@ struct PaneScreen: View {
     private var fits: Bool { !ownSize && grid != nil }
 
     var body: some View {
+        Group {
+            if mode == .conversation {
+                if let conversation {
+                    ConversationView(conversation: conversation) { setMode(.terminal) }
+                } else {
+                    ProgressView()
+                }
+            } else {
+                terminal
+            }
+        }
+        .navigationBarBackButtonHidden(true)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar { toolbar }
+        .task {
+            screenVisible = true
+            await show(current)
+        }
+        // Opened by an activity's Reply while this pane already shows.
+        .onChange(of: model.typeInto) { _, ref in
+            guard let ref, ref == current, let surfaceView else { return }
+            model.typeInto = nil
+            surfaceView.keyboardWanted = true
+        }
+        .onChange(of: node?.sizeOwner) { _, owner in
+            guard let view = surfaceView, grid != nil else { return }
+            view.updateSizeOwner(owner ?? "")
+            if !view.sizeClaimRequested { ownSize = false }
+        }
+        .onChange(of: model.streamGeneration) { _, _ in
+            guard screenVisible, phase == .active, mode == .terminal else { return }
+            guard surfaceView?.surface == nil else { return }
+            model.receipts.warn("pane", "stream died on screen; re-dialing", ["pane": current.pane])
+            // A reconnect is no act of yours: the size stays whose it was.
+            let held = ownSize
+            leave()
+            error = nil
+            Task { await enter(current, claim: held) }
+        }
+        .onDisappear {
+            screenVisible = false
+            leave()
+            conversation?.stop()
+            conversation = nil
+            model.dismissed(current)
+        }
+        // Leaving the active scene yields (nobody looks at the phone).
+        // Bringing the app back on this pane is opening it again: it claims.
+        .onChange(of: phase) { _, now in
+            switch now {
+            case .background, .inactive:
+                model.receipts.info("pane", "scene left; yielding", ["pane": current.pane, "phase": "\(now)"])
+                entryGeneration = UUID()
+                surfaceView?.claimSize(false)
+                surfaceView?.keyboardWanted = false
+                surfaceView?.attended = false
+                ownSize = false
+            case .active:
+                guard screenVisible, mode == .terminal else { return }
+                model.receipts.info("pane", "active again", ["pane": current.pane])
+                if let view = surfaceView, view.surface != nil {
+                    view.attended = true
+                    view.refreshFromDaemon()
+                    setOwnSize(true)
+                } else {
+                    Task { await enter(current, claim: true) }
+                }
+            @unknown default: break
+            }
+        }
+    }
+
+    /// The pane's terminal: a Ghostty surface over its `proxy` stream.
+    private var terminal: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 Color(ghostty.config.backgroundColor)
@@ -1034,26 +1121,25 @@ struct PaneScreen: View {
         }
         .ignoresSafeArea(.container, edges: [.top, .bottom])
         .ignoresSafeArea(.keyboard)
-        .navigationBarBackButtonHidden(true)
-        .toolbarBackground(.hidden, for: .navigationBar)
-        .toolbar {
+    }
+
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
             ToolbarItem(placement: .topBarLeading) {
                 Button { dismiss() } label: { Image(systemName: "chevron.left") }
             }
             ToolbarItem(placement: .principal) {
-                // Where it is (the one naming rule), then its Mac and state.
-                VStack(spacing: 1) {
-                    Text(node?.path ?? current.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    HStack(spacing: 4) {
-                        Circle().fill(node?.alive == false ? Color.gray.opacity(0.3) : (node?.state ?? .idle).tint).frame(width: 6, height: 6)
-                        Text([current.host.name, node?.words].compactMap { $0 }.joined(separator: " · "))
-                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
-                .padding(.horizontal, 14).padding(.vertical, 6)
-                .glassEffect(.regular, in: Capsule())
+                PaneTitle(title: node?.path ?? current.title,
+                          line: [current.host.name, node?.words].compactMap { $0 }.joined(separator: " · "),
+                          tint: node?.alive == false ? Color.gray.opacity(0.3) : (node?.state ?? .idle).tint)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                // Conversation ⇄ terminal, for a pane with a conversation.
+                if node?.agent == true || mode == .conversation {
+                    Button { setMode(mode == .conversation ? .terminal : .conversation) } label: {
+                        Image(systemName: mode == .conversation ? "terminal" : "text.bubble")
+                    }
+                    .accessibilityLabel(mode == .conversation ? "Show the terminal" : "Show the conversation")
+                }
                 if let surfaceView { KeyboardButton(surface: surfaceView) }
                 if surfaceView != nil {
                     // MIRROR: a picture of the Mac's grid, the Mac untouched.
@@ -1065,8 +1151,10 @@ struct PaneScreen: View {
                         Image(systemName: ownSize ? "iphone" : "desktopcomputer")
                     }
                 }
-                Button { zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
-                Button { zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
+                if mode == .terminal {
+                    Button { zoom(-1) } label: { Image(systemName: "minus.magnifyingglass") }
+                    Button { zoom(1) } label: { Image(systemName: "plus.magnifyingglass") }
+                }
                 Menu {
                     // Beside this pane, opened here in its place with the
                     // keyboard up; or a workspace in this pane's folder.
@@ -1097,53 +1185,38 @@ struct PaneScreen: View {
                     .disabled(!model.reachable(current.host))
                 } label: { Image(systemName: "rectangle.stack") }
             }
-        }
-        .task { screenVisible = true; await enter(current, claim: true) }
-        // Opened by an activity's Reply while this pane already shows.
-        .onChange(of: model.typeInto) { _, ref in
-            guard let ref, ref == current, let surfaceView else { return }
-            model.typeInto = nil
-            surfaceView.keyboardWanted = true
-        }
-        .onChange(of: node?.sizeOwner) { _, owner in
-            guard let view = surfaceView, grid != nil else { return }
-            view.updateSizeOwner(owner ?? "")
-            if !view.sizeClaimRequested { ownSize = false }
-        }
-        .onChange(of: model.streamGeneration) { _, _ in
-            guard screenVisible, phase == .active else { return }
-            guard surfaceView?.surface == nil else { return }
-            model.receipts.warn("pane", "stream died on screen; re-dialing", ["pane": current.pane])
-            // A reconnect is no act of yours: the size stays whose it was.
-            let held = ownSize
-            leave()
-            error = nil
-            Task { await enter(current, claim: held) }
-        }
-        .onDisappear { screenVisible = false; leave(); model.dismissed(current) }
-        // Leaving the active scene yields (nobody looks at the phone).
-        // Bringing the app back on this pane is opening it again: it claims.
-        .onChange(of: phase) { _, now in
-            switch now {
-            case .background, .inactive:
-                model.receipts.info("pane", "scene left; yielding", ["pane": current.pane, "phase": "\(now)"])
-                entryGeneration = UUID()
-                surfaceView?.claimSize(false)
-                surfaceView?.keyboardWanted = false
-                surfaceView?.attended = false
-                ownSize = false
-            case .active:
-                guard screenVisible else { return }
-                model.receipts.info("pane", "active again", ["pane": current.pane])
-                if let view = surfaceView, view.surface != nil {
-                    view.attended = true
-                    view.refreshFromDaemon()
-                    setOwnSize(true)
-                } else {
-                    Task { await enter(current, claim: true) }
-                }
-            @unknown default: break
+    }
+
+    /// Brings `ref` on screen in the current mode: its conversation (its
+    /// feed followed; the terminal untouched, so the Mac keeps its size),
+    /// or its terminal, claimed (you opened it).
+    private func show(_ ref: PaneRef) async {
+        if mode == .conversation, node?.agent == true {
+            model.present(ref)
+            if conversation?.ref != ref {
+                conversation?.stop()
+                let next = Conversation(ref: ref)
+                next.start()
+                conversation = next
             }
+        } else {
+            mode = .terminal
+            await enter(ref, claim: true)
+        }
+    }
+
+    /// The toggle: the terminal attaches and claims as an open would; the
+    /// conversation lets the terminal go (yielding its size).
+    private func setMode(_ next: Mode) {
+        guard next != mode else { return }
+        mode = next
+        model.receipts.info("pane", next == .conversation ? "conversation" : "terminal", ["pane": current.pane])
+        switch next {
+        case .terminal:
+            Task { await enter(current, claim: true) }
+        case .conversation:
+            leave()
+            Task { await show(current) }
         }
     }
 
@@ -1191,11 +1264,16 @@ struct PaneScreen: View {
         surfaceView = nil
     }
 
+    /// Another pane in this screen's place. One just created opens on its
+    /// terminal, where a new program starts; any other as it opens.
     private func switchTo(_ other: PaneRef) {
         leave()
+        conversation?.stop()
+        conversation = nil
         current = other
         fitZoom = 1
-        Task { await enter(other, claim: true) }
+        mode = model.typeInto == other ? .terminal : Self.opens(other)
+        Task { await show(other) }
     }
 
     private func setOwnSize(_ own: Bool) {
@@ -1211,6 +1289,25 @@ struct PaneScreen: View {
         } else {
             surfaceView?.zoom(direction)
         }
+    }
+}
+
+/// The pane screen's name capsule: where the pane is (the one naming
+/// rule), then its Mac and state beside its state's dot.
+struct PaneTitle: View {
+    let title: String
+    let line: String
+    let tint: Color
+    var body: some View {
+        VStack(spacing: 1) {
+            Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
+            HStack(spacing: 4) {
+                Circle().fill(tint).frame(width: 6, height: 6)
+                Text(line).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 6)
+        .glassEffect(.regular, in: Capsule())
     }
 }
 

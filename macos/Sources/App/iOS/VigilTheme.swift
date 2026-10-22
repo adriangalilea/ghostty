@@ -33,6 +33,18 @@ enum VigilTheme {
     font-size = 8
     """
 
+    /// The terminal's ground, read from the config above: what a screen
+    /// drawn beside the terminal (the conversation) stands on, so the
+    /// toggle between them never changes the ground.
+    static let background: UIColor = {
+        let key = "background = #"
+        guard let line = config.split(separator: "\n").first(where: { $0.hasPrefix(key) }),
+              let value = UInt32(line.dropFirst(key.count), radix: 16)
+        else { preconditionFailure("the theme names no background") }
+        return UIColor(red: CGFloat(value >> 16 & 0xff) / 255, green: CGFloat(value >> 8 & 0xff) / 255,
+                       blue: CGFloat(value & 0xff) / 255, alpha: 1)
+    }()
+
     /// Writes the config and returns its path (nil only if the sandbox
     /// refuses a write, which is a receipt-worthy failure).
     static func configPath() -> String? {

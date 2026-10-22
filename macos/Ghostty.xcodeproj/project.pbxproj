@@ -348,6 +348,7 @@
 				App/iOS/Sounds,
 				App/iOS/VigilAgents.swift,
 				App/iOS/VigilAuthz.swift,
+				App/iOS/VigilConversation.swift,
 				App/iOS/VigilCreate.swift,
 				App/iOS/VigilFixture.swift,
 				App/iOS/VigilPhone.swift,

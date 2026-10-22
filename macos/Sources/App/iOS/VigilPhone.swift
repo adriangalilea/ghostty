@@ -366,6 +366,9 @@ final class VigilPhone: ObservableObject {
         /// Why a pane waits, when it waits.
         var flavor: BlockFlavor? = nil
         var alive: Bool = true
+        /// An agent (Claude, Codex) runs in the pane: it has a conversation
+        /// to draw, and its screen opens on it.
+        var agent: Bool = false
         /// A pane's state in the words every surface uses.
         var words: String { alive ? (state ?? .idle).words(flavor) : "Not running" }
         var pane: PaneRef? = nil
@@ -841,6 +844,7 @@ final class VigilPhone: ObservableObject {
                                 state: truth?.shown,
                                 flavor: truth?.shown == .blocked ? truth?.token?.flavor : nil,
                                 alive: alive,
+                                agent: alive && Program.runsAgent(truth?.tree ?? []),
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: path) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
                                 sizeOwner: truth?.owner ?? "",
@@ -939,6 +943,23 @@ final class VigilPhone: ObservableObject {
         }
         receipts.info("stream", preview ? "preview attached" : "attached", ["mac": host.name, "pane": pane, "fd": fds[0]])
         return fds[0]
+    }
+
+    // MARK: Conversation: an agent pane's feed and its replies
+
+    /// A pane's conversation feed (`VigilLink.feed`), followed until the
+    /// caller stops iterating; why it could not be followed, as a step.
+    func feed(_ ref: PaneRef) -> AsyncStream<VigilLink.FeedStep> {
+        guard let node else {
+            return AsyncStream { $0.yield(.waiting("vigil is not connected to tether yet")); $0.finish() }
+        }
+        receipts.info("feed", "following", ["mac": ref.host.name, "pane": ref.pane])
+        return VigilLink.feed(node, device: ref.host.id, pane: ref.pane)
+    }
+
+    /// The page before `before`, the oldest entry the conversation holds.
+    func feedEarlier(_ ref: PaneRef, _ request: FeedEarlier) async throws -> FeedPage {
+        try await VigilLink.feedEarlier(linked(), device: ref.host.id, pane: ref.pane, request)
     }
 
     // MARK: Surfaces: the model owns every live stream
