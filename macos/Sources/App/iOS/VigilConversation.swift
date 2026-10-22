@@ -307,6 +307,8 @@ final class Conversation: ObservableObject {
 
 struct ConversationView: View {
     @ObservedObject var conversation: Conversation
+    /// Its Mac's directory: the state the header shows (the seen rule).
+    @ObservedObject private var phone = VigilPhone.shared
     /// Shows the pane's terminal instead (the toggle's other side).
     let showTerminal: () -> Void
     @Environment(\.colorScheme) private var scheme
@@ -360,7 +362,8 @@ struct ConversationView: View {
                 if let reply = conversation.reply, reply.failed == nil {
                     PromptRow(prompt: .init(text: Clip(text: reply.text)), sending: true)
                 }
-                LiveRow(live: conversation.live).id(Self.bottom)
+                LiveRow(live: conversation.live, shown: phone.directories[conversation.ref.host.id]?.panes[conversation.ref.pane]?.shown)
+                    .id(Self.bottom)
             }
             .scrollTargetLayout()
             .padding(.horizontal, 14)
@@ -1070,15 +1073,22 @@ private struct Divided: View {
 /// full its context is.
 private struct LiveRow: View {
     let live: FeedLive?
+    /// The pane's state as every row shows it (its Mac's directory, the
+    /// seen rule applied: a finished turn you have seen reads idle), so the
+    /// header and this row never say two things about one pane.
+    let shown: AgentState?
 
     var body: some View {
         if let live {
+            let seen = shown == .idle && (live.state == .done || live.state == .blocked && live.flavor == .ask)
+            let state = seen ? AgentState.idle : live.state
+            let flavor = seen ? nil : live.flavor
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    Image(systemName: live.state.symbol)
-                        .foregroundStyle(live.state.tint)
-                        .symbolEffect(.pulse, isActive: live.state == .working)
-                    Text(live.state.words(live.flavor)).font(.footnote.weight(.medium))
+                    Image(systemName: state.symbol)
+                        .foregroundStyle(state.tint)
+                        .symbolEffect(.pulse, isActive: state == .working)
+                    Text(state.words(flavor)).font(.footnote.weight(.medium))
                     Spacer(minLength: 6)
                     if let context = live.context { ContextMeter(percent: context) }
                 }
