@@ -23,7 +23,18 @@ struct VigilPhoneApp: App {
 
     var body: some Scene {
         WindowGroup {
-            VigilPhoneRoot()
+            if let fixture = VigilFixture.asked {
+                // Review only: made-up state in the system's appearance,
+                // nothing started (no tether, no Mac).
+                VigilFixtureView(fixture: fixture)
+            } else {
+                root
+            }
+        }
+    }
+
+    private var root: some View {
+        VigilPhoneRoot()
                 .environmentObject(ghostty)
                 // A terminal app is dark; never flash light chrome between
                 // a dark pane and the tree.
@@ -40,6 +51,5 @@ struct VigilPhoneApp: App {
                     }
                     VigilPhone.shared.scene(active: phase == .active)
                 }
-        }
     }
 }
