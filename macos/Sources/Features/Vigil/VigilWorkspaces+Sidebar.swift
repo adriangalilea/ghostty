@@ -123,27 +123,32 @@ extension VigilWorkspaces {
 
     /// One immutable projection of everything the left bar shows, READ
     /// FROM THE REGISTRY: every session, wherever displayed → its
-    /// tabs → their panes (splits AND dock tenants), each pane decorated
-    /// with its live view when one exists (title, focus) and with its
-    /// program (argv truth from the daemon's tree file) and continuous
-    /// AgentState. Every registered row renders whether or not its view
+    /// tabs → their panes (splits AND dock tenants), each pane named and
+    /// decorated from its daemon's facts (program from the tree file,
+    /// title from `<pane>.title`) and its continuous AgentState, never from
+    /// a live view. Every registered row renders whether or not its view
     /// exists yet: nothing flashes while a tab mounts.
     func sidebarSnapshot() -> [SidebarWorkspaceRow] {
         let leases = watchLeases()
 
-        func paneRow(_ pane: Registry.Pane, view: Ghostty.SurfaceView?, isDock: Bool) -> SidebarPane {
-            let program = paneProgram(pane.id)
-            let liveTitle = view.flatMap { liveTabTitle($0.title) }
-            // The name YOU gave it, else what runs there, else what it was
-            // born to run (an undisplayed session-API pane), else what the program
-            // calls itself, else where it lives.
-            let title = pane.label
-                ?? program
-                ?? pane.command.flatMap(Program.label)
-                ?? liveTitle
-                ?? pane.title
-                ?? Directory.folder(pane.cwd, home: NSHomeDirectory())
-            return SidebarPane(
+        /// A tab's panes (splits, then the dock) named by the one rule every
+        /// surface reads (`Registry.Pane.ownName`: yours, an agent's
+        /// conversation from its daemon's published title, what runs there,
+        /// ...), namesakes numbered as the phone numbers them.
+        func paneRows(_ tab: Registry.Tab) -> [SidebarPane] {
+            let members = tab.members
+            let programs = members.map { paneProgram($0.id) }
+            let names = Directory.numbered(members.indices.map {
+                members[$0].ownName(program: programs[$0], title: paneFileLines(members[$0].id, "title").first,
+                                    home: NSHomeDirectory())
+            })
+            return members.indices.map {
+                paneRow(members[$0], title: names[$0], program: programs[$0], isDock: $0 >= tab.panes.count)
+            }
+        }
+
+        func paneRow(_ pane: Registry.Pane, title: String, program: String?, isDock: Bool) -> SidebarPane {
+            SidebarPane(
                 id: pane.id,
                 paneId: pane.id,
                 title: title,
@@ -168,8 +173,6 @@ extension VigilWorkspaces {
             return base.isEmpty ? fallback : base
         }
 
-        func liveTabTitle(_ raw: String?) -> String? { raw.flatMap(Self.name(ofTitle:)) }
-
         var rows: [SidebarWorkspaceRow] = []
         let ordered = workspaces.values.sorted { ($0.order, $0.label) < ($1.order, $1.label) }
         for session in ordered {
@@ -186,8 +189,7 @@ extension VigilWorkspaces {
             for (index, tab) in session.tabs.enumerated() {
                 let ids = Set(tab.paneIds)
                 guard !ids.isEmpty else { continue }
-                var panes = tab.panes.map { paneRow($0, view: live[$0.id], isDock: false) }
-                panes += (tab.dock?.panes ?? []).map { paneRow($0, view: live[$0.id], isDock: true) }
+                let panes = paneRows(tab)
                 let anchor = tab.panes.first?.id ?? tab.dock?.panes.first?.id
                 let title = tab.label.flatMap { $0.isEmpty ? nil : $0 }
                     ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)")

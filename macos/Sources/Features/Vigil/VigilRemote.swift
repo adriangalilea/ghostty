@@ -268,15 +268,10 @@ final class VigilRemote: ObservableObject {
                     let panes = all.enumerated().map { offset, pane -> VigilWorkspaces.SidebarPane in
                         let truth = dir.panes[pane.id]
                         let program = truth?.program
-                        let title = pane.label
-                            ?? program
-                            ?? pane.command.flatMap(Program.label)
-                            ?? pane.title
-                            ?? (pane.cwd as NSString).lastPathComponent
                         return .init(
                             id: Self.compositeId(host.device, pane.id),
                             paneId: nil,
-                            title: title,
+                            title: dir.title(of: pane),
                             program: program,
                             state: truth?.shown,
                             isDock: offset >= tab.panes.count,

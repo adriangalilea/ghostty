@@ -335,19 +335,16 @@ extension VigilWorkspaces {
     }
 
     /// The name a terminal title gives its pane, nil when it gives none.
-    /// Claude prefixes its title with a live STATE marker: a braille
-    /// spinner while working, `✳` when idle. That is a status light, not
-    /// part of the name: freezing it into stored state would pin a stale
-    /// spinner onto a captured pane forever, and a row showing it would
-    /// flicker several times a second. Ghostty's default (a bare "👻") and
-    /// an empty title name nothing.
+    /// Claude prefixes its title with a live STATE marker (a spinner while
+    /// working, `✳` when idle): a status light, not part of the name.
+    /// Freezing it into stored state would pin a stale spinner onto a
+    /// captured pane forever, and a row showing it would flicker several
+    /// times a second. One rule with the daemon's `<pane>.title`
+    /// (`Registry.unlit`); Ghostty's default (a bare "👻", a symbol) and an
+    /// empty title name nothing.
     nonisolated static func name(ofTitle raw: String) -> String? {
-        var t = raw.trimmingCharacters(in: .whitespaces)
-        while let first = t.unicodeScalars.first,
-              (0x2800...0x28FF).contains(first.value) || first == "✳" || first == "·" {
-            t = String(String.UnicodeScalarView(t.unicodeScalars.dropFirst())).trimmingCharacters(in: .whitespaces)
-        }
-        return t.isEmpty || t == "👻" ? nil : t
+        let t = Registry.unlit(raw)
+        return t.isEmpty ? nil : t
     }
 
     /// A pane's remembered name, from its registry entry.
