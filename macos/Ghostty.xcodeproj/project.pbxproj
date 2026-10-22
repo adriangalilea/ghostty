@@ -54,6 +54,7 @@
 		0DAA1111000000000000E042 /* VigilNotify.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 0DAA1111000000000000E002 /* VigilNotify.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		0DAA1111000000000000E052 /* AuthzGlance in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E050 /* AuthzGlance */; };
 		0DAA1111000000000000E053 /* VigilActivity in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E051 /* VigilActivity */; };
+		0DAA1111000000000000E061 /* MarkdownText in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E060 /* MarkdownText */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -440,6 +441,7 @@
 				0DAA111100000000000002C5 /* Log in Frameworks */,
 				0DAA1111000000000000E052 /* AuthzGlance in Frameworks */,
 				0DAA1111000000000000E053 /* VigilActivity in Frameworks */,
+				0DAA1111000000000000E061 /* MarkdownText in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -659,6 +661,7 @@
 				0DAA111100000000000002C4 /* Log */,
 				0DAA1111000000000000E050 /* AuthzGlance */,
 				0DAA1111000000000000E051 /* VigilActivity */,
+				0DAA1111000000000000E060 /* MarkdownText */,
 			);
 			productName = "Ghostty-iOS";
 			productReference = A5D4499D2B53AE7B000F5B83 /* Ghostty-iOS.app */;
@@ -1960,6 +1963,7 @@
 		0DAA1111000000000000E027 /* AuthzGlance */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000002A1; productName = AuthzGlance; };
 		0DAA1111000000000000E050 /* AuthzGlance */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000002A1; productName = AuthzGlance; };
 		0DAA1111000000000000E051 /* VigilActivity */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */; productName = VigilActivity; };
+		0DAA1111000000000000E060 /* MarkdownText */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = MarkdownText; };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A5B30529299BEAAA0047F10C /* Project object */;

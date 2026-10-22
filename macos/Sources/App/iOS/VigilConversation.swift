@@ -1,4 +1,5 @@
 import AuthzUI
+import MarkdownText
 import SwiftUI
 import VigilActivity
 import VigilLink
@@ -413,7 +414,7 @@ private struct EntryRow: View {
         case .prompt(let prompt):
             PromptRow(prompt: prompt)
         case .reply(let clip):
-            Markdown(text: clip.text).font(.callout)
+            MarkdownView(clip.text).markdownStyle(MarkdownStyle(textStyle: .callout))
         case .thinking(let clip):
             if !clip.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Folded(title: "Thinking", systemImage: "ellipsis.bubble") {
@@ -753,7 +754,8 @@ private struct ToolBody: View {
             }
         case .plan(let plan):
             Expandable(lines: 10) { lines in
-                Markdown(text: plan.text).font(.footnote).lineLimit(lines)
+                MarkdownView(plan.text).markdownStyle(
+                    lines.map { MarkdownStyle(textStyle: .footnote).preview(lines: $0) } ?? MarkdownStyle(textStyle: .footnote))
             }
         case .todos(let todos):
             VStack(alignment: .leading, spacing: 4) {
@@ -1001,7 +1003,7 @@ private struct EventRow: View {
             Divided(text: ["Context compacted", trigger, Self.tokens(before, after)].compactMap { $0 }.joined(separator: " · "))
         case .summary(let clip):
             Folded(title: "What it kept after compacting", systemImage: "archivebox") {
-                Markdown(text: clip.text).font(.footnote).foregroundStyle(.secondary)
+                MarkdownView(clip.text).markdownStyle(.footnote)
             }
         case .interrupted:
             Label("Interrupted", systemImage: "stop.circle").font(.footnote).foregroundStyle(.secondary)
@@ -1156,103 +1158,3 @@ private struct ContextMeter: View {
     }
 }
 
-// MARK: - Markdown
-
-/// An agent's markdown, drawn by blocks: paragraphs with their inline
-/// marks (bold, code, links), headings, fenced code in a well, tables as
-/// written in a monospaced well, list items with their bullet.
-struct Markdown: View {
-    let text: String
-
-    enum Block {
-        case paragraph(String)
-        case heading(String)
-        case code(String)
-        case table(String)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(Self.blocks(text).enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .paragraph(let words):
-                    Text(Self.inline(words)).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                case .heading(let words):
-                    Text(Self.inline(words)).fontWeight(.semibold)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                case .code(let code), .table(let code):
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(code).font(.caption.monospaced()).textSelection(.enabled).fixedSize()
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 7)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-            }
-        }
-    }
-
-    static func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(text)
-    }
-
-    static func blocks(_ text: String) -> [Block] {
-        var blocks: [Block] = []
-        var paragraph: [String] = []
-        var table: [String] = []
-        var code: [String]?
-        func flush() {
-            if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: "\n"))) }
-            if !table.isEmpty { blocks.append(.table(table.joined(separator: "\n"))) }
-            paragraph = []
-            table = []
-        }
-        for line in text.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if var open = code {
-                if trimmed.hasPrefix("```") {
-                    blocks.append(.code(open.joined(separator: "\n")))
-                    code = nil
-                } else {
-                    open.append(line)
-                    code = open
-                }
-                continue
-            }
-            if trimmed.hasPrefix("```") {
-                flush()
-                code = []
-            } else if trimmed.isEmpty {
-                flush()
-            } else if trimmed.hasPrefix("|") {
-                if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: "\n"))); paragraph = [] }
-                table.append(trimmed)
-            } else if let heading = Self.heading(trimmed) {
-                flush()
-                blocks.append(.heading(heading))
-            } else {
-                if !table.isEmpty { blocks.append(.table(table.joined(separator: "\n"))); table = [] }
-                paragraph.append(Self.bullet(line))
-            }
-        }
-        if let open = code { blocks.append(.code(open.joined(separator: "\n"))) }
-        flush()
-        return blocks
-    }
-
-    private static func heading(_ line: String) -> String? {
-        let hashes = line.prefix { $0 == "#" }.count
-        guard (1...6).contains(hashes), line.dropFirst(hashes).first == " " else { return nil }
-        return String(line.dropFirst(hashes + 1))
-    }
-
-    /// "- item" and "* item" as "• item", their indent kept.
-    private static func bullet(_ line: String) -> String {
-        let indent = line.prefix { $0 == " " }
-        let rest = line.dropFirst(indent.count)
-        guard rest.hasPrefix("- ") || rest.hasPrefix("* ") else { return line }
-        return indent + "• " + rest.dropFirst(2)
-    }
-}
