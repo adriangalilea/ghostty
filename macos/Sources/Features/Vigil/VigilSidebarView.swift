@@ -764,7 +764,7 @@ struct VigilSidebarView: View {
         HStack(spacing: 3 * scale) {
             lookerGlyphs(pane.lookers)
             if pane.followed {
-                mark("bell.fill", .primary.opacity(0.75), "Followed on iPhone: its stalls and ends ring there")
+                mark("pin.fill", .primary.opacity(0.75), "Followed on iPhone: its stalls and ends ring there")
             }
             switch pane.priority {
             case .high: mark("exclamationmark", .orange, "High priority: rings through Focus")
