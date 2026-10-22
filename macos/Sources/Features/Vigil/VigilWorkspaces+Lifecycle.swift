@@ -80,12 +80,12 @@ extension VigilWorkspaces {
     /// Start a pane's daemon headless (`vigild new <id> [-c cmd]`): the
     /// process half of creation. The app's own environment flows (plus
     /// VIGIL_WORKSPACE), the same contract as the attach backend's spawn;
-    /// vigild scrubs agent ancestry itself. Failure screams — a created
-    /// session that is not running is the lie this call exists to kill.
+    /// vigild scrubs agent ancestry itself. The app is the birth authority
+    /// (`PaneBirth`: a daemon is born only for the app or vigil-agent).
+    /// Failure screams — a created session that is not running is the lie
+    /// this call exists to kill.
     @discardableResult
     func startDaemon(pane: Registry.Pane, session: String) -> Bool {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: Self.vigildBin)
         // The folder is vigild's to resolve (a missing one falls back to its
         // nearest existing parent), never this process's working directory.
         var args = ["new", pane.id, "--cwd", pane.cwd]
@@ -99,18 +99,15 @@ extension VigilWorkspaces {
                 args += ["-c", cmd]
             }
         }
-        proc.arguments = args
         var env = ProcessInfo.processInfo.environment
         env["VIGIL_WORKSPACE"] = session
-        proc.environment = env
         do {
-            try proc.run()
-            proc.waitUntilExit()
-            if proc.terminationStatus == 0 {
+            let status = try PaneBirth.run(args, environment: env)
+            if status == 0 {
                 daemonLog.info("daemon up", ["pane": pane.id])
                 return true
             } else {
-                daemonLog.error("daemon spawn failed", ["pane": pane.id, "status": proc.terminationStatus])
+                daemonLog.error("daemon spawn failed", ["pane": pane.id, "status": status])
             }
         } catch {
             daemonLog.error("daemon spawn failed", ["pane": pane.id, "err": error])

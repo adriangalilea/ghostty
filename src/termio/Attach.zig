@@ -295,7 +295,8 @@ fn sendHello(self: *Attach, kind: []const u8) void {
     self.enqueueFrame('h', hello);
 }
 
-/// Spawn `vigild new <id> [-c cmd | -- argv]` to bring the daemon up. No
+/// Spawn `vigild new <id> [-c cmd | -- argv]` to bring the daemon up, this
+/// app its birth authority (`birth`). No
 /// command = the daemon's login shell; a command is the daemon's CHILD
 /// (`<login shell> -lc` for a shell string, verbatim for `direct:` argv),
 /// so the spec records it and `vigild restore` respawns it after a reboot.
@@ -330,16 +331,9 @@ fn spawnDaemon(self: *Attach) !void {
         },
     };
 
-    var child = std.process.Child.init(argv.items, self.alloc);
-    child.env_map = &env;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    const term = try child.spawnAndWait();
-    switch (term) {
-        .Exited => |code| if (code != 0) return error.DaemonSpawnFailed,
-        else => return error.DaemonSpawnFailed,
-    }
+    // The app is the birth's authority (`birth`): vigild alone may create
+    // no pane.
+    if (try birth(self.alloc, argv.items, &env) != 0) return error.DaemonSpawnFailed;
 }
 
 pub fn threadEnter(
@@ -900,11 +894,84 @@ fn restoreDaemons(self: *Attach) void {
     const home = posix.getenv("HOME") orelse return;
     const bin = std.fmt.allocPrint(self.alloc, "{s}/.local/bin/vigild", .{home}) catch return;
     defer self.alloc.free(bin);
-    var child = std.process.Child.init(&.{ bin, "restore", self.id }, self.alloc);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    _ = child.spawnAndWait() catch |err| log.warn("attach: {s} vigild restore failed err={}", .{ self.id, err });
+    _ = birth(self.alloc, &.{ bin, "restore", self.id }, null) catch |err| log.warn("attach: {s} vigild restore failed err={}", .{ self.id, err });
+}
+
+extern "c" fn posix_spawn_file_actions_init(actions: *?*anyopaque) c_int;
+extern "c" fn posix_spawn_file_actions_destroy(actions: *?*anyopaque) c_int;
+extern "c" fn posix_spawn_file_actions_adddup2(actions: *?*anyopaque, fd: c_int, target: c_int) c_int;
+extern "c" fn posix_spawn_file_actions_addopen(actions: *?*anyopaque, fd: c_int, path: [*:0]const u8, flags: c_int, mode: std.c.mode_t) c_int;
+extern "c" fn posix_spawn(pid: *posix.pid_t, path: [*:0]const u8, actions: *const ?*anyopaque, attr: ?*const anyopaque, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn socketpair(domain: c_int, kind: c_int, protocol: c_int, fds: *[2]c_int) c_int;
+
+/// vigild `new`/`restore` with this app as their birth authority: a daemon
+/// is born only for the Vigil app or vigil-agent (vigild's authorizeBirth,
+/// judged by code signature). vigild's stdin is one end of a socketpair;
+/// this process answers `born <id> <nonce>` on the other for every daemon
+/// vigild spawns, until vigild and every daemon have let go of it, then
+/// reaps vigild. Its exit code. posix_spawn, never fork: this is a
+/// threaded process.
+fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.EnvMap) !u8 {
+    // Daemons live on a Mac; a phone's panes are always another device's.
+    if (comptime builtin.os.tag != .macos) return error.Unsupported;
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const argv_z = try arena.allocSentinel(?[*:0]const u8, argv.len, null);
+    for (argv, 0..) |arg, i| argv_z[i] = (try arena.dupeZ(u8, arg)).ptr;
+    const envp: [*:null]const ?[*:0]const u8 = if (env) |map|
+        (try std.process.createNullDelimitedEnvMap(arena, map)).ptr
+    else
+        @ptrCast(std.c.environ);
+
+    var pair: [2]c_int = undefined;
+    if (socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
+    defer posix.close(pair[0]);
+    // Both ends close-on-exec: dup2 onto stdin clears it for vigild's copy
+    // alone, and no other child of this app ever holds either end.
+    _ = try posix.fcntl(pair[0], posix.F.SETFD, posix.FD_CLOEXEC);
+    _ = try posix.fcntl(pair[1], posix.F.SETFD, posix.FD_CLOEXEC);
+    var actions: ?*anyopaque = null;
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        posix.close(pair[1]);
+        return error.SpawnActions;
+    }
+    defer _ = posix_spawn_file_actions_destroy(&actions);
+    _ = posix_spawn_file_actions_adddup2(&actions, pair[1], 0);
+    const write_only: c_int = @bitCast(posix.O{ .ACCMODE = .WRONLY });
+    _ = posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", write_only, 0);
+    _ = posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", write_only, 0);
+    var pid: posix.pid_t = 0;
+    const rc = posix_spawn(&pid, argv_z[0].?, &actions, null, argv_z.ptr, envp);
+    posix.close(pair[1]);
+    if (rc != 0) return error.SpawnFailed;
+
+    var line: [256]u8 = undefined;
+    var len: usize = 0;
+    while (true) {
+        const n = posix.read(pair[0], line[len .. len + 1]) catch break;
+        if (n == 0) break;
+        if (line[len] != '\n') {
+            len += 1;
+            if (len == line.len) break;
+            continue;
+        }
+        var words = std.mem.tokenizeScalar(u8, line[0..len], ' ');
+        len = 0;
+        if (!std.mem.eql(u8, words.next() orelse continue, "birth")) continue;
+        const id = words.next() orelse continue;
+        const nonce = words.next() orelse continue;
+        var valid = nonce.len == 16;
+        for (nonce) |ch| valid = valid and std.ascii.isHex(ch);
+        for (id) |ch| valid = valid and (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_');
+        if (!valid) continue;
+        var answer: [256]u8 = undefined;
+        const said = std.fmt.bufPrint(&answer, "born {s} {s}\n", .{ id, nonce }) catch continue;
+        var written: usize = 0;
+        while (written < said.len) written += posix.write(pair[0], said[written..]) catch break;
+    }
+    const waited = posix.waitpid(pid, 0);
+    return if (posix.W.IFEXITED(waited.status)) posix.W.EXITSTATUS(waited.status) else 255;
 }
 
 /// Runs on the read thread after EOF. Returns the new socket, wired into

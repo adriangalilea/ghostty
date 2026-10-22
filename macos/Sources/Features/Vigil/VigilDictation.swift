@@ -177,19 +177,16 @@ enum VigilDictation {
         let clean = String(text.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined())
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return Reply(ok: true) }
-        let process = Process()
-        process.executableURL = VigilPaths.vigild
-        process.arguments = ["sendraw", pane, clean + " "]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch {
-            dictationLog.error("sendraw failed to launch", ["err": "\(error)"])
-            return .refused("vigild did not start")
+        // Typed by the app itself over the pane's socket: a pane answers the
+        // app and vigil-agent, never a vigild it runs.
+        do {
+            try PaneLink.type(pane, keys: clean + " ", hello: "app dictation")
+        } catch {
+            dictationLog.error("not delivered", ["pane": pane, "err": "\(error)"])
+            return .refused("\(error)")
         }
-        process.waitUntilExit()
-        let status = process.terminationStatus
-        dictationLog.info("delivered", ["pane": pane, "chars": clean.count, "status": status])
-        return status == 0 ? Reply(ok: true) : .refused("vigild sendraw exited \(status)")
+        dictationLog.info("delivered", ["pane": pane, "chars": clean.count])
+        return Reply(ok: true)
     }
 
     private static func send(_ reply: Reply, to fd: Int32) {

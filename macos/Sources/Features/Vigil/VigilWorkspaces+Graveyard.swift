@@ -413,21 +413,22 @@ extension VigilWorkspaces {
     /// and before collectOrphans, so a restored daemon is never read as
     /// an orphan of a session the registry still lists.
     func respawnMachineKilledDaemons() {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: Self.vigildBin)
-        proc.arguments = ["restore"]
-        let out = Pipe()
-        proc.standardOutput = out
-        proc.standardError = out
+        // The app is the births' authority (`PaneBirth`), which waits for
+        // the restore before anything is read: its report goes to a file (a
+        // pipe nobody drains would stall a long report).
+        let report = FileManager.default.temporaryDirectory.appendingPathComponent("vigil-restore-\(UUID().uuidString)")
         do {
-            try proc.run()
-            let data = out.fileHandleForReading.readDataToEndOfFile()
-            proc.waitUntilExit()
+            FileManager.default.createFile(atPath: report.path, contents: nil, attributes: [.posixPermissions: 0o600])
+            let handle = try FileHandle(forWritingTo: report)
+            defer { try? FileManager.default.removeItem(at: report) }
+            let status = try PaneBirth.run(["restore"], output: handle, errors: handle)
+            try? handle.close()
+            let data = (try? Data(contentsOf: report)) ?? Data()
             let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
             let respawned = lines.filter { $0.hasSuffix(" up") }.count
-            if respawned > 0 || proc.terminationStatus != 0 {
+            if respawned > 0 || status != 0 {
                 daemonLog.info("machine-killed daemons respawned from their specs", [
-                    "respawned": respawned, "status": proc.terminationStatus,
+                    "respawned": respawned, "status": status,
                     "output": lines.filter { !$0.hasSuffix(" up") },
                 ])
             }
