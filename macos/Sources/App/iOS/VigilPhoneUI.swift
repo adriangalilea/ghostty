@@ -514,6 +514,8 @@ struct GlanceRow<Marks: View>: View {
     @ViewBuilder let marks: () -> Marks
 
     private var state: AgentState { node.state ?? .idle }
+    /// The row's line is its last words (done or idle, and it has some).
+    private var saysLastWords: Bool { (state == .done || state == .idle) && glance.said != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -533,10 +535,14 @@ struct GlanceRow<Marks: View>: View {
             }
             line.padding(.leading, 21)
             if let pane = node.followPane {
-                MiddleTruncate(pane, tail: "-")
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, 21)
+                HStack(spacing: 6) {
+                    MiddleTruncate(pane, tail: "-").font(.caption2.monospaced())
+                    // Last words are the past: how long ago, never cut off
+                    // by a long message.
+                    if saysLastWords, let at = glance.saidAt { Text("said " + Self.ago(at)).font(.caption2) }
+                }
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 21)
             }
         }
     }
@@ -556,8 +562,7 @@ struct GlanceRow<Marks: View>: View {
             }
         case .done, .idle:
             if let said = glance.said {
-                let age = Text(glance.saidAt.map { "  · " + Self.ago($0) } ?? "").foregroundStyle(.tertiary)
-                Text("\(said)\(age)").font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+                Text(said).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
             } else {
                 Text(state.words(node.flavor)).font(.footnote).foregroundStyle(.secondary)
             }
