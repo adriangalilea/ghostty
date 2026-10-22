@@ -318,6 +318,7 @@ final class VigilPhone: ObservableObject {
                         self.receipts.info("dir", "following", ["mac": host.name])
                     }
                     self.down[host.id] = nil
+                    VigilAgents.learnNoteKey(of: host.id, node: node)
                 case .directory:
                     guard let dir = step.directory else { continue }
                     if self.directories[host.id] == nil {

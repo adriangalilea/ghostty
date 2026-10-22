@@ -10,7 +10,9 @@ import VigilWire
 /// what needs you there and what you follow. Its Mac's hub alone starts it
 /// (by push) and draws it (`Board`); this app tells each Mac where it is
 /// reached (`AgentsRoute`: the app's push-to-start token, the running
-/// activity's own token, the key it seals to) and what you follow there.
+/// activity's own token, the key it seals to) and what you follow there,
+/// and learns from each Mac the key it signs its notes with (`note-key`):
+/// the activity opens only notes signed by a Mac still paired here.
 ///
 /// The activity's token is the one fact only this phone has, and the Mac
 /// starts nothing else until it hears it, so it is delivered for sure: it is
@@ -31,10 +33,18 @@ enum VigilAgents {
     /// The Macs to tell, and the panes followed on each.
     private static var macs: [String: [String]] = [:]
     private static var observed = Set<String>()
+    /// Whose notes the activity opens (`NoteSenders.homes`: each Mac's note
+    /// key id by its tether root), as kept beside the activity key, where
+    /// the widget reads it.
+    private static var senders = NoteSenders()
 
-    /// At launch: the push-to-start token as iOS gives it, every activity
-    /// running (and every one the Mac starts later) adopted.
+    /// At launch: who notes are taken from as kept, the push-to-start token
+    /// as iOS gives it, every activity running (and every one the Mac
+    /// starts later) adopted.
     static func begin() {
+        do { senders = try AgentsActivity.key.senders() } catch {
+            VigilPhone.shared.receipts.error("agents", "note senders unreadable: every Mac's notes stay generic until it is met", ["err": error])
+        }
         Task {
             for await data in Activity<AgentsActivity>.pushToStartTokenUpdates {
                 startToken = data.map { String(format: "%02x", $0) }.joined()
@@ -54,9 +64,43 @@ enum VigilAgents {
     static func macs(_ next: [String: [String]]) {
         let fresh = next.keys.filter { macs[$0] == nil }
         macs = next
+        // A Mac no longer paired: its notes stop opening.
+        keep(NoteSenders(homes: senders.homes.filter { next[$0.key] != nil }))
         // A Mac newly listed is told even when nothing changed here: its hub
         // may have restarted without this phone's route.
         for mac in fresh { Task { await tell(mac, force: true) } }
+    }
+
+    /// Asks a Mac, now reached, for the key it signs its notes with
+    /// (`note-key`, answered by that very Mac over tether), so the activity
+    /// opens its notes and no one else's. Asked each time its directory
+    /// opens: a Mac whose key changed is learned again.
+    static func learnNoteKey(of mac: String, node: TetherNode) {
+        Task {
+            do {
+                let id = try await VigilLink.noteKey(node, device: mac)
+                guard macs[mac] != nil else { return }
+                var next = senders
+                next.homes[mac] = id
+                keep(next)
+            } catch {
+                VigilPhone.shared.receipts.warn("agents", "note key not learned: its notes stay as last learned", [
+                    "mac": String(mac.prefix(10)), "err": error,
+                ])
+            }
+        }
+    }
+
+    /// Who notes are taken from, kept beside the activity key when it changed.
+    private static func keep(_ next: NoteSenders) {
+        guard next != senders else { return }
+        do {
+            try AgentsActivity.key.keep(next)
+            senders = next
+            VigilPhone.shared.receipts.info("agents", "note senders kept", ["macs": next.homes.count])
+        } catch {
+            VigilPhone.shared.receipts.error("agents", "note senders not kept: a new Mac's notes stay generic", ["err": error])
+        }
     }
 
     /// Follows a pane on a Mac, or stops: the Mac shows it (starting its

@@ -137,7 +137,7 @@ struct VigilFixtureView: View {
         let lead = rows.first?.state ?? .idle
         return AgentsShown(
             state: AgentsActivity.ContentState(state: lead, since: now - 300), mac: mac,
-            note: opened ? Agents(mac: mac, rows: rows, more: more) : nil, stale: stale)
+            note: opened ? Agents(mac: mac, from: "fixture", rows: rows, more: more) : nil, stale: stale)
     }
 
     static let permission = Agents.Row(
