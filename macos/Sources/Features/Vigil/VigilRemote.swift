@@ -293,7 +293,8 @@ final class VigilRemote: ObservableObject {
                             lookers: truth?.lookers.filter { $0 == .phone } ?? [],
                             priority: pane.priority ?? .normal,
                             conversation: truth?.meaning?.conversation,
-                            conversationName: truth?.meaning?.title)
+                            conversationName: truth?.meaning?.title,
+                            background: truth?.meaning?.background)
                     }
                     let anchor = all.first.map { Self.compositeId(host.device, $0.id) }
                     tabs.append(.init(

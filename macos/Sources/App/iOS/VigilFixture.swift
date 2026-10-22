@@ -23,9 +23,12 @@ enum VigilFixture: String {
     /// The other kinds of rows (a plan, a subagent, a compaction, a
     /// failure, a tool vigil does not type), working.
     case conversationLong = "conversation-long"
+    /// A turn done, waiting on its background work: a fork and an agent
+    /// running, a shell watching CI, three that ended.
+    case conversationBackground = "conversation-background"
     /// The home tree: agent panes drawn by their glance (waiting, asked,
-    /// working, done long ago), a shell and an agent with no glance beside
-    /// them, drawn as terminals.
+    /// working, done and waiting on its background work), a shell and an
+    /// agent with no glance beside them, drawn as terminals.
     case home
 
     /// The fixture this launch asked for, if any.
@@ -53,6 +56,8 @@ struct VigilFixtureView: View {
             case .conversationQuestion:
                 ConversationFixture(conversation: Self.conversation(Self.questioning, live: Self.questionLive, offer: Self.question))
             case .conversationLong: ConversationFixture(conversation: Self.conversation(Self.long, live: Self.workingLive, earlier: true))
+            case .conversationBackground:
+                ConversationFixture(conversation: Self.conversation(Self.launching, live: Self.backgroundLive))
             case .activity, .activityMore, .activityIsland: activity
             case .home:
                 // As the app shows it: dark, its tree from `VigilPhone`.
@@ -218,7 +223,8 @@ extension VigilFixtureView {
 
     /// Minerlab as the M5 shows it: a codex scoring, two claudes in one tab
     /// (one waiting on a permission, one that asked a question), a claude
-    /// done an hour and a half ago beside a shell, and a claude whose Mac
+    /// done four minutes ago with two agents and a shell still running in
+    /// the background, beside a shell, and a claude whose Mac
     /// publishes no glance (an older broker): a terminal, as before.
     static let home: [VigilPhone.Node] = {
         let codex = agent("vigil-lively-harbor-88", "Score the qubic miners", .working, glance: PaneGlance(
@@ -236,7 +242,7 @@ extension VigilFixtureView {
         let done = agent("vigil-lively-harbor-92", "Fix the hashrate chart", .done, glance: PaneGlance(
             agent: "claude", conversation: "c41d77e0-5a2b-4e19-b8f3-90d1e2a3b4c5", name: "Fix the hashrate chart",
             said: "Fixed: the chart now plots the 1h average instead of raw samples, so the spikes are gone. The tests pass.",
-            saidAt: now - 5_400, context: 24))
+            saidAt: now - 240, context: 24, background: .init(agents: 2, shells: 1, title: "Cull a failed core phase")))
         let shell = VigilPhone.Node(id: "fixture/lively-harbor/vigil-lively-harbor-93", kind: .pane, title: "fish", state: .idle,
                                     pane: PaneRef(host: host, pane: "vigil-lively-harbor-93", title: "minerlab › fish"),
                                     rows: 40, cols: 120, path: "minerlab › fish", followPane: "vigil-lively-harbor-93",
@@ -376,6 +382,29 @@ extension VigilFixtureView {
     ]
 
     static let workingLive = FeedLive(state: .working, context: 74)
+
+    /// A turn that launched its work in the background and ended.
+    static let launching: [FeedEntry] = [
+        row("b1", "b1", .prompt(.init(text: Clip(text: "Cull the failed phase in a fork, survey the parsers, and wait for CI.")))),
+        tool("b2", "b1", "Agent", .agent(description: "Cull a failed core phase", type: "fork", background: true),
+             .init(status: .ok, output: Clip(text: "Async agent launched successfully."))),
+        tool("b3", "b1", "Agent", .agent(description: "Survey the parsers' callers", type: "Explore", background: true),
+             .init(status: .ok, output: Clip(text: "Async agent launched successfully."))),
+        tool("b4", "b1", "Bash", .shell(command: "gh run watch --exit-status", description: "Wait for CI", background: true),
+             .init(status: .ok, output: Clip(text: "Command running in background with ID: bq3x9."))),
+        row("b5", "b1", .reply(Clip(text: "Three things run in the background now. I'll pick each up as it finishes."))),
+        row("b6", "b1", .event(.turnEnded(milliseconds: 21_000))),
+    ]
+
+    static let backgroundLive = FeedLive(state: .done, context: 46, title: "Cull the failed phase", background: [
+        AgentTask(id: "a16bec942d6e67d1f", kind: .fork, title: "Cull a failed core phase", state: .running, started: now - 1_205),
+        AgentTask(id: "a06d1e2f3a4b5c6d7", kind: .agent, title: "Survey the parsers' callers", state: .running, started: now - 312),
+        AgentTask(id: "bq3x9", kind: .shell, title: "Wait for CI", state: .running, started: now - 95),
+        AgentTask(id: "a1c2", kind: .agent, title: "Read the pool engine policy", state: .completed, started: now - 2_400,
+                       ended: now - 1_300, tokens: 594_100, toolUses: 31),
+        AgentTask(id: "b7y1", kind: .shell, title: "npm run vet", state: .failed, started: now - 1_900, ended: now - 1_850, exitCode: 144),
+        AgentTask(id: "a9f0", kind: .fork, title: "Port the miner to population 32", state: .lost, started: now - 3_600, ended: now - 2_000),
+    ])
 }
 
 /// The conversation as the pane screen shows it: under its bar.

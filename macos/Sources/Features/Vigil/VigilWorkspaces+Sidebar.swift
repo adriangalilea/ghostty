@@ -37,6 +37,9 @@ extension VigilWorkspaces {
         /// name (what the agent's own UI calls it).
         var conversation: String? = nil
         var conversationName: String? = nil
+        /// What its agent runs in the background now (its glance): counted,
+        /// with the first running task's title.
+        var background: PaneGlance.Background? = nil
 
         /// The ids we communicate by, each only where it exists: the
         /// pane's daemon id, its conversation's name and id.
@@ -180,7 +183,8 @@ extension VigilWorkspaces {
                 followed: phoneFollows.contains(pane.id),
                 priority: pane.priority ?? .normal,
                 conversation: meaning?.conversation,
-                conversationName: meaning?.title)
+                conversationName: meaning?.title,
+                background: meaning?.background)
         }
 
         var rows: [SidebarWorkspaceRow] = []

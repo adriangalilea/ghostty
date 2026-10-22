@@ -362,6 +362,9 @@ struct ConversationView: View {
                 if let reply = conversation.reply, reply.failed == nil {
                     PromptRow(prompt: .init(text: Clip(text: reply.text)), sending: true)
                 }
+                if let tasks = conversation.live?.background, tasks.contains(where: \.state.running) {
+                    BackgroundSection(tasks: tasks)
+                }
                 LiveRow(live: conversation.live, shown: phone.directories[conversation.ref.host.id]?.panes[conversation.ref.pane]?.shown)
                     .id(Self.bottom)
             }
@@ -1063,6 +1066,112 @@ private struct Divided: View {
             Rectangle().fill(.primary.opacity(0.12)).frame(height: 0.5)
             Text(text).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).fixedSize()
             Rectangle().fill(.primary.opacity(0.12)).frame(height: 0.5)
+        }
+    }
+}
+
+// MARK: Background work
+
+/// What the agent runs beside its conversation, above its live state, as
+/// its own footer lists it: each running task with its kind, its title and
+/// how long it has run; the ones that ended lately folded into one line.
+/// Shown while something runs (a finished turn can be waiting on it).
+private struct BackgroundSection: View {
+    let tasks: [AgentTask]
+
+    var body: some View {
+        let running = tasks.filter(\.state.running)
+        let ended = tasks.filter { !$0.state.running }
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Background").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            TimelineView(.periodic(from: .now, by: 1)) { clock in
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(running) { task in BackgroundLine(task: task, now: clock.date) }
+                }
+            }
+            if !ended.isEmpty {
+                Folded(title: Self.summary(ended), systemImage: "checkmark.circle") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(ended) { task in BackgroundLine(task: task, now: .now) }
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    /// "3 ended · 1 failed": how many, and how many did not finish well.
+    static func summary(_ ended: [AgentTask]) -> String {
+        let bad = ended.count { $0.state == .failed || $0.state == .lost }
+        return "\(ended.count) ended" + (bad > 0 ? " · \(bad) failed or lost" : "")
+    }
+}
+
+/// One background task in a line: its kind's glyph, its title, then how it
+/// stands (its time running, or how it ended) and its tokens when known.
+private struct BackgroundLine: View {
+    let task: AgentTask
+    let now: Date
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Image(systemName: Self.glyph(task.kind))
+                .font(.caption)
+                .foregroundStyle(task.state.running ? AnyShapeStyle(AgentState.working.tint) : AnyShapeStyle(.secondary))
+                .frame(width: 16)
+                .accessibilityLabel(Self.kind(task.kind))
+            Text(task.title).font(.footnote).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 6)
+            Text(status).font(.caption.monospacedDigit())
+                .foregroundStyle(task.state == .failed || task.state == .lost ? AnyShapeStyle(Hue.care) : AnyShapeStyle(.secondary))
+                .lineLimit(1)
+                .layoutPriority(1)
+        }
+    }
+
+    private var status: String {
+        let run = Self.elapsed((task.ended ?? now.timeIntervalSince1970) - task.started)
+        let tokens = task.tokens.map { " · ↓ \(Self.tokens($0))" } ?? ""
+        switch task.state {
+        case .running: return run + tokens
+        case .completed: return "done in \(run)" + tokens
+        case .failed: return "failed" + (task.exitCode.map { " (exit \($0))" } ?? "") + tokens
+        case .killed: return "stopped"
+        case .stopped: return "ended with its session"
+        case .lost: return "lost"
+        }
+    }
+
+    /// "20m 5s", "1h 3m": the time as Claude's own panel says it.
+    static func elapsed(_ seconds: Double) -> String {
+        Duration.seconds(max(0, Int(seconds))).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .narrow, maximumUnitCount: 2))
+    }
+
+    /// "594.1k", "1.2M".
+    static func tokens(_ count: Int) -> String {
+        count >= 1_000_000 ? String(format: "%.1fM", Double(count) / 1_000_000)
+            : count >= 1_000 ? String(format: "%.1fk", Double(count) / 1_000) : "\(count)"
+    }
+
+    static func glyph(_ kind: AgentTask.Kind) -> String {
+        switch kind {
+        case .agent: "person.2"
+        case .fork: "arrow.triangle.branch"
+        case .shell: "terminal"
+        case .monitor: "waveform.path.ecg"
+        case .other: "circle.dashed"
+        }
+    }
+
+    static func kind(_ kind: AgentTask.Kind) -> String {
+        switch kind {
+        case .agent: "Background agent"
+        case .fork: "Fork"
+        case .shell: "Background shell"
+        case .monitor: "Monitor"
+        case .other: "Background task"
         }
     }
 }

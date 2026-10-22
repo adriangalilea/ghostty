@@ -509,8 +509,9 @@ struct TreeNodeView: View {
 /// state's glyph, its conversation's name, the mark of a conversation (it
 /// opens as one), then one or two lines: the question while it waits for
 /// you, the tool call while it works, else its last words in a card with
-/// its context, and how long ago it said them. Its pane id, dim, under it. Each line only when the glance
-/// has it; the state's words otherwise, never a blank row.
+/// its context, and how long ago it said them; what it runs in the
+/// background, counted. Its pane id, dim, under it. Each line only when the
+/// glance has it; the state's words otherwise, never a blank row.
 struct GlanceRow<Marks: View>: View {
     let node: VigilPhone.Node
     let glance: PaneGlance
@@ -537,6 +538,15 @@ struct GlanceRow<Marks: View>: View {
                 marks()
             }
             line.padding(.leading, 21)
+            // Its background work, while any runs: a finished turn can be
+            // waiting on it ("2 agents · 1 shell").
+            if let background = glance.background {
+                Label(background.words, systemImage: "gearshape.2")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 21)
+                    .accessibilityLabel("In the background: \(background.words)")
+            }
             if let pane = node.followPane {
                 HStack(spacing: 6) {
                     MiddleTruncate(pane, tail: "-").font(.caption2.monospaced())

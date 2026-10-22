@@ -787,11 +787,12 @@ struct VigilSidebarView: View {
     /// yellow dot never shares a row - the antenna hides while working).
     /// Declared vs derived lives in the tooltip (lease notes first).
     /// What a pane is to the world beyond this window, each only when it
-    /// differs from the default: who looks from elsewhere (the phone,
-    /// another Mac), a phone following it, its priority (high rings
-    /// through Focus, low never rings).
+    /// differs from the default: what its agent runs in the background,
+    /// who looks from elsewhere (the phone, another Mac), a phone following
+    /// it, its priority (high rings through Focus, low never rings).
     private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         HStack(spacing: 3 * scale) {
+            if let background = pane.background { backgroundMark(background) }
             lookerGlyphs(pane.lookers)
             if pane.followed {
                 mark("pin.fill", .primary.opacity(0.75), "Followed on iPhone: its stalls and ends ring there")
@@ -809,6 +810,18 @@ struct VigilSidebarView: View {
         ForEach(Array(Set(lookers)).sorted { $0.rawValue < $1.rawValue }, id: \.self) { viewer in
             mark(viewer == .phone ? "iphone" : "laptopcomputer", .cyan, "Open on \(viewer.words) right now")
         }
+    }
+
+    /// Its background work, counted (agents, shells and the rest together);
+    /// hovering says each count and what the first one is for.
+    private func backgroundMark(_ background: PaneGlance.Background) -> some View {
+        HStack(spacing: 1) {
+            Image(systemName: "gearshape.2").font(.system(size: 8 * scale, weight: .semibold))
+            Text("\(background.agents + background.shells + background.others)")
+                .font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
+        }
+        .foregroundStyle(.secondary)
+        .help((["In the background: \(background.words)"] + [background.title].compactMap { $0 }).joined(separator: "\n"))
     }
 
     private func mark(_ symbol: String, _ color: Color, _ help: String) -> some View {
