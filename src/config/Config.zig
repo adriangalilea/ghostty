@@ -6960,7 +6960,7 @@ pub const Keybinds = struct {
                 .{ .new_window = {} },
             );
 
-            // vigil session keys are DEFAULTS, never launch-time config: a
+            // vigil's workspace keys are DEFAULTS, never launch-time config: a
             // launch by macOS (login relaunch, dock, `open`) carries no
             // arguments, and the share kit ships no config file. Global
             // ones work with the app in service mode (no windows) and need

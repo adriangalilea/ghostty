@@ -253,7 +253,7 @@ class BaseTerminalController: NSWindowController,
                 in: self, from: oldView, operation: "split", direction: directionName) { return nil }
         }
 
-        // Create a new surface view. Splits inside a vigil session are
+        // Create a new surface view. Splits inside a vigil workspace are
         // daemon-backed like every other pane of it: the whole workspace
         // survives, not just the first pane.
         guard let ghostty_app = ghostty.app else { return nil }

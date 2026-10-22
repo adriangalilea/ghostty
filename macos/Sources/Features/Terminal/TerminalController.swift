@@ -1330,9 +1330,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return
         }
 
-        // vigil session tab: closing ONE tab of a multi-tab session is a
-        // structural edit, not the session's lifecycle: the tab leaves the
-        // session, buried with the undo grace, then its processes DIE. The
+        // vigil workspace tab: closing ONE tab of a multi-tab workspace is a
+        // structural edit, not the workspace's lifecycle: the tab leaves the
+        // workspace, buried with the undo grace, then its processes DIE. The
         // confirm asks vigil's process truth (what holds the tty), never
         // ghostty's always-running daemon child.
         if VigilWorkspaces.shared.workspaceName(of: self) != nil {

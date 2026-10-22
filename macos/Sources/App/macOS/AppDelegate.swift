@@ -225,7 +225,7 @@ class AppDelegate: NSObject,
             toggleSecureInput(self)
         }
 
-        // vigil session manager in the menu bar. Before initial config load so
+        // vigil's workspace manager in the menu bar. Before initial config load so
         // its menu items are present for the first syncMenuShortcuts pass.
         vigilStatusItem = VigilStatusItem(ghostty: ghostty)
 
