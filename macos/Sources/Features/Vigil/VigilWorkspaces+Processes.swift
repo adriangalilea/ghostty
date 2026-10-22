@@ -89,6 +89,29 @@ extension VigilWorkspaces {
         Program.of(tree: paneFileLines(pane, "tree"), foreground: paneForeground(pane))
     }
 
+    /// What this Mac knows of one of its panes, in the directory's own shape
+    /// (`Directory.Facts`, what `vigild dir` would print for it), so the
+    /// sidebar names its rows by the very rule the phone and a remote
+    /// sidebar apply to the same pane (`Directory.titles`).
+    func paneFacts(_ pane: String) -> Directory.Facts {
+        Directory.Facts(alive: true, tree: paneFileLines(pane, "tree"),
+                        pid: paneFileLines(pane, "pid").joined(separator: "\n"),
+                        title: paneFileLines(pane, "title").first, glance: paneGlance(pane))
+    }
+
+    /// The pane's glance (`state/<pane>.glance`, its broker's), nil when it
+    /// has none. One that does not read is said once per change of the
+    /// file, and the pane is named as if it had none.
+    func paneGlance(_ pane: String) -> PaneGlance? {
+        guard let file = facts.files["state/\(pane).glance"] else { return nil }
+        do { return try JSONDecoder().decode(PaneGlance.self, from: file.data) } catch {
+            if unreadGlances.updateValue(file.revision, forKey: pane) != file.revision {
+                sidebarLog.warn("glance not read: the pane is named without it", ["pane": pane, "err": error])
+            }
+            return nil
+        }
+    }
+
     /// Background SENTRIES under a pane: labeled tree processes that are
     /// neither the shell nor the pane's program - "something is keeping
     /// watch under this quiet pane" (a tg watch under an idle claude, a

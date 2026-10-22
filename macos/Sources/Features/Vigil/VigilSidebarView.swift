@@ -623,6 +623,7 @@ struct VigilSidebarView: View {
                     .font(.system(size: 8 * scale))
                     .foregroundColor(Color.secondary.opacity(0.8))
             }
+            paneIdentity(pane)
             Spacer(minLength: 4)
             paneMarks(pane)
             followKeycap(id)
@@ -650,6 +651,15 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: id as NSString)
         }
         .contextMenu {
+            // The ids we communicate by, each where it exists.
+            Section {
+                ForEach(pane.identifiers, id: \.label) { id in
+                    Button("Copy \(id.label)") {
+                        VigilSidebarView.copied.copy(id.value)
+                        sidebarLog.info("copied", ["what": id.label, "pane": pane.id])
+                    }
+                }
+            }
             if let paneId = pane.paneId {
                 Button("Rename…") {
                     VigilIdentity.editModal(
@@ -689,6 +699,26 @@ struct VigilSidebarView: View {
         .opacity(hintFade(id)
             * (pane.paneId.map { dragSourceFade(.pane(session: session, paneId: $0, isDock: pane.isDock)) } ?? 1))
         .overlay(alignment: .leading) { hintChip(id, depth: level) }
+    }
+
+    /// Ink's one copy action, for the rows' Copy items (a menu has no
+    /// place to show its confirmation; the pasteboard is the receipt).
+    static let copied = CopyFeedback()
+
+    /// The ids we speak by, dim beside the name and never louder than it:
+    /// the conversation's name when the row's title is not it (you named
+    /// the pane), else the pane's id cut in the middle (its end tells panes
+    /// apart). Hovering the row shows every id whole; its menu copies them.
+    @ViewBuilder
+    private func paneIdentity(_ pane: VigilWorkspaces.SidebarPane) -> some View {
+        let named = pane.conversationName.flatMap { $0 == pane.title ? nil : $0 }
+        if let dim = named ?? pane.identifiers.first?.value {
+            MiddleTruncate(dim, tail: named == nil ? "-" : 6)
+                .font(.system(size: 9 * scale, design: named == nil ? .monospaced : .default))
+                .foregroundStyle(.secondary.opacity(0.7))
+                .layoutPriority(-1)
+                .help(pane.identifiers.map { "\($0.label): \($0.value)" }.joined(separator: "\n"))
+        }
     }
 
     // MARK: Jump hints (helix gw: f in the bar, labels appear, type to land)

@@ -223,6 +223,13 @@ final class VigilRemote: ObservableObject {
         guard let index = hosts.firstIndex(where: { $0.device == device }) else { return }
         let dir = received.projected
         guard hosts[index].directory != dir || hosts[index].error != nil else { return }
+        // A glance that did not travel or did not read: said once per
+        // reason; the row names its pane without it.
+        for (pane, facts) in dir.panes where facts.glanceError != hosts[index].directory?.panes[pane]?.glanceError {
+            if let why = facts.glanceError {
+                remoteLog.warn("glance not read: the pane is named without it", ["host": hosts[index].name, "pane": pane, "err": why])
+            }
+        }
         // A receipt per SHAPE change (a session or pane came or went), not
         // per state flip: the stream delivers every flip and a busy fleet
         // would write the log a few times a second.
@@ -279,14 +286,14 @@ final class VigilRemote: ObservableObject {
                             // Another Mac looking at a remote pane is this
                             // one (two Macs): only the phone is news.
                             lookers: truth?.lookers.filter { $0 == .phone } ?? [],
-                            priority: pane.priority ?? .normal)
+                            priority: pane.priority ?? .normal,
+                            conversation: truth?.meaning?.conversation,
+                            conversationName: truth?.meaning?.title)
                     }
                     let anchor = all.first.map { Self.compositeId(host.device, $0.id) }
-                    let title = tab.label.flatMap { $0.isEmpty ? nil : $0 }
-                        ?? ((tab.panes.first?.cwd ?? "") as NSString).lastPathComponent
                     tabs.append(.init(
                         id: VigilWorkspaces.tabRowId(composite, anchor: anchor, index: index),
-                        title: title.isEmpty ? "tab \(index + 1)" : title,
+                        title: dir.title(ofTab: index, in: session),
                         index: index,
                         panes: panes,
                         anchor: anchor,

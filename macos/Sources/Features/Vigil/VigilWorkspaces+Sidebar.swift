@@ -32,6 +32,24 @@ extension VigilWorkspaces {
         /// A phone follows it (the hub's board).
         var followed: Bool = false
         var priority: Registry.Priority = .normal
+        /// The agent's conversation (its glance), while one runs there: its
+        /// id (Claude's session id, what `c -r` and its logs name) and its
+        /// name (what the agent's own UI calls it).
+        var conversation: String? = nil
+        var conversationName: String? = nil
+
+        /// The ids we communicate by, each only where it exists: the
+        /// pane's daemon id, its conversation's name and id.
+        var identifiers: [Identifier] {
+            [("Pane ID", paneId ?? VigilRemote.split(id)?.name), ("Conversation Name", conversationName),
+             ("Conversation ID", conversation)]
+                .compactMap { label, value in value.map { Identifier(label: label, value: $0) } }
+        }
+    }
+
+    struct Identifier: Hashable {
+        let label: String
+        let value: String
     }
 
     struct SidebarTab: Identifiable, Equatable {
@@ -132,23 +150,23 @@ extension VigilWorkspaces {
         let leases = watchLeases()
 
         /// A tab's panes (splits, then the dock) named by the one rule every
-        /// surface reads (`Registry.Pane.ownName`: yours, an agent's
-        /// conversation from its daemon's published title, what runs there,
-        /// ...), namesakes numbered as the phone numbers them.
+        /// surface reads (`Directory.titles`: yours, an agent's conversation
+        /// from its glance, then its daemon's published title, what runs
+        /// there, ...), from this Mac's files in the directory's own shape,
+        /// so the phone reads the very same names.
         func paneRows(_ tab: Registry.Tab) -> [SidebarPane] {
             let members = tab.members
-            let programs = members.map { paneProgram($0.id) }
-            let names = Directory.numbered(members.indices.map {
-                members[$0].ownName(program: programs[$0], title: paneFileLines(members[$0].id, "title").first,
-                                    home: NSHomeDirectory())
-            })
+            let known = Dictionary(uniqueKeysWithValues: members.map { ($0.id, paneFacts($0.id)) })
+            let names = Directory.titles(of: members, facts: known, home: NSHomeDirectory())
             return members.indices.map {
-                paneRow(members[$0], title: names[$0], program: programs[$0], isDock: $0 >= tab.panes.count)
+                paneRow(members[$0], title: names[$0], facts: known[members[$0].id]!, isDock: $0 >= tab.panes.count)
             }
         }
 
-        func paneRow(_ pane: Registry.Pane, title: String, program: String?, isDock: Bool) -> SidebarPane {
-            SidebarPane(
+        func paneRow(_ pane: Registry.Pane, title: String, facts: Directory.Facts, isDock: Bool) -> SidebarPane {
+            let program = facts.program
+            let meaning = facts.meaning
+            return SidebarPane(
                 id: pane.id,
                 paneId: pane.id,
                 title: title,
@@ -160,17 +178,9 @@ extension VigilWorkspaces {
                 watchProcs: paneWatchers(pane.id),
                 lookers: Viewer.parse(paneFileLines(pane.id, "viewers").joined(separator: "\n")),
                 followed: phoneFollows.contains(pane.id),
-                priority: pane.priority ?? .normal)
-        }
-
-        /// A tab's skim label: WHERE it lives (the folder rule every surface
-        /// shares, home as `~`), never an echo of its first pane's program
-        /// or title (the pane rows already say that; a terminal title is the
-        /// full path).
-        func tabTitle(cwd: String?, fallback: String) -> String {
-            guard let cwd, !cwd.isEmpty else { return fallback }
-            let base = Directory.folder(cwd, home: NSHomeDirectory())
-            return base.isEmpty ? fallback : base
+                priority: pane.priority ?? .normal,
+                conversation: meaning?.conversation,
+                conversationName: meaning?.title)
         }
 
         var rows: [SidebarWorkspaceRow] = []
@@ -186,13 +196,15 @@ extension VigilWorkspaces {
                 }
             }
             var tabs: [SidebarTab] = []
+            // A tab's skim label: yours, else WHERE it lives (home as `~`),
+            // namesakes numbered: the phone's rule, the phone's strings.
+            let tabTitles = Directory.titles(ofTabs: session.tabs, home: NSHomeDirectory())
             for (index, tab) in session.tabs.enumerated() {
                 let ids = Set(tab.paneIds)
                 guard !ids.isEmpty else { continue }
                 let panes = paneRows(tab)
                 let anchor = tab.panes.first?.id ?? tab.dock?.panes.first?.id
-                let title = tab.label.flatMap { $0.isEmpty ? nil : $0 }
-                    ?? tabTitle(cwd: tab.panes.first?.cwd, fallback: "tab \(index + 1)")
+                let title = tabTitles[index]
                 tabs.append(SidebarTab(
                     id: Self.tabRowId(name, anchor: anchor, index: index),
                     title: title,

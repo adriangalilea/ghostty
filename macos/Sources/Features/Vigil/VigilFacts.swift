@@ -125,7 +125,7 @@ final class VigilFacts: @unchecked Sendable {
             for name in names {
                 let ext = name.split(separator: ".").last.map(String.init) ?? ""
                 let wanted = folder == "panes" ? ["pid", "tree", "died", "size", "screen", "viewers", "command", "title"].contains(ext)
-                    : folder == "state" ? ["state", "seen"].contains(ext) : ext == "json"
+                    : folder == "state" ? ["state", "seen", "glance"].contains(ext) : ext == "json"
                 guard wanted else { continue }
                 let key = folder + "/" + name
                 if let file = Self.read(root + "/" + key, previous: current.files[key]) { files[key] = file }
@@ -147,8 +147,18 @@ final class VigilFacts: @unchecked Sendable {
         // Identical means the BYTES: a tree rewritten with the same lines (a
         // child that came and went between two reads) is a new inode and
         // mtime and no new fact; each such rewrite was a sidebar revision.
+        // A glance is rewritten with every tool call its agent makes; the
+        // sidebar draws only its conversation (agent, id, name).
         let sidebarChanged = current.revision == 0 || leases != current.leases ||
-            files.contains { key, file in Self.sidebarKey(key) && (key.hasSuffix(".tree") ? current.files[key]?.data != file.data : current.files[key] != file) } ||
+            files.contains { key, file in
+                guard Self.sidebarKey(key) else { return false }
+                if key.hasSuffix(".tree") { return current.files[key]?.data != file.data }
+                if key.hasSuffix(".glance") {
+                    guard let before = current.files[key] else { return true }
+                    return Self.conversation(before) != Self.conversation(file)
+                }
+                return current.files[key] != file
+            } ||
             current.files.keys.contains { Self.sidebarKey($0) && files[$0] == nil }
         current = Snapshot(revision: current.revision + 1,
             sidebarRevision: current.sidebarRevision + (sidebarChanged ? 1 : 0), files: files, leases: leases)
@@ -169,6 +179,14 @@ final class VigilFacts: @unchecked Sendable {
 
     private static func identity(_ info: stat) -> String {
         "\(info.st_ino)-\(info.st_mtimespec.tv_sec * 1_000_000_000 + Int(info.st_mtimespec.tv_nsec))"
+    }
+
+    /// What a sidebar draws of a glance file (VigilWire's `PaneGlance`): its
+    /// agent, conversation id and name, nil when it does not read (the
+    /// reader that names the pane says why).
+    static func conversation(_ file: File) -> [String]? {
+        guard let object = try? JSONSerialization.jsonObject(with: file.data) as? [String: Any] else { return nil }
+        return ["agent", "conversation", "name"].map { object[$0] as? String ?? "" }
     }
 
     private static func sidebarKey(_ key: String) -> Bool {

@@ -56,6 +56,9 @@ import VigilWire
 class VigilWorkspaces {
     static let shared = VigilWorkspaces()
     var facts = VigilFacts.Snapshot()
+    /// Each pane whose glance file did not read, by the file revision last
+    /// said (`paneGlance`): one warning per broken file, never per render.
+    var unreadGlances: [String: String] = [:]
     lazy var factsLoader = VigilFacts(report: { event in
         switch event {
         case .seenUnwritable(let pane, let error): factsLog.error("seen mark not written", ["pane": pane, "err": error])
