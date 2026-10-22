@@ -38,6 +38,16 @@ final class Conversation: ObservableObject {
     /// live state), never with a page prepended: what keeps a reader at
     /// the newest row there.
     @Published private(set) var revision = 0
+    /// How many of the newest rows are drawn. A snapshot holds a long tail
+    /// (200 rows, every one laid out to anchor the view at its bottom, which
+    /// held the screen blank for seconds): the screen draws a page of it and
+    /// reveals the rest as the top comes into view, before asking the Mac.
+    @Published private(set) var drawn = Conversation.page
+    static let page = 30
+    /// The rows drawn, oldest first.
+    var visible: ArraySlice<FeedEntry> { entries.suffix(drawn) }
+    /// Rows older than those drawn exist, here or on the Mac.
+    var more: Bool { entries.count > drawn || earlier }
     private var conversation: String?
     private var index: [String: Int] = [:]
     private var task: Task<Void, Never>?
@@ -193,11 +203,16 @@ final class Conversation: ObservableObject {
     private func replace(_ rows: [FeedEntry]) {
         entries = rows
         index = Dictionary(rows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { _, last in last })
+        drawn = Self.page
         revision += 1
     }
 
-    /// The page before the oldest row held, put above it.
+    /// The page above the rows drawn: from those held, else from the Mac.
     func loadEarlier() {
+        if entries.count > drawn {
+            drawn = min(entries.count, drawn + Self.page)
+            return
+        }
         guard earlier, !paging, let first = entries.first, let conversation else { return }
         paging = true
         pageError = nil
@@ -210,6 +225,7 @@ final class Conversation: ObservableObject {
                 let fresh = page.entries.filter { index[$0.id] == nil }
                 entries = fresh + entries
                 index = Dictionary(entries.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { _, last in last })
+                drawn += fresh.count
                 earlier = page.earlier
                 VigilPhone.shared.receipts.info("feed", "earlier page", ["pane": ref.pane, "entries": fresh.count, "more": page.earlier])
             } catch {
@@ -327,8 +343,8 @@ struct ConversationView: View {
     private var rows: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
-                if conversation.earlier { EarlierRow(conversation: conversation) }
-                ForEach(conversation.entries) { entry in
+                if conversation.more { EarlierRow(conversation: conversation) }
+                ForEach(conversation.visible) { entry in
                     EntryRow(entry: entry, conversation: conversation)
                 }
                 if conversation.requestUnplaced {
