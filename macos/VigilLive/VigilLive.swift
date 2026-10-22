@@ -11,8 +11,9 @@ import WidgetKit
 /// you: the question and wide Allow / Deny, the question its turn ended
 /// on, the tool call it runs exactly, its last words; then its context bar
 /// and Reply / Open), and under it the others needing you as one line each
-/// (a tap opens the pane), ‹ › turning through the rest. Nothing needing
-/// you: one quiet line until the Mac ends it.
+/// (a tap opens the pane), and last the Mac it speaks for, ‹ › turning
+/// through the rest. Nothing needing you: one quiet line until the Mac
+/// ends it.
 ///
 /// Every word beyond the leading state arrives sealed to this phone
 /// (`Agents`) and is opened here with the app's key; without it the
@@ -122,13 +123,31 @@ private struct LockScreen: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(shown.pageRows, id: \.pane) { row in OneLine(row: row) }
                 }
-                Pager(shown: shown)
+            }
+            Footline(shown: shown, stale: stale)
+        }
+    }
+}
+
+/// The card's last line: which Mac it speaks for (one card per Mac, so two
+/// Macs are two cards, each saying its own), whether it is stale, and the
+/// pager when the others fill more than a page.
+private struct Footline: View {
+    let shown: Shown
+    let stale: Bool
+    var body: some View {
+        HStack(spacing: 10) {
+            if let mac = shown.note?.mac {
+                Label(mac, systemImage: "desktopcomputer").lineLimit(1)
             }
             if stale {
-                Label("Not updated lately", systemImage: "clock.badge.exclamationmark")
-                    .font(.caption2).foregroundStyle(.secondary)
+                Label("Not updated lately", systemImage: "clock.badge.exclamationmark").lineLimit(1)
             }
+            Spacer(minLength: 0)
+            Pager(shown: shown)
         }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(.secondary)
     }
 }
 
@@ -245,7 +264,7 @@ private struct OneLine: View {
                 Circle().fill(row.tint).frame(width: 7, height: 7)
                 if let emoji = row.emoji { Text(emoji).font(.caption) }
                 Text(row.label).font(.caption.weight(.semibold)).lineLimit(1).layoutPriority(1)
-                Text(row.line ?? row.commandWords.map { [$0, row.commandLine].compactMap { $0 }.joined(separator: " · ") } ?? row.state.words)
+                Text(row.line ?? row.commandWords.map { [$0, row.commandLine].compactMap { $0 }.joined(separator: " · ") } ?? row.state.words(row.flavor))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 4)
                 // The header's clock, small: "1:03:12" ticking, never a
@@ -263,29 +282,24 @@ private struct OneLine: View {
 }
 
 /// ‹ n/m › when the others fill more than a page, "+N more" when the Mac
-/// carried fewer than it has.
+/// carried fewer than it has. The font is the caller's.
 private struct Pager: View {
     let shown: Shown
     var body: some View {
         let more = shown.note?.more ?? 0
-        if shown.pages > 1 || more > 0 {
-            HStack(spacing: 10) {
-                if shown.pages > 1 {
-                    Button(intent: PageIntent(mac: shown.mac, page: (shown.page + shown.pages - 1) % shown.pages)) {
-                        Image(systemName: "chevron.left")
-                    }
-                    Text("\(shown.page + 1)/\(shown.pages)").monospacedDigit()
-                    Button(intent: PageIntent(mac: shown.mac, page: (shown.page + 1) % shown.pages)) {
-                        Image(systemName: "chevron.right")
-                    }
+        HStack(spacing: 10) {
+            if more > 0 { Text("+\(more) more") }
+            if shown.pages > 1 {
+                Button(intent: PageIntent(mac: shown.mac, page: (shown.page + shown.pages - 1) % shown.pages)) {
+                    Image(systemName: "chevron.left")
                 }
-                Spacer(minLength: 0)
-                if more > 0 { Text("+\(more) more") }
+                Text("\(shown.page + 1)/\(shown.pages)").monospacedDigit()
+                Button(intent: PageIntent(mac: shown.mac, page: (shown.page + 1) % shown.pages)) {
+                    Image(systemName: "chevron.right")
+                }
             }
-            .buttonStyle(.plain)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.secondary)
         }
+        .buttonStyle(.plain)
     }
 }
 
@@ -374,7 +388,7 @@ private struct Header: View {
     let row: Agents.Row
 
     var body: some View {
-        let words = row.commandWords ?? (row.state == .blocked && row.flavor == .ask ? "Asked you" : row.state.words)
+        let words = row.commandWords ?? row.state.words(row.flavor)
         HStack(spacing: 6) {
             Image(systemName: row.state.symbol).foregroundStyle(row.tint).imageScale(.small)
             if let emoji = row.emoji { Text(emoji) }
