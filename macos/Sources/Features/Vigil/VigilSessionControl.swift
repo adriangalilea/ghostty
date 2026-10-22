@@ -170,6 +170,9 @@ enum VigilSessionControl {
     @MainActor
     static func transact(_ request: Request) -> Reply {
         guard request.version == 1 else { return .failure(request, "unsupported_version", "Workspace command version 1 is required.") }
+        // The rule the hub asks of another device's request, asked of every
+        // sender (this Mac's own included).
+        if let why = request.refusal { return .failure(request, "invalid_request", why) }
         let age = Date().timeIntervalSince1970 - request.issuedAt
         guard age >= -300, age < lifetime else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
         if request.operation == "inspect-input" {

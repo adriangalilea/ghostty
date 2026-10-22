@@ -234,7 +234,7 @@ extension NSApplication {
             let program = try text("command", "command")
             let openWindow = (args["openWindow"] as? NSNumber)?.boolValue ?? false
             let name = VigilWorkspaces.shared.apiNewWorkspace(
-                label: label, cwd: cwd, command: program, openWindow: openWindow)
+                label: label, cwd: cwd, command: program, openWindow: openWindow).name
             return ["name": name, "label": label ?? name] as NSDictionary
         } catch {
             command.scriptErrorNumber = errAECoercionFail

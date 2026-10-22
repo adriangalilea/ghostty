@@ -263,6 +263,12 @@ extension VigilWorkspaces {
             return Reply(id: request.id, ok: true, code: "committed", message: "Back on its Mac.",
                          revision: back.flatMap { workspaces[$0]?.layoutRevision }, session: back)
         }
+        // A workspace of its own: in the folder asked (`~` is this Mac's
+        // home), running what was asked, through the one birth path.
+        if request.operation == "create" {
+            let cwd = (request.cwd! as NSString).expandingTildeInPath
+            return birthReply(request, apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
+        }
         guard var session = workspaces[request.session] else {
             return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
         }
@@ -290,20 +296,7 @@ extension VigilWorkspaces {
         case "new_session":
             let cwd = liveView(attachId: request.anchor)?.pwd
                 ?? tab.panes.first(where: { $0.id == request.anchor })?.cwd ?? session.cwd
-            let name = createWorkspace(cwd: cwd)
-            guard let created = workspaces[name], let pane = created.tabs.first?.panes.first,
-                  startDaemon(pane: pane, session: name) else {
-                persist()
-                return .failure(request, "spawn_failed", "The workspace was created on its Mac, but its terminal did not start.")
-            }
-            persist()
-            guard let data = try? Data(contentsOf: persistURL),
-                  let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
-                  saved.contains(where: { $0.name == name && $0.tabs?.first?.panes.first?.id == pane.id }) else {
-                return .failure(request, "commit_failed", "The new workspace could not be confirmed on its Mac.")
-            }
-            return Reply(id: request.id, ok: true, code: "committed", message: "Workspace created on its homeMac.",
-                         revision: workspaces[name]?.layoutRevision, pane: pane.id, session: name)
+            return birthReply(request, apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
         case "split", "new_tab":
             guard let anchor = tab.panes.first(where: { $0.id == request.anchor }) else {
                 return .failure(request, "unsupported_target", "A dock tenant cannot anchor a split or tab.")
@@ -312,9 +305,9 @@ extension VigilWorkspaces {
                 return .failure(request, "invalid_direction", "Expected left, right, up or down.")
             }
             let id = "vigil-\(request.session)-\(nextPaneIndex(name: request.session))"
-            // The home pane supplies cwd. No M5 environment, command or path
-            // is inherited from a remote surface configuration.
-            let pane = Registry.Pane(id: id, cwd: liveView(attachId: anchor.id)?.pwd ?? anchor.cwd)
+            // The home pane supplies cwd. No environment or path is inherited
+            // from the sender; its command is the one thing it names.
+            let pane = Registry.Pane(id: id, cwd: liveView(attachId: anchor.id)?.pwd ?? anchor.cwd, command: request.command)
             guard startDaemon(pane: pane, session: request.session) else {
                 persist() // the allocated identity is never recycled
                 return .failure(request, "spawn_failed", "The terminal could not start on its Mac; its log says why (mise run log).")
@@ -413,6 +406,25 @@ extension VigilWorkspaces {
         ])
         return Reply(id: request.id, ok: true, code: "committed", message: "Workspace edit committed.",
                      revision: workspaces[request.session]?.layoutRevision, pane: created?.id)
+    }
+
+    /// A workspace born for a command, as its reply: committed only once
+    /// its pane runs and vigil.json lists it.
+    private func birthReply(_ request: VigilSessionControl.Request, _ birth: Birth) -> VigilSessionControl.Reply {
+        guard birth.running else {
+            return .failure(request, "spawn_failed", "The workspace was created on its Mac, but its terminal did not start; its log says why (mise run log).")
+        }
+        guard let data = try? Data(contentsOf: persistURL),
+              let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
+              saved.contains(where: { $0.name == birth.name && $0.tabs?.first?.panes.first?.id == birth.pane.id }) else {
+            return .failure(request, "commit_failed", "The new workspace could not be confirmed on its Mac.")
+        }
+        sessionLog.info("session command committed", [
+            "id": request.id.uuidString, "operation": request.operation, "workspace": birth.name,
+            "pane": birth.pane.id, "command": request.command,
+        ])
+        return VigilSessionControl.Reply(id: request.id, ok: true, code: "committed", message: "Workspace created on its Mac.",
+                                         revision: workspaces[birth.name]?.layoutRevision, pane: birth.pane.id, session: birth.name)
     }
 
     static func completeLayout(_ tab: Registry.Tab) -> Registry.Layout {
