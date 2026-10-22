@@ -183,6 +183,11 @@ final class VigilRemote: ObservableObject {
         switch step.step {
         case .open: remoteLog.info("following", ["host": host(device)?.name ?? device])
         case .directory: if let directory = step.directory { apply(device, directory) }
+        // The panes that moved, onto the directory held (it is whole: a
+        // follower always gets a whole document first).
+        case .changes:
+            guard let changes = step.changes, let held = host(device)?.directory else { return }
+            apply(device, held.applying(changes))
         case .waiting: failed(device, step.reason ?? "out of reach")
         }
     }

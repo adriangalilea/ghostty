@@ -102,7 +102,9 @@ final class VigilPhone: ObservableObject {
     /// kills taps mid-update).
     private(set) var directories: [String: Directory] = [:] {
         didSet {
-            rebuildTree()
+            // A screen hash alone (a working pane repaints several times a
+            // second) changes no row: the tree is rebuilt only for what rows draw.
+            if Self.rows(oldValue) != Self.rows(directories) { rebuildTree() }
             checkScreens()
             let waiting = directoryWaiters
             directoryWaiters = []
@@ -139,6 +141,11 @@ final class VigilPhone: ObservableObject {
     /// live surface hashes its viewport like the daemon does; a difference
     /// while the daemon's hash held still across two directory reads is a
     /// desync: logged, then re-synced with a dump.
+    /// Every Mac's directory as its rows draw it: without content receipts.
+    private static func rows(_ directories: [String: Directory]) -> [String: Directory] {
+        directories.mapValues(\.unscreened)
+    }
+
     private func checkScreens() {
         for (pane, view) in surfaces {
             guard let truth = directories.values.first(where: { $0.panes[pane] != nil })?.panes[pane],
@@ -319,8 +326,12 @@ final class VigilPhone: ObservableObject {
                     }
                     self.down[host.id] = nil
                     VigilAgents.learnNoteKey(of: host.id, node: node)
-                case .directory:
-                    guard let dir = step.directory else { continue }
+                case .directory, .changes:
+                    // The panes that moved apply onto the directory held (a
+                    // follower always gets a whole document first).
+                    guard let dir = step.directory
+                        ?? step.changes.flatMap({ changes in self.directories[host.id].map { $0.applying(changes) } })
+                    else { continue }
                     if self.directories[host.id] == nil {
                         self.receipts.info("dir", "first directory", [
                             "mac": host.name, "host": dir.host, "workspaces": dir.workspaces.count, "panes": dir.panes.count,
