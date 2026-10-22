@@ -266,7 +266,8 @@ extension VigilWorkspaces {
         // A workspace of its own: in the folder asked (`~` is this Mac's
         // home), running what was asked, through the one birth path.
         if request.operation == "create" {
-            let cwd = (request.cwd! as NSString).expandingTildeInPath
+            guard let asked = request.cwd else { return .failure(request, "invalid_request", "A new workspace names its folder.") }
+            let cwd = (asked as NSString).expandingTildeInPath
             return birthReply(request, apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
         }
         guard var session = workspaces[request.session] else {

@@ -827,9 +827,8 @@ final class VigilPhone: ObservableObject {
                 let docked = Set(tabs.flatMap { $0.dock?.panes.map(\.id) ?? [] })
                 func paneNode(_ p: Registry.Pane) -> Node {
                     let truth = dir.panes[p.id]
-                    let program = truth?.program
-                    let title = p.label ?? program ?? p.command.flatMap(Program.label)
-                        ?? p.title ?? URL(fileURLWithPath: p.cwd).lastPathComponent
+                    // The one rule every surface names a pane by (VigilWire's `title`).
+                    let title = dir.title(of: p)
                     let alive = truth?.alive ?? false
                     return Node(id: "\(sid)/\(p.id)", kind: .pane, title: title, emoji: p.emoji,
                                 state: truth?.shown,
@@ -844,8 +843,7 @@ final class VigilPhone: ObservableObject {
                     let all = t.members
                     let showTab = tabs.count > 1 || t.label != nil || t.emoji != nil
                     if showTab {
-                        let name = t.label ?? URL(fileURLWithPath: t.panes.first?.cwd ?? "").lastPathComponent
-                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: name.isEmpty ? "tab \(ti + 1)" : name, emoji: t.emoji,
+                        var tab = Node(id: "\(sid)/t\(ti)", kind: .tab, title: Directory.title(of: t, at: ti), emoji: t.emoji,
                                        anchor: t.panes.first?.id)
                         tab.children = all.map(paneNode)
                         sess.children.append(tab)
