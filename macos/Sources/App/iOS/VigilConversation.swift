@@ -449,7 +449,9 @@ private struct EntryRow: View {
             let pending = conversation.pending(call, turn: entry.turn)
             // A question answered by buttons here shows its options once: as them.
             let buttons = if pending == .waiting, case .choices? = conversation.offer?.offer { true } else { false }
-            ToolRow(call: call, pending: pending, options: !buttons) {
+            // A launch returns at once; the row follows the work it started.
+            let task = call.task.flatMap { id in conversation.live?.background?.first { $0.id == id } }
+            ToolRow(call: call, pending: pending, task: task, options: !buttons) {
                 if pending == .waiting { AnswerBar(conversation: conversation) }
             }
         case .event(let event):
@@ -594,6 +596,8 @@ private struct Folded<Content: View>: View {
 private struct ToolRow<Answers: View>: View {
     let call: ToolCall
     let pending: Conversation.Pending?
+    /// The background task this call started, as the pane lists it now.
+    let task: AgentTask?
     /// A question's options drawn as written (not when its buttons are).
     let options: Bool
     /// The way to answer the request standing on this call, if one does.
@@ -610,7 +614,11 @@ private struct ToolRow<Answers: View>: View {
                     }
                 }
                 Spacer(minLength: 6)
-                StatusMark(result: call.result, pending: pending).frame(minHeight: 20)
+                if call.task != nil, call.result?.status == .ok {
+                    TaskMark(task: task).frame(minHeight: 20)
+                } else {
+                    StatusMark(result: call.result, pending: pending).frame(minHeight: 20)
+                }
             }
             ToolBody(call: call, options: options)
             answers()
@@ -642,7 +650,7 @@ private struct ToolRow<Answers: View>: View {
         case .question: "questionmark.bubble"
         case .plan: "list.bullet.clipboard"
         case .todos: "checklist"
-        case .agent: "person.2"
+        case .agent(_, let type, _): BackgroundLine.glyph(type == "fork" ? .fork : .agent)
         case .generic: "wrench.and.screwdriver"
         }
     }
@@ -744,6 +752,33 @@ private struct StatusMark: View {
                 }
                 .foregroundStyle(.secondary)
             case (nil, .unfinished?), (nil, nil): Text("Unfinished").foregroundStyle(.tertiary)
+            }
+        }
+        .font(.caption.weight(.medium))
+        .labelStyle(.titleAndIcon)
+    }
+}
+
+/// Where the work a launch started stands: the call returned at once, the
+/// work runs on (`FeedLive.background`). A task the pane no longer lists
+/// (ended long ago, or before vigil listened) says only that it started.
+private struct TaskMark: View {
+    let task: AgentTask?
+
+    var body: some View {
+        Group {
+            switch task?.state {
+            case .running?:
+                HStack(spacing: 4) {
+                    ProgressView().controlSize(.mini)
+                    Text("Running")
+                }
+                .foregroundStyle(.secondary)
+            case .completed?: Image(systemName: "checkmark").foregroundStyle(.secondary).accessibilityLabel("Done")
+            case .failed?: Label(task?.exitCode.map { "Failed (exit \($0))" } ?? "Failed", systemImage: "xmark").foregroundStyle(Hue.care)
+            case .killed?, .stopped?: Label("Stopped", systemImage: "stop").foregroundStyle(.secondary)
+            case .ended?: Text("Ended").foregroundStyle(.secondary)
+            case nil: Text("Started").foregroundStyle(.tertiary)
             }
         }
         .font(.caption.weight(.medium))
@@ -1102,10 +1137,11 @@ private struct BackgroundSection: View {
         .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    /// "3 ended · 1 failed": how many, and how many did not finish well.
+    /// "3 ended · 1 failed": how many, and how many failed (an end nobody
+    /// described is not a failure).
     static func summary(_ ended: [AgentTask]) -> String {
-        let bad = ended.count { $0.state == .failed || $0.state == .lost }
-        return "\(ended.count) ended" + (bad > 0 ? " · \(bad) failed or lost" : "")
+        let failed = ended.count { $0.state == .failed }
+        return "\(ended.count) ended" + (failed > 0 ? " · \(failed) failed" : "")
     }
 }
 
@@ -1122,10 +1158,16 @@ private struct BackgroundLine: View {
                 .foregroundStyle(task.state.running ? AnyShapeStyle(AgentState.working.tint) : AnyShapeStyle(.secondary))
                 .frame(width: 16)
                 .accessibilityLabel(Self.kind(task.kind))
-            Text(task.title).font(.footnote).lineLimit(1).truncationMode(.middle)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(task.title).font(.footnote).lineLimit(1).truncationMode(.middle)
+                // What it does now, in Claude's own words ("Waiting on …").
+                if let label = task.label {
+                    Text(label).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                }
+            }
             Spacer(minLength: 6)
             Text(status).font(.caption.monospacedDigit())
-                .foregroundStyle(task.state == .failed || task.state == .lost ? AnyShapeStyle(Hue.care) : AnyShapeStyle(.secondary))
+                .foregroundStyle(task.state == .failed ? AnyShapeStyle(Hue.care) : AnyShapeStyle(.secondary))
                 .lineLimit(1)
                 .layoutPriority(1)
         }
@@ -1139,8 +1181,8 @@ private struct BackgroundLine: View {
         case .completed: return "done in \(run)" + tokens
         case .failed: return "failed" + (task.exitCode.map { " (exit \($0))" } ?? "") + tokens
         case .killed: return "stopped"
-        case .stopped: return "ended with its session"
-        case .lost: return "lost"
+        case .stopped: return "stopped with its agent"
+        case .ended: return "ended after \(run)"
         }
     }
 

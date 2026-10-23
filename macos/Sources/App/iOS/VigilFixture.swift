@@ -229,10 +229,13 @@ extension VigilFixtureView {
     static let home: [VigilPhone.Node] = {
         let codex = agent("vigil-lively-harbor-88", "Score the qubic miners", .working, glance: PaneGlance(
             agent: "codex", conversation: "0199f3c2-7d41-7a10-9c2e-5b8e1f0a3d77", name: "Score the qubic miners",
+            said: "Epoch 141 scored. Running 142 with the top 20 now, then I'll compare both against the pool's numbers.",
+            saidAt: now - 14,
             action: .init(tool: "Bash", subject: "python3 score.py --epoch 142 --top 20", shell: true), actionAt: now - 12,
             context: 33, turn: now - 340))
         let waiting = agent("vigil-lively-harbor-90", "Urgent qubic/core commit", .blocked, flavor: .permission, glance: PaneGlance(
             agent: "claude", conversation: "00f4d5db-1c3e-4b9a-8f2d-6a7e9b0c1d2e", name: "Urgent qubic/core commit",
+            said: "The fix is committed on core-fix and the tests pass. Pushing it so CI picks it up.", saidAt: now - 97,
             question: "Run git push origin core-fix", context: 58, turn: now - 95))
         let asked = agent("vigil-lively-harbor-91", "pgbot infra integration", .blocked, flavor: .ask, glance: PaneGlance(
             agent: "claude", conversation: "7b2e0a41-93c8-4d6f-a1b5-2c9e8d7f6a50", name: "pgbot infra integration",
@@ -242,7 +245,7 @@ extension VigilFixtureView {
         let done = agent("vigil-lively-harbor-92", "Fix the hashrate chart", .done, glance: PaneGlance(
             agent: "claude", conversation: "c41d77e0-5a2b-4e19-b8f3-90d1e2a3b4c5", name: "Fix the hashrate chart",
             said: "Fixed: the chart now plots the 1h average instead of raw samples, so the spikes are gone. The tests pass.",
-            saidAt: now - 240, context: 24, background: .init(agents: 2, shells: 1, title: "Cull a failed core phase")))
+            saidAt: now - 240, context: 24, background: .init(agents: 2, shells: 1, title: "Waiting on the parity run")))
         let shell = VigilPhone.Node(id: "fixture/lively-harbor/vigil-lively-harbor-93", kind: .pane, title: "fish", state: .idle,
                                     pane: PaneRef(host: host, pane: "vigil-lively-harbor-93", title: "minerlab › fish"),
                                     rows: 40, cols: 120, path: "minerlab › fish", followPane: "vigil-lively-harbor-93",
@@ -295,8 +298,9 @@ extension VigilFixtureView {
         FeedEntry(id: id, at: now, turn: turn, native: "fixture", body: body)
     }
 
-    private static func tool(_ id: String, _ turn: String, _ name: String, _ call: ToolCall.Call, _ result: ToolCall.Result?) -> FeedEntry {
-        row(id, turn, .tool(ToolCall(id: id, name: name, call: call, result: result)))
+    private static func tool(_ id: String, _ turn: String, _ name: String, _ call: ToolCall.Call, _ result: ToolCall.Result?,
+                             task: String? = nil) -> FeedEntry {
+        row(id, turn, .tool(ToolCall(id: id, name: name, call: call, result: result, task: task)))
     }
 
     static let root = "/Users/adrian/Developer/ledger/src/reports"
@@ -387,23 +391,25 @@ extension VigilFixtureView {
     static let launching: [FeedEntry] = [
         row("b1", "b1", .prompt(.init(text: Clip(text: "Cull the failed phase in a fork, survey the parsers, and wait for CI.")))),
         tool("b2", "b1", "Agent", .agent(description: "Cull a failed core phase", type: "fork", background: true),
-             .init(status: .ok, output: Clip(text: "Async agent launched successfully."))),
+             .init(status: .ok, output: Clip(text: "Async agent launched successfully.")), task: "a16bec942d6e67d1f"),
         tool("b3", "b1", "Agent", .agent(description: "Survey the parsers' callers", type: "Explore", background: true),
-             .init(status: .ok, output: Clip(text: "Async agent launched successfully."))),
+             .init(status: .ok, output: Clip(text: "Async agent launched successfully.")), task: "a06d1e2f3a4b5c6d7"),
         tool("b4", "b1", "Bash", .shell(command: "gh run watch --exit-status", description: "Wait for CI", background: true),
-             .init(status: .ok, output: Clip(text: "Command running in background with ID: bq3x9."))),
+             .init(status: .ok, output: Clip(text: "Command running in background with ID: bq3x9.")), task: "bq3x9"),
         row("b5", "b1", .reply(Clip(text: "Three things run in the background now. I'll pick each up as it finishes."))),
         row("b6", "b1", .event(.turnEnded(milliseconds: 21_000))),
     ]
 
     static let backgroundLive = FeedLive(state: .done, context: 46, title: "Cull the failed phase", background: [
-        AgentTask(id: "a16bec942d6e67d1f", kind: .fork, title: "Cull a failed core phase", state: .running, started: now - 1_205),
-        AgentTask(id: "a06d1e2f3a4b5c6d7", kind: .agent, title: "Survey the parsers' callers", state: .running, started: now - 312),
+        AgentTask(id: "a16bec942d6e67d1f", kind: .fork, title: "Cull a failed core phase", state: .running, started: now - 1_205,
+                  label: "Waiting on the parity run", tokens: 594_100),
+        AgentTask(id: "a06d1e2f3a4b5c6d7", kind: .agent, title: "Survey the parsers' callers", state: .running, started: now - 312,
+                  label: "Reading Parser.swift", tokens: 41_200),
         AgentTask(id: "bq3x9", kind: .shell, title: "Wait for CI", state: .running, started: now - 95),
         AgentTask(id: "a1c2", kind: .agent, title: "Read the pool engine policy", state: .completed, started: now - 2_400,
                        ended: now - 1_300, tokens: 594_100, toolUses: 31),
         AgentTask(id: "b7y1", kind: .shell, title: "npm run vet", state: .failed, started: now - 1_900, ended: now - 1_850, exitCode: 144),
-        AgentTask(id: "a9f0", kind: .fork, title: "Port the miner to population 32", state: .lost, started: now - 3_600, ended: now - 2_000),
+        AgentTask(id: "a9f0", kind: .fork, title: "Port the miner to population 32", state: .ended, started: now - 3_600, ended: now - 2_000),
     ])
 }
 

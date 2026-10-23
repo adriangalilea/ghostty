@@ -518,8 +518,6 @@ struct GlanceRow<Marks: View>: View {
     @ViewBuilder let marks: () -> Marks
 
     private var state: AgentState { node.state ?? .idle }
-    /// The row's line is its last words (done or idle, and it has some).
-    private var saysLastWords: Bool { state != .blocked && glance.action == nil && glance.said != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -537,56 +535,73 @@ struct GlanceRow<Marks: View>: View {
                     .accessibilityLabel("A conversation with \(glance.agent)")
                 marks()
             }
-            line.padding(.leading, 21)
-            // Its background work, while any runs: a finished turn can be
-            // waiting on it ("2 agents · 1 shell").
-            if let background = glance.background {
-                Label(background.words, systemImage: "gearshape.2")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 21)
-                    .accessibilityLabel("In the background: \(background.words)")
-            }
+            card.padding(.leading, 21)
             if let pane = node.followPane {
-                HStack(spacing: 6) {
-                    MiddleTruncate(pane, tail: "-").font(.caption2.monospaced())
-                    // Last words are the past: how long ago, never cut off
-                    // by a long message.
-                    if saysLastWords, let at = glance.saidAt { Text("said " + Self.ago(at)).font(.caption2) }
-                }
-                .foregroundStyle(.tertiary)
-                .padding(.leading, 21)
+                MiddleTruncate(pane, tail: "-").font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 21)
             }
         }
     }
 
-    @ViewBuilder private var line: some View {
-        switch state {
-        case .blocked:
-            Text(glance.question ?? state.words(node.flavor))
-                .font(.footnote).foregroundStyle(state.tint).lineLimit(2)
-        case .working, .interrupting, .unknown, .done, .idle:
-            if let action = glance.action {
-                Text(action.line)
-                    .font(action.shell ? .footnote.monospaced() : .footnote)
-                    .foregroundStyle(.secondary).lineLimit(1)
-            } else if let said = glance.said {
-                // Where it ended: its last words as the glance skims them
-                // (first and last paragraph, `PaneGlance.ending`, markdown),
-                // in a card, then how full its context is.
-                VStack(alignment: .leading, spacing: 6) {
-                    MarkdownView(said)
-                        .markdownStyle(MarkdownStyle(textStyle: .footnote, ink: .secondary, measure: nil).preview(lines: 10))
-                    if let context = glance.context { ContextMeter(percent: context) }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            } else {
+    /// The pane's meaning in one card, each part only when the glance has
+    /// it: what it asks or runs now, its last words (as the glance skims
+    /// them, `PaneGlance.ending`, markdown), then a footer of how full its
+    /// context is, what runs in the background and when it last spoke.
+    /// With none of them, the state's words: never a blank row.
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let now { now.lineLimit(state == .blocked ? 3 : 1) }
+            if let said = glance.said {
+                MarkdownView(said)
+                    .markdownStyle(MarkdownStyle(textStyle: .footnote, ink: .secondary, measure: nil).preview(lines: 10))
+            }
+            if now == nil && glance.said == nil {
                 Text(state.words(node.flavor)).font(.footnote).foregroundStyle(.secondary)
             }
+            // What runs in the background, and what the first of it does.
+            if let background = glance.background {
+                Label {
+                    Text(([background.words] + [background.title].compactMap { $0 }).joined(separator: " · "))
+                } icon: {
+                    Image(systemName: "gearshape.2")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .accessibilityLabel("In the background: \(background.words)")
+            }
+            if hasFooter {
+                HStack(spacing: 10) {
+                    if let context = glance.context { ContextMeter(percent: context) }
+                    Spacer(minLength: 0)
+                    // Last words are the past: an hour-old line must not
+                    // pass for one said now.
+                    if glance.said != nil, let at = glance.saidAt { Text(Self.ago(at)) }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    /// What it asks you (blocked) or runs (a tool call), its first line.
+    private var now: Text? {
+        if state == .blocked {
+            return Text(glance.question ?? state.words(node.flavor)).font(.footnote).foregroundStyle(state.tint)
+        }
+        guard let action = glance.action else { return nil }
+        return Text(action.line).font(action.shell ? .footnote.monospaced() : .footnote).foregroundStyle(.primary)
+    }
+
+    private var hasFooter: Bool {
+        glance.context != nil || (glance.said != nil && glance.saidAt != nil)
     }
 
     /// How long ago, said plainly: last words are the past, and an hour-old
