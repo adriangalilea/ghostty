@@ -1008,6 +1008,16 @@ final class VigilPhone: ObservableObject {
 
     /// Types `text` into the pane as one message (`send`: one paste, one
     /// Enter), as a reply typed at its keyboard would be.
+    /// A question about a pane's repositories, answered with git's own
+    /// output (harness/GIT-VIEW.md).
+    func git(_ query: GitQuery, in ref: PaneRef) async throws -> GitReply {
+        let data = try await VigilLink.call(linked(), device: ref.host.id, .git(ref.pane, query))
+        let reply = try JSONDecoder().decode(GitReply.self, from: data)
+        receipts.info("git", "answered", ["mac": ref.host.name, "pane": ref.pane, "kind": query.kind.rawValue,
+                                          "bytes": data.count, "cut": reply.cut.joined(separator: ",")])
+        return reply
+    }
+
     /// Presses one of the agent's keys in its pane; the Mac's account of
     /// what it did (it checks each step against the transcript).
     func press(_ key: PaneKey, in ref: PaneRef) async throws -> String {

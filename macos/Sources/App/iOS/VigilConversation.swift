@@ -281,6 +281,10 @@ final class Conversation: ObservableObject {
         }
     }
 
+    /// Words handed to the reply box from elsewhere (a quote from the
+    /// changes view): the box appends them to what is typed, then clears this.
+    @Published var quote: String?
+
     /// Where pressing a key stands: its answer from the Mac, or why not.
     @Published private(set) var keyNote: String?
     @Published private(set) var pressing: PaneKey?
@@ -672,6 +676,13 @@ private struct Composer: View {
         // A failed reply comes back here to be sent again.
         .onChange(of: conversation.reply?.failed) { _, failed in
             if failed != nil, text.isEmpty, let back = conversation.reply?.text { text = back }
+        }
+        // A quote from the changes view lands in the box, after what was typed.
+        .onReceive(conversation.$quote) { quote in
+            guard let quote else { return }
+            text = text.isEmpty ? quote + "\n\n" : text + "\n\n" + quote + "\n\n"
+            conversation.quote = nil
+            focused = true
         }
         // An activity's Reply: the box takes the keyboard.
         .onReceive(VigilPhone.shared.$typeInto) { ref in
