@@ -229,22 +229,48 @@ extension VigilFixtureView {
     static let home: [VigilPhone.Node] = {
         let codex = agent("vigil-lively-harbor-88", "Score the qubic miners", .working, glance: PaneGlance(
             agent: "codex", conversation: "0199f3c2-7d41-7a10-9c2e-5b8e1f0a3d77", name: "Score the qubic miners",
-            said: "Epoch 141 scored. Running 142 with the top 20 now, then I'll compare both against the pool's numbers.",
+            prompt: "score the last two epochs and tell me if our miners beat the pool average",
+            said: """
+            Epoch 141 is scored: our 7 keys averaged **4,061** against the pool's 3,980, so we are ahead by about 2%. \
+            ALPWDHYK carried most of it; GNNYAYWW is still below average after its restart.
+
+            Running 142 with the top 20 now, then I'll compare both epochs against the pool's numbers.
+            """,
             saidAt: now - 14,
             action: .init(tool: "Bash", subject: "python3 score.py --epoch 142 --top 20", shell: true), actionAt: now - 12,
             context: 33, turn: now - 340))
         let waiting = agent("vigil-lively-harbor-90", "Urgent qubic/core commit", .blocked, flavor: .permission, glance: PaneGlance(
             agent: "claude", conversation: "00f4d5db-1c3e-4b9a-8f2d-6a7e9b0c1d2e", name: "Urgent qubic/core commit",
-            said: "The fix is committed on core-fix and the tests pass. Pushing it so CI picks it up.", saidAt: now - 97,
+            prompt: "the fill is destroying built cores, fix it and ship it before the next epoch",
+            said: """
+            Found it: the fill phase still drew about 22% wiring walks, which rewired a built core back into chaos. \
+            r119 makes the fill use LUT walks only, so a built machine survives its fill.
+
+            The fix is committed on `core-fix` and the tests pass. Pushing it so CI picks it up.
+            """, saidAt: now - 97,
             question: "Run git push origin core-fix", context: 58, turn: now - 95))
         let asked = agent("vigil-lively-harbor-91", "pgbot infra integration", .blocked, flavor: .ask, glance: PaneGlance(
             agent: "claude", conversation: "7b2e0a41-93c8-4d6f-a1b5-2c9e8d7f6a50", name: "pgbot infra integration",
-            said: "The bot now reads its pool from the infra registry and the health check passes.",
+            prompt: "move pgbot onto the infra registry",
+            said: """
+            Done for production: the bot now reads its pool from the infra registry and the health check passes. \
+            I kept the old config file as a fallback for one release.
+
+            Should I also move the staging bot over, or keep it on the old config for now?
+            """,
             saidAt: now - 600, question: "Should I also move the staging bot over, or keep it on the old config for now?",
             context: 71))
         let done = agent("vigil-lively-harbor-92", "Fix the hashrate chart", .done, glance: PaneGlance(
             agent: "claude", conversation: "c41d77e0-5a2b-4e19-b8f3-90d1e2a3b4c5", name: "Fix the hashrate chart",
-            said: "Fixed: the chart now plots the 1h average instead of raw samples, so the spikes are gone. The tests pass.",
+            prompt: "the hashrate chart spikes every few minutes, it makes it unreadable",
+            said: """
+            Fixed: the chart now plots the 1h average instead of raw samples, so the spikes are gone.
+
+            The spikes were real samples: each restart reports its first minute at 10x before it settles. \
+            The average hides them; the raw line is still one tap away under **Details**.
+
+            The tests pass. The parity run and the fork culling the failed phase are still going in the background.
+            """,
             saidAt: now - 240, context: 24, background: .init(agents: 2, shells: 1, title: "Waiting on the parity run")))
         let shell = VigilPhone.Node(id: "fixture/lively-harbor/vigil-lively-harbor-93", kind: .pane, title: "fish", state: .idle,
                                     pane: PaneRef(host: host, pane: "vigil-lively-harbor-93", title: "minerlab › fish"),

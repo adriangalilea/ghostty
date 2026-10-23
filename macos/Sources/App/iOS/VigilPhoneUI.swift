@@ -544,19 +544,32 @@ struct GlanceRow<Marks: View>: View {
         }
     }
 
-    /// The pane's meaning in one card, each part only when the glance has
-    /// it: what it asks or runs now, its last words (as the glance skims
-    /// them, `PaneGlance.ending`, markdown), then a footer of how full its
-    /// context is, what runs in the background and when it last spoke.
-    /// With none of them, the state's words: never a blank row.
+    /// The pane's conversation at a glance, in its order, each part only
+    /// when the glance has it: what you last asked (on the right, as the
+    /// conversation draws a prompt), what it said (as the glance skims it,
+    /// `PaneGlance.ending`, markdown), what it asks or runs now, then what
+    /// runs in the background and a footer of its context and when it
+    /// spoke. With none of them, the state's words: never a blank row.
     private var card: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let now { now.lineLimit(state == .blocked ? 3 : 1) }
+        VStack(alignment: .leading, spacing: 8) {
+            if let prompt = glance.prompt {
+                Text(prompt)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.leading, 28)
+                    .accessibilityLabel("You asked: \(prompt)")
+            }
             if let said = glance.said {
                 MarkdownView(said)
-                    .markdownStyle(MarkdownStyle(textStyle: .footnote, ink: .secondary, measure: nil).preview(lines: 10))
+                    .markdownStyle(MarkdownStyle(textStyle: .footnote, ink: .primary, measure: nil).preview(lines: 18))
             }
-            if now == nil && glance.said == nil {
+            if let now { now.lineLimit(state == .blocked ? 3 : 1) }
+            if now == nil && glance.said == nil && glance.prompt == nil {
                 Text(state.words(node.flavor)).font(.footnote).foregroundStyle(.secondary)
             }
             // What runs in the background, and what the first of it does.
@@ -597,7 +610,7 @@ struct GlanceRow<Marks: View>: View {
             return Text(glance.question ?? state.words(node.flavor)).font(.footnote).foregroundStyle(state.tint)
         }
         guard let action = glance.action else { return nil }
-        return Text(action.line).font(action.shell ? .footnote.monospaced() : .footnote).foregroundStyle(.primary)
+        return Text(action.line).font(action.shell ? .footnote.monospaced() : .footnote).foregroundStyle(.secondary)
     }
 
     private var hasFooter: Bool {
