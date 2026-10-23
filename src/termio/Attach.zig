@@ -846,10 +846,6 @@ fn readThreadMain(
         termio.Exec.ReadThread.threadMainPosix(current_fd, io, quit_dup);
         if (closing.load(.acquire)) return;
         self.setTransport(2);
-        // A remote stream's EOF (the hub, over tether) says nothing about
-        // the home process. Keep its last screen; the Mac viewport shows
-        // connection loss and offers an explicit reconnect.
-        if (self.host != null) return;
         // The phone's stream is the embedder's; it reconnects on its own.
         if (self.given_fd != null) break;
         // A local daemon ended under a live surface. Its spec decides what
@@ -995,9 +991,10 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
     } else {
         log.warn("attach: {s} stream ended with its spec on disk; reconnecting", .{self.id});
     }
-    self.setTransport(0);
     // Retire the writer (it may have severed itself on the dead socket
     // already) before the descriptor closes; a new one is born per socket.
+    // Only then is the transport "connecting": a writer severing after it
+    // would mark it closed, and every hub dial would refuse itself.
     self.write_mutex.lock();
     self.write_closed = true;
     self.write_cond.signal();
@@ -1010,6 +1007,7 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
     self.sock_fd = -1;
     self.write_fd = -1;
     if (old >= 0) posix.close(old);
+    self.setTransport(0);
 
     const began = std.time.milliTimestamp();
     var restored = false;
