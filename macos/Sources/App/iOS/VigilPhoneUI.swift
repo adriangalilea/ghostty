@@ -1155,7 +1155,25 @@ struct PaneScreen: View {
     /// The current pane's feed, followed while its conversation can show.
     @State private var conversation: Conversation?
 
-    enum Mode { case conversation, terminal }
+    enum Mode: CaseIterable {
+        case conversation, changes, terminal
+
+        var symbol: String {
+            switch self {
+            case .conversation: "text.bubble"
+            case .changes: "plus.forwardslash.minus"
+            case .terminal: "terminal"
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .conversation: "Show the conversation"
+            case .changes: "Show the changes"
+            case .terminal: "Show the terminal"
+            }
+        }
+    }
 
     init(ref: PaneRef) {
         self.ref = ref
@@ -1178,13 +1196,20 @@ struct PaneScreen: View {
 
     var body: some View {
         Group {
-            if mode == .conversation {
+            switch mode {
+            case .conversation:
                 if let conversation {
                     ConversationView(conversation: conversation) { setMode(.terminal) }
                 } else {
                     ProgressView()
                 }
-            } else {
+            case .changes:
+                // A quote lands in the reply box, and the conversation shows.
+                VigilChanges(ref: current) { quote in
+                    setMode(.conversation)
+                    conversation?.quote = quote.markdown
+                }
+            case .terminal:
                 terminal
             }
         }
@@ -1289,12 +1314,13 @@ struct PaneScreen: View {
                           tint: node?.alive == false ? Color.gray.opacity(0.3) : (node?.state ?? .idle).tint)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                // Conversation ⇄ terminal, for a pane with a conversation.
-                if node?.agent == true || mode == .conversation {
-                    Button { setMode(mode == .conversation ? .terminal : .conversation) } label: {
-                        Image(systemName: mode == .conversation ? "terminal" : "text.bubble")
+                // Conversation, changes, terminal: the other two, for a pane
+                // with an agent (its repositories come from its conversation).
+                if node?.agent == true || mode != .terminal {
+                    ForEach(Mode.allCases.filter { $0 != mode }, id: \.self) { other in
+                        Button { setMode(other) } label: { Image(systemName: other.symbol) }
+                            .accessibilityLabel(other.label)
                     }
-                    .accessibilityLabel(mode == .conversation ? "Show the terminal" : "Show the conversation")
                 }
                 if let surfaceView { KeyboardButton(surface: surfaceView) }
                 if surfaceView != nil {
@@ -1347,7 +1373,8 @@ struct PaneScreen: View {
     /// feed followed; the terminal untouched, so the Mac keeps its size),
     /// or its terminal, claimed (you opened it).
     private func show(_ ref: PaneRef) async {
-        if mode == .conversation, node?.agent == true {
+        // The conversation is followed in the changes too: a quote goes to its box.
+        if mode != .terminal, node?.agent == true {
             model.present(ref)
             if conversation?.ref != ref {
                 conversation?.stop()
@@ -1366,13 +1393,17 @@ struct PaneScreen: View {
     private func setMode(_ next: Mode) {
         guard next != mode else { return }
         mode = next
-        model.receipts.info("pane", next == .conversation ? "conversation" : "terminal", ["pane": current.pane])
+        model.receipts.info("pane", "\(next)", ["pane": current.pane])
         switch next {
         case .terminal:
             Task { await enter(current, claim: true) }
         case .conversation:
             leave()
             Task { await show(current) }
+        case .changes:
+            // The conversation stays followed underneath: a quote goes to its box.
+            leave()
+            if conversation == nil { Task { await show(current) } }
         }
     }
 

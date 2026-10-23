@@ -1,4 +1,5 @@
 import AuthzUI
+import GitViews
 import MarkdownText
 import SwiftUI
 import VigilActivity
@@ -930,8 +931,8 @@ private struct ToolBody: View {
                         .lineLimit(lines)
                 }
             }
-        case .patch(_, let hunks, let exact, _):
-            DiffView(hunks: hunks, exact: exact)
+        case .patch(let path, let hunks, _, _):
+            PatchView(path: path, hunks: hunks)
         case .read, .search, .fetch, .webSearch:
             EmptyView()
         case .question(let questions):
@@ -989,42 +990,22 @@ private struct Well<Content: View>: View {
     }
 }
 
-/// A change as its lines: added green, removed red, context quiet; the
-/// first lines, the rest a tap away.
-private struct DiffView: View {
+/// A tool call's change, drawn by swift-utils' `DiffView` (the one diff
+/// everywhere: this card, the changes view, a markdown fence): its hunks as
+/// unified text, its path for the language, folded to its first lines.
+private struct PatchView: View {
+    let path: String
     let hunks: [ToolCall.Hunk]
-    let exact: Bool
-    @State private var whole = false
-    private static let shown = 14
 
-    private var lines: [String] {
-        hunks.flatMap { hunk in
-            (exact ? ["@@ -\(hunk.oldStart),\(hunk.oldLines) +\(hunk.newStart),\(hunk.newLines) @@"] : []) + hunk.lines
-        }
+    private var unified: String {
+        hunks.map { hunk in
+            (["@@ -\(hunk.oldStart),\(hunk.oldLines) +\(hunk.newStart),\(hunk.newLines) @@"] + hunk.lines).joined(separator: "\n")
+        }.joined(separator: "\n")
     }
 
     var body: some View {
-        let all = lines
-        let cut = whole ? all : Array(all.prefix(Self.shown))
-        Well {
-            VStack(alignment: .leading, spacing: 4) {
-                // Lines as written, never wrapped: a wrapped line reads as two.
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(SyntaxLines.diff(cut.joined(separator: "\n")))
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                        .fixedSize()
-                }
-                if all.count > Self.shown {
-                    Button(whole ? "Show less" : "Show \(all.count - Self.shown) more lines") {
-                        withAnimation(.snappy(duration: 0.2)) { whole.toggle() }
-                    }
-                    .font(.caption.weight(.medium))
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                }
-            }
-        }
+        GitViews.DiffView(unified: unified, path: path)
+            .diffMaxLines(14)
     }
 }
 

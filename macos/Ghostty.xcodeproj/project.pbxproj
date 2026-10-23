@@ -56,6 +56,8 @@
 		0DAA1111000000000000E053 /* VigilActivity in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E051 /* VigilActivity */; };
 		0DAA1111000000000000E061 /* MarkdownText in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E060 /* MarkdownText */; };
 		0DAA1111000000000000E071 /* Ink in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E070 /* Ink */; };
+		0DAA1111000000000000E081 /* GitKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E080 /* GitKit */; };
+		0DAA1111000000000000E091 /* GitViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E090 /* GitViews */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -350,6 +352,7 @@
 				App/iOS/Sounds,
 				App/iOS/VigilAgents.swift,
 				App/iOS/VigilAuthz.swift,
+				App/iOS/VigilChanges.swift,
 				App/iOS/VigilConversation.swift,
 				App/iOS/VigilCreate.swift,
 				App/iOS/VigilFixture.swift,
@@ -444,6 +447,8 @@
 				0DAA1111000000000000E053 /* VigilActivity in Frameworks */,
 				0DAA1111000000000000E061 /* MarkdownText in Frameworks */,
 				0DAA1111000000000000E071 /* Ink in Frameworks */,
+				0DAA1111000000000000E081 /* GitKit in Frameworks */,
+				0DAA1111000000000000E091 /* GitViews in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -665,6 +670,8 @@
 				0DAA1111000000000000E051 /* VigilActivity */,
 				0DAA1111000000000000E060 /* MarkdownText */,
 				0DAA1111000000000000E070 /* Ink */,
+				0DAA1111000000000000E080 /* GitKit */,
+				0DAA1111000000000000E090 /* GitViews */,
 			);
 			productName = "Ghostty-iOS";
 			productReference = A5D4499D2B53AE7B000F5B83 /* Ghostty-iOS.app */;
@@ -1968,6 +1975,8 @@
 		0DAA1111000000000000E051 /* VigilActivity */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */; productName = VigilActivity; };
 		0DAA1111000000000000E060 /* MarkdownText */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = MarkdownText; };
 		0DAA1111000000000000E070 /* Ink */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = Ink; };
+		0DAA1111000000000000E080 /* GitKit */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitKit; };
+		0DAA1111000000000000E090 /* GitViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitViews; };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A5B30529299BEAAA0047F10C /* Project object */;
