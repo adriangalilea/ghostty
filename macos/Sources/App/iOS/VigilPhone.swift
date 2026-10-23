@@ -1008,6 +1008,14 @@ final class VigilPhone: ObservableObject {
 
     /// Types `text` into the pane as one message (`send`: one paste, one
     /// Enter), as a reply typed at its keyboard would be.
+    /// Presses one of the agent's keys in its pane; the Mac's account of
+    /// what it did (it checks each step against the transcript).
+    func press(_ key: PaneKey, in ref: PaneRef) async throws -> String {
+        let said = String(decoding: try await VigilLink.call(linked(), device: ref.host.id, .key(ref.pane, key)), as: UTF8.self)
+        receipts.info("feed", "key pressed", ["mac": ref.host.name, "pane": ref.pane, "key": key.rawValue, "said": said])
+        return said
+    }
+
     func send(_ text: String, to ref: PaneRef) async throws {
         _ = try await VigilLink.call(linked(), device: ref.host.id, .send(ref.pane, text: text))
         receipts.info("feed", "reply sent", ["mac": ref.host.name, "pane": ref.pane, "bytes": text.utf8.count])

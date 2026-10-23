@@ -26,6 +26,10 @@ enum VigilFixture: String {
     /// A turn done, waiting on its background work: a fork and an agent
     /// running, a shell watching CI, three that ended.
     case conversationBackground = "conversation-background"
+    /// A turn at work: a task's end as its line, a command running in the
+    /// foreground (Run in background), two messages waiting in its queue
+    /// (Send all now), every message with when it was sent.
+    case conversationWorking = "conversation-working"
     /// The home tree: agent panes drawn by their glance (waiting, asked,
     /// working, done and waiting on its background work), a shell and an
     /// agent with no glance beside them, drawn as terminals.
@@ -58,6 +62,11 @@ struct VigilFixtureView: View {
             case .conversationLong: ConversationFixture(conversation: Self.conversation(Self.long, live: Self.workingLive, earlier: true))
             case .conversationBackground:
                 ConversationFixture(conversation: Self.conversation(Self.launching, live: Self.backgroundLive))
+            case .conversationWorking:
+                ConversationFixture(conversation: Conversation(
+                    ref: Self.pane, entries: Self.atWork, live: FeedLive(state: .working, context: 61),
+                    queued: [FeedQueued(text: "also check the CSV header while you wait", at: Self.now - 40),
+                             FeedQueued(text: "and keep the old column names", at: Self.now - 12)]))
             case .activity, .activityMore, .activityIsland: activity
             case .home:
                 // As the app shows it: dark, its tree from `VigilPhone`.
@@ -412,6 +421,16 @@ extension VigilFixtureView {
     ]
 
     static let workingLive = FeedLive(state: .working, context: 74)
+
+    /// A turn at work, after a background task it started ended.
+    static let atWork: [FeedEntry] = [
+        FeedEntry(id: "w1", at: now - 300, turn: "w1", native: "fixture",
+                  body: .prompt(.init(text: Clip(text: "Re-import last month's ledger and tell me what changed.")))),
+        FeedEntry(id: "w2", at: now - 200, turn: "w1", native: "fixture", body: .event(.taskEnded(AgentTask(
+            id: "b7y1", kind: .shell, title: "npm run vet", state: .completed, started: now - 260, ended: now - 200, exitCode: 0)))),
+        row("w3", "w1", .reply(Clip(text: "The vet passed. Importing the ledger now; this takes a few minutes."))),
+        tool("w4", "w1", "Bash", .shell(command: "python3 import.py --month 2026-09", description: "Import September", background: false), nil),
+    ]
 
     /// A turn that launched its work in the background and ended.
     static let launching: [FeedEntry] = [

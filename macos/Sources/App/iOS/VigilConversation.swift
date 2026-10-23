@@ -57,9 +57,10 @@ final class Conversation: ObservableObject {
 
     /// Drawn from made-up rows (`VigilFixture`): nothing followed.
     init(ref: PaneRef, entries: [FeedEntry], live: FeedLive?, earlier: Bool = false, waiting: String? = nil, offer: Offer? = nil,
-         reply: Reply? = nil) {
+         reply: Reply? = nil, queued: [FeedQueued] = []) {
         self.ref = ref
         self.reply = reply
+        self.queued = queued
         self.live = live
         self.earlier = earlier
         self.waiting = waiting
@@ -176,6 +177,7 @@ final class Conversation: ObservableObject {
             conversation = snapshot.conversation
             earlier = snapshot.earlier
             live = snapshot.live
+            queued = snapshot.queued ?? []
             readOffer()
             pageError = nil
             replace(snapshot.entries)
@@ -197,6 +199,10 @@ final class Conversation: ObservableObject {
         case .live(let now):
             live = now
             readOffer()
+            revision += 1
+        case .queued(let now):
+            queued = now
+            if let reply, reply.failed == nil, now.contains(where: { Self.same($0.text, reply.text) }) { self.reply = nil }
             revision += 1
         }
     }
@@ -249,16 +255,50 @@ final class Conversation: ObservableObject {
     }
     @Published private(set) var reply: Reply?
 
-    /// Why a reply cannot be typed now (nil: the turn is yours).
+    /// What was sent while it worked and it has not taken yet: its own
+    /// queue, as its transcript says (`FeedMessage.queued`).
+    @Published private(set) var queued: [FeedQueued] = []
+
+    /// Why a reply cannot be typed now (nil: it can, any time the prompt is
+    /// its input box: while it works, the agent queues it itself). A dialog
+    /// standing in the terminal would take the words as its answer.
     var replyRefusal: String? {
         // The placeholder of the reply box: one short line.
-        guard let live else { return "Not known yet if it can take a reply" }
+        guard let live else { return nil }
         switch live.state {
-        case .done, .idle: return nil
         case .blocked where live.flavor == .ask: return nil
         case .blocked: return "Answer its request first"
-        case .working, .interrupting: return "Working: reply when it's done"
-        case .unknown: return "Its state is not confirmed"
+        case .done, .idle, .working, .interrupting, .unknown: return nil
+        }
+    }
+
+    /// The placeholder: what a reply does now.
+    var replyHint: String {
+        if let replyRefusal { return replyRefusal }
+        switch live?.state {
+        case .working?, .interrupting?: return "Queue a message"
+        default: return "Reply"
+        }
+    }
+
+    /// Where pressing a key stands: its answer from the Mac, or why not.
+    @Published private(set) var keyNote: String?
+    @Published private(set) var pressing: PaneKey?
+
+    /// Presses one of the agent's keys in its pane (`PaneKey`): the Mac
+    /// checks each step against the transcript and says what happened.
+    func press(_ key: PaneKey) {
+        guard pressing == nil else { return }
+        pressing = key
+        keyNote = nil
+        Task {
+            defer { pressing = nil }
+            do {
+                keyNote = try await VigilPhone.shared.press(key, in: ref)
+            } catch {
+                keyNote = VigilLink.reason(error)
+                VigilPhone.shared.receipts.warn("feed", "key not pressed", ["pane": ref.pane, "key": key.rawValue, "err": error])
+            }
         }
     }
 
@@ -285,7 +325,11 @@ final class Conversation: ObservableObject {
 
     private static func carries(_ entry: FeedEntry, _ text: String) -> Bool {
         guard case .prompt(let prompt) = entry.body else { return false }
-        return prompt.text.text.trimmingCharacters(in: .whitespacesAndNewlines) == text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return same(prompt.text.text, text) || prompt.text.text.contains(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    static func same(_ a: String, _ b: String) -> Bool {
+        a.trimmingCharacters(in: .whitespacesAndNewlines) == b.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The standing request names no row held here (a dialog with no
@@ -359,8 +403,10 @@ struct ConversationView: View {
                     .padding(10)
                     .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
+                // What you sent while it worked: in its queue until taken.
+                if !conversation.queued.isEmpty { QueuedRows(conversation: conversation) }
                 if let reply = conversation.reply, reply.failed == nil {
-                    PromptRow(prompt: .init(text: Clip(text: reply.text)), sending: true)
+                    PromptRow(prompt: .init(text: Clip(text: reply.text)), stage: .sending)
                 }
                 if let tasks = conversation.live?.background, tasks.contains(where: \.state.running) {
                     BackgroundSection(tasks: tasks)
@@ -435,7 +481,7 @@ private struct EntryRow: View {
     var body: some View {
         switch entry.body {
         case .prompt(let prompt):
-            PromptRow(prompt: prompt)
+            PromptRow(prompt: prompt, at: entry.at)
         case .reply(let clip):
             MarkdownView(clip.text).markdownStyle(MarkdownStyle(textStyle: .callout))
         case .thinking(let clip):
@@ -453,9 +499,29 @@ private struct EntryRow: View {
             let task = call.task.flatMap { id in conversation.live?.background?.first { $0.id == id } }
             ToolRow(call: call, pending: pending, task: task, options: !buttons) {
                 if pending == .waiting { AnswerBar(conversation: conversation) }
+                // A command running in the foreground: Ctrl+B, as at its terminal.
+                if pending == .running, case .shell(_, _, false) = call.call {
+                    HStack {
+                        if let note = conversation.keyNote, conversation.pressing == nil {
+                            Text(note).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                        Button {
+                            conversation.press(.background)
+                        } label: {
+                            if conversation.pressing == .background {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Label("Run in background", systemImage: "arrow.down.right.square")
+                            }
+                        }
+                        .buttonStyle(.ink)
+                        .disabled(conversation.pressing != nil)
+                    }
+                }
             }
         case .event(let event):
-            EventRow(event: event)
+            EventRow(event: event, at: entry.at)
         case .opaque:
             Label("Not shown here: \(entry.native)", systemImage: "questionmark.square.dashed")
                 .font(.caption).foregroundStyle(.tertiary)
@@ -463,18 +529,56 @@ private struct EntryRow: View {
     }
 }
 
+/// What waits in the agent's queue, each as your message not yet taken
+/// (dashed, quieter), and one button that sends them all now as one
+/// message. The Mac checks every step against the transcript and says what
+/// happened under it.
+private struct QueuedRows: View {
+    @ObservedObject var conversation: Conversation
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            ForEach(Array(conversation.queued.enumerated()), id: \.offset) { _, queued in
+                PromptRow(prompt: .init(text: Clip(text: queued.text), origin: .queued), at: queued.at, stage: .queued)
+            }
+            HStack(spacing: 10) {
+                if let note = conversation.keyNote {
+                    Text(note).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    conversation.press(.sendNow)
+                } label: {
+                    if conversation.pressing == .sendNow {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label(conversation.queued.count == 1 ? "Send now" : "Send all now", systemImage: "paperplane")
+                    }
+                }
+                .buttonStyle(.ink)
+                .disabled(conversation.pressing != nil)
+            }
+        }
+    }
+}
+
 /// What you (or something on your behalf) said: on the right, a shade off
-/// the ground, as a message app draws your side.
+/// the ground, as a message app draws your side, with when it was sent.
 private struct PromptRow: View {
     let prompt: FeedEntry.Prompt
-    /// Typed into the pane, not yet in the feed.
-    var sending = false
+    var at: Double?
+    /// Where it stands: in the conversation, waiting in the agent's queue,
+    /// or typed into the pane and not yet seen anywhere.
+    var stage: Stage = .sent
     @State private var whole = false
+
+    enum Stage { case sent, queued, sending }
 
     private var origin: String? {
         switch prompt.origin {
-        case .typed, .other: nil
-        case .queued: "Queued"
+        // A queued message once taken is simply sent; one waiting says so
+        // in its caption.
+        case .typed, .other, .queued: nil
         case .task: "From a task"
         case .system: "From the system"
         }
@@ -501,15 +605,30 @@ private struct PromptRow: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
-            .background(.primary.opacity(0.09), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .opacity(sending ? 0.55 : 1)
-            .overlay(alignment: .bottomTrailing) {
-                if sending {
-                    Text("Sending…").font(.caption2).foregroundStyle(.secondary).offset(y: 16)
+            .background {
+                let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+                switch stage {
+                case .sent: shape.fill(.primary.opacity(0.09))
+                case .queued, .sending:
+                    shape.strokeBorder(.primary.opacity(0.28), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 }
             }
+            .opacity(stage == .sent ? 1 : 0.7)
+            .overlay(alignment: .bottomTrailing) {
+                Text(caption).font(.caption2).foregroundStyle(.secondary).monospacedDigit().offset(y: 16)
+            }
         }
-        .padding(.bottom, sending ? 14 : 0)
+        .padding(.bottom, 16)
+    }
+
+    /// Where it stands and when: "11:33", "Queued · 11:33", "Sending…".
+    private var caption: String {
+        let time = at.map { Date(timeIntervalSince1970: $0).formatted(date: .omitted, time: .shortened) }
+        switch stage {
+        case .sent: return time ?? ""
+        case .queued: return ["Queued, not taken yet", time].compactMap { $0 }.joined(separator: " · ")
+        case .sending: return "Sending…"
+        }
     }
 }
 
@@ -529,7 +648,7 @@ private struct Composer: View {
                     .font(.footnote).foregroundStyle(Hue.care)
             }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField(refusal ?? "Reply", text: $text, axis: .vertical)
+                TextField(conversation.replyHint, text: $text, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($focused)
                     .disabled(refusal != nil)
@@ -1054,6 +1173,10 @@ private struct AnswerBar: View {
 
 private struct EventRow: View {
     let event: FeedEntry.Event
+    var at: Double?
+
+    /// "11:33": when it happened, a clock on the person's day.
+    private var time: String? { at.map { Date(timeIntervalSince1970: $0).formatted(date: .omitted, time: .shortened) } }
 
     var body: some View {
         switch event {
@@ -1081,7 +1204,14 @@ private struct EventRow: View {
                 .font(.footnote)
                 .foregroundStyle(Hue.care)
         case .turnEnded(let milliseconds):
-            Divided(text: "Turn took \(Duration.milliseconds(milliseconds).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .narrow)))")
+            Divided(text: ["Turn took \(Duration.milliseconds(milliseconds).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .narrow)))",
+                           time.map { "ended \($0)" }].compactMap { $0 }.joined(separator: " · "))
+        case .taskEnded(let task):
+            // A background task's end, as the agent heard it: its line,
+            // never its markup.
+            BackgroundLine(task: task, now: .now)
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
 
