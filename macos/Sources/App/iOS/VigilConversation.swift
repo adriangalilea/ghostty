@@ -1003,8 +1003,11 @@ private struct PatchView: View {
         }.joined(separator: "\n")
     }
 
+    /// A card shows what the edit changed: the unchanged lines Claude keeps
+    /// around it (whole paragraphs, in prose) fold behind a tap.
     var body: some View {
         GitViews.DiffView(unified: unified, path: path)
+            .diffContext(lines: 0)
             .diffMaxLines(14)
     }
 }
