@@ -221,27 +221,62 @@ final class Conversation: ObservableObject {
             drawn = min(entries.count, drawn + Self.page)
             return
         }
-        guard earlier, !paging, let first = entries.first, let conversation else { return }
+        Task { _ = await pageEarlier() }
+    }
+
+    /// One page from the Mac before the oldest row held; false when none came.
+    private func pageEarlier() async -> Bool {
+        guard earlier, !paging, let first = entries.first, let conversation else { return false }
         paging = true
         pageError = nil
-        Task {
-            defer { paging = false }
-            do {
-                let page = try await VigilPhone.shared.feedEarlier(ref, FeedEarlier(conversation: conversation, before: first.id))
-                // Another conversation arrived meanwhile: this page is not its.
-                guard self.conversation == conversation else { return }
-                let fresh = page.entries.filter { index[$0.id] == nil }
-                entries = fresh + entries
-                index = Dictionary(entries.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { _, last in last })
-                drawn += fresh.count
-                earlier = page.earlier
-                VigilPhone.shared.receipts.info("feed", "earlier page", ["pane": ref.pane, "entries": fresh.count, "more": page.earlier])
-            } catch {
-                pageError = VigilLink.reason(error)
-                VigilPhone.shared.receipts.warn("feed", "earlier page not read", ["pane": ref.pane, "err": error])
-            }
+        defer { paging = false }
+        do {
+            let page = try await VigilPhone.shared.feedEarlier(ref, FeedEarlier(conversation: conversation, before: first.id))
+            // Another conversation arrived meanwhile: this page is not its.
+            guard self.conversation == conversation else { return false }
+            let fresh = page.entries.filter { index[$0.id] == nil }
+            entries = fresh + entries
+            index = Dictionary(entries.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { _, last in last })
+            drawn += fresh.count
+            earlier = page.earlier
+            VigilPhone.shared.receipts.info("feed", "earlier page", ["pane": ref.pane, "entries": fresh.count, "more": page.earlier])
+            return !fresh.isEmpty
+        } catch {
+            pageError = VigilLink.reason(error)
+            VigilPhone.shared.receipts.warn("feed", "earlier page not read", ["pane": ref.pane, "err": error])
+            return false
         }
     }
+
+    /// A row to bring on screen (an edit opened from the changes), once drawn.
+    @Published private(set) var focus: String?
+    /// Why the last row asked for could not be shown.
+    @Published private(set) var focusMissing: String?
+
+    /// Draws everything from `id`'s row down, paging back to it if it is
+    /// older than what is held, then names it in `focus`.
+    func show(_ id: String) {
+        focusMissing = nil
+        Task {
+            var pages = 0
+            while index[id] == nil, earlier, pages < Self.focusPages {
+                guard await pageEarlier() else { break }
+                pages += 1
+            }
+            guard let at = index[id] else {
+                focusMissing = "That edit is not in what the Mac reads of this conversation."
+                return
+            }
+            drawn = max(drawn, entries.count - at)
+            focus = id
+        }
+    }
+
+    /// Pages a jump reads back at most (30 rows each).
+    static let focusPages = 100
+
+    func focused() { focus = nil }
+    func missingSeen() { focusMissing = nil }
 
     /// Where a tool call with no result stands, by the broker's word.
     enum Pending { case waiting, running, unfinished }
@@ -326,6 +361,18 @@ final class Conversation: ObservableObject {
                 VigilPhone.shared.receipts.warn("feed", "reply not sent", ["pane": ref.pane, "err": error])
             }
         }
+    }
+
+    /// What the person sent in the conversation as far as the feed reads it,
+    /// the newest first, each once: the reply box's history.
+    var sent: [String] {
+        var seen: Set<String> = []
+        let typed = entries.reversed().compactMap { entry -> String? in
+            guard case .prompt(let prompt) = entry.body, prompt.origin == .typed || prompt.origin == .queued else { return nil }
+            return prompt.text.text
+        }
+        return (queued.reversed().map(\.text) + typed)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && seen.insert($0).inserted }
     }
 
     private static func carries(_ entry: FeedEntry, _ text: String) -> Bool {
@@ -437,6 +484,23 @@ struct ConversationView: View {
         .onChange(of: conversation.revision) { _, _ in
             guard atBottom else { return }
             withAnimation(.snappy) { position.scrollTo(id: Self.bottom, anchor: .bottom) }
+        }
+        .overlay(alignment: .bottom) {
+            if let missing = conversation.focusMissing {
+                Label(missing, systemImage: "questionmark.circle")
+                    .font(.footnote)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14))
+                    .padding(.bottom, 8)
+                    .onTapGesture { conversation.missingSeen() }
+            }
+        }
+        // An edit opened from the changes: its call, mid-screen.
+        .task(id: conversation.focus) {
+            guard let focus = conversation.focus else { return }
+            await Task.yield()
+            withAnimation(.snappy) { position.scrollTo(id: focus, anchor: .center) }
+            conversation.focused()
         }
         .overlay(alignment: .top) {
             if let why = conversation.waiting {
@@ -643,6 +707,42 @@ private struct Composer: View {
     @ObservedObject var conversation: Conversation
     @State private var text = ""
     @FocusState private var focused: Bool
+    /// Where ↑ and ↓ stand in what was sent (nil: the box holds the draft).
+    @State private var recalled: Int?
+    @State private var draft = ""
+
+    /// ↑ an older message, ↓ a newer one, past the newest back to the draft.
+    private func recall(_ step: Int) {
+        let sent = conversation.sent
+        let next = (recalled ?? -1) + step
+        if recalled == nil { draft = text }
+        if next < 0 {
+            recalled = nil
+            text = draft
+        } else if next < sent.count {
+            recalled = next
+            text = sent[next]
+        }
+    }
+
+    private var history: some View {
+        Menu {
+            ForEach(Array(conversation.sent.prefix(20).enumerated()), id: \.offset) { index, message in
+                Button {
+                    if recalled == nil { draft = text }
+                    recalled = index
+                    text = message
+                    focused = true
+                } label: {
+                    Text(message.split(separator: "\n").first.map(String.init) ?? message)
+                }
+            }
+        } label: {
+            Image(systemName: "clock.arrow.circlepath").font(.system(size: 20))
+        }
+        .disabled(conversation.sent.isEmpty)
+        .accessibilityLabel("Sent messages")
+    }
 
     var body: some View {
         let refusal = conversation.replyRefusal
@@ -653,15 +753,31 @@ private struct Composer: View {
                     .font(.footnote).foregroundStyle(Hue.care)
             }
             HStack(alignment: .bottom, spacing: 8) {
+                history.padding(.bottom, 9)
                 TextField(conversation.replyHint, text: $text, axis: .vertical)
                     .lineLimit(1...6)
                     .focused($focused)
                     .disabled(refusal != nil)
                     .padding(.horizontal, 12).padding(.vertical, 9)
                     .background(.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .toolbar {
+                        ToolbarItemGroup(placement: .keyboard) {
+                            Button { recall(1) } label: { Image(systemName: "chevron.up") }
+                                .disabled((recalled ?? -1) + 1 >= conversation.sent.count)
+                                .accessibilityLabel("Older sent message")
+                            Button { recall(-1) } label: { Image(systemName: "chevron.down") }
+                                .disabled(recalled == nil)
+                                .accessibilityLabel("Newer sent message")
+                            Spacer()
+                        }
+                    }
                 Button {
                     conversation.send(text)
-                    if conversation.reply?.failed == nil { text = "" }
+                    if conversation.reply?.failed == nil {
+                        text = ""
+                        recalled = nil
+                        draft = ""
+                    }
                 } label: {
                     Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
                 }

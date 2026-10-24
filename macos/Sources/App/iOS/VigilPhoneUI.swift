@@ -1208,6 +1208,9 @@ struct PaneScreen: View {
                 VigilChanges(ref: current) { quote in
                     setMode(.conversation)
                     conversation?.quote = quote.markdown
+                } show: { entry in
+                    setMode(.conversation)
+                    conversation?.show(entry)
                 }
             case .terminal:
                 terminal

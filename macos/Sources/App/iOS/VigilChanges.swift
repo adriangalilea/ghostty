@@ -31,6 +31,12 @@ struct VigilGitSource: Git.Source {
         VigilGitSource(ref: ref, root: root + "/" + path)
     }
 
+    func contents(_ path: String, in target: Git.ChangeScope.Target) async throws -> String {
+        let scope = try JSONEncoder().encode(Git.ChangeScope(target: target))
+        let data = try await VigilPhone.shared.git(GitCall(kind: .contents, repo: root, scope: scope, path: path), in: ref)
+        return String(decoding: data, as: UTF8.self)
+    }
+
     private func call<Value: Decodable>(_ call: GitCall) async throws -> Value {
         try JSONDecoder().decode(Value.self, from: await VigilPhone.shared.git(call, in: ref))
     }
@@ -43,6 +49,8 @@ struct VigilGitSource: Git.Source {
 struct VigilChanges: View {
     let ref: PaneRef
     let quote: (DiffQuote) -> Void
+    /// Opens the conversation on an edit's call (its feed entry id).
+    let show: (String) -> Void
 
     enum Shown: Hashable {
         case edits
@@ -66,7 +74,18 @@ struct VigilChanges: View {
                 } else {
                     switch shown {
                     case .edits:
-                        if let edits { EditsView(edits: edits) }
+                        if let edits {
+                            EditsView(edits: edits, show: show)
+                                // A file shown whole is now's text against before: its
+                                // lines between hunks are the file on the Mac now.
+                                .diffContents { [ref] file in
+                                    guard let path = edits.files.first(where: { $0.whole && Self.names($0, file.path) })?.path else {
+                                        throw Unread(description: "not shown whole")
+                                    }
+                                    let data = try await VigilPhone.shared.git(GitCall(kind: .file, path: path), in: ref)
+                                    return String(decoding: data, as: UTF8.self)
+                                }
+                        }
                     case .repo(let root):
                         GitBrowser(source: VigilGitSource(ref: ref, root: root), agent: agent(root))
                             .id(root)
@@ -87,6 +106,11 @@ struct VigilChanges: View {
     }
 
     private var roots: [String] { (repos ?? []).map(\.root) + opened }
+
+    /// The Mac draws an edited file under its home as `~/…`: the same file.
+    private static func names(_ file: EditedFile, _ shown: String) -> Bool {
+        shown.hasPrefix("~/") ? file.path.hasSuffix(String(shown.dropFirst())) : file.path == shown
+    }
 
     /// Where the folder browser offers to start: the pane's repositories and
     /// the folders its agent edited in.
@@ -159,7 +183,61 @@ struct VigilChanges: View {
 /// also changed outside those edits, the agent's edits one after another.
 private struct EditsView: View {
     let edits: ConversationEdits
+    let show: (String) -> Void
     @State private var diff: Git.Diff?
+    @State private var listed = false
+
+    /// Each file, its edits and when the last came; a tap opens the
+    /// conversation on that edit.
+    private var files: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { listed.toggle() }
+            } label: {
+                Label(listed ? "Hide the files" : "Each file's edits in the conversation",
+                      systemImage: listed ? "chevron.down" : "chevron.right")
+                    .font(.footnote)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tint)
+            if listed {
+                // A list that keeps the diff on screen under it.
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(edits.files, id: \.path) { file in
+                            if let last = file.edits.last {
+                                Button { show(last.entry) } label: { row(file, last) }
+                                    .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 280)
+                .fixedSize(horizontal: false, vertical: edits.files.count < 6)
+            }
+        }
+    }
+
+    private func row(_ file: EditedFile, _ last: EditedFile.Edit) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text((file.path as NSString).lastPathComponent).font(.callout).lineLimit(1)
+                Text((file.path as NSString).deletingLastPathComponent)
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+            }
+            Spacer(minLength: 6)
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(file.edits.count == 1 ? "1 edit" : "\(file.edits.count) edits").font(.caption)
+                if let at = last.at {
+                    Text(Date(timeIntervalSince1970: at).formatted(date: .omitted, time: .shortened))
+                        .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                }
+            }
+            Image(systemName: "text.bubble").font(.caption).foregroundStyle(.tint)
+        }
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+    }
 
     var body: some View {
         if let unread = edits.unread {
@@ -169,7 +247,11 @@ private struct EditsView: View {
                                 symbol: "doc.badge.ellipsis"))
         } else if let diff {
             VStack(alignment: .leading, spacing: 0) {
-                summary(diff).padding(.horizontal, 16).padding(.bottom, 6)
+                VStack(alignment: .leading, spacing: 6) {
+                    summary(diff)
+                    files
+                }
+                .padding(.horizontal, 16).padding(.bottom, 6)
                 DiffPage(diff)
                     .diffCollapsed(edits.files.count > 8)
             }
