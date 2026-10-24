@@ -463,6 +463,18 @@ struct ConversationView: View {
                 if let tasks = conversation.live?.background, tasks.contains(where: \.state.running) {
                     BackgroundSection(tasks: tasks)
                 }
+                // What it writes now, off its screen: the reply row it becomes
+                // once the transcript has it.
+                if let writing = conversation.live?.writing {
+                    VStack(alignment: .leading, spacing: 4) {
+                        MarkdownView(writing).markdownStyle(MarkdownStyle(textStyle: .callout))
+                            .opacity(0.6)
+                        Label("Writing…", systemImage: "ellipsis")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .symbolEffect(.variableColor.iterative, options: .repeating)
+                    }
+                    .transition(.opacity)
+                }
                 LiveRow(live: conversation.live, shown: phone.directories[conversation.ref.host.id]?.panes[conversation.ref.pane]?.shown)
                     .id(Self.bottom)
             }
