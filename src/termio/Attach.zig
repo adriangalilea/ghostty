@@ -856,7 +856,13 @@ fn readThreadMain(
         // paint the exit overlay over a live program. The quit pipe stays
         // armed throughout, so a teardown
         // mid-reconnect returns at the next check.
-        current_fd = self.reconnect(closing) orelse break;
+        current_fd = self.reconnect(closing) orelse {
+            // A view torn down mid-redial is no ended program: told one,
+            // the surface closes on the next key, and a released view that
+            // kept first responder closed whatever tab was in front.
+            if (closing.load(.acquire)) return;
+            break;
+        };
     }
     // NEVER a blocking push: a surface mid-release drains no mailbox, and
     // a .forever push parks this thread exactly when threadExit is about
