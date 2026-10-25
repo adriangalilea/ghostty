@@ -6,6 +6,7 @@ import MarkdownText
 import SwiftUI
 import GhosttyKit
 import VigilActivity
+import VigilLink
 import VigilWire
 
 /// The phone's screens: ONE home tree (Macs → workspaces → tabs → panes,
@@ -1205,13 +1206,19 @@ struct PaneScreen: View {
                 }
             case .changes:
                 // A quote lands in the reply box, and the conversation shows.
-                VigilChanges(ref: current) { quote in
+                VigilChanges(git: { [current] call in
+                    do { return try await VigilPhone.shared.git(call, in: current) } catch {
+                        throw PaneGitCallFailed(description: VigilLink.reason(error))
+                    }
+                }) { quote in
                     setMode(.conversation)
                     conversation?.quote = quote.markdown
                 } show: { entry in
                     setMode(.conversation)
                     conversation?.show(entry)
                 }
+                // Another pane is another Mac's question: read again.
+                .id(current)
             case .terminal:
                 terminal
             }

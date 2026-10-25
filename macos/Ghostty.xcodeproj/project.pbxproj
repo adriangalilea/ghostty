@@ -58,6 +58,8 @@
 		0DAA1111000000000000E071 /* Ink in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E070 /* Ink */; };
 		0DAA1111000000000000E081 /* GitKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E080 /* GitKit */; };
 		0DAA1111000000000000E091 /* GitViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E090 /* GitViews */; };
+		0DAA1111000000000000E083 /* GitKit in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E082 /* GitKit */; };
+		0DAA1111000000000000E093 /* GitViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E092 /* GitViews */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -315,6 +317,7 @@
 				Helpers/VibrantLayer.m,
 				Features/Vigil/VigilHarnessCoordinator.swift,
 				Features/Vigil/VigilBars.swift,
+				Features/Vigil/VigilChangesWindow.swift,
 				Features/Vigil/VigilCortex.swift,
 				Features/Vigil/VigilDictation.swift,
 				Features/Vigil/VigilDock.swift,
@@ -352,7 +355,6 @@
 				App/iOS/Sounds,
 				App/iOS/VigilAgents.swift,
 				App/iOS/VigilAuthz.swift,
-				App/iOS/VigilChanges.swift,
 				App/iOS/VigilConversation.swift,
 				App/iOS/VigilCreate.swift,
 				App/iOS/VigilFixture.swift,
@@ -429,6 +431,8 @@
 				0DAA111100000000000000C3 /* Ink in Frameworks */,
 				0DAA111100000000000000C5 /* Keymap in Frameworks */,
 				0DAA111100000000000002C9 /* Log in Frameworks */,
+				0DAA1111000000000000E083 /* GitKit in Frameworks */,
+				0DAA1111000000000000E093 /* GitViews in Frameworks */,
 				A56B880B2A840447007A0E29 /* Carbon.framework in Frameworks */,
 				A571AB1D2A206FCF00248498 /* GhosttyKit.xcframework in Frameworks */,
 			);
@@ -637,6 +641,8 @@
 				0DAA111100000000000000C2 /* Ink */,
 				0DAA111100000000000000C4 /* Keymap */,
 				0DAA111100000000000002C8 /* Log */,
+				0DAA1111000000000000E082 /* GitKit */,
+				0DAA1111000000000000E092 /* GitViews */,
 			);
 			productName = Ghostty;
 			productReference = A5B30531299BEAAA0047F10C /* Ghostty.app */;
@@ -1977,6 +1983,8 @@
 		0DAA1111000000000000E070 /* Ink */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = Ink; };
 		0DAA1111000000000000E080 /* GitKit */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitKit; };
 		0DAA1111000000000000E090 /* GitViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitViews; };
+		0DAA1111000000000000E082 /* GitKit */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitKit; };
+		0DAA1111000000000000E092 /* GitViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitViews; };
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A5B30529299BEAAA0047F10C /* Project object */;

@@ -2,15 +2,25 @@ import Foundation
 import GitKit
 import GitViews
 import SwiftUI
-import VigilLink
 import VigilWire
 
+/// One `GitCall` answered by a pane's Mac: over the link from the phone or
+/// for another Mac's pane, by this Mac's hub for its own (`Local.here`).
+/// What it throws is said as it describes itself: the host puts its
+/// failures in words (`PaneGitCallFailed`).
+typealias PaneGitCall = @Sendable (GitCall) async throws -> Data
+
+/// A call that did not come back, in the host's words.
+struct PaneGitCallFailed: Error, CustomStringConvertible {
+    let description: String
+}
+
 /// A repository read through its pane's Mac (harness/GIT-VIEW.md): each call
-/// of `Git.Source` asked over the link (`Open.git`), answered by that Mac's
+/// of `Git.Source` asked of it (`Open.git`), answered by that Mac's
 /// `Git.LocalSource`, GitKit's own value coming back. A submodule is the
 /// same source rooted at its checkout.
 struct VigilGitSource: Git.Source {
-    let ref: PaneRef
+    let git: PaneGitCall
     let root: String
 
     var name: String { (root as NSString).lastPathComponent }
@@ -28,29 +38,30 @@ struct VigilGitSource: Git.Source {
     }
 
     func submodule(_ path: String) -> (any Git.Source)? {
-        VigilGitSource(ref: ref, root: root + "/" + path)
+        VigilGitSource(git: git, root: root + "/" + path)
     }
 
     func contents(_ path: String, in target: Git.ChangeScope.Target) async throws -> String {
         let scope = try JSONEncoder().encode(Git.ChangeScope(target: target))
-        let data = try await VigilPhone.shared.git(GitCall(kind: .contents, repo: root, scope: scope, path: path), in: ref)
-        return String(decoding: data, as: UTF8.self)
+        return String(decoding: try await git(GitCall(kind: .contents, repo: root, scope: scope, path: path)), as: UTF8.self)
     }
 
     private func call<Value: Decodable>(_ call: GitCall) async throws -> Value {
-        try JSONDecoder().decode(Value.self, from: await VigilPhone.shared.git(call, in: ref))
+        try JSONDecoder().decode(Value.self, from: await git(call))
     }
 }
 
 /// The pane's changes: what its agent edited in this conversation, in a
 /// repository or not; each of its repositories in the git browser, opening
 /// on the agent's work there; and any other repository on its Mac, found by
-/// folder. A quote goes to the conversation's reply box.
+/// folder. A quote goes where the host says (the phone's reply box). Drawn
+/// by the phone's pane screen and the Mac's changes window alike.
 struct VigilChanges: View {
-    let ref: PaneRef
+    let git: PaneGitCall
     let quote: (DiffQuote) -> Void
-    /// Opens the conversation on an edit's call (its feed entry id).
-    let show: (String) -> Void
+    /// Opens the conversation on an edit's call (its feed entry id), where
+    /// the host has one.
+    let show: ((String) -> Void)?
 
     enum Shown: Hashable {
         case edits
@@ -78,19 +89,18 @@ struct VigilChanges: View {
                             EditsView(edits: edits, show: show)
                                 // A file shown whole is now's text against before: its
                                 // lines between hunks are the file on the Mac now.
-                                .diffContents { [ref] file in
+                                .diffContents { [git] file in
                                     guard let path = edits.files.first(where: { $0.whole && Self.names($0, file.path) })?.path else {
                                         throw Unread(description: "not shown whole")
                                     }
-                                    let data = try await VigilPhone.shared.git(GitCall(kind: .file, path: path), in: ref)
-                                    return String(decoding: data, as: UTF8.self)
+                                    return String(decoding: try await git(GitCall(kind: .file, path: path)), as: UTF8.self)
                                 }
                         }
                     case .repo(let root):
-                        GitBrowser(source: VigilGitSource(ref: ref, root: root), agent: agent(root))
+                        GitBrowser(source: VigilGitSource(git: git, root: root), agent: agent(root))
                             .id(root)
                     case .open:
-                        FolderBrowser(ref: ref, places: places) { root in
+                        FolderBrowser(git: git, places: places) { root in
                             if !roots.contains(root) { opened.append(root) }
                             shown = .repo(root)
                         }
@@ -160,8 +170,8 @@ struct VigilChanges: View {
     private func load() async {
         failure = nil
         do {
-            async let editsData = VigilPhone.shared.git(GitCall(kind: .edits), in: ref)
-            async let reposData = VigilPhone.shared.git(GitCall(kind: .repos), in: ref)
+            async let editsData = git(GitCall(kind: .edits))
+            async let reposData = git(GitCall(kind: .repos))
             let edits = try JSONDecoder().decode(ConversationEdits.self, from: await editsData)
             let read = try JSONDecoder().decode([RepoInfo].self, from: await reposData)
             // The repository the agent worked in first, else the pane's folder's.
@@ -173,7 +183,7 @@ struct VigilChanges: View {
                 shown = !edits.files.isEmpty ? .edits : repos.first.map { .repo($0.root) } ?? .edits
             }
         } catch {
-            failure = VigilLink.reason(error)
+            failure = "\(error)"
         }
     }
 }
@@ -183,18 +193,18 @@ struct VigilChanges: View {
 /// also changed outside those edits, the agent's edits one after another.
 private struct EditsView: View {
     let edits: ConversationEdits
-    let show: (String) -> Void
+    let show: ((String) -> Void)?
     @State private var diff: Git.Diff?
     @State private var listed = false
 
     /// Each file, its edits and when the last came; a tap opens the
-    /// conversation on that edit.
+    /// conversation on that edit where the host has one.
     private var files: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
                 withAnimation(.snappy(duration: 0.2)) { listed.toggle() }
             } label: {
-                Label(listed ? "Hide the files" : "Each file's edits in the conversation",
+                Label(listed ? "Hide the files" : "Each file's edits",
                       systemImage: listed ? "chevron.down" : "chevron.right")
                     .font(.footnote)
             }
@@ -206,8 +216,12 @@ private struct EditsView: View {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(edits.files, id: \.path) { file in
                             if let last = file.edits.last {
-                                Button { show(last.entry) } label: { row(file, last) }
-                                    .buttonStyle(.plain)
+                                if let show {
+                                    Button { show(last.entry) } label: { row(file, last) }
+                                        .buttonStyle(.plain)
+                                } else {
+                                    row(file, last)
+                                }
                             }
                         }
                     }
@@ -233,7 +247,7 @@ private struct EditsView: View {
                         .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
-            Image(systemName: "text.bubble").font(.caption).foregroundStyle(.tint)
+            if show != nil { Image(systemName: "text.bubble").font(.caption).foregroundStyle(.tint) }
         }
         .padding(.vertical, 6)
         .contentShape(Rectangle())
@@ -298,7 +312,7 @@ private struct EditsView: View {
 /// A folder on the pane's Mac at a time, its repositories marked: tap a
 /// repository to open it, any other folder to go inside, or type a path.
 private struct FolderBrowser: View {
-    let ref: PaneRef
+    let git: PaneGitCall
     let places: [String]
     let open: (String) -> Void
 
@@ -311,7 +325,9 @@ private struct FolderBrowser: View {
         List {
             Section {
                 TextField("A folder on the Mac, like ~/Developer", text: $typed)
+                    #if os(iOS)
                     .textInputAutocapitalization(.never)
+                    #endif
                     .autocorrectionDisabled()
                     .font(.callout.monospaced())
                     .onSubmit {
@@ -376,11 +392,11 @@ private struct FolderBrowser: View {
 
     private func load() async {
         do {
-            let data = try await VigilPhone.shared.git(GitCall(kind: .browse, repo: path), in: ref)
+            let data = try await git(GitCall(kind: .browse, repo: path))
             listing = try JSONDecoder().decode(FolderListing.self, from: data)
             failure = nil
         } catch {
-            failure = VigilLink.reason(error)
+            failure = "\(error)"
         }
     }
 }

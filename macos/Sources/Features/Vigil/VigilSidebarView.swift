@@ -661,6 +661,10 @@ struct VigilSidebarView: View {
                 }
             }
             if let paneId = pane.paneId {
+                // What its agent edited, its repositories, any other on its Mac.
+                Button("Changes…") {
+                    VigilChangesWindow.show(pane: paneId, title: pane.title)
+                }
                 Button("Rename…") {
                     VigilIdentity.editModal(
                         title: "Pane identity",
