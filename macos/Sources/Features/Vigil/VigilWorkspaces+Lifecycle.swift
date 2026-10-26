@@ -85,6 +85,13 @@ extension VigilWorkspaces {
         return Birth(name: name, pane: panes[0], running: running)
     }
 
+    /// The app's births vouched for by vigil-agent, the one key holder
+    /// (`Local.Request.vouch`): this app has no keychain group. vigil-agent
+    /// down means no seal, so the birth is refused, never let through.
+    nonisolated static let vouch: Vouch = { question in
+        Local.Client(socket: VigilPaths.hub).vouch(question)
+    }
+
     /// Start a pane's daemon headless (`vigild new <id> [-c cmd]`): the
     /// process half of creation. The app's own environment flows (plus
     /// VIGIL_WORKSPACE), the same contract as the attach backend's spawn;
@@ -110,7 +117,7 @@ extension VigilWorkspaces {
         var env = ProcessInfo.processInfo.environment
         env["VIGIL_WORKSPACE"] = session
         do {
-            let status = try PaneBirth.run(args, environment: env)
+            let status = try PaneBirth.run(args, environment: env, vouch: Self.vouch)
             if status == 0 {
                 daemonLog.info("daemon up", ["pane": pane.id])
                 return true

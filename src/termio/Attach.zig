@@ -230,10 +230,7 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
     for (self.id) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return error.InvalidPane;
 
     var path_buf: [512]u8 = undefined;
-    const path = if (posix.getenv("VIGIL_AGENT_STATE")) |root|
-        try std.fmt.bufPrint(&path_buf, "{s}/hub.sock", .{root})
-    else
-        try std.fmt.bufPrint(&path_buf, "{s}/.local/state/vigil/agent/hub.sock", .{posix.getenv("HOME") orelse return error.NoHome});
+    const path = try hubPath(&path_buf);
     const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
     errdefer posix.close(fd);
     // Runs before the errdefer close (defers unwind in reverse).
@@ -269,6 +266,15 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
     }
     log.info("attach: remote {s} on {s} through the hub", .{ self.id, host });
     return fd;
+}
+
+/// The hub's socket, as VigilWire's `VigilPaths.hub` names it
+/// (`VIGIL_AGENT_STATE` moves it).
+fn hubPath(buf: []u8) ![]const u8 {
+    return if (posix.getenv("VIGIL_AGENT_STATE")) |root|
+        try std.fmt.bufPrint(buf, "{s}/hub.sock", .{root})
+    else
+        try std.fmt.bufPrint(buf, "{s}/.local/state/vigil/agent/hub.sock", .{posix.getenv("HOME") orelse return error.NoHome});
 }
 
 fn setDialing(self: *Attach, fd: posix.fd_t) void {
@@ -906,6 +912,93 @@ extern "c" fn posix_spawn_file_actions_addopen(actions: *?*anyopaque, fd: c_int,
 extern "c" fn posix_spawn(pid: *posix.pid_t, path: [*:0]const u8, actions: *const ?*anyopaque, attr: ?*const anyopaque, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn socketpair(domain: c_int, kind: c_int, protocol: c_int, fds: *[2]c_int) c_int;
 
+/// A daemon's birth question (`birth <id> <nonce> <spec> <old|-> <old
+/// seal|-> <resume|-> <resume seal|->`, vigild's authorizeBirth) answered
+/// through vigil-agent, the one holder of the pane key (VigilWire's
+/// `Local.Request.vouch`; this app has no keychain group): `born <id>
+/// <nonce> <seal>`, or `refused <id> <nonce> <why>` when it says no or does
+/// not answer. Null for a line that is no question (the daemon then
+/// refuses itself). Every word is checked to its alphabet first, so none
+/// needs quoting in the request.
+fn vouchBirth(alloc: Allocator, question: []const u8, out: []u8) ?[]const u8 {
+    var words: [8][]const u8 = undefined;
+    var it = std.mem.splitScalar(u8, question, ' ');
+    var count: usize = 0;
+    while (it.next()) |word| : (count += 1) {
+        if (count == words.len) return null;
+        words[count] = word;
+    }
+    if (count != words.len or !std.mem.eql(u8, words[0], "birth")) return null;
+    const id = words[1];
+    const nonce = words[2];
+    if (id.len == 0 or nonce.len != 16) return null;
+    for (id) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_')) return null;
+    for (nonce) |ch| if (!std.ascii.isHex(ch)) return null;
+    // Digests are 64 lowercase hex, seals 44 base64; "-" is none.
+    for ([_]usize{ 3, 4, 6 }) |i| {
+        if (i != 3 and std.mem.eql(u8, words[i], "-")) continue;
+        if (words[i].len != 64) return null;
+        for (words[i]) |ch| if (!(std.ascii.isDigit(ch) or (ch >= 'a' and ch <= 'f'))) return null;
+    }
+    for ([_]usize{ 5, 7 }) |i| {
+        if (std.mem.eql(u8, words[i], "-")) continue;
+        if (words[i].len != 44) return null;
+        for (words[i]) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '+' or ch == '/' or ch == '=')) return null;
+    }
+
+    const why: []const u8 = why: {
+        var request = std.ArrayList(u8){};
+        request.print(alloc, "{{\"kind\":\"vouch\",\"birth\":{{\"pane\":\"{s}\",\"spec\":\"{s}\"", .{ id, words[3] }) catch break :why "out of memory";
+        const fields = [_]struct { name: []const u8, at: usize }{
+            .{ .name = "old", .at = 4 },    .{ .name = "oldSeal", .at = 5 },
+            .{ .name = "resume", .at = 6 }, .{ .name = "resumeSeal", .at = 7 },
+        };
+        for (fields) |field| {
+            if (std.mem.eql(u8, words[field.at], "-")) continue;
+            request.print(alloc, ",\"{s}\":\"{s}\"", .{ field.name, words[field.at] }) catch break :why "out of memory";
+        }
+        request.appendSlice(alloc, "}}\n") catch break :why "out of memory";
+
+        var path_buf: [512]u8 = undefined;
+        const path = hubPath(&path_buf) catch break :why "vigil-agent's hub has no path here";
+        const fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch break :why "no socket for vigil-agent's hub";
+        defer posix.close(fd);
+        _ = posix.fcntl(fd, posix.F.SETFD, posix.FD_CLOEXEC) catch {};
+        var addr = std.net.Address.initUnix(path) catch break :why "vigil-agent's hub has no address";
+        posix.connect(fd, &addr.any, addr.getOsSockLen()) catch break :why "vigil-agent's hub does not answer (is vigil-agent running?)";
+        var written: usize = 0;
+        while (written < request.items.len) written += posix.write(fd, request.items[written..]) catch break :why "vigil-agent's hub did not take the question";
+
+        var reply: [2048]u8 = undefined;
+        var got: usize = 0;
+        while (true) {
+            if (got == reply.len) break :why "vigil-agent's hub answered too much";
+            const n = posix.read(fd, reply[got .. got + 1]) catch break :why "vigil-agent's hub left";
+            if (n == 0) break :why "vigil-agent's hub left";
+            if (reply[got] == '\n') break;
+            got += 1;
+        }
+        // CallResult: `output` is the seal's bytes, base64 again (JSON Data).
+        const Reply = struct { ok: bool, output: ?[]const u8 = null, @"error": ?[]const u8 = null };
+        const parsed = std.json.parseFromSlice(Reply, alloc, reply[0..got], .{ .ignore_unknown_fields = true }) catch break :why "vigil-agent's hub answered something else";
+        if (!parsed.value.ok) break :why (alloc.dupe(u8, parsed.value.@"error" orelse "vigil-agent refused it") catch "vigil-agent refused it");
+        const encoded = parsed.value.output orelse break :why "vigil-agent answered with no seal";
+        var seal: [64]u8 = undefined;
+        const size = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch break :why "vigil-agent answered with no seal";
+        if (size != 44) break :why "vigil-agent answered with no seal";
+        std.base64.standard.Decoder.decode(seal[0..size], encoded) catch break :why "vigil-agent answered with no seal";
+        return std.fmt.bufPrint(out, "born {s} {s} {s}\n", .{ id, nonce, seal[0..size] }) catch null;
+    };
+    // One line, within what the daemon reads.
+    var said: [300]u8 = undefined;
+    const why_len = @min(why.len, said.len);
+    @memcpy(said[0..why_len], why[0..why_len]);
+    for (said[0..why_len]) |*ch| if (ch.* == '\n' or ch.* == '\r') {
+        ch.* = ' ';
+    };
+    return std.fmt.bufPrint(out, "refused {s} {s} {s}\n", .{ id, nonce, said[0..why_len] }) catch null;
+}
+
 /// vigild `new`/`restore` with this app as their birth authority: a daemon
 /// is born only for the Vigil app or vigil-agent (vigild's authorizeBirth,
 /// judged by code signature). vigild's stdin is one end of a socketpair;
@@ -948,7 +1041,7 @@ fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.En
     posix.close(pair[1]);
     if (rc != 0) return error.SpawnFailed;
 
-    var line: [256]u8 = undefined;
+    var line: [1024]u8 = undefined;
     var len: usize = 0;
     while (true) {
         const n = posix.read(pair[0], line[len .. len + 1]) catch break;
@@ -958,17 +1051,10 @@ fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.En
             if (len == line.len) break;
             continue;
         }
-        var words = std.mem.tokenizeScalar(u8, line[0..len], ' ');
+        const question = line[0..len];
         len = 0;
-        if (!std.mem.eql(u8, words.next() orelse continue, "birth")) continue;
-        const id = words.next() orelse continue;
-        const nonce = words.next() orelse continue;
-        var valid = nonce.len == 16;
-        for (nonce) |ch| valid = valid and std.ascii.isHex(ch);
-        for (id) |ch| valid = valid and (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_');
-        if (!valid) continue;
-        var answer: [256]u8 = undefined;
-        const said = std.fmt.bufPrint(&answer, "born {s} {s}\n", .{ id, nonce }) catch continue;
+        var answer: [1024]u8 = undefined;
+        const said = vouchBirth(arena, question, &answer) orelse continue;
         var written: usize = 0;
         while (written < said.len) written += posix.write(pair[0], said[written..]) catch break;
     }

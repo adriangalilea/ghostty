@@ -421,7 +421,7 @@ extension VigilWorkspaces {
             FileManager.default.createFile(atPath: report.path, contents: nil, attributes: [.posixPermissions: 0o600])
             let handle = try FileHandle(forWritingTo: report)
             defer { try? FileManager.default.removeItem(at: report) }
-            let status = try PaneBirth.run(["restore"], output: handle, errors: handle)
+            let status = try PaneBirth.run(["restore"], vouch: Self.vouch, output: handle, errors: handle)
             try? handle.close()
             let data = (try? Data(contentsOf: report)) ?? Data()
             let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
@@ -471,6 +471,7 @@ extension VigilWorkspaces {
             let id = String(entry.dropLast(".resume".count))
             guard !owned.contains(id), !Self.daemonAlive(id) else { continue }
             try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry))
+            try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry + ".seal"))
             daemonLog.info("stale resume pointer removed", ["pane": id])
         }
         for entry in (try? fm.contentsOfDirectory(atPath: agentStateDir.path)) ?? []
