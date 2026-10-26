@@ -36,7 +36,8 @@ enum VigilChangesWindow {
                 }
             }.value
         }
-        let view = VigilChanges(git: git, quote: { quote in
+        let watch: PaneGitWatch = { root in hub.gitChanges(device: remote?.device, pane: id, repo: root) }
+        let view = VigilChanges(git: git, watch: watch, quote: { quote in
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(quote.markdown, forType: .string)
         }, show: nil)

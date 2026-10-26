@@ -1016,6 +1016,21 @@ final class VigilPhone: ObservableObject {
         return data
     }
 
+    /// A repository of the pane's Mac watched while a viewer reads it
+    /// (`VigilLink.gitChanges`): one element per change.
+    nonisolated func gitChanges(_ repo: String, in ref: PaneRef) -> AsyncStream<Void> {
+        AsyncStream { continuation in
+            let task = Task {
+                guard let node = await self.node else { return continuation.finish() }
+                for await _ in VigilLink.gitChanges(node, device: ref.host.id, pane: ref.pane, repo: repo) {
+                    continuation.yield()
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     /// Presses one of the agent's keys in its pane; the Mac's account of
     /// what it did (it checks each step against the transcript).
     func press(_ key: PaneKey, in ref: PaneRef) async throws -> String {

@@ -10,6 +10,10 @@ import VigilWire
 /// failures in words (`PaneGitCallFailed`).
 typealias PaneGitCall = @Sendable (GitCall) async throws -> Data
 
+/// A repository of the pane's Mac watched (`Open.gitWatch`), by its top
+/// level: one element each time it may have changed.
+typealias PaneGitWatch = @Sendable (String) -> AsyncStream<Void>
+
 /// A call that did not come back, in the host's words.
 struct PaneGitCallFailed: Error, CustomStringConvertible {
     let description: String
@@ -17,13 +21,16 @@ struct PaneGitCallFailed: Error, CustomStringConvertible {
 
 /// A repository read through its pane's Mac (harness/GIT-VIEW.md): each call
 /// of `Git.Source` asked of it (`Open.git`), answered by that Mac's
-/// `Git.LocalSource`, GitKit's own value coming back. A submodule is the
-/// same source rooted at its checkout.
+/// `Git.LocalSource`, GitKit's own value coming back, and watched by it
+/// (`changes()`). A submodule is the same source rooted at its checkout.
 struct VigilGitSource: Git.Source {
     let git: PaneGitCall
+    let watch: PaneGitWatch
     let root: String
 
     var name: String { (root as NSString).lastPathComponent }
+
+    func changes() -> AsyncStream<Void> { watch(root) }
 
     func snapshot() async throws -> Git.Snapshot {
         try await call(GitCall(kind: .snapshot, repo: root))
@@ -38,7 +45,7 @@ struct VigilGitSource: Git.Source {
     }
 
     func submodule(_ path: String) -> (any Git.Source)? {
-        VigilGitSource(git: git, root: root + "/" + path)
+        VigilGitSource(git: git, watch: watch, root: root + "/" + path)
     }
 
     func contents(_ path: String, in target: Git.ChangeScope.Target) async throws -> String {
@@ -58,6 +65,7 @@ struct VigilGitSource: Git.Source {
 /// by the phone's pane screen and the Mac's changes window alike.
 struct VigilChanges: View {
     let git: PaneGitCall
+    let watch: PaneGitWatch
     let quote: (DiffQuote) -> Void
     /// Opens the conversation on an edit's call (its feed entry id), where
     /// the host has one.
@@ -97,7 +105,7 @@ struct VigilChanges: View {
                                 }
                         }
                     case .repo(let root):
-                        GitBrowser(source: VigilGitSource(git: git, root: root), agent: agent(root))
+                        GitBrowser(source: VigilGitSource(git: git, watch: watch, root: root), agent: agent(root))
                             .id(root)
                     case .open:
                         FolderBrowser(git: git, places: places) { root in

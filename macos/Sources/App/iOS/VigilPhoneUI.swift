@@ -1210,7 +1210,7 @@ struct PaneScreen: View {
                     do { return try await VigilPhone.shared.git(call, in: current) } catch {
                         throw PaneGitCallFailed(description: VigilLink.reason(error))
                     }
-                }) { quote in
+                }, watch: { [phone = VigilPhone.shared, current] root in phone.gitChanges(root, in: current) }) { quote in
                     setMode(.conversation)
                     conversation?.quote = quote.markdown
                 } show: { entry in
