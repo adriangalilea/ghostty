@@ -1884,6 +1884,12 @@ extension Ghostty {
                 guard let window = surfaceView.window,
                       let controller = window.windowController as? BaseTerminalController
                 else { return false }
+                // vigil: a tab of panes has one name, its stored identity
+                // (ScriptTab's name override says why).
+                if controller.surfaceTree.contains(where: \.isVigilPane) {
+                    guard let terminal = controller as? TerminalController else { return false }
+                    return MainActor.assumeIsolated { VigilWorkspaces.shared.setTabLabel(terminal, titleOverride) }
+                }
                 controller.titleOverride = titleOverride
                 return true
 

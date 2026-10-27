@@ -140,11 +140,21 @@ extension VigilWorkspaces {
     /// The inline tab-title editor's commit, kept in the one store so it
     /// survives, shows in the sidebar, and is never clobbered by a sync.
     /// Preserves the tab's face: renaming is not un-emoji-ing.
+    /// True when the name was stored; false for a window of no workspace or
+    /// a tab no workspace here owns (a mirror of another Mac's).
     @discardableResult
     func setTabLabel(_ controller: TerminalController, _ label: String?) -> Bool {
         guard let key = tabIdentityKey(for: controller) else { return false }
-        setCustomIdentity(key: key, label: label, emoji: customIdentity(key)?.emoji)
-        return true
+        return setCustomIdentity(key: key, label: label, emoji: customIdentity(key)?.emoji)
+    }
+
+    /// A pane's name set from outside the identity editor (AppleScript's
+    /// terminal `name override`), stored on the pane like every other pane
+    /// name. False when no workspace here owns the pane.
+    @discardableResult
+    func setPaneLabel(_ view: Ghostty.SurfaceView, _ label: String?) -> Bool {
+        guard let id = view.vigilAttachId, view.vigilHost == nil, !view.vigilMirror else { return false }
+        return setCustomIdentity(key: id, label: label, emoji: customIdentity(id)?.emoji)
     }
 
     /// Rename the TAB shown in this window, through the one identity editor

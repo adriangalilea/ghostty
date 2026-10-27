@@ -57,8 +57,15 @@ final class ScriptTerminal: NSObject {
             return surfaceView?.titleOverride ?? ""
         }
         set {
-            guard NSApp.isAppleScriptEnabled else { return }
-            surfaceView?.titleOverride = newValue.isEmpty ? nil : newValue
+            guard NSApp.isAppleScriptEnabled, let surfaceView else { return }
+            let label = newValue.isEmpty ? nil : newValue
+            // vigil: a pane's name is its stored identity (the sidebar's,
+            // every Mac's and the phone's), never a surface-only override.
+            if surfaceView.isVigilPane {
+                VigilWorkspaces.shared.setPaneLabel(surfaceView, label)
+                return
+            }
+            surfaceView.titleOverride = label
         }
     }
 

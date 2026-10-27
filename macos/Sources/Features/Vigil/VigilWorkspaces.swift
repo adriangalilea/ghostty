@@ -231,7 +231,9 @@ class VigilWorkspaces {
         return nil
     }
 
-    func setCustomIdentity(key: String, label: String?, emoji: String?) {
+    /// True when a workspace owns `key` and stored the identity.
+    @discardableResult
+    func setCustomIdentity(key: String, label: String?, emoji: String?) -> Bool {
         let wantsTab = key.hasPrefix("tab:")
         let target = wantsTab ? String(key.dropFirst(4)) : key
         var landed = false
@@ -281,6 +283,7 @@ class VigilWorkspaces {
             for controller in TerminalController.all { syncTabTitle(controller) }
         }
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+        return landed
     }
 
     /// A workspace as this app holds it: the registry's record (`Registry`,
