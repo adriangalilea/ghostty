@@ -194,21 +194,12 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
         editor.translatesAutoresizingMaskIntoConstraints = false
         let horizontalInset: CGFloat = 6
         let editorHeight = sourceLabel?.bounds.height ?? tabButton.bounds.height
-
-        // The face lives WHERE THE NAME IS: renaming a tab and giving it a
-        // face are one gesture, so the picker sits inside the inline editor
-        // instead of hiding behind a context menu.
-        // The text field stays EXACTLY as vanilla ghostty lays it out: same
-        // anchors, same alignment, no shift. The face is an INDEPENDENT
-        // control floating at the leading edge, so the rename you already
-        // know is untouched and the picker is simply there.
         NSLayoutConstraint.activate([
             editor.centerYAnchor.constraint(equalTo: tabButton.centerYAnchor),
             editor.leadingAnchor.constraint(equalTo: tabButton.leadingAnchor, constant: horizontalInset),
             editor.trailingAnchor.constraint(equalTo: tabButton.trailingAnchor, constant: -horizontalInset),
             editor.heightAnchor.constraint(equalToConstant: editorHeight),
         ])
-
         CATransaction.commit()
 
         // Focus after insertion so AppKit has created the field editor for this text field.
