@@ -58,8 +58,15 @@ final class ScriptTab: NSObject {
             return controller?.titleOverride ?? ""
         }
         set {
-            guard NSApp.isAppleScriptEnabled else { return }
-            controller?.titleOverride = newValue.isEmpty ? nil : newValue
+            guard NSApp.isAppleScriptEnabled, let controller else { return }
+            let label = newValue.isEmpty ? nil : newValue
+            // vigil: a workspace's tab has ONE name, its stored identity;
+            // titleOverride is only how that name reaches the tab bar, and a
+            // direct write would be repainted away and never saved. A window
+            // of no workspace keeps Ghostty's override.
+            if let terminal = controller as? TerminalController,
+               VigilWorkspaces.shared.setTabLabel(terminal, label) { return }
+            controller.titleOverride = label
         }
     }
 
