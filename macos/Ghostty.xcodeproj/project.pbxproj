@@ -166,7 +166,6 @@
 				"Features/Custom App Icon/Extensions/UserDefaults+AppIcon.swift",
 				Ghostty/Ghostty.ConfigTypes.swift,
 				Ghostty/GhosttyPackageMeta.swift,
-				Helpers/CrossKit.swift,
 				"Helpers/Extensions/NSImage+Extension.swift",
 				"Helpers/Extensions/OSColor+Extension.swift",
 				"Helpers/Extensions/OSPasteboard+Extension.swift",
@@ -881,7 +880,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.mitchellh.ghostty;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/macOS/ghostty-bridging-header.h";
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/ghostty-bridging-header.h";
 				SWIFT_VERSION = 5.0;
 			};
 			name = ReleaseLocal;
@@ -1279,7 +1278,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.mitchellh.ghostty.debug;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/macOS/ghostty-bridging-header.h";
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/ghostty-bridging-header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 			};
@@ -1335,7 +1334,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.mitchellh.ghostty;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/macOS/ghostty-bridging-header.h";
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/ghostty-bridging-header.h";
 				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
@@ -1722,8 +1721,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.5.1;
+				kind = exactVersion;
+				version = 2.9.6;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

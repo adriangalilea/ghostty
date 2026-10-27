@@ -1,13 +1,9 @@
-const std = @import("std");
-const assert = std.debug.assert;
 const c = @import("c.zig").c;
 
 pub const DisplayLink = opaque {
     pub const Error = error{
+        CreationFailed,
         InvalidOperation,
-        /// CoreVideo refused to create a link: there is no active display
-        /// (a login relaunch in dark wake, a headless session).
-        NoActiveDisplay,
     };
 
     pub fn createWithActiveCGDisplays() Error!*DisplayLink {
@@ -15,9 +11,9 @@ pub const DisplayLink = opaque {
         if (c.CVDisplayLinkCreateWithActiveCGDisplays(
             @ptrCast(&result),
         ) != c.kCVReturnSuccess)
-            return error.NoActiveDisplay;
+            return error.CreationFailed;
 
-        return result orelse error.NoActiveDisplay;
+        return result orelse error.CreationFailed;
     }
 
     pub fn release(self: *DisplayLink) void {

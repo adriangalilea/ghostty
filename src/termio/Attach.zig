@@ -24,7 +24,10 @@ const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
+const global = @import("../global.zig");
+const compat_fd = @import("../lib/compat/fd.zig");
 const internal_os = @import("../os/main.zig");
+const apprt = @import("../apprt.zig");
 const renderer = @import("../renderer.zig");
 const configpkg = @import("../config.zig");
 const terminal = @import("../terminal/main.zig");
@@ -78,7 +81,7 @@ write_fd: posix.fd_t = -1,
 /// teardown shuts it down so the read thread it blocks returns at once.
 /// Set and cleared under the mutex, cleared before the descriptor closes,
 /// so a shutdown never reaches a reused number.
-dialing_mutex: std.Thread.Mutex = .{},
+dialing_mutex: std.Io.Mutex = .init,
 dialing_fd: posix.fd_t = -1,
 
 /// Cached tty name of the daemon's pty (from its pidfile).
@@ -104,9 +107,9 @@ focus_pending: bool = false,
 /// Outbound frame queue: enqueueFrame appends (io thread, never blocks),
 /// the writer thread alone writes the socket. Order is total — resize and
 /// data frames share the one queue.
-write_mutex: std.Thread.Mutex = .{},
-write_cond: std.Thread.Condition = .{},
-write_buf: std.ArrayListUnmanaged(u8) = .{},
+write_mutex: std.Io.Mutex = .init,
+write_cond: std.Io.Condition = .init,
+write_buf: std.ArrayListUnmanaged(u8) = .empty,
 write_closed: bool = false,
 write_thread: ?std.Thread = null,
 
@@ -122,7 +125,7 @@ stalled: std.atomic.Value(bool) = .init(false),
 /// (stream open or lost, a stall begun or cleared) is pushed to it as
 /// `vigil_transport`, and the embedder reads `transportStatus` then.
 /// Deliberate teardown reports nothing.
-mailbox: ?@FieldType(termio.Termio, "surface_mailbox") = null,
+mailbox: ?apprt.surface.Mailbox = null,
 
 pub const TransportStatus = extern struct {
     state: u8, // 0 connecting, 1 stream open, 2 disconnected
@@ -170,6 +173,8 @@ pub const Config = struct {
 
 pub fn init(alloc: Allocator, cfg: Config) !Attach {
     const explicit_claim = cfg.explicit_claim or (if (cfg.host) |host| host.len > 0 else false);
+    var client_id: u64 = undefined;
+    global.io().random(std.mem.asBytes(&client_id));
     return .{
         .alloc = alloc,
         .id = try alloc.dupe(u8, cfg.id),
@@ -179,7 +184,7 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .host = if (cfg.host) |v| if (v.len > 0) try alloc.dupe(u8, v) else null else null,
         .given_fd = cfg.fd,
         .explicit_claim = explicit_claim,
-        .client_id = std.crypto.random.int(u64),
+        .client_id = client_id,
     };
 }
 
@@ -201,21 +206,16 @@ pub fn initTerminal(self: *Attach, term: *terminal.Terminal) void {
 }
 
 fn sockPath(self: *Attach, buf: []u8) ![]const u8 {
-    const home = posix.getenv("HOME") orelse return error.NoHome;
-    return std.fmt.bufPrint(buf, "{s}/.local/state/vigil/panes/{s}.sock", .{ home, self.id });
+    const home = sys.env("HOME") orelse return error.NoHome;
+    return std.mem.print(buf, "{s}/.local/state/vigil/panes/{s}.sock", .{ home, self.id });
 }
 
 fn connectSock(self: *Attach) !posix.fd_t {
     var buf: [512]u8 = undefined;
     const path = try self.sockPath(&buf);
-    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
-    errdefer posix.close(fd);
-    // Never inherited by spawned daemons: a leaked attach fd in a sibling
-    // daemon holds this connection open past its owner, so the daemon
-    // never sees EOF and EOF-driven detach detection silently breaks.
-    _ = try posix.fcntl(fd, posix.F.SETFD, posix.FD_CLOEXEC);
-    var addr: std.net.Address = try .initUnix(path);
-    try posix.connect(fd, &addr.any, addr.getOsSockLen());
+    const fd = try sys.unixSocket();
+    errdefer sys.close(fd);
+    try sys.connect(fd, path);
     return fd;
 }
 
@@ -231,22 +231,20 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
 
     var path_buf: [512]u8 = undefined;
     const path = try hubPath(&path_buf);
-    const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
-    errdefer posix.close(fd);
+    const fd = try sys.unixSocket();
+    errdefer sys.close(fd);
     // Runs before the errdefer close (defers unwind in reverse).
     self.setDialing(fd);
     defer self.setDialing(-1);
     // Teardown marks the transport closed before it severs: seen here, it
     // came before this dial was registered and would not cut it.
     if (self.transport_state.load(.acquire) == 2) return error.Closing;
-    _ = try posix.fcntl(fd, posix.F.SETFD, posix.FD_CLOEXEC);
-    var addr: std.net.Address = try .initUnix(path);
-    try posix.connect(fd, &addr.any, addr.getOsSockLen());
+    try sys.connect(fd, path);
 
     var req_buf: [512]u8 = undefined;
-    const request = try std.fmt.bufPrint(&req_buf, "{{\"kind\":\"open\",\"device\":\"{s}\",\"open\":{{\"op\":\"proxy\",\"pane\":\"{s}\"}}}}\n", .{ host, self.id });
+    const request = try std.mem.print(&req_buf, "{{\"kind\":\"open\",\"device\":\"{s}\",\"open\":{{\"op\":\"proxy\",\"pane\":\"{s}\"}}}}\n", .{ host, self.id });
     var written: usize = 0;
-    while (written < request.len) written += try posix.write(fd, request[written..]);
+    while (written < request.len) written += try sys.write(fd, request[written..]);
 
     var ack_buf: [1024]u8 = undefined;
     var len: usize = 0;
@@ -271,25 +269,25 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
 /// The hub's socket, as VigilWire's `VigilPaths.hub` names it
 /// (`VIGIL_AGENT_STATE` moves it).
 fn hubPath(buf: []u8) ![]const u8 {
-    return if (posix.getenv("VIGIL_AGENT_STATE")) |root|
-        try std.fmt.bufPrint(buf, "{s}/hub.sock", .{root})
+    return if (sys.env("VIGIL_AGENT_STATE")) |root|
+        try std.mem.print(buf, "{s}/hub.sock", .{root})
     else
-        try std.fmt.bufPrint(buf, "{s}/.local/state/vigil/agent/hub.sock", .{posix.getenv("HOME") orelse return error.NoHome});
+        try std.mem.print(buf, "{s}/.local/state/vigil/agent/hub.sock", .{sys.env("HOME") orelse return error.NoHome});
 }
 
 fn setDialing(self: *Attach, fd: posix.fd_t) void {
-    self.dialing_mutex.lock();
-    defer self.dialing_mutex.unlock();
+    self.dialing_mutex.lockUncancelable(global.io());
+    defer self.dialing_mutex.unlock(global.io());
     self.dialing_fd = fd;
 }
 
 /// Cut the stream so the reader sees EOF, and a hub dial in flight with it.
 fn sever(self: *Attach) void {
     self.setTransport(2);
-    if (self.sock_fd >= 0) posix.shutdown(self.sock_fd, .both) catch {};
-    self.dialing_mutex.lock();
-    defer self.dialing_mutex.unlock();
-    if (self.dialing_fd >= 0) posix.shutdown(self.dialing_fd, .both) catch {};
+    if (self.sock_fd >= 0) sys.shutdown(self.sock_fd);
+    self.dialing_mutex.lockUncancelable(global.io());
+    defer self.dialing_mutex.unlock(global.io());
+    if (self.dialing_fd >= 0) sys.shutdown(self.dialing_fd);
 }
 
 /// Hello: who this client is, for the daemon's receipts.
@@ -297,7 +295,7 @@ fn sendHello(self: *Attach, kind: []const u8) void {
     var buf: [64]u8 = undefined;
     // "mirror" tells the daemon this client never adopts the size unowned:
     // it renders whatever grid the owner has and claims only explicitly.
-    const hello = std.fmt.bufPrint(&buf, "{s} ghostty:{d}/{x}{s}", .{ kind, std.c.getpid(), self.client_id, if (self.explicit_claim) " mirror" else "" }) catch return;
+    const hello = std.mem.print(&buf, "{s} ghostty:{d}/{x}{s}", .{ kind, std.c.getpid(), self.client_id, if (self.explicit_claim) " mirror" else "" }) catch return;
     self.enqueueFrame('h', hello);
 }
 
@@ -309,7 +307,7 @@ fn sendHello(self: *Attach, kind: []const u8) void {
 /// Env carries VIGIL_WORKSPACE so claude hooks feed the attention queue
 /// from birth.
 fn spawnDaemon(self: *Attach) !void {
-    var env = try internal_os.getEnvMap(self.alloc);
+    var env = try global.environMap();
     defer env.deinit();
     // The surface config's env does NOT flow here by itself (this is the
     // APP's environment): anything the daemon must inherit is plumbed
@@ -317,11 +315,11 @@ fn spawnDaemon(self: *Attach) !void {
     // reads its own `<id>.resume`, so it works on every spawn path.
     if (self.session) |s| try env.put("VIGIL_WORKSPACE", s);
 
-    const home = posix.getenv("HOME") orelse return error.NoHome;
-    const bin = try std.fmt.allocPrint(self.alloc, "{s}/.local/bin/vigild", .{home});
+    const home = sys.env("HOME") orelse return error.NoHome;
+    const bin = try self.alloc.print("{s}/.local/bin/vigild", .{home});
     defer self.alloc.free(bin);
 
-    var argv: std.ArrayListUnmanaged([]const u8) = .{};
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
     defer argv.deinit(self.alloc);
     try argv.appendSlice(self.alloc, &.{ bin, "new", self.id });
     // The folder is vigild's to resolve (a missing one falls back to its
@@ -373,8 +371,8 @@ pub fn threadEnter(
     }
     const fd = self.sock_fd;
     errdefer {
-        posix.close(fd);
-        if (self.write_fd != fd) posix.close(self.write_fd);
+        sys.close(fd);
+        if (self.write_fd != fd) sys.close(self.write_fd);
         self.sock_fd = -1;
         self.write_fd = -1;
     }
@@ -383,7 +381,7 @@ pub fn threadEnter(
     // frame so nothing ever writes inline.
     self.write_closed = false;
     const write_thread = try std.Thread.spawn(.{}, writeThreadMain, .{self});
-    write_thread.setName("io-writer") catch {};
+    write_thread.setName(global.io(), "io-writer") catch {};
     self.write_thread = write_thread;
 
     // Hello, then our size once it is real. The size is RECORDED by the
@@ -395,8 +393,8 @@ pub fn threadEnter(
     // Quit pipe + read thread, exactly Exec's shape: the ReadThread just
     // reads an fd and feeds processOutput; a socket fd is an fd.
     const pipe = try internal_os.pipe();
-    errdefer posix.close(pipe[0]);
-    errdefer posix.close(pipe[1]);
+    errdefer sys.close(pipe[0]);
+    errdefer sys.close(pipe[1]);
 
     const closing = try alloc_state: {
         break :alloc_state self.alloc.create(std.atomic.Value(bool));
@@ -407,9 +405,9 @@ pub fn threadEnter(
     const read_thread = try std.Thread.spawn(
         .{},
         readThreadMain,
-        .{ self, fd, io, pipe[0], closing, std.time.milliTimestamp() },
+        .{ self, fd, io, pipe[0], closing, std.Io.Timestamp.now(global.io(), .awake) },
     );
-    read_thread.setName("io-reader") catch {};
+    read_thread.setName(global.io(), "io-reader") catch {};
     if (self.transport_state.cmpxchgStrong(0, 1, .release, .monotonic) == null) self.reportTransport();
 
     td.backend = .{ .attach = .{
@@ -429,7 +427,7 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
     attach.closing.store(true, .release);
     self.transport_state.store(2, .release);
 
-    _ = posix.write(attach.read_thread_pipe, "x") catch |err| switch (err) {
+    _ = sys.write(attach.read_thread_pipe, "x") catch |err| switch (err) {
         error.BrokenPipe => {},
         else => log.warn("error writing to read thread quit pipe err={}", .{err}),
     };
@@ -438,18 +436,15 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
     // The writer: close the queue, wake it, join BEFORE the fd closes (a
     // writer blocked in POLLOUT sees the sever as writable-then-EPIPE
     // and severs its way out; it must never touch a closed fd).
-    self.write_mutex.lock();
-    self.write_closed = true;
-    self.write_cond.signal();
-    self.write_mutex.unlock();
+    self.closeQueue();
     if (self.write_thread) |t| {
         t.join();
         self.write_thread = null;
     }
     // The read thread's CURRENT socket, never the one recorded at enter: a
     // reconnect replaced it, and the number may be another surface's by now.
-    if (self.write_fd != self.sock_fd and self.write_fd >= 0) posix.close(self.write_fd);
-    if (self.sock_fd >= 0) posix.close(self.sock_fd);
+    if (self.write_fd != self.sock_fd and self.write_fd >= 0) sys.close(self.write_fd);
+    if (self.sock_fd >= 0) sys.close(self.sock_fd);
     self.sock_fd = -1;
     self.write_fd = -1;
 }
@@ -577,9 +572,9 @@ test "Vigil focus lost before the viewport leaves no pending claim" {
 }
 
 test "Vigil transport receipts count queued and written frames without contents" {
-    const pipe = try posix.pipe();
-    defer posix.close(pipe[0]);
-    defer posix.close(pipe[1]);
+    const pipe = try compat_fd.pipe();
+    defer sys.close(pipe[0]);
+    defer sys.close(pipe[1]);
     var attach = try Attach.init(std.testing.allocator, .{ .id = "test", .host = "19a204d11b9198077eb1feb2eae429bf81d6d269df9b790ed38bdcc4035fcaa5" });
     defer attach.deinit();
     attach.write_fd = pipe[1];
@@ -608,7 +603,7 @@ fn writeAll(self: *Attach, data: []const u8) bool {
     const fd = self.write_fd;
     var off: usize = 0;
     while (off < data.len) {
-        const n = posix.write(fd, data[off..]) catch |err| switch (err) {
+        const n = sys.write(fd, data[off..]) catch |err| switch (err) {
             error.WouldBlock => {
                 self.setStalled(true);
                 // A drain stall is survivable for as long as the queue
@@ -650,14 +645,14 @@ fn writeAll(self: *Attach, data: []const u8) bool {
 /// stopped draining for real: sever loudly rather than grow forever.
 fn enqueueFrame(self: *Attach, typ: u8, payload: []const u8) void {
     assert(payload.len <= 0xffff);
-    self.write_mutex.lock();
-    defer self.write_mutex.unlock();
+    self.write_mutex.lockUncancelable(global.io());
+    defer self.write_mutex.unlock(global.io());
     if (self.write_closed) return;
     if (self.write_buf.items.len > 4 << 20) {
         log.warn("attach write queue past 4MB -> sever", .{});
         self.sever();
         self.write_closed = true;
-        self.write_cond.signal();
+        self.write_cond.signal(global.io());
         return;
     }
     const hdr: [3]u8 = .{
@@ -668,38 +663,47 @@ fn enqueueFrame(self: *Attach, typ: u8, payload: []const u8) void {
     self.write_buf.ensureUnusedCapacity(self.alloc, hdr.len + payload.len) catch {
         self.sever();
         self.write_closed = true;
-        self.write_cond.signal();
+        self.write_cond.signal(global.io());
         return;
     };
     self.write_buf.appendSliceAssumeCapacity(&hdr);
     self.write_buf.appendSliceAssumeCapacity(payload);
     _ = self.pending_bytes.fetchAdd(hdr.len + payload.len, .monotonic);
-    self.write_cond.signal();
+    self.write_cond.signal(global.io());
+}
+
+/// Close the outbound queue and wake the writer, which drains what it
+/// holds and returns.
+fn closeQueue(self: *Attach) void {
+    self.write_mutex.lockUncancelable(global.io());
+    defer self.write_mutex.unlock(global.io());
+    self.write_closed = true;
+    self.write_cond.signal(global.io());
 }
 
 fn writeThreadMain(self: *Attach) void {
-    var local: std.ArrayListUnmanaged(u8) = .{};
+    var local: std.ArrayListUnmanaged(u8) = .empty;
     defer local.deinit(self.alloc);
     while (true) {
-        self.write_mutex.lock();
+        self.write_mutex.lockUncancelable(global.io());
         while (self.write_buf.items.len == 0 and !self.write_closed) {
-            self.write_cond.wait(&self.write_mutex);
+            self.write_cond.waitUncancelable(global.io(), &self.write_mutex);
         }
         if (self.write_buf.items.len == 0) {
             // Closed and drained: done.
-            self.write_mutex.unlock();
+            self.write_mutex.unlock(global.io());
             return;
         }
         // Swap and drain OUTSIDE the lock: enqueue never waits on a write.
         std.mem.swap(std.ArrayListUnmanaged(u8), &local, &self.write_buf);
-        self.write_mutex.unlock();
+        self.write_mutex.unlock(global.io());
 
         if (!self.writeAll(local.items)) {
             // Severed: everything still queued is dead bytes.
-            self.write_mutex.lock();
+            self.write_mutex.lockUncancelable(global.io());
             self.write_closed = true;
             self.write_buf.clearAndFree(self.alloc);
-            self.write_mutex.unlock();
+            self.write_mutex.unlock(global.io());
             return;
         }
         local.clearRetainingCapacity();
@@ -809,17 +813,17 @@ pub fn getProcessInfo(self: *Attach, comptime info: ProcessInfo) ?ProcessInfo.Ty
             _ = lines.next() orelse return null;
             const tty = lines.next() orelse return null;
             if (tty.len == 0) return null;
-            self.cached_tty = self.alloc.dupeZ(u8, tty) catch return null;
+            self.cached_tty = self.alloc.dupeSentinel(u8, tty, 0) catch return null;
             return self.cached_tty;
         },
     }
 }
 
 fn readPidfile(self: *Attach) ?[]u8 {
-    const home = posix.getenv("HOME") orelse return null;
+    const home = sys.env("HOME") orelse return null;
     var buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/.local/state/vigil/panes/{s}.pid", .{ home, self.id }) catch return null;
-    return std.fs.cwd().readFileAlloc(self.alloc, path, 256) catch null;
+    const path = std.mem.print(&buf, "{s}/.local/state/vigil/panes/{s}.pid", .{ home, self.id }) catch return null;
+    return std.Io.Dir.cwd().readFileAlloc(global.io(), path, self.alloc, .limited(256)) catch null;
 }
 
 /// The read thread body: Exec's loop over the socket fd, plus a death
@@ -836,16 +840,16 @@ fn readThreadMain(
     io: *termio.Termio,
     quit: posix.fd_t,
     closing: *std.atomic.Value(bool),
-    birth_ms: i64,
+    attached: std.Io.Timestamp,
 ) void {
     // Exec's loop closes the quit descriptor it is given on return; each
     // stream gets a dup, and the pipe itself (its bytes shared by every
     // dup, so a quit written mid-reconnect is still readable) lives as
     // long as this thread.
-    defer posix.close(quit);
+    defer sys.close(quit);
     var current_fd = fd;
     while (true) {
-        const quit_dup = posix.dup(quit) catch |err| {
+        const quit_dup = sys.dup(quit) catch |err| {
             log.err("attach: {s} cannot dup the quit pipe err={}", .{ self.id, err });
             return;
         };
@@ -879,17 +883,17 @@ fn readThreadMain(
     const pushed = io.surface_mailbox.push(.{
         .child_exited = .{
             .exit_code = 1,
-            .runtime_ms = @intCast(@max(0, std.time.milliTimestamp() - birth_ms)),
+            .runtime_ms = @intCast(@max(0, sys.since(attached))),
         },
     }, .{ .instant = {} });
     if (pushed == 0) log.warn("attach child_exited dropped (mailbox full or dying)", .{});
 }
 
 fn specExists(self: *Attach) bool {
-    const home = posix.getenv("HOME") orelse return false;
+    const home = sys.env("HOME") orelse return false;
     var buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/.local/state/vigil/panes/{s}.spec", .{ home, self.id }) catch return false;
-    std.fs.cwd().access(path, .{}) catch return false;
+    const path = std.mem.print(&buf, "{s}/.local/state/vigil/panes/{s}.spec", .{ home, self.id }) catch return false;
+    std.Io.Dir.cwd().access(global.io(), path, .{}) catch return false;
     return true;
 }
 
@@ -899,8 +903,8 @@ fn specExists(self: *Attach) bool {
 /// vigild serializes restores and a pane's lock admits one daemon, however
 /// many surfaces ask at once.
 fn restoreDaemons(self: *Attach) void {
-    const home = posix.getenv("HOME") orelse return;
-    const bin = std.fmt.allocPrint(self.alloc, "{s}/.local/bin/vigild", .{home}) catch return;
+    const home = sys.env("HOME") orelse return;
+    const bin = self.alloc.print("{s}/.local/bin/vigild", .{home}) catch return;
     defer self.alloc.free(bin);
     _ = birth(self.alloc, &.{ bin, "restore", self.id }, null) catch |err| log.warn("attach: {s} vigild restore failed err={}", .{ self.id, err });
 }
@@ -947,7 +951,7 @@ fn vouchBirth(alloc: Allocator, question: []const u8, out: []u8) ?[]const u8 {
     }
 
     const why: []const u8 = why: {
-        var request = std.ArrayList(u8){};
+        var request: std.ArrayList(u8) = .empty;
         request.print(alloc, "{{\"kind\":\"vouch\",\"birth\":{{\"pane\":\"{s}\",\"spec\":\"{s}\"", .{ id, words[3] }) catch break :why "out of memory";
         const fields = [_]struct { name: []const u8, at: usize }{
             .{ .name = "old", .at = 4 },    .{ .name = "oldSeal", .at = 5 },
@@ -961,13 +965,11 @@ fn vouchBirth(alloc: Allocator, question: []const u8, out: []u8) ?[]const u8 {
 
         var path_buf: [512]u8 = undefined;
         const path = hubPath(&path_buf) catch break :why "vigil-agent's hub has no path here";
-        const fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch break :why "no socket for vigil-agent's hub";
-        defer posix.close(fd);
-        _ = posix.fcntl(fd, posix.F.SETFD, posix.FD_CLOEXEC) catch {};
-        var addr = std.net.Address.initUnix(path) catch break :why "vigil-agent's hub has no address";
-        posix.connect(fd, &addr.any, addr.getOsSockLen()) catch break :why "vigil-agent's hub does not answer (is vigil-agent running?)";
+        const fd = sys.unixSocket() catch break :why "no socket for vigil-agent's hub";
+        defer sys.close(fd);
+        sys.connect(fd, path) catch break :why "vigil-agent's hub does not answer (is vigil-agent running?)";
         var written: usize = 0;
-        while (written < request.items.len) written += posix.write(fd, request.items[written..]) catch break :why "vigil-agent's hub did not take the question";
+        while (written < request.items.len) written += sys.write(fd, request.items[written..]) catch break :why "vigil-agent's hub did not take the question";
 
         var reply: [2048]u8 = undefined;
         var got: usize = 0;
@@ -987,7 +989,7 @@ fn vouchBirth(alloc: Allocator, question: []const u8, out: []u8) ?[]const u8 {
         const size = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch break :why "vigil-agent answered with no seal";
         if (size != 44) break :why "vigil-agent answered with no seal";
         std.base64.standard.Decoder.decode(seal[0..size], encoded) catch break :why "vigil-agent answered with no seal";
-        return std.fmt.bufPrint(out, "born {s} {s} {s}\n", .{ id, nonce, seal[0..size] }) catch null;
+        return std.mem.print(out, "born {s} {s} {s}\n", .{ id, nonce, seal[0..size] }) catch null;
     };
     // One line, within what the daemon reads.
     var said: [300]u8 = undefined;
@@ -996,7 +998,7 @@ fn vouchBirth(alloc: Allocator, question: []const u8, out: []u8) ?[]const u8 {
     for (said[0..why_len]) |*ch| if (ch.* == '\n' or ch.* == '\r') {
         ch.* = ' ';
     };
-    return std.fmt.bufPrint(out, "refused {s} {s} {s}\n", .{ id, nonce, said[0..why_len] }) catch null;
+    return std.mem.print(out, "refused {s} {s} {s}\n", .{ id, nonce, said[0..why_len] }) catch null;
 }
 
 /// vigild `new`/`restore` with this app as their birth authority: a daemon
@@ -1006,29 +1008,29 @@ fn vouchBirth(alloc: Allocator, question: []const u8, out: []u8) ?[]const u8 {
 /// vigild spawns, until vigild and every daemon have let go of it, then
 /// reaps vigild. Its exit code. posix_spawn, never fork: this is a
 /// threaded process.
-fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.EnvMap) !u8 {
+fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.Environ.Map) !u8 {
     // Daemons live on a Mac; a phone's panes are always another device's.
-    if (comptime builtin.os.tag != .macos) return error.Unsupported;
+    if (comptime builtin.target.os.tag != .macos) return error.Unsupported;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const argv_z = try arena.allocSentinel(?[*:0]const u8, argv.len, null);
-    for (argv, 0..) |arg, i| argv_z[i] = (try arena.dupeZ(u8, arg)).ptr;
+    for (argv, 0..) |arg, i| argv_z[i] = (try arena.dupeSentinel(u8, arg, 0)).ptr;
     const envp: [*:null]const ?[*:0]const u8 = if (env) |map|
-        (try std.process.createNullDelimitedEnvMap(arena, map)).ptr
+        (try map.createPosixBlock(arena, .{})).slice.ptr
     else
         @ptrCast(std.c.environ);
 
     var pair: [2]c_int = undefined;
     if (socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
-    defer posix.close(pair[0]);
+    defer sys.close(pair[0]);
     // Both ends close-on-exec: dup2 onto stdin clears it for vigild's copy
     // alone, and no other child of this app ever holds either end.
-    _ = try posix.fcntl(pair[0], posix.F.SETFD, posix.FD_CLOEXEC);
-    _ = try posix.fcntl(pair[1], posix.F.SETFD, posix.FD_CLOEXEC);
+    try sys.cloexec(pair[0]);
+    try sys.cloexec(pair[1]);
     var actions: ?*anyopaque = null;
     if (posix_spawn_file_actions_init(&actions) != 0) {
-        posix.close(pair[1]);
+        sys.close(pair[1]);
         return error.SpawnActions;
     }
     defer _ = posix_spawn_file_actions_destroy(&actions);
@@ -1038,7 +1040,7 @@ fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.En
     _ = posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", write_only, 0);
     var pid: posix.pid_t = 0;
     const rc = posix_spawn(&pid, argv_z[0].?, &actions, null, argv_z.ptr, envp);
-    posix.close(pair[1]);
+    sys.close(pair[1]);
     if (rc != 0) return error.SpawnFailed;
 
     var line: [1024]u8 = undefined;
@@ -1056,10 +1058,11 @@ fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.En
         var answer: [1024]u8 = undefined;
         const said = vouchBirth(arena, question, &answer) orelse continue;
         var written: usize = 0;
-        while (written < said.len) written += posix.write(pair[0], said[written..]) catch break;
+        while (written < said.len) written += sys.write(pair[0], said[written..]) catch break;
     }
-    const waited = posix.waitpid(pid, 0);
-    return if (posix.W.IFEXITED(waited.status)) posix.W.EXITSTATUS(waited.status) else 255;
+    // vigild unwaited, or killed by a signal: no exit code, a failure.
+    const status = sys.waitpid(pid) orelse return 255;
+    return if (std.c.W.IFEXITED(status)) std.c.W.EXITSTATUS(status) else 255;
 }
 
 /// Runs on the read thread after EOF. Returns the new socket, wired into
@@ -1087,10 +1090,7 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
     // already) before the descriptor closes; a new one is born per socket.
     // Only then is the transport "connecting": a writer severing after it
     // would mark it closed, and every hub dial would refuse itself.
-    self.write_mutex.lock();
-    self.write_closed = true;
-    self.write_cond.signal();
-    self.write_mutex.unlock();
+    self.closeQueue();
     if (self.write_thread) |t| {
         t.join();
         self.write_thread = null;
@@ -1098,29 +1098,29 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
     const old = self.sock_fd;
     self.sock_fd = -1;
     self.write_fd = -1;
-    if (old >= 0) posix.close(old);
+    if (old >= 0) sys.close(old);
     self.setTransport(0);
 
-    const began = std.time.milliTimestamp();
+    const began = std.Io.Timestamp.now(global.io(), .awake);
     var restored = false;
     // Remote: a pause that grows to 2 s between dials (a dial to a Mac out
     // of reach itself takes up to tether's 10 s to say so).
     var pause_ms: u64 = 200;
-    while (self.host != null or std.time.milliTimestamp() - began < 30_000) {
+    while (self.host != null or sys.since(began) < 30_000) {
         if (closing.load(.acquire)) return null;
         const dialed = if (self.host) |host| self.connectHub(host) else self.connectSock();
         if (dialed) |nfd| {
-            self.write_mutex.lock();
+            self.write_mutex.lockUncancelable(global.io());
             self.write_closed = false;
             self.write_buf.clearRetainingCapacity();
             self.pending_bytes.store(0, .monotonic);
-            self.write_mutex.unlock();
+            self.write_mutex.unlock(global.io());
             const t = std.Thread.spawn(.{}, writeThreadMain, .{self}) catch |err| {
                 log.warn("attach: {s} reconnect writer failed err={}", .{ self.id, err });
-                posix.close(nfd);
+                sys.close(nfd);
                 return null;
             };
-            t.setName("io-writer") catch {};
+            t.setName(global.io(), "io-writer") catch {};
             self.write_thread = t;
             self.sock_fd = nfd;
             self.write_fd = nfd;
@@ -1129,13 +1129,13 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
             self.setTransport(1);
             // warn, not info: the receipt must reach the unified log in a
             // release build; "I saw no overlay" is not a fact.
-            log.warn("attach: {s} reattached in place after {d}ms", .{ self.id, std.time.milliTimestamp() - began });
+            log.warn("attach: {s} reattached in place after {d}ms", .{ self.id, sys.since(began) });
             return nfd;
         } else |err| if (self.host != null) {
             log.info("attach: remote {s} not reached yet ({}); again in {d}ms", .{ self.id, err, pause_ms });
             // In slices: teardown joins this thread and must not wait on it.
             var slept: u64 = 0;
-            while (slept < pause_ms and !closing.load(.acquire)) : (slept += 50) std.Thread.sleep(50 * std.time.ns_per_ms);
+            while (slept < pause_ms and !closing.load(.acquire)) : (slept += 50) sys.sleep(50);
             pause_ms = @min(pause_ms * 2, 2_000);
             continue;
         }
@@ -1145,11 +1145,11 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
         }
         // One beat for a respawn already in flight (the login agent, the
         // app's launch restore); then respawn it from here.
-        if (!restored and std.time.milliTimestamp() - began >= 1_000) {
+        if (!restored and sys.since(began) >= 1_000) {
             restored = true;
             self.restoreDaemons();
         }
-        std.Thread.sleep(200 * std.time.ns_per_ms);
+        sys.sleep(200);
     }
     log.warn("attach: {s} daemon did not come back in 30s", .{self.id});
     return null;
@@ -1163,7 +1163,108 @@ pub const ThreadData = struct {
     closing: *std.atomic.Value(bool),
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
-        posix.close(self.read_thread_pipe);
+        sys.close(self.read_thread_pipe);
         alloc.destroy(self.closing);
+    }
+};
+
+/// The system calls this file makes, over libc. Zig 0.17 removed
+/// `std.posix`'s wrappers; these keep their contract where this file
+/// relied on it (EINTR retried, EAGAIN as `error.WouldBlock`, EPIPE as
+/// `error.BrokenPipe`), the way ghostty's own code now calls
+/// `posix.system` and reads `posix.errno`.
+const sys = struct {
+    const c = std.c;
+
+    fn close(fd: posix.fd_t) void {
+        compat_fd.close(fd);
+    }
+
+    /// The process's environment variable, as libc holds it.
+    fn env(name: [*:0]const u8) ?[]const u8 {
+        return std.mem.span(c.getenv(name) orelse return null);
+    }
+
+    /// A unix stream socket, close-on-exec: never inherited by spawned
+    /// daemons, since a leaked attach fd in a sibling daemon holds this
+    /// connection open past its owner, so the daemon never sees EOF and
+    /// EOF-driven detach detection silently breaks.
+    fn unixSocket() !posix.fd_t {
+        const rc = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+        if (rc < 0) return unexpected("socket");
+        errdefer close(rc);
+        try cloexec(rc);
+        return rc;
+    }
+
+    fn cloexec(fd: posix.fd_t) !void {
+        if (posix.errno(c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC))) != .SUCCESS) return unexpected("fcntl");
+    }
+
+    fn connect(fd: posix.fd_t, path: []const u8) !void {
+        var addr: c.sockaddr.un = .{ .path = @splat(0) };
+        if (path.len >= addr.path.len) return error.NameTooLong;
+        @memcpy(addr.path[0..path.len], path);
+        while (true) switch (posix.errno(c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .NOENT => return error.FileNotFound,
+            .CONNREFUSED => return error.ConnectionRefused,
+            else => return unexpected("connect"),
+        };
+    }
+
+    fn write(fd: posix.fd_t, bytes: []const u8) !usize {
+        while (true) {
+            const rc = c.write(fd, bytes.ptr, bytes.len);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                .PIPE => return error.BrokenPipe,
+                else => return unexpected("write"),
+            }
+        }
+    }
+
+    fn dup(fd: posix.fd_t) !posix.fd_t {
+        const rc = c.dup(fd);
+        if (rc < 0) return unexpected("dup");
+        return rc;
+    }
+
+    fn shutdown(fd: posix.fd_t) void {
+        _ = c.shutdown(fd, c.SHUT.RDWR);
+    }
+
+    /// A child's wait status once it has exited; null when it cannot be
+    /// waited for (said in the log).
+    fn waitpid(pid: posix.pid_t) ?u32 {
+        var status: c_int = 0;
+        while (true) switch (posix.errno(c.waitpid(pid, &status, 0))) {
+            .SUCCESS => return @bitCast(status),
+            .INTR => continue,
+            else => |err| {
+                log.warn("waitpid failed errno={}", .{err});
+                return null;
+            },
+        };
+    }
+
+    /// Milliseconds since `began` on the monotonic clock.
+    fn since(began: std.Io.Timestamp) i64 {
+        return began.untilNow(global.io(), .awake).toMilliseconds();
+    }
+
+    fn sleep(ms: u64) void {
+        std.Io.sleep(global.io(), .fromMilliseconds(@intCast(ms)), .awake) catch {};
+    }
+
+    /// Called right after the failing call, before anything can change
+    /// errno.
+    fn unexpected(comptime call: []const u8) error{Unexpected} {
+        const err = posix.errno(@as(c_int, -1));
+        log.warn(call ++ " failed errno={}", .{err});
+        return error.Unexpected;
     }
 };
