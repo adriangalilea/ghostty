@@ -74,6 +74,15 @@ pub fn build(b: *std.Build) !void {
         ) } },
         .target = target,
         .optimize = optimize,
+        // Apple's headers declare blocks on every platform. Aro enables
+        // them for Darwin targets, but its macOS version check answers
+        // false for any other Darwin OS before reaching the line that
+        // would enable them (Target.isBlocksSupported), so iOS translates
+        // with blocks off and every CoreGraphics block typedef fails.
+        .extra_args = if (target.result.os.tag.isDarwin() and target.result.os.tag != .macos)
+            &.{"-fblocks"}
+        else
+            &.{},
     });
 
     const lib = b.addLibrary(.{
