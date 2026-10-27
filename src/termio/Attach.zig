@@ -36,6 +36,19 @@ const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.io_attach);
 
+/// How long a local pane's daemon may take to come back (a reconnect's
+/// window), and so how long a `vigild new`/`restore` this app answers may
+/// run: past it, that vigild is killed and the wait ends.
+const daemon_wait_ms: i64 = 30_000;
+
+/// vigild's authorizeBirth waits 5 s for the birth authority's answer and
+/// then refuses itself: a vouch slower than that answers nobody.
+const vouch_wait_ms: i64 = 5_000;
+
+/// The hub answers a dial within tether's 10 s verdict on a Mac out of
+/// reach (CLAUDE.md, remote viewports); a hub silent past this is stuck.
+const hub_answer_ms: i64 = 15_000;
+
 /// Session daemon id (e.g. "vigil-myproject-0").
 id: []const u8,
 
@@ -77,11 +90,13 @@ sock_fd: posix.fd_t = -1,
 /// Write side: the same socket (a given fd may be one too).
 write_fd: posix.fd_t = -1,
 
+/// Guards every descriptor another thread may shut down: `dialing_fd`, and
+/// `sock_fd`/`write_fd` while a reconnect replaces them. `sever` shuts
+/// down under it and a descriptor is closed only under it, so a shutdown
+/// never reaches a number already reused by another surface.
+fd_mutex: std.Io.Mutex = .init,
 /// A hub dial waiting for its answer (a remote pane being dialed again):
 /// teardown shuts it down so the read thread it blocks returns at once.
-/// Set and cleared under the mutex, cleared before the descriptor closes,
-/// so a shutdown never reaches a reused number.
-dialing_mutex: std.Io.Mutex = .init,
 dialing_fd: posix.fd_t = -1,
 
 /// Cached tty name of the daemon's pty (from its pidfile).
@@ -266,14 +281,7 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
     while (written < request.len) written += try sys.write(fd, request[written..]);
 
     var ack_buf: [1024]u8 = undefined;
-    var len: usize = 0;
-    while (true) {
-        if (len == ack_buf.len) return error.HubAnswerTooLong;
-        const n = try posix.read(fd, ack_buf[len .. len + 1]);
-        if (n == 0) return error.HubClosed;
-        if (ack_buf[len] == '\n') break;
-        len += 1;
-    }
+    const len = try sys.readLine(fd, &ack_buf, std.Io.Timestamp.now(global.io(), .awake), hub_answer_ms);
     const Ack = struct { ok: bool, @"error": ?[]const u8 = null };
     const parsed = try std.json.parseFromSlice(Ack, self.alloc, ack_buf[0..len], .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -294,17 +302,25 @@ fn hubPath(buf: []u8) ![]const u8 {
 }
 
 fn setDialing(self: *Attach, fd: posix.fd_t) void {
-    self.dialing_mutex.lockUncancelable(global.io());
-    defer self.dialing_mutex.unlock(global.io());
+    self.fd_mutex.lockUncancelable(global.io());
+    defer self.fd_mutex.unlock(global.io());
     self.dialing_fd = fd;
+}
+
+/// The stream's socket, read and written from now on (a reconnect's).
+fn setStream(self: *Attach, fd: posix.fd_t) void {
+    self.fd_mutex.lockUncancelable(global.io());
+    defer self.fd_mutex.unlock(global.io());
+    self.sock_fd = fd;
+    self.write_fd = fd;
 }
 
 /// Cut the stream so the reader sees EOF, and a hub dial in flight with it.
 fn sever(self: *Attach) void {
     self.setTransport(2);
+    self.fd_mutex.lockUncancelable(global.io());
+    defer self.fd_mutex.unlock(global.io());
     if (self.sock_fd >= 0) sys.shutdown(self.sock_fd);
-    self.dialing_mutex.lockUncancelable(global.io());
-    defer self.dialing_mutex.unlock(global.io());
     if (self.dialing_fd >= 0) sys.shutdown(self.dialing_fd);
 }
 
@@ -375,7 +391,13 @@ pub fn threadEnter(
         self.write_fd = given;
         log.info("attach: {s} on a given fd {d}", .{ self.id, given });
     } else if (self.host) |host| {
-        const fd = try self.connectHub(host);
+        // A Mac out of reach at mount (asleep, its hub restarting) is no
+        // ended pane: the read thread dials it again, as after any loss
+        // (reconnect), and the view shows "connecting" until then.
+        const fd = self.connectHub(host) catch |err| fd: {
+            log.warn("attach: remote {s} on {s} not reached at mount ({}); dialing it again", .{ self.id, host, err });
+            break :fd -1;
+        };
         self.sock_fd = fd;
         self.write_fd = fd;
     } else {
@@ -388,24 +410,35 @@ pub fn threadEnter(
     }
     const fd = self.sock_fd;
     errdefer {
-        sys.close(fd);
-        if (self.write_fd != fd) sys.close(self.write_fd);
+        if (fd >= 0) sys.close(fd);
+        if (self.write_fd != fd and self.write_fd >= 0) sys.close(self.write_fd);
         self.sock_fd = -1;
         self.write_fd = -1;
     }
 
-    // The writer: sole owner of stream writes. Born before the first
-    // frame so nothing ever writes inline.
-    self.write_closed = false;
-    const write_thread = try std.Thread.spawn(.{}, writeThreadMain, .{self});
-    write_thread.setName(global.io(), "io-writer") catch {};
-    self.write_thread = write_thread;
+    if (fd >= 0) {
+        // The writer: sole owner of stream writes. Born before the first
+        // frame so nothing ever writes inline.
+        self.write_closed = false;
+        const write_thread = try std.Thread.spawn(.{}, writeThreadMain, .{self});
+        write_thread.setName(global.io(), "io-writer") catch {};
+        self.write_thread = write_thread;
 
-    // Hello, then our size once it is real. The size is RECORDED by the
-    // daemon; it is applied to the pty only while this client owns the
-    // size (claimed on focus, or adopted when nobody owns it yet).
-    self.sendHello(if (self.given_fd != null) "app" else if (self.host != null) "remote" else "surface");
-    self.sendResize();
+        // Hello, then our size once it is real. The size is RECORDED by the
+        // daemon; it is applied to the pty only while this client owns the
+        // size (claimed on focus, or adopted when nobody owns it yet).
+        self.sendHello(if (self.given_fd != null) "app" else if (self.host != null) "remote" else "surface");
+        self.sendResize();
+    }
+    // Runs before the descriptor's errdefer above: the writer may hold the
+    // number already, so it is retired before the number can be reused.
+    errdefer {
+        if (self.write_thread) |t| {
+            self.closeQueue();
+            t.join();
+            self.write_thread = null;
+        }
+    }
 
     // Quit pipe + read thread, exactly Exec's shape: the ReadThread just
     // reads an fd and feeds processOutput; a socket fd is an fd.
@@ -425,7 +458,7 @@ pub fn threadEnter(
         .{ self, fd, io, pipe[0], closing, std.Io.Timestamp.now(global.io(), .awake) },
     );
     read_thread.setName(global.io(), "io-reader") catch {};
-    if (self.transport_state.cmpxchgStrong(0, 1, .release, .monotonic) == null) self.reportTransport();
+    if (fd >= 0 and self.transport_state.cmpxchgStrong(0, 1, .release, .monotonic) == null) self.reportTransport();
 
     td.backend = .{ .attach = .{
         .sock_fd = fd,
@@ -823,13 +856,20 @@ pub fn getProcessInfo(self: *Attach, comptime info: ProcessInfo) ?ProcessInfo.Ty
             return std.fmt.parseInt(u64, child, 10) catch null;
         },
         .tty_name => {
-            if (self.cached_tty) |v| return v;
+            // Read each time: a daemon respawned under this surface (a
+            // reconnect in place) has a new pty. The copy is kept so the
+            // name handed out stays valid until it changes.
             const data = self.readPidfile() orelse return null;
             defer self.alloc.free(data);
             var lines = std.mem.splitScalar(u8, data, '\n');
             _ = lines.next() orelse return null;
             const tty = lines.next() orelse return null;
             if (tty.len == 0) return null;
+            if (self.cached_tty) |v| {
+                if (std.mem.eql(u8, v, tty)) return v;
+                self.alloc.free(v);
+                self.cached_tty = null;
+            }
             self.cached_tty = self.alloc.dupeSentinel(u8, tty, 0) catch return null;
             return self.cached_tty;
         },
@@ -863,17 +903,20 @@ fn readThreadMain(
     // dup, so a quit written mid-reconnect is still readable) lives as
     // long as this thread.
     defer sys.close(quit);
+    // -1: a remote pane not reached at mount, dialed from the start.
     var current_fd = fd;
     while (true) {
-        const quit_dup = sys.dup(quit) catch |err| {
-            log.err("attach: {s} cannot dup the quit pipe err={}", .{ self.id, err });
-            return;
-        };
-        termio.Exec.ReadThread.threadMainPosix(current_fd, io, quit_dup);
-        if (closing.load(.acquire)) return;
-        self.setTransport(2);
-        // The phone's stream is the embedder's; it reconnects on its own.
-        if (self.given_fd != null) break;
+        if (current_fd >= 0) {
+            const quit_dup = sys.dup(quit) catch |err| {
+                log.err("attach: {s} cannot dup the quit pipe err={}", .{ self.id, err });
+                return;
+            };
+            termio.Exec.ReadThread.threadMainPosix(current_fd, io, quit_dup);
+            if (closing.load(.acquire)) return;
+            self.setTransport(2);
+            // The phone's stream is the embedder's; it reconnects on its own.
+            if (self.given_fd != null) break;
+        }
         // A local daemon ended under a live surface. Its spec decides what
         // that meant: a deliberate end (shell exit, `vigild kill`) unlinks
         // the spec before the socket goes, a machine-death class end (a
@@ -939,6 +982,8 @@ extern "c" fn socketpair(domain: c_int, kind: c_int, protocol: c_int, fds: *[2]c
 /// refuses itself). Every word is checked to its alphabet first, so none
 /// needs quoting in the request.
 fn vouchBirth(alloc: Allocator, question: []const u8, out: []u8) ?[]const u8 {
+    // The daemon's own clock started when it asked; ours starts now.
+    const asked = std.Io.Timestamp.now(global.io(), .awake);
     var words: [8][]const u8 = undefined;
     var it = std.mem.splitScalar(u8, question, ' ');
     var count: usize = 0;
@@ -986,14 +1031,11 @@ fn vouchBirth(alloc: Allocator, question: []const u8, out: []u8) ?[]const u8 {
         while (written < request.items.len) written += sys.write(fd, request.items[written..]) catch break :why "vigil-agent's hub did not take the question";
 
         var reply: [2048]u8 = undefined;
-        var got: usize = 0;
-        while (true) {
-            if (got == reply.len) break :why "vigil-agent's hub answered too much";
-            const n = posix.read(fd, reply[got .. got + 1]) catch break :why "vigil-agent's hub left";
-            if (n == 0) break :why "vigil-agent's hub left";
-            if (reply[got] == '\n') break;
-            got += 1;
-        }
+        const got = sys.readLine(fd, &reply, asked, vouch_wait_ms) catch |err| break :why switch (err) {
+            error.LineTooLong => "vigil-agent's hub answered too much",
+            error.Timeout => "vigil-agent's hub did not answer in time",
+            else => "vigil-agent's hub left",
+        };
         // CallResult: `output` is the seal's bytes, base64 again (JSON Data).
         const Reply = struct { ok: bool, output: ?[]const u8 = null, @"error": ?[]const u8 = null };
         const parsed = std.json.parseFromSlice(Reply, alloc, reply[0..got], .{ .ignore_unknown_fields = true }) catch break :why "vigil-agent's hub answered something else";
@@ -1038,15 +1080,16 @@ fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.En
     var pair: [2]c_int = undefined;
     if (socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
     defer sys.close(pair[0]);
+    // vigild's end is closed right after the spawn; until then, on any
+    // failure here.
+    var theirs_open = true;
+    defer if (theirs_open) sys.close(pair[1]);
     // Both ends close-on-exec: dup2 onto stdin clears it for vigild's copy
     // alone, and no other child of this app ever holds either end.
     try sys.cloexec(pair[0]);
     try sys.cloexec(pair[1]);
     var actions: ?*anyopaque = null;
-    if (posix_spawn_file_actions_init(&actions) != 0) {
-        sys.close(pair[1]);
-        return error.SpawnActions;
-    }
+    if (posix_spawn_file_actions_init(&actions) != 0) return error.SpawnActions;
     defer _ = posix_spawn_file_actions_destroy(&actions);
     _ = posix_spawn_file_actions_adddup2(&actions, pair[1], 0);
     const write_only: c_int = @bitCast(posix.O{ .ACCMODE = .WRONLY });
@@ -1055,22 +1098,26 @@ fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.En
     var pid: posix.pid_t = 0;
     const rc = posix_spawn(&pid, argv_z[0].?, &actions, null, argv_z.ptr, envp);
     sys.close(pair[1]);
+    theirs_open = false;
     if (rc != 0) return error.SpawnFailed;
 
+    // Questions until vigild and every daemon let go of the pair, within
+    // the window a daemon has to come back: this runs on threads a
+    // teardown joins (the io thread at a pane's first contact, the read
+    // thread restoring one), so a vigild stuck past it is killed rather
+    // than waited on.
+    const began = std.Io.Timestamp.now(global.io(), .awake);
     var line: [1024]u8 = undefined;
-    var len: usize = 0;
     while (true) {
-        const n = posix.read(pair[0], line[len .. len + 1]) catch break;
-        if (n == 0) break;
-        if (line[len] != '\n') {
-            len += 1;
-            if (len == line.len) break;
-            continue;
-        }
-        const question = line[0..len];
-        len = 0;
+        const len = sys.readLine(pair[0], &line, began, daemon_wait_ms) catch |err| {
+            if (err == error.Timeout) {
+                log.warn("attach: vigild {s} still running after {d}ms; killed", .{ argv[1], daemon_wait_ms });
+                _ = std.c.kill(pid, std.c.SIG.KILL);
+            }
+            break;
+        };
         var answer: [1024]u8 = undefined;
-        const said = vouchBirth(arena, question, &answer) orelse continue;
+        const said = vouchBirth(arena, line[0..len], &answer) orelse continue;
         var written: usize = 0;
         while (written < said.len) written += sys.write(pair[0], said[written..]) catch break;
     }
@@ -1109,10 +1156,13 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
         t.join();
         self.write_thread = null;
     }
-    const old = self.sock_fd;
-    self.sock_fd = -1;
-    self.write_fd = -1;
-    if (old >= 0) sys.close(old);
+    {
+        self.fd_mutex.lockUncancelable(global.io());
+        defer self.fd_mutex.unlock(global.io());
+        if (self.sock_fd >= 0) sys.close(self.sock_fd);
+        self.sock_fd = -1;
+        self.write_fd = -1;
+    }
     self.setTransport(0);
 
     const began = std.Io.Timestamp.now(global.io(), .awake);
@@ -1120,7 +1170,7 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
     // Remote: a pause that grows to 2 s between dials (a dial to a Mac out
     // of reach itself takes up to tether's 10 s to say so).
     var pause_ms: u64 = 200;
-    while (self.host != null or sys.since(began) < 30_000) {
+    while (self.host != null or sys.since(began) < daemon_wait_ms) {
         if (closing.load(.acquire)) return null;
         const dialed = if (self.host) |host| self.connectHub(host) else self.connectSock();
         if (dialed) |nfd| {
@@ -1136,8 +1186,7 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
             };
             t.setName(global.io(), "io-writer") catch {};
             self.write_thread = t;
-            self.sock_fd = nfd;
-            self.write_fd = nfd;
+            self.setStream(nfd);
             self.sendHello(if (self.host != null) "remote" else "surface");
             self.sendResize();
             self.setTransport(1);
@@ -1165,7 +1214,7 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
         }
         sys.sleep(200);
     }
-    log.warn("attach: {s} daemon did not come back in 30s", .{self.id});
+    log.warn("attach: {s} daemon did not come back in {d}ms", .{ self.id, daemon_wait_ms });
     return null;
 }
 
@@ -1241,10 +1290,30 @@ const sys = struct {
         }
     }
 
+    /// A duplicate, close-on-exec like every descriptor this file opens.
     fn dup(fd: posix.fd_t) !posix.fd_t {
-        const rc = c.dup(fd);
-        if (rc < 0) return unexpected("dup");
+        const rc = c.fcntl(fd, c.F.DUPFD_CLOEXEC, @as(c_int, 0));
+        if (rc < 0) return unexpected("fcntl F_DUPFD_CLOEXEC");
         return rc;
+    }
+
+    /// One line from `fd`, read byte by byte (what follows it is not
+    /// ours), its newline excluded, within `budget_ms` of `began`: every
+    /// wait on a peer here is bounded, since the thread waiting is one a
+    /// teardown joins.
+    fn readLine(fd: posix.fd_t, buf: []u8, began: std.Io.Timestamp, budget_ms: i64) !usize {
+        var len: usize = 0;
+        while (true) {
+            if (len == buf.len) return error.LineTooLong;
+            const left = budget_ms - since(began);
+            if (left <= 0) return error.Timeout;
+            var pfd = [1]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+            if (try posix.poll(&pfd, @intCast(left)) == 0) return error.Timeout;
+            const n = try posix.read(fd, buf[len .. len + 1]);
+            if (n == 0) return error.Closed;
+            if (buf[len] == '\n') return len;
+            len += 1;
+        }
     }
 
     fn shutdown(fd: posix.fd_t) void {
