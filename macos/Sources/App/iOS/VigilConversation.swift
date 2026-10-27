@@ -414,10 +414,12 @@ struct ConversationView: View {
     /// The bottom row's id: the live state, always last.
     private static let bottom = "live"
 
+    @ObservedObject private var keyboard = KeyboardState.shared
+
     var body: some View {
         Group {
             if conversation.opened {
-                rows
+                screen
             } else if let why = conversation.waiting {
                 ContentUnavailableView {
                     Label("No conversation", systemImage: "text.bubble")
@@ -438,6 +440,35 @@ struct ConversationView: View {
     /// The terminal's own ground in dark (the app's appearance), the
     /// system's in light: switching to the terminal never changes it.
     private var ground: Color { scheme == .dark ? Color(VigilTheme.background) : Color(.systemBackground) }
+
+    /// The rows over the reply box, one column laid out from the keyboard as
+    /// a fact (`KeyboardState`, the terminal's own pattern): the window
+    /// minus the keyboard, no SwiftUI keyboard avoidance and nothing floating
+    /// over the box (an iOS keyboard toolbar is a glass layer of its own
+    /// that covered the box and took the send button's taps).
+    private var screen: some View {
+        GeometryReader { geo in
+            let up = keyboard.inset > 0
+            VStack(spacing: 0) {
+                rows
+                Composer(conversation: conversation, keyboardUp: up)
+            }
+            // Up: the column ends where the keyboard begins (its height is
+            // measured from the window's bottom, under the home indicator).
+            // Down: it ends above the home indicator, the box's ground
+            // reaching under it.
+            .frame(
+                width: geo.size.width,
+                height: max(0, up ? geo.size.height + geo.safeAreaInsets.bottom - keyboard.inset : geo.size.height),
+                alignment: .top)
+        }
+        .ignoresSafeArea(.keyboard)
+        // A reader at the newest row keeps it in view as the keyboard rises.
+        .onChange(of: keyboard.inset) { _, _ in
+            guard atBottom else { return }
+            withAnimation(.snappy) { position.scrollTo(id: Self.bottom, anchor: .bottom) }
+        }
+    }
 
     private var rows: some View {
         ScrollView {
@@ -483,7 +514,6 @@ struct ConversationView: View {
             .padding(.vertical, 12)
         }
         .scrollDismissesKeyboard(.interactively)
-        .safeAreaInset(edge: .bottom, spacing: 0) { Composer(conversation: conversation) }
         .scrollPosition($position)
         .defaultScrollAnchor(.bottom)
         .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -717,6 +747,9 @@ private struct PromptRow: View {
 /// turn is yours; otherwise it says why not.
 private struct Composer: View {
     @ObservedObject var conversation: Conversation
+    /// The keyboard is up (`KeyboardState`): the box sits on it, and its
+    /// own row of ↑ ↓ and hide shows above the text.
+    let keyboardUp: Bool
     @State private var text = ""
     @FocusState private var focused: Bool
     /// Where ↑ and ↓ stand in what was sent (nil: the box holds the draft).
@@ -764,6 +797,27 @@ private struct Composer: View {
                 Label("Not sent: \(failed)", systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(Hue.care)
             }
+            // Typing: what was sent, one step at a time, and the keyboard
+            // put away. A row of the box itself, never a layer over it.
+            if keyboardUp && focused {
+                HStack(spacing: 18) {
+                    Button { recall(1) } label: { Image(systemName: "chevron.up") }
+                        .disabled((recalled ?? -1) + 1 >= conversation.sent.count)
+                        .accessibilityLabel("Older sent message")
+                    Button { recall(-1) } label: { Image(systemName: "chevron.down") }
+                        .disabled(recalled == nil)
+                        .accessibilityLabel("Newer sent message")
+                    if let recalled {
+                        Text("Sent \(recalled + 1) of \(conversation.sent.count)")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button { focused = false } label: { Image(systemName: "keyboard.chevron.compact.down") }
+                        .accessibilityLabel("Hide the keyboard")
+                }
+                .font(.system(size: 17, weight: .medium))
+                .padding(.horizontal, 4)
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 history.padding(.bottom, 9)
                 TextField(conversation.replyHint, text: $text, axis: .vertical)
@@ -772,17 +826,6 @@ private struct Composer: View {
                     .disabled(refusal != nil)
                     .padding(.horizontal, 12).padding(.vertical, 9)
                     .background(.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .toolbar {
-                        ToolbarItemGroup(placement: .keyboard) {
-                            Button { recall(1) } label: { Image(systemName: "chevron.up") }
-                                .disabled((recalled ?? -1) + 1 >= conversation.sent.count)
-                                .accessibilityLabel("Older sent message")
-                            Button { recall(-1) } label: { Image(systemName: "chevron.down") }
-                                .disabled(recalled == nil)
-                                .accessibilityLabel("Newer sent message")
-                            Spacer()
-                        }
-                    }
                 Button {
                     conversation.send(text)
                     if conversation.reply?.failed == nil {
@@ -800,8 +843,10 @@ private struct Composer: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
-        .padding(.bottom, 6)
-        .background(.bar)
+        .padding(.bottom, 8)
+        // Down, the box's ground reaches under the home indicator; up, it
+        // ends on the keyboard.
+        .background(.bar, ignoresSafeAreaEdges: keyboardUp ? [] : .bottom)
         // A failed reply comes back here to be sent again.
         .onChange(of: conversation.reply?.failed) { _, failed in
             if failed != nil, text.isEmpty, let back = conversation.reply?.text { text = back }

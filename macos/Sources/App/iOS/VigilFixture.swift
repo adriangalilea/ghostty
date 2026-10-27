@@ -30,6 +30,9 @@ enum VigilFixture: String {
     /// foreground (Run in background), two messages waiting in its queue
     /// (Send all now), every message with when it was sent.
     case conversationWorking = "conversation-working"
+    /// The same turn with the reply box taking the keyboard: the box on the
+    /// keyboard, its ↑ ↓ and hide row, nothing over it.
+    case conversationTyping = "conversation-typing"
     /// The home tree: agent panes drawn by their glance (waiting, asked,
     /// working, done and waiting on its background work), a shell and an
     /// agent with no glance beside them, drawn as terminals.
@@ -62,11 +65,10 @@ struct VigilFixtureView: View {
             case .conversationLong: ConversationFixture(conversation: Self.conversation(Self.long, live: Self.workingLive, earlier: true))
             case .conversationBackground:
                 ConversationFixture(conversation: Self.conversation(Self.launching, live: Self.backgroundLive))
-            case .conversationWorking:
-                ConversationFixture(conversation: Conversation(
-                    ref: Self.pane, entries: Self.atWork, live: FeedLive(state: .working, context: 61),
-                    queued: [FeedQueued(text: "also check the CSV header while you wait", at: Self.now - 40),
-                             FeedQueued(text: "and keep the old column names", at: Self.now - 12)]))
+            case .conversationWorking: ConversationFixture(conversation: Self.atWorkConversation)
+            case .conversationTyping:
+                ConversationFixture(conversation: Self.atWorkConversation)
+                    .onAppear { VigilPhone.shared.typeInto = Self.pane }
             case .activity, .activityMore, .activityIsland: activity
             case .home:
                 // As the app shows it: dark, its tree from `VigilPhone`.
@@ -307,6 +309,13 @@ extension VigilFixtureView {
     static func conversation(_ entries: [FeedEntry], live: FeedLive, earlier: Bool = false, offer: Conversation.Offer? = nil,
                              reply: Conversation.Reply? = nil) -> Conversation {
         Conversation(ref: pane, entries: entries, live: live, earlier: earlier, offer: offer, reply: reply)
+    }
+
+    static var atWorkConversation: Conversation {
+        Conversation(
+            ref: pane, entries: atWork, live: FeedLive(state: .working, context: 61),
+            queued: [FeedQueued(text: "also check the CSV header while you wait", at: now - 40),
+                     FeedQueued(text: "and keep the old column names", at: now - 12)])
     }
 
     static let consent = Conversation.Offer.consent(allow: "allow", allowLabel: "Allow", deny: "deny", denyLabel: "Deny")
