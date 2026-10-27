@@ -254,8 +254,10 @@ class AppDelegate: NSObject,
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 
-        // Start our update checker.
-        updateController.startUpdater()
+        // vigil: no update checker. Vigil updates by deploy (`ship release`,
+        // `mise run deploy`); Sparkle's feed is vanilla Ghostty's, and an
+        // update taken from it would replace Vigil.app with Ghostty. The
+        // menu item is hidden (setupMenuImages) and the action is inert.
 
         // Register our service provider. This must happen after everything is initialized.
         NSApp.servicesProvider = ServiceProvider()
@@ -440,8 +442,8 @@ class AppDelegate: NSObject,
         // Killing for real is the explicit Quit in the eye menu.
         // Upstream's earlier returns are not here on purpose: "no windows,
         // terminate now" would quit the menu-bar service a background fleet
-        // lives in, and "an accepted update" cannot happen (no SUFeedURL:
-        // vigil updates by deploy).
+        // lives in, and "an accepted update" cannot happen (the updater
+        // never starts: vigil updates by deploy).
         if VigilWorkspaces.shared.interceptTermination() {
             return .terminateCancel
         }
@@ -1077,8 +1079,9 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func checkForUpdates(_ sender: Any?) {
-        updateController.checkForUpdates()
-        // UpdateSimulator.happyPath.simulate(with: updateViewModel)
+        // vigil: updates come by deploy, never from Sparkle (see the
+        // updater's absence in applicationDidFinishLaunching).
+        Self.logger.info("check for updates ignored: vigil updates by deploy")
     }
 
     @IBAction func newWindow(_ sender: Any?) {
@@ -1232,7 +1235,8 @@ extension AppDelegate {
         // Note: This COULD Be done all in the xib file, but I find it easier to
         // modify this stuff as code.
         self.menuAbout?.setImageIfDesired(systemSymbolName: "info.circle")
-        self.menuCheckForUpdates?.setImageIfDesired(systemSymbolName: "square.and.arrow.down")
+        // vigil: no updater (applicationDidFinishLaunching), so no item.
+        self.menuCheckForUpdates?.isHidden = true
         self.menuOpenConfig?.setImageIfDesired(systemSymbolName: "gear")
         self.menuReloadConfig?.setImageIfDesired(systemSymbolName: "arrow.trianglehead.2.clockwise.rotate.90")
         self.menuSecureInput?.setImageIfDesired(systemSymbolName: "lock.display")
