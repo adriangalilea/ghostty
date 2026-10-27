@@ -1323,7 +1323,10 @@ struct PaneScreen: View {
                 Button { dismiss() } label: { Image(systemName: "chevron.left") }
             }
             ToolbarItem(placement: .principal) {
-                PaneTitle(title: node?.path ?? current.title, state: node?.words, host: current.host.name,
+                // The conversation says where it stands on its own last row;
+                // the terminal and the changes have none, so the title does.
+                PaneTitle(title: node?.path ?? current.title, state: mode == .conversation ? nil : node?.words,
+                          host: current.host.name,
                           tint: node?.alive == false ? .secondary : (node?.state ?? .idle).tint)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
@@ -1499,7 +1502,7 @@ struct PaneScreen: View {
 /// meaning (a lone dot beside a cut line said nothing).
 struct PaneTitle: View {
     let title: String
-    /// "Working", "Waiting for you"…; nil while unknown.
+    /// "Working", "Waiting for you"…; nil where the view below says it.
     let state: String?
     let host: String
     let tint: Color

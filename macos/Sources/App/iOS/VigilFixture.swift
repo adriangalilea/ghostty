@@ -477,8 +477,7 @@ private struct ConversationFixture: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) { Button {} label: { Image(systemName: "chevron.left") } }
                     ToolbarItem(placement: .principal) {
-                        PaneTitle(title: conversation.ref.title, state: conversation.live?.state.words(conversation.live?.flavor),
-                                  host: conversation.ref.host.name, tint: conversation.live?.state.tint ?? .gray)
+                        PaneTitle(title: conversation.ref.title, state: nil, host: conversation.ref.host.name, tint: .gray)
                     }
                     ToolbarItemGroup(placement: .topBarTrailing) {
                         Button {} label: { Image(systemName: "terminal") }
