@@ -42,6 +42,10 @@ enum VigilFixture: String {
     /// working, done and waiting on its background work), a shell and an
     /// agent with no glance beside them, drawn as terminals.
     case home
+    /// A terminal surface fed known bytes through a socketpair, as the
+    /// transport feeds a pane's stream: prompt colors, the 16 and 256
+    /// color palettes, box drawing, wide characters, a title.
+    case terminal
 
     /// The fixture this launch asked for, if any.
     static var asked: VigilFixture? {
@@ -51,6 +55,103 @@ enum VigilFixture: String {
             preconditionFailure("no fixture named \(arguments[at + 1])")
         }
         return fixture
+    }
+}
+
+/// `terminal`: the bytes a pane's stream would carry, written into one end
+/// of a socketpair whose other end the surface reads, exactly as the
+/// transport hands a pane to the attach backend. Drawn once the core has
+/// parsed through the closing title and the display has shown two frames.
+private struct TerminalFixture: View {
+    @EnvironmentObject private var ghostty: Ghostty.App
+    @State private var surfaceView: Ghostty.SurfaceView?
+
+    private static let title = "fixture terminal"
+
+    /// What a shell and a TUI print, one fact per line.
+    private static var screen: String {
+        let esc = "\u{1b}["
+        var lines = [
+            "\(esc)1;32madrian@phone\(esc)0m:\(esc)1;34m~/vigil\(esc)0m$ ls --color",
+            "\(esc)34mghostty\(esc)0m  \(esc)32mbin\(esc)0m  README.md  \(esc)31mbuild.zip\(esc)0m",
+            "",
+            (0..<8).map { "\(esc)4\($0)m  \(esc)0m" }.joined() + "  normal",
+            (0..<8).map { "\(esc)10\($0)m  \(esc)0m" }.joined() + "  bright",
+            stride(from: 16, to: 232, by: 6).map { "\(esc)48;5;\($0)m \(esc)0m" }.joined(),
+            "\(esc)1mbold\(esc)0m \(esc)3mitalic\(esc)0m \(esc)4munderline\(esc)0m \(esc)9mstrike\(esc)0m",
+            "┌──────────┐",
+            "│ 日本語 ✓ │",
+            "└──────────┘",
+            "\(esc)1;32m❯\(esc)0m ",
+        ]
+        lines[lines.count - 1] += "\u{1b}]2;\(title)\u{07}"
+        return lines.joined(separator: "\r\n")
+    }
+
+    var body: some View {
+        ZStack {
+            Color(ghostty.config.backgroundColor).ignoresSafeArea()
+            if let surfaceView {
+                SurfaceHost(view: surfaceView, purpose: "fixture", interactive: false, visible: true) { _, _ in .own }
+            }
+        }
+        .task { await draw() }
+    }
+
+    private func draw() async {
+        guard let app = ghostty.app else { preconditionFailure("ghostty not ready") }
+        var ends: [Int32] = [0, 0]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &ends) == 0 else { preconditionFailure("socketpair: \(errno)") }
+        var config = Ghostty.SurfaceConfiguration()
+        config.vigilAttach = "fixture"
+        config.vigilFd = ends[0]
+        config.vigilExplicitClaim = true
+        config.fontSize = 8
+        let view = Ghostty.SurfaceView(app, baseConfig: config)
+        view.attended = true
+        surfaceView = view
+        // The attach's frames (hello, sizes) are read and dropped, as a
+        // daemon that has nothing to say back would.
+        let peer = ends[1]
+        Thread.detachNewThread {
+            var sink = [UInt8](repeating: 0, count: 4096)
+            while read(peer, &sink, sink.count) > 0 {}
+        }
+        let bytes = Array(Self.screen.utf8)
+        precondition(write(peer, bytes, bytes.count) == bytes.count, "the fixture's bytes were not written whole")
+        for await title in view.$title.values where title == Self.title { break }
+        await Frames.next(2)
+        print("fixture drawn")
+    }
+}
+
+/// The display's own clock: resumes after `count` frames were shown.
+@MainActor
+private final class Frames: NSObject {
+    private var left: Int
+    private let done: CheckedContinuation<Void, Never>
+    private var link: CADisplayLink?
+
+    private init(_ count: Int, _ done: CheckedContinuation<Void, Never>) {
+        left = count
+        self.done = done
+    }
+
+    static func next(_ count: Int) async {
+        await withCheckedContinuation { done in
+            let frames = Frames(count, done)
+            let link = CADisplayLink(target: frames, selector: #selector(tick))
+            frames.link = link
+            link.add(to: .main, forMode: .common)
+        }
+    }
+
+    @objc private func tick() {
+        left -= 1
+        guard left == 0 else { return }
+        link?.invalidate()
+        link = nil
+        done.resume()
     }
 }
 
@@ -81,11 +182,12 @@ struct VigilFixtureView: View {
                 NavigationStack { HomeView() }
                     .environmentObject(VigilPhone.shared)
                     .preferredColorScheme(.dark)
+            case .terminal: TerminalFixture()
             }
         }
         .task {
-            // A replay says when it is done itself.
-            guard fixture != .conversationArriving else { return }
+            // A replay, or a terminal, says when it is done itself.
+            guard fixture != .conversationArriving, fixture != .terminal else { return }
             // One turn of the run loop: the views are laid out and drawn.
             await Task.yield()
             print("fixture drawn")
