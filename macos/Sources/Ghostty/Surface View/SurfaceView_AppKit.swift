@@ -2531,11 +2531,14 @@ extension Ghostty.SurfaceView: NSTextInputClient {
         // ñ), typed as a person would type them: key events on the same
         // channel as the committed text, never a paste (a bracketed paste
         // inserts the bytes instead of acting on them). Only outside
-        // preedit: IME composition manages its own state via marked text,
-        // and the length cap keeps a confused input method from erasing the
-        // user's line.
-        if !hadMarkedText, replacementRange.length > 0, replacementRange.length <= 8 {
-            for _ in 0..<replacementRange.length { vigilTypeBackspace() }
+        // preedit (IME composition manages its own state via marked text),
+        // and only for the ONE character the popup replaces: a longer range
+        // is some other input method's correction, measured against
+        // selectedRange, which is the terminal's mouse selection and says
+        // nothing about the prompt, so erasing that many would delete the
+        // wrong characters.
+        if !hadMarkedText, replacementRange.length == 1 {
+            vigilTypeBackspace()
         }
 
         // If we have an accumulator we're in another key event so we just
