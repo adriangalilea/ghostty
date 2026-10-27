@@ -173,196 +173,10 @@
 			);
 			target = 8193244C2F24E6C000A9ED8F /* DockTilePlugin */;
 		};
-		81F82CB02E8281F5001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				App/macOS/AppDelegate.swift,
-				"App/macOS/AppDelegate+Ghostty.swift",
-				App/macOS/main.swift,
-				App/macOS/MainMenu.xib,
-				Features/About/About.xib,
-				Features/About/AboutController.swift,
-				Features/About/AboutView.swift,
-				Features/About/AboutViewModel.swift,
-				Features/About/CyclingIconView.swift,
-				"Features/App Intents/CloseTerminalIntent.swift",
-				"Features/App Intents/CommandPaletteIntent.swift",
-				"Features/App Intents/Entities/CommandEntity.swift",
-				"Features/App Intents/Entities/TerminalEntity.swift",
-				"Features/App Intents/FocusTerminalIntent.swift",
-				"Features/App Intents/GetTerminalDetailsIntent.swift",
-				"Features/App Intents/GhosttyIntentError.swift",
-				"Features/App Intents/InputIntent.swift",
-				"Features/App Intents/IntentPermission.swift",
-				"Features/App Intents/KeybindIntent.swift",
-				"Features/App Intents/NewTerminalIntent.swift",
-				"Features/App Intents/QuickTerminalIntent.swift",
-				"Features/AppleScript/AppDelegate+AppleScript.swift",
-				"Features/AppleScript/Ghostty.Input.Mods+AppleScript.swift",
-				Features/AppleScript/ScriptInputTextCommand.swift,
-				Features/AppleScript/ScriptKeyEventCommand.swift,
-				Features/AppleScript/ScriptMouseButtonCommand.swift,
-				Features/AppleScript/ScriptMousePosCommand.swift,
-				Features/AppleScript/ScriptMouseScrollCommand.swift,
-				Features/AppleScript/ScriptRecord.swift,
-				Features/AppleScript/ScriptSurfaceConfiguration.swift,
-				Features/AppleScript/ScriptTab.swift,
-				Features/AppleScript/ScriptTerminal.swift,
-				Features/AppleScript/ScriptWindow.swift,
-				Features/ClipboardConfirmation/ClipboardConfirmation.xib,
-				Features/ClipboardConfirmation/ClipboardConfirmationController.swift,
-				Features/ClipboardConfirmation/ClipboardConfirmationView.swift,
-				"Features/Command Palette/CommandPalette.swift",
-				"Features/Command Palette/TerminalCommandPalette.swift",
-				"Features/Custom App Icon/AppIcon.swift",
-				"Features/Custom App Icon/ColorizedGhosttyIcon.swift",
-				"Features/Custom App Icon/ColorizedGhosttyIconImage.swift",
-				"Features/Custom App Icon/ColorizedGhosttyIconView.swift",
-				"Features/Custom App Icon/DockTilePlugin.swift",
-				"Features/Custom App Icon/Extensions/Notification+AppIcon.swift",
-				"Features/Custom App Icon/Extensions/UserDefaults+AppIcon.swift",
-				"Features/Global Keybinds/GlobalEventTap.swift",
-				Features/QuickTerminal/QuickTerminal.xib,
-				Features/QuickTerminal/QuickTerminalController.swift,
-				Features/QuickTerminal/QuickTerminalPosition.swift,
-				Features/QuickTerminal/QuickTerminalRestorableState.swift,
-				Features/QuickTerminal/QuickTerminalScreen.swift,
-				Features/QuickTerminal/QuickTerminalScreenStateCache.swift,
-				Features/QuickTerminal/QuickTerminalSize.swift,
-				Features/QuickTerminal/QuickTerminalSpaceBehavior.swift,
-				Features/QuickTerminal/QuickTerminalWindow.swift,
-				"Features/Secure Input/SecureInput.swift",
-				"Features/Secure Input/SecureInputOverlay.swift",
-				Features/Services/ServiceProvider.swift,
-				Features/Settings/ConfigurationErrors.xib,
-				Features/Settings/ConfigurationErrorsController.swift,
-				Features/Settings/ConfigurationErrorsView.swift,
-				Features/Settings/SettingsView.swift,
-				Features/Splits/SplitTree.swift,
-				Features/Splits/SplitView.Divider.swift,
-				Features/Splits/SplitView.swift,
-				Features/Splits/TerminalSplitTreeView.swift,
-				Features/Terminal/BaseTerminalController.swift,
-				Features/Terminal/ErrorView.swift,
-				Features/Terminal/TerminalController.swift,
-				Features/Terminal/TerminalRestorable.swift,
-				"Features/Terminal/TerminalRestorableState+InteralState.swift",
-				Features/Terminal/TerminalTabColor.swift,
-				Features/Terminal/TerminalView.swift,
-				Features/Terminal/TerminalViewContainer.swift,
-				"Features/Terminal/Window Styles/HiddenTitlebarTerminalWindow.swift",
-				"Features/Terminal/Window Styles/Terminal.xib",
-				"Features/Terminal/Window Styles/TerminalHiddenTitlebar.xib",
-				"Features/Terminal/Window Styles/TerminalTabsTitlebarTahoe.xib",
-				"Features/Terminal/Window Styles/TerminalTabsTitlebarVentura.xib",
-				"Features/Terminal/Window Styles/TerminalTransparentTitlebar.xib",
-				"Features/Terminal/Window Styles/TerminalWindow.swift",
-				"Features/Terminal/Window Styles/TitlebarTabsTahoeTerminalWindow.swift",
-				"Features/Terminal/Window Styles/TitlebarTabsVenturaTerminalWindow.swift",
-				"Features/Terminal/Window Styles/TransparentTitlebarTerminalWindow.swift",
-				Features/Update/UpdateBadge.swift,
-				Features/Update/UpdateController.swift,
-				Features/Update/UpdateDelegate.swift,
-				Features/Update/UpdateDriver.swift,
-				Features/Update/UpdatePill.swift,
-				Features/Update/UpdatePopoverView.swift,
-				Features/Update/UpdateSimulator.swift,
-				Features/Update/UpdateViewModel.swift,
-				"Ghostty/FullscreenMode+Extension.swift",
-				Ghostty/Ghostty.Error.swift,
-				Ghostty/Ghostty.Event.swift,
-				Ghostty/Ghostty.Input.swift,
-				Ghostty/Ghostty.MenuShortcutManager.swift,
-				Ghostty/Ghostty.Surface.swift,
-				"Ghostty/NSEvent+Extension.swift",
-				"Ghostty/Surface View/InspectorView.swift",
-				"Ghostty/Surface View/SurfaceDragSource.swift",
-				"Ghostty/Surface View/SurfaceGrabHandle.swift",
-				"Ghostty/Surface View/SurfaceScrollView.swift",
-				"Ghostty/Surface View/SurfaceView_AppKit.swift",
-				Helpers/AppInfo.swift,
-				Helpers/CodableBridge.swift,
-				Helpers/Cursor.swift,
-				Helpers/ExpiringUndoManager.swift,
-				"Helpers/Extensions/Double+Extension.swift",
-				"Helpers/Extensions/EventModifiers+Extension.swift",
-				"Helpers/Extensions/FileHandle+Extension.swift",
-				"Helpers/Extensions/KeyboardShortcut+Extension.swift",
-				"Helpers/Extensions/NSAppearance+Extension.swift",
-				"Helpers/Extensions/NSApplication+Extension.swift",
-				"Helpers/Extensions/NSColor+Extension.swift",
-				"Helpers/Extensions/NSImage+Extension.swift",
-				"Helpers/Extensions/NSMenu+Extension.swift",
-				"Helpers/Extensions/NSMenuItem+Extension.swift",
-				"Helpers/Extensions/NSPasteboard+Extension.swift",
-				"Helpers/Extensions/NSScreen+Extension.swift",
-				"Helpers/Extensions/NSView+Extension.swift",
-				"Helpers/Extensions/NSWindow+Extension.swift",
-				"Helpers/Extensions/NSWorkspace+Extension.swift",
-				"Helpers/Extensions/Transferable+Extension.swift",
-				"Helpers/Extensions/UndoManager+Extension.swift",
-				"Helpers/Extensions/View+Extension.swift",
-				Helpers/Fullscreen.swift,
-				Helpers/HostingWindow.swift,
-				Helpers/KeyboardLayout.swift,
-				Helpers/LastWindowPosition.swift,
-				Helpers/MetalView.swift,
-				Helpers/NonDraggableHostingView.swift,
-				Helpers/ObjCExceptionCatcher.m,
-				Helpers/PermissionRequest.swift,
-				Helpers/Private/CGS.swift,
-				Helpers/Private/Dock.swift,
-				Helpers/TabGroupCloseCoordinator.swift,
-				Helpers/TabTitleEditor.swift,
-				Helpers/VibrantLayer.m,
-				Features/Vigil/VigilHarnessCoordinator.swift,
-				Features/Vigil/VigilBars.swift,
-				Features/Vigil/VigilChangesWindow.swift,
-				Features/Vigil/VigilCortex.swift,
-				Features/Vigil/VigilDictation.swift,
-				Features/Vigil/VigilDock.swift,
-				Features/Vigil/VigilFaceButton.swift,
-				Features/Vigil/VigilFollowSplash.swift,
-				Features/Vigil/VigilIdentityEditor.swift,
-				Features/Vigil/VigilNameCell.swift,
-				Features/Vigil/VigilOverview.swift,
-				Features/Vigil/VigilRemote.swift,
-				Features/Vigil/VigilWorkspaces.swift,
-				"Features/Vigil/VigilWorkspaces+Attention.swift",
-				"Features/Vigil/VigilWorkspaces+Dock.swift",
-				"Features/Vigil/VigilWorkspaces+Graveyard.swift",
-				"Features/Vigil/VigilWorkspaces+Instrumentation.swift",
-				"Features/Vigil/VigilWorkspaces+Lifecycle.swift",
-				"Features/Vigil/VigilWorkspaces+Naming.swift",
-				"Features/Vigil/VigilWorkspaces+Navigation.swift",
-				"Features/Vigil/VigilWorkspaces+Processes.swift",
-				"Features/Vigil/VigilWorkspaces+Sidebar.swift",
-				"Features/Vigil/VigilWorkspaces+Viewports.swift",
-				Features/Vigil/VigilSidebar.swift,
-				Features/Vigil/VigilSidebarView.swift,
-				Features/Vigil/VigilStatusItem.swift,
-				Features/Vigil/VigilSummon.swift,
-				Features/Vigil/VigilTabFaceControl.swift,
-				Features/Vigil/VigilWatchdog.swift,
-				Features/Vigil/VigilWindowMark.swift,
-			);
-			target = A5D4499C2B53AE7B000F5B83 /* Ghostty-iOS */;
-		};
 		81F82CB12E8281F9001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				App/iOS/iOSApp.swift,
-				App/iOS/Sounds,
-				App/iOS/VigilAgents.swift,
-				App/iOS/VigilAuthz.swift,
-				App/iOS/VigilConversation.swift,
-				App/iOS/VigilCreate.swift,
-				App/iOS/VigilFixture.swift,
-				App/iOS/VigilPhone.swift,
-				App/iOS/VigilPhoneUI.swift,
-				App/iOS/VigilTheme.swift,
 				"Features/Custom App Icon/DockTilePlugin.swift",
-				"Ghostty/Surface View/SurfaceView_UIKit.swift",
 			);
 			target = A5B30530299BEAAA0047F10C /* Ghostty */;
 		};
@@ -380,14 +194,23 @@
 			);
 			target = 0DAA1111000000000000E020 /* VigilNotify */;
 		};
+		0DAA1111000000000000E008 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A5D4499C2B53AE7B000F5B83 /* Ghostty-iOS */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		810ACCA02E9D3302004F8F92 /* GhosttyUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = GhosttyUITests; sourceTree = "<group>"; };
-		81F82BC72E82815D001EDFA7 /* Sources */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (81F82CB12E8281F9001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, 81F82CB02E8281F5001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, 8193245D2F24E80800A9ED8F /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = Sources; sourceTree = "<group>"; };
+		81F82BC72E82815D001EDFA7 /* Sources */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (81F82CB12E8281F9001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, 8193245D2F24E80800A9ED8F /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = Sources; sourceTree = "<group>"; };
 		A54F45F42E1F047A0046BD5C /* Tests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = Tests; sourceTree = "<group>"; };
 		0DAA1111000000000000E003 /* VigilLive */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (0DAA1111000000000000E004 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = VigilLive; sourceTree = "<group>"; };
 		0DAA1111000000000000E005 /* VigilNotify */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (0DAA1111000000000000E006 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = VigilNotify; sourceTree = "<group>"; };
+		0DAA1111000000000000E007 /* VigilPhone */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (0DAA1111000000000000E008 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = VigilPhone; sourceTree = "<group>"; };
+		0DAA1111000000000000E009 /* VigilShared */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = VigilShared; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -507,6 +330,8 @@
 				81F82BC72E82815D001EDFA7 /* Sources */,
 				0DAA1111000000000000E003 /* VigilLive */,
 				0DAA1111000000000000E005 /* VigilNotify */,
+				0DAA1111000000000000E007 /* VigilPhone */,
+				0DAA1111000000000000E009 /* VigilShared */,
 				A54F45F42E1F047A0046BD5C /* Tests */,
 				810ACCA02E9D3302004F8F92 /* GhosttyUITests */,
 				A5D495A3299BECBA00DD1313 /* Frameworks */,
@@ -623,6 +448,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				81F82BC72E82815D001EDFA7 /* Sources */,
+				0DAA1111000000000000E009 /* VigilShared */,
 			);
 			name = Ghostty;
 			packageProductDependencies = (
@@ -664,7 +490,8 @@
 				0DAA1111000000000000E044 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				81F82BC72E82815D001EDFA7 /* Sources */,
+				0DAA1111000000000000E007 /* VigilPhone */,
+				0DAA1111000000000000E009 /* VigilShared */,
 			);
 			name = "Ghostty-iOS";
 			packageProductDependencies = (
@@ -1527,7 +1354,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "Ghostty-iOS-Info.plist";
+				INFOPLIST_FILE = VigilPhone/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = vigil;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -1568,7 +1395,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "Ghostty-iOS-Info.plist";
+				INFOPLIST_FILE = VigilPhone/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = vigil;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -1609,7 +1436,7 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "Ghostty-iOS-Info.plist";
+				INFOPLIST_FILE = VigilPhone/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = vigil;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

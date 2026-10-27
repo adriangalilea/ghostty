@@ -1,7 +1,6 @@
 import AuthzClient
 import AuthzGlance
 import SwiftUI
-import GhosttyKit
 
 /// vigil for iPhone: a viewport onto the Macs' sessions. The terminal is
 /// Ghostty's own (libghostty, Metal); the transport is tether (`vigil/1`,
@@ -10,15 +9,12 @@ import GhosttyKit
 struct VigilPhoneApp: App {
     @UIApplicationDelegateAdaptor private var delegate: VigilAppDelegate
     @Environment(\.scenePhase) private var phase
-    @StateObject private var ghostty: Ghostty.App
+    @StateObject private var core: TerminalCore
 
     init() {
         // First: every event from here on is kept in its record.
         Record.keep(service: "vigil-phone")
-        if ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) != GHOSTTY_SUCCESS {
-            preconditionFailure("Initialize ghostty backend failed")
-        }
-        _ghostty = StateObject(wrappedValue: Ghostty.App())
+        _core = StateObject(wrappedValue: TerminalCore())
         // A made-up tree is in place before the first frame.
         if VigilFixture.asked == .home { VigilPhone.shared.fixture(VigilFixtureView.home) }
     }
@@ -29,7 +25,7 @@ struct VigilPhoneApp: App {
                 // Review only: made-up state in the system's appearance,
                 // nothing started (no tether, no Mac).
                 VigilFixtureView(fixture: fixture)
-                    .environmentObject(ghostty)
+                    .environmentObject(core)
             } else {
                 root
             }
@@ -38,7 +34,7 @@ struct VigilPhoneApp: App {
 
     private var root: some View {
         VigilPhoneRoot()
-                .environmentObject(ghostty)
+                .environmentObject(core)
                 // A terminal app is dark; never flash light chrome between
                 // a dark pane and the tree.
                 .preferredColorScheme(.dark)

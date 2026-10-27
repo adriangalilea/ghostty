@@ -1,9 +1,11 @@
-import SwiftUI
 import GhosttyKit
+import SwiftUI
+import UIKit
 
-extension Ghostty {
     /// The UIView for a terminal surface on the phone: libghostty's Metal
-    /// terminal, attached to a vigild pane over the app's transport.
+    /// terminal, attached to a vigild pane over the app's transport (the
+    /// stream it reads is a descriptor the app owns, a socketpair end
+    /// bridged to tether).
     ///
     /// Four facts about a surface are FOUR properties here, never
     /// inferred from one another (the phone's whole first day of bugs was
@@ -20,7 +22,7 @@ extension Ghostty {
     /// Layout is ONE authority: `layoutSubviews` computes the framebuffer
     /// from the presentation and reports it to the core only when it
     /// changed. SwiftUI hands this view a frame and nothing else.
-    class SurfaceView: OSSurfaceView {
+    final class TerminalSurface: UIView, ObservableObject {
         // MARK: Receipts
 
         /// Every fact this view learns or decides goes through here; the
@@ -30,28 +32,46 @@ extension Ghostty {
         private func receipt(_ message: String, _ fields: [String: any Sendable] = [:]) {
             Self.report(message, fields.merging(["pane": paneId]) { mine, _ in mine })
         }
-        /// The pane this surface shows, for receipts.
-        private(set) var paneId: String = "?"
+        /// The pane this surface shows.
+        let paneId: String
 
-        @Published var title: String = "👻"
-        @Published var bell: Bool = false
+        /// What the program running in the pane calls it (OSC 0/2).
+        @Published var title: String = ""
 
-        private(set) var _surface: ghostty_surface_t?
-        override var surface: ghostty_surface_t? { _surface }
+        private(set) var surface: ghostty_surface_t?
 
-        init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
+        /// A phone reads at 8pt (the Mac's 13 minus five loupe taps).
+        private static let fontSize: Float32 = 8
+
+        /// A surface reading `pane`'s stream from `stream`, a descriptor it
+        /// owns from here on (the attach closes it). It never claims the
+        /// pane's pty size by focus: only an own-size screen claims,
+        /// explicitly (`claimSize`), and a fit viewport mirrors the owner's
+        /// grid.
+        init(_ app: ghostty_app_t, pane: String, stream: Int32) {
+            paneId = pane
             // A non-zero initial frame so the render layer is never 0×0.
-            super.init(id: uuid, frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-            let surface_cfg = baseConfig ?? SurfaceConfiguration()
-            paneId = surface_cfg.vigilAttach ?? "local"
-            let surface = surface_cfg.withCValue(view: self) { surface_cfg_c in
-                ghostty_surface_new(app, &surface_cfg_c)
+            super.init(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+            var config = ghostty_surface_config_new()
+            config.userdata = Unmanaged.passUnretained(self).toOpaque()
+            config.platform_tag = GHOSTTY_PLATFORM_IOS
+            config.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(
+                uiview: Unmanaged.passUnretained(self).toOpaque()))
+            // The view is in no window yet; `syncScale` applies the
+            // window's scale at the first layout.
+            config.scale_factor = appliedScale
+            config.font_size = Self.fontSize
+            config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
+            config.vigil_fd = stream
+            config.vigil_explicit_claim = true
+            surface = pane.withCString { attach in
+                config.vigil_attach = attach
+                return ghostty_surface_new(app, &config)
             }
             guard let surface else {
                 receipt("ghostty_surface_new failed")
                 return
             }
-            _surface = surface
             // Born unfocused and unclaimed: a screen decides both.
             ghostty_surface_set_focus(surface, false)
             proxy.owner = self
@@ -59,7 +79,7 @@ extension Ghostty {
             installScrollGesture()
             NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive),
                                                    name: UIApplication.willResignActiveNotification, object: nil)
-            receipt("born", ["explicit_claim": surface_cfg.vigilExplicitClaim])
+            receipt("born")
         }
 
         required init?(coder: NSCoder) {
@@ -68,7 +88,7 @@ extension Ghostty {
 
         deinit {
             NotificationCenter.default.removeObserver(self)
-            guard let surface = _surface else { return }
+            guard let surface else { return }
             ghostty_surface_free(surface)
         }
 
@@ -79,8 +99,8 @@ extension Ghostty {
             claimSize(false)
             keyboardWanted = false
             if isFirstResponder { _ = resignFirstResponder() }
-            guard let surface = _surface else { return }
-            _surface = nil
+            guard let surface else { return }
+            self.surface = nil
             ghostty_surface_free(surface)
             receipt("detached")
         }
@@ -302,7 +322,7 @@ extension Ghostty {
         }
 
         final class KeyboardProxy: UIView, UIKeyInput {
-            weak var owner: SurfaceView?
+            weak var owner: TerminalSurface?
             var accessory: UIView?
             override var canBecomeFirstResponder: Bool { true }
             override var inputAccessoryView: UIView? { accessory }
@@ -570,7 +590,7 @@ extension Ghostty {
             // (a fit view's finger travels presentation.scale × the grid).
             let p = terminalPoint(sv.panGestureRecognizer.location(in: self))
             ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
-            // mods bit 0 = precision (Ghostty.Input.ScrollMods' layout).
+            // ghostty_input_scroll_mods_t bit 0: a precise (pixel) delta.
             ghostty_surface_mouse_scroll(surface, 0, Double(dy * appliedScale / presentation.scale), ghostty_input_scroll_mods_t(1))
         }
 
@@ -587,9 +607,13 @@ extension Ghostty {
         /// The core's cell metrics changed (font set, font size changed):
         /// every fit layout depends on them.
         func cellMetricsDidChange(px: CGSize) {
-            cellSize = CGSize(width: px.width / appliedScale, height: px.height / appliedScale)
             receipt("cell metrics", ["width": Int(px.width), "height": Int(px.height)])
             setNeedsLayout()
+        }
+
+        /// The renderer's own word on whether it draws (a GPU failure).
+        func rendererHealth(_ healthy: Bool) {
+            receipt("renderer health", ["healthy": healthy])
         }
 
         /// The owner's hook: a dead stream is the transport's fact, the
@@ -678,12 +702,9 @@ extension Ghostty {
             CATransaction.commit()
             scroller?.contentSize = CGSize(width: bounds.width, height: Self.runway * 2)
         }
-
-        override func sizeDidChange(_ size: CGSize) { setNeedsLayout() }
     }
-}
 
-extension Ghostty.SurfaceView: UIEditMenuInteractionDelegate {
+extension TerminalSurface: UIEditMenuInteractionDelegate {
     func editMenuInteraction(
         _ interaction: UIEditMenuInteraction,
         menuFor configuration: UIEditMenuConfiguration,
@@ -696,7 +717,7 @@ extension Ghostty.SurfaceView: UIEditMenuInteractionDelegate {
     }
 }
 
-extension Ghostty.SurfaceView: UIScrollViewDelegate {
+extension TerminalSurface: UIScrollViewDelegate {
     func scrollViewDidScroll(_ scrollView: UIScrollView) { scrollerMoved(scrollView) }
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { scrollerSettled(scrollView) }
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {

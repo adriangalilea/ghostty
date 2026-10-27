@@ -200,10 +200,9 @@ final class VigilPhone: ObservableObject {
     private var followWatches: [String: Task<Void, Never>] = [:]
 
     private init() {
-        Ghostty.SurfaceView.report = { [weak self] message, fields in
+        TerminalSurface.report = { [weak self] message, fields in
             Task { @MainActor in self?.receipts.info("surface", message, fields) }
-        }
-    }
+        }    }
 
     // MARK: Macs (paired devices serving vigil/1)
 
@@ -1051,7 +1050,7 @@ final class VigilPhone: ObservableObject {
     /// A row's preview and the pane screen show the SAME surface; hosting
     /// (which container holds the UIView right now) is the representable's
     /// business (`SurfaceHost`), lifetime is this table's.
-    private(set) var surfaces: [String: Ghostty.SurfaceView] = [:]
+    private(set) var surfaces: [String: TerminalSurface] = [:]
     /// The pane the screen shows, ONE fact: rows read it to know their
     /// view is borrowed, the occlusion policy reads it to idle the rest.
     @Published private(set) var presenting: PaneRef?
@@ -1137,7 +1136,7 @@ final class VigilPhone: ObservableObject {
     /// The surface for a pane, dialing one if none exists. `nil` when the
     /// cap is reached (rows show a placeholder; the screen always gets
     /// one: it evicts an idle row's surface).
-    func surface(for ref: PaneRef, app: ghostty_app_t, screen: Bool) async throws -> Ghostty.SurfaceView? {
+    func surface(for ref: PaneRef, app: ghostty_app_t, screen: Bool) async throws -> TerminalSurface? {
         if let existing = surfaces[ref.pane], existing.surface != nil { return existing }
         guard !dialing.contains(ref.pane) else { return nil }
         if surfaces.count + dialing.count >= Self.surfaceCap {
@@ -1151,16 +1150,7 @@ final class VigilPhone: ObservableObject {
         dialing.insert(ref.pane)
         defer { dialing.remove(ref.pane) }
         let fd = try await attach(ref.host, pane: ref.pane, preview: !screen)
-        var config = Ghostty.SurfaceConfiguration()
-        config.vigilAttach = ref.pane
-        config.vigilFd = fd
-        config.vigilMirror = true
-        // The phone never owns the pty by focus: only an own-size screen
-        // claims, explicitly (a fit viewport mirrors the owner's grid).
-        config.vigilExplicitClaim = true
-        // A phone reads at 8pt (the Mac's 13 minus five loupe taps).
-        config.fontSize = 8
-        let view = Ghostty.SurfaceView(app, baseConfig: config)
+        let view = TerminalSurface(app, pane: ref.pane, stream: fd)
         view.onStreamEnd = { [weak self, weak view] in
             guard let self, let view, self.surfaces[ref.pane] === view else { return }
             self.receipts.warn("surface", "stream died; dropped, the screen re-dials", ["pane": ref.pane])

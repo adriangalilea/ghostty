@@ -63,8 +63,8 @@ enum VigilFixture: String {
 /// transport hands a pane to the attach backend. Drawn once the core has
 /// parsed through the closing title and the display has shown two frames.
 private struct TerminalFixture: View {
-    @EnvironmentObject private var ghostty: Ghostty.App
-    @State private var surfaceView: Ghostty.SurfaceView?
+    @EnvironmentObject private var core: TerminalCore
+    @State private var surfaceView: TerminalSurface?
 
     private static let title = "fixture terminal"
 
@@ -90,7 +90,7 @@ private struct TerminalFixture: View {
 
     var body: some View {
         ZStack {
-            Color(ghostty.config.backgroundColor).ignoresSafeArea()
+            core.background.ignoresSafeArea()
             if let surfaceView {
                 SurfaceHost(view: surfaceView, purpose: "fixture", interactive: false, visible: true) { _, _ in .own }
             }
@@ -99,15 +99,9 @@ private struct TerminalFixture: View {
     }
 
     private func draw() async {
-        guard let app = ghostty.app else { preconditionFailure("ghostty not ready") }
         var ends: [Int32] = [0, 0]
         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &ends) == 0 else { preconditionFailure("socketpair: \(errno)") }
-        var config = Ghostty.SurfaceConfiguration()
-        config.vigilAttach = "fixture"
-        config.vigilFd = ends[0]
-        config.vigilExplicitClaim = true
-        config.fontSize = 8
-        let view = Ghostty.SurfaceView(app, baseConfig: config)
+        let view = TerminalSurface(core.app, pane: "fixture", stream: ends[0])
         view.attended = true
         surfaceView = view
         // The attach's frames (hello, sizes) are read and dropped, as a

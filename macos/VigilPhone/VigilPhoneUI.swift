@@ -34,7 +34,7 @@ import VigilWire
 ///    (pinch, two-finger pan, the loupe sets `zoomScale`); one finger
 ///    stays the terminal's own scroll.
 struct VigilPhoneRoot: View {
-    @EnvironmentObject private var ghostty: Ghostty.App
+    @EnvironmentObject private var core: TerminalCore
     @StateObject private var model = VigilPhone.shared
     @State private var path: [PaneRef] = []
 
@@ -136,7 +136,7 @@ struct CloseItems: View {
 
 struct HomeView: View {
     @EnvironmentObject private var model: VigilPhone
-    @EnvironmentObject private var ghostty: Ghostty.App
+    @EnvironmentObject private var core: TerminalCore
     @State private var settings = false
     /// The coordinate space preview rows report their frames in: the
     /// scroll view's own, so the visible area is its size at the origin.
@@ -167,7 +167,7 @@ struct HomeView: View {
         }
         .coordinateSpace(name: Self.treeSpace)
         .onGeometryChange(for: CGSize.self) { $0.size } action: { model.treeSize($0) }
-        .background(Color(ghostty.config.backgroundColor).ignoresSafeArea())
+        .background(core.background.ignoresSafeArea())
         // The bar carries the buttons only: the app's name on its own line
         // took the space of three rows.
         .toolbarTitleDisplayMode(.inline)
@@ -648,7 +648,7 @@ struct CopyItem: View {
 /// is a function of the space given), then the surface's own layout
 /// reports pixels to the core.
 final class SurfaceHostView: UIView {
-    var presentation: ((Ghostty.SurfaceView, CGSize) -> Ghostty.SurfaceView.Presentation)?
+    var presentation: ((TerminalSurface, CGSize) -> TerminalSurface.Presentation)?
     let purpose: String
     init(purpose: String) {
         self.purpose = purpose
@@ -657,9 +657,9 @@ final class SurfaceHostView: UIView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    var hosted: Ghostty.SurfaceView? { subviews.first as? Ghostty.SurfaceView }
+    var hosted: TerminalSurface? { subviews.first as? TerminalSurface }
 
-    func host(_ view: Ghostty.SurfaceView) {
+    func host(_ view: TerminalSurface) {
         guard view.superview !== self else { return }
         addSubview(view)
         view.frame = bounds
@@ -682,11 +682,11 @@ final class SurfaceHostView: UIView {
 
 /// A surface in a SwiftUI frame: a thumbnail row or an own-size screen.
 struct SurfaceHost: UIViewRepresentable {
-    let view: Ghostty.SurfaceView
+    let view: TerminalSurface
     let purpose: String
     let interactive: Bool
     let visible: Bool
-    let presentation: (Ghostty.SurfaceView, CGSize) -> Ghostty.SurfaceView.Presentation
+    let presentation: (TerminalSurface, CGSize) -> TerminalSurface.Presentation
 
     func makeUIView(context: Context) -> SurfaceHostView { SurfaceHostView(purpose: purpose) }
 
@@ -709,7 +709,7 @@ struct SurfaceHost: UIViewRepresentable {
 
 /// A surface's natural picture size for a grid at a content scale
 /// (before any fit): the core's pixels, in points.
-private func naturalSize(_ view: Ghostty.SurfaceView, grid: Ghostty.SurfaceView.Grid, contentScale: CGFloat) -> CGSize? {
+private func naturalSize(_ view: TerminalSurface, grid: TerminalSurface.Grid, contentScale: CGFloat) -> CGSize? {
     view.present(.init(grid: grid, contentScale: contentScale, scale: 1))
     return view.presentedSize
 }
@@ -722,10 +722,10 @@ private func naturalSize(_ view: Ghostty.SurfaceView, grid: Ghostty.SurfaceView.
 /// down; the screen's 3× on a full grid was 2.25× the pixels for nothing).
 struct PanePreview: View {
     let ref: PaneRef
-    let grid: Ghostty.SurfaceView.Grid
-    @EnvironmentObject private var ghostty: Ghostty.App
+    let grid: TerminalSurface.Grid
+    @EnvironmentObject private var core: TerminalCore
     @EnvironmentObject private var model: VigilPhone
-    @State private var surfaceView: Ghostty.SurfaceView?
+    @State private var surfaceView: TerminalSurface?
     @State private var denied = false
 
     /// The pane's last lines, where the action is, without one row taking
@@ -734,7 +734,7 @@ struct PanePreview: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            Color(ghostty.config.backgroundColor)
+            core.background
             if let surfaceView {
                 SurfaceHost(view: surfaceView, purpose: "row \(ref.pane)", interactive: false,
                             visible: model.presenting == nil) { view, bounds in
@@ -770,9 +770,8 @@ struct PanePreview: View {
     private var wanted: Bool { model.previewed.contains(ref.pane) }
 
     private func load() async {
-        guard let app = ghostty.app else { return }
         do {
-            guard let view = try await model.surface(for: ref, app: app, screen: false) else { denied = true; return }
+            guard let view = try await model.surface(for: ref, app: core.app, screen: false) else { denied = true; return }
             surfaceView = view
         } catch {
             model.receipts.error("surface", "preview failed", ["pane": ref.pane, "err": error])
@@ -821,7 +820,7 @@ final class KeyboardState: ObservableObject {
 /// esc / tab / ctrl / arrows / ⌃C / paste: the keys a software keyboard
 /// hides. Rides the keyboard as its accessory (pattern: ACCESSORY).
 struct KeyStrip: View {
-    @ObservedObject var surface: Ghostty.SurfaceView
+    @ObservedObject var surface: TerminalSurface
     @State private var ctrl = false
 
     var body: some View {
@@ -877,7 +876,7 @@ struct KeyStrip: View {
 }
 
 /// The strip as a UIKit accessory view (one per surface on screen).
-private func makeAccessory(for surface: Ghostty.SurfaceView) -> UIView {
+private func makeAccessory(for surface: TerminalSurface) -> UIView {
     let host = UIHostingController(rootView: KeyStrip(surface: surface))
     host.view.backgroundColor = .clear
     host.safeAreaRegions = []
@@ -892,8 +891,8 @@ private func makeAccessory(for surface: Ghostty.SurfaceView) -> UIView {
 /// two-finger pannable, the loupe driving `zoom`. One finger is the
 /// terminal's (its own scroll engine sits inside).
 struct FitCanvas: UIViewRepresentable {
-    let view: Ghostty.SurfaceView
-    let grid: Ghostty.SurfaceView.Grid
+    let view: TerminalSurface
+    let grid: TerminalSurface.Grid
     @Binding var zoom: CGFloat
 
     /// The fit is computed in ITS layout pass (the bounds are a fact
@@ -901,7 +900,7 @@ struct FitCanvas: UIViewRepresentable {
     /// re-runs it: a blank fit screen).
     final class ZoomView: UIScrollView {
         let content = SurfaceHostView(purpose: "fit screen")
-        var grid: Ghostty.SurfaceView.Grid?
+        var grid: TerminalSurface.Grid?
         private var fitted: (bounds: CGSize, natural: CGSize)?
 
         override func layoutSubviews() {
@@ -996,7 +995,7 @@ struct FitCanvas: UIViewRepresentable {
 /// Replaces the strip's arrow row: arrows deserve a thumb, not four tap
 /// targets.
 struct ArrowStick: View {
-    let surface: Ghostty.SurfaceView
+    let surface: TerminalSurface
     let area: CGSize
     @AppStorage("vigil.stick.fx") private var fx = 0.86
     @AppStorage("vigil.stick.fy") private var fy = 0.62
@@ -1075,9 +1074,9 @@ struct ArrowStick: View {
         @Published var movingCenter: CGPoint = .zero
         private var holdWork: DispatchWorkItem?
         private var timer: Timer?
-        private weak var surface: Ghostty.SurfaceView?
+        private weak var surface: TerminalSurface?
 
-        func changed(_ v: DragGesture.Value, surface: Ghostty.SurfaceView, home: CGPoint) {
+        func changed(_ v: DragGesture.Value, surface: TerminalSurface, home: CGPoint) {
             self.surface = surface
             let t = v.translation
             switch mode {
@@ -1142,12 +1141,12 @@ struct ArrowStick: View {
 
 struct PaneScreen: View {
     let ref: PaneRef
-    @EnvironmentObject private var ghostty: Ghostty.App
+    @EnvironmentObject private var core: TerminalCore
     @EnvironmentObject private var model: VigilPhone
     @ObservedObject private var keyboard = KeyboardState.shared
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
-    @State private var surfaceView: Ghostty.SurfaceView?
+    @State private var surfaceView: TerminalSurface?
     @State private var current: PaneRef
     @State private var error: String?
     @State private var ownSize = false
@@ -1193,7 +1192,7 @@ struct PaneScreen: View {
 
     private var node: VigilPhone.Node? { model.node(for: current) }
     /// The owner's grid for the current pane, if the Mac published one.
-    private var grid: Ghostty.SurfaceView.Grid? {
+    private var grid: TerminalSurface.Grid? {
         guard let n = node, n.rows > 0, n.cols > 0 else { return nil }
         return .init(rows: n.rows, cols: n.cols)
     }
@@ -1292,7 +1291,7 @@ struct PaneScreen: View {
     private var terminal: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                Color(ghostty.config.backgroundColor)
+                core.background
                 if let surfaceView {
                     if let grid, fits {
                         FitCanvas(view: surfaceView, grid: grid, zoom: $fitZoom)
@@ -1435,9 +1434,8 @@ struct PaneScreen: View {
         entryGeneration = generation
         model.present(ref)
         model.receipts.info("pane", "screen", ["pane": ref.pane])
-        guard let app = ghostty.app else { error = "ghostty not ready"; return }
         do {
-            guard let view = try await model.surface(for: ref, app: app, screen: true) else { error = "no surface"; return }
+            guard let view = try await model.surface(for: ref, app: core.app, screen: true) else { error = "no surface"; return }
             guard !Task.isCancelled, screenVisible, phase == .active,
                   entryGeneration == generation, current == ref else {
                 model.receipts.info("pane", "attached after presentation ended; no claim", ["pane": ref.pane])
@@ -1521,7 +1519,7 @@ struct PaneTitle: View {
 
 /// Keyboard up/down, from the surface's own fact.
 struct KeyboardButton: View {
-    @ObservedObject var surface: Ghostty.SurfaceView
+    @ObservedObject var surface: TerminalSurface
     var body: some View {
         Button { surface.keyboardWanted.toggle() } label: {
             Image(systemName: surface.keyboardWanted ? "keyboard.chevron.compact.down" : "keyboard")
