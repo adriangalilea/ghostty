@@ -56,7 +56,7 @@ struct TerminalEntity: AppEntity {
     /// otherwise, never an automation's), so those read as gone.
     @MainActor
     var surfaceModel: Ghostty.Surface? {
-        guard let view = surfaceView, view.vigilAttachId == nil, view.vigilHost == nil, !view.vigilMirror else { return nil }
+        guard let view = surfaceView, !view.isVigilPane else { return nil }
         return view.surfaceModel
     }
 

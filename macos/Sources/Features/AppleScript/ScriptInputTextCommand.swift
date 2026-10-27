@@ -52,9 +52,21 @@ extension NSScriptCommand {
     /// surface that is no pane (none in this fork today) keeps upstream's
     /// behaviour. Every scripted input path asks this.
     @MainActor func refusesScriptedInput(_ view: Ghostty.SurfaceView) -> Bool {
-        guard view.vigilAttachId != nil || view.vigilHost != nil || view.vigilMirror else { return false }
+        guard view.isVigilPane else { return false }
         scriptErrorNumber = errAEEventFailed
         scriptErrorString = "Scripted input into a Vigil pane is refused: type into it with `vigil send <workspace> <text>`, which asks you unless it runs inside that pane."
+        return true
+    }
+
+    /// Scripted `close terminal` / `close tab` of a Vigil pane: refused.
+    /// Closing a pane or tab ends its processes after the undo grace, and a
+    /// death stays a person's gesture (birth is scriptable, `vigil new`;
+    /// there is no kill in the API). `close window` stays: for a workspace
+    /// it detaches, nothing dies.
+    @MainActor func refusesScriptedClose(_ views: [Ghostty.SurfaceView]) -> Bool {
+        guard views.contains(where: \.isVigilPane) else { return false }
+        scriptErrorNumber = errAEEventFailed
+        scriptErrorString = "Scripted close of a Vigil pane or tab is refused: closing ends its processes, which only you do (⌘W, the sidebar's Kill…). `close window` detaches its workspace."
         return true
     }
 }

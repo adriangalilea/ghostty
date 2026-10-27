@@ -163,6 +163,7 @@ final class ScriptTab: NSObject {
             return nil
         }
 
+        if command.refusesScriptedClose(tabController.surfaceTree.root?.leaves() ?? []) { return nil }
         if let managedTerminalController = tabController as? TerminalController {
             managedTerminalController.closeTabImmediately(registerRedo: false)
             return nil

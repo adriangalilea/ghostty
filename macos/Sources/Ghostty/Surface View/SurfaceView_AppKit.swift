@@ -253,6 +253,10 @@ extension Ghostty {
         /// skips it.
         private(set) var vigilMirror = false
 
+        /// Vigil: this surface is a view of a pane (its own, another Mac's
+        /// or a mirror): what scripted input and scripted closes refuse.
+        var isVigilPane: Bool { vigilAttachId != nil || vigilHost != nil || vigilMirror }
+
         /// Vigil: the pty's grid when ANOTHER client owns the size (the
         /// phone in OWN). nil = this surface's own grid is the pty's. Set
         /// whenever `<pane>.size` changes (`syncOwnerGrids`); the wrapper then

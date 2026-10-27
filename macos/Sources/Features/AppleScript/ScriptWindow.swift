@@ -196,6 +196,14 @@ final class ScriptWindow: NSObject {
         guard NSApp.validateScript(command: command) else { return nil }
 
         if let managedTerminalController = preferredController as? TerminalController {
+            // vigil: a workspace's window closes as its red button does
+            // (detached, nothing dies); upstream's immediate close would
+            // empty every tab's tree, which vigil reads as panes closed.
+            if VigilWorkspaces.shared.workspaceName(of: managedTerminalController) != nil
+                || VigilWorkspaces.shared.mirroredWorkspace(of: managedTerminalController) != nil {
+                managedTerminalController.closeWindow(nil)
+                return nil
+            }
             managedTerminalController.closeWindowImmediately()
             return nil
         }

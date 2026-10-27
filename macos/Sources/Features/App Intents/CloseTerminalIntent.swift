@@ -26,6 +26,9 @@ struct CloseTerminalIntent: AppIntent {
         guard let surfaceView = terminal.surfaceView else {
             throw GhosttyIntentError.surfaceNotFound
         }
+        if surfaceView.isVigilPane {
+            throw GhosttyIntentError.vigilPaneClose
+        }
 
         guard let controller = BaseTerminalController.controller(owning: surfaceView) else {
             return .result()

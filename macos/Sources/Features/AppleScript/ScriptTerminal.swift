@@ -192,6 +192,7 @@ final class ScriptTerminal: NSObject {
             return nil
         }
 
+        if command.refusesScriptedClose([surfaceView]) { return nil }
         controller.closeSurface(surfaceView, withConfirmation: false)
         return nil
     }

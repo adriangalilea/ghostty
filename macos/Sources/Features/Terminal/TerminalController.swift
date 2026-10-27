@@ -328,8 +328,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             NSApp.activate(ignoringOtherApps: true)
         }
 
-        // Setup our undo
-        if let undoManager = c.undoManager {
+        // Setup our undo (vigil: none for a window of panes, see vigilOwnsLifecycle)
+        if let undoManager = c.undoManager, !c.vigilOwnsLifecycle {
             undoManager.setActionName("New Window")
             undoManager.registerUndo(
                 withTarget: c,
@@ -403,8 +403,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
-        // Setup our undo
-        if let undoManager = c.undoManager {
+        // Setup our undo (vigil: none for a window of panes, see vigilOwnsLifecycle)
+        if let undoManager = c.undoManager, !c.vigilOwnsLifecycle {
             undoManager.setActionName("New Window")
             undoManager.registerUndo(
                 withTarget: c,
@@ -553,8 +553,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             controller.relabelTabs()
         }
 
-        // Setup our undo
-        if let undoManager = parentController.undoManager {
+        // Setup our undo (vigil: none for a tab of panes, see vigilOwnsLifecycle)
+        if let undoManager = parentController.undoManager, !controller.vigilOwnsLifecycle {
             undoManager.setActionName("New Tab")
             undoManager.registerUndo(
                 withTarget: controller,
@@ -721,6 +721,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         return result
     }
 
+    /// vigil: a window or tab whose tree holds a pane. Its lifecycle is
+    /// vigil's (detach, bury, undo from the graveyard), so it takes none of
+    /// ghostty's "New Window"/"New Tab" undo: that ⌘Z closes it outside
+    /// vigil's close path and keeps its views alive in a restore closure no
+    /// registry knows.
+    var vigilOwnsLifecycle: Bool { surfaceTree.contains(where: \.isVigilPane) }
+
     /// This is called anytime a node in the surface tree is being removed.
     override func closeSurface(
         _ node: SplitTree<Ghostty.SurfaceView>.Node,
@@ -739,7 +746,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // More than 1 window means we have tabs and we're closing a tab
         if window?.tabGroup?.windows.count ?? 0 > 1 {
-            if withConfirmation {
+            // vigil: a workspace's tab (or a mirror of one) closes through
+            // vigil's closeTab whoever closes it, a process exit and a script
+            // included: buried with its undo, asked only when something
+            // runs. Upstream's immediate close would take it out from under
+            // the registry; it stays for windows of no workspace.
+            if withConfirmation || VigilWorkspaces.shared.workspaceName(of: self) != nil
+                || VigilWorkspaces.shared.mirroredWorkspace(of: self) != nil {
                 closeTab(nil)
             } else {
                 closeTabImmediately()
@@ -1519,29 +1532,27 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // keeps running (the red button never kills; ⌘W does). Ghostty's
         // generic "sessions will be terminated" confirm never runs here
         // (every surface is daemon-backed, it would fire on every close).
-        // One session spans the whole tabGroup; handle each session ONCE and
-        // let stray session-less tabs close plain.
-        // A mirror viewport (a second view of a session living elsewhere)
-        // closes plain: its mirror clients end, nothing detaches, nothing
-        // dies.
-        if group.contains(where: { VigilWorkspaces.shared.mirroredWorkspace(of: $0) != nil }) {
-            for c in group {
-                VigilWorkspaces.shared.endMirrorViewport(c)
-                c.closeWindowImmediately()
+        // Each tab of the group closes for what it is, and only itself: a
+        // mirror viewport (a second view of a session living elsewhere) ends
+        // its mirror clients, nothing detaches, nothing dies; a stray
+        // session-less tab closes plain; each session detaches ONCE (one
+        // session spans the whole tabGroup). Never closeWindowImmediately
+        // here: it empties EVERY tab of the group, which reads as every
+        // member's panes closed (buried, then killed) when a mirror or a
+        // stray sorts first, and registers an undo that restores them as
+        // windows no registry knows.
+        let vigil = VigilWorkspaces.shared
+        if group.contains(where: { vigil.workspaceName(of: $0) != nil || vigil.mirroredWorkspace(of: $0) != nil }) {
+            for c in group where vigil.workspaceName(of: c) == nil {
+                if vigil.mirroredWorkspace(of: c) != nil { vigil.endMirrorViewport(c) }
+                c.cancelPendingInitialPresentation()
+                c.surfaceTree = .init()
+                c.window?.close()
             }
-            return
-        }
-
-        let sessionNames = group.compactMap { VigilWorkspaces.shared.workspaceName(of: $0) }
-        if !sessionNames.isEmpty {
             var handled = Set<String>()
             for c in group where !c.surfaceTree.isEmpty {
-                if let name = VigilWorkspaces.shared.workspaceName(of: c) {
-                    guard handled.insert(name).inserted else { continue }
-                    _ = VigilWorkspaces.shared.handleWindowClose(controller: c)
-                } else {
-                    c.closeWindowImmediately()
-                }
+                guard let name = vigil.workspaceName(of: c), handled.insert(name).inserted else { continue }
+                _ = vigil.handleWindowClose(controller: c)
             }
             return
         }
