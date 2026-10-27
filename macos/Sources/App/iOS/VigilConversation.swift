@@ -460,7 +460,7 @@ struct ConversationView: View {
         // A reader at the newest row keeps it in view as the keyboard rises.
         .onChange(of: keyboard.inset) { _, _ in
             guard atBottom else { return }
-            withAnimation(.snappy) { position.scrollTo(id: Self.bottom, anchor: .bottom) }
+            position.scrollTo(id: Self.bottom, anchor: .bottom)
         }
     }
 
@@ -517,9 +517,17 @@ struct ConversationView: View {
         }
         // A reader at the newest row stays there as rows arrive; one who
         // scrolled up keeps their place.
-        .onChange(of: conversation.revision) { _, _ in
+        .onChange(of: conversation.revision) { _, revision in
+            phone.receipts.info("conversation", "revision", [
+                "pane": conversation.ref.pane, "revision": revision, "rows": conversation.visible.count, "atBottom": atBottom,
+            ])
             guard atBottom else { return }
-            withAnimation(.snappy) { position.scrollTo(id: Self.bottom, anchor: .bottom) }
+            // A jump, never animated: the rows are lazy, their heights
+            // estimates until drawn, and an animated scroll across estimates
+            // ended over rows never built (the blank first open, 2026-10-27:
+            // a live update 0.1 s after the snapshot, the content's height
+            // still moving 2396 → 7363 → 5763).
+            position.scrollTo(id: Self.bottom, anchor: .bottom)
         }
         .overlay(alignment: .bottom) {
             if let missing = conversation.focusMissing {
@@ -535,7 +543,7 @@ struct ConversationView: View {
         .task(id: conversation.focus) {
             guard let focus = conversation.focus else { return }
             await Task.yield()
-            withAnimation(.snappy) { position.scrollTo(id: focus, anchor: .center) }
+            position.scrollTo(id: focus, anchor: .center)
             conversation.focused()
         }
         .overlay(alignment: .top) {
