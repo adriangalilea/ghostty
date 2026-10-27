@@ -788,6 +788,9 @@ struct PanePreview: View {
 final class KeyboardState: ObservableObject {
     static let shared = KeyboardState()
     @Published private(set) var inset: CGFloat = 0
+    /// How far the keyboard reaches above the window's bottom safe area (the
+    /// home indicator): what a view that keeps that safe area moves up by.
+    @Published private(set) var aboveSafeArea: CGFloat = 0
 
     private init() {
         let center = NotificationCenter.default
@@ -804,12 +807,13 @@ final class KeyboardState: ObservableObject {
               let window = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first
         else { return }
         let local = window.convert(end, from: nil)
-        set(max(0, window.bounds.maxY - local.minY), "frame \(Int(end.height))pt")
+        set(max(0, window.bounds.maxY - local.minY), safeArea: window.safeAreaInsets.bottom, "frame \(Int(end.height))pt")
     }
 
-    private func set(_ value: CGFloat, _ why: String) {
+    private func set(_ value: CGFloat, safeArea: CGFloat = 0, _ why: String) {
         guard value != inset else { return }
         inset = value
+        aboveSafeArea = max(0, value - safeArea)
         VigilPhone.shared.receipts.info("keyboard", "inset", ["points": Int(value), "why": why])
     }
 }
@@ -1319,9 +1323,8 @@ struct PaneScreen: View {
                 Button { dismiss() } label: { Image(systemName: "chevron.left") }
             }
             ToolbarItem(placement: .principal) {
-                PaneTitle(title: node?.path ?? current.title,
-                          line: [current.host.name, node?.words].compactMap { $0 }.joined(separator: " · "),
-                          tint: node?.alive == false ? Color.gray.opacity(0.3) : (node?.state ?? .idle).tint)
+                PaneTitle(title: node?.path ?? current.title, state: node?.words, host: current.host.name,
+                          tint: node?.alive == false ? .secondary : (node?.state ?? .idle).tint)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 // Conversation, changes, terminal: the other two, for a pane
@@ -1491,18 +1494,23 @@ struct PaneScreen: View {
 
 /// The pane screen's name capsule: where the pane is (the one naming
 /// rule), then its Mac and state beside its state's dot.
+/// The pane's name, then where it stands in its own colour and on which
+/// Mac: the state first, so a narrow pill cuts the Mac's name, never the
+/// meaning (a lone dot beside a cut line said nothing).
 struct PaneTitle: View {
     let title: String
-    let line: String
+    /// "Working", "Waiting for you"…; nil while unknown.
+    let state: String?
+    let host: String
     let tint: Color
     var body: some View {
         VStack(spacing: 1) {
             Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
-            HStack(spacing: 4) {
-                Circle().fill(tint).frame(width: 6, height: 6)
-                Text(line).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            }
+            (state.map { Text($0).foregroundStyle(tint) + Text(" · ") } ?? Text(""))
+                .font(.caption2.weight(.medium))
+                + Text(host).font(.caption2).foregroundStyle(.secondary)
         }
+        .lineLimit(1)
         .padding(.horizontal, 14).padding(.vertical, 6)
         .glassEffect(.regular, in: Capsule())
     }

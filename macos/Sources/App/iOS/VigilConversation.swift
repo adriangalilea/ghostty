@@ -441,27 +441,21 @@ struct ConversationView: View {
     /// system's in light: switching to the terminal never changes it.
     private var ground: Color { scheme == .dark ? Color(VigilTheme.background) : Color(.systemBackground) }
 
-    /// The rows over the reply box, one column laid out from the keyboard as
-    /// a fact (`KeyboardState`, the terminal's own pattern): the window
-    /// minus the keyboard, no SwiftUI keyboard avoidance and nothing floating
-    /// over the box (an iOS keyboard toolbar is a glass layer of its own
-    /// that covered the box and took the send button's taps).
+    /// The rows over the reply box, one column moved up by the keyboard as a
+    /// fact (`KeyboardState`, the terminal's own pattern): no SwiftUI
+    /// keyboard avoidance and nothing floating over the box (an iOS keyboard
+    /// toolbar is a glass layer of its own that covered the box and took the
+    /// send button's taps). The column keeps its own size and is never
+    /// measured: sized from a GeometryReader, its first pass was empty and
+    /// the rows anchored to the bottom of nothing (a blank first open).
     private var screen: some View {
-        GeometryReader { geo in
-            let up = keyboard.inset > 0
-            VStack(spacing: 0) {
-                rows
-                Composer(conversation: conversation, keyboardUp: up)
-            }
-            // Up: the column ends where the keyboard begins (its height is
-            // measured from the window's bottom, under the home indicator).
-            // Down: it ends above the home indicator, the box's ground
-            // reaching under it.
-            .frame(
-                width: geo.size.width,
-                height: max(0, up ? geo.size.height + geo.safeAreaInsets.bottom - keyboard.inset : geo.size.height),
-                alignment: .top)
+        VStack(spacing: 0) {
+            rows
+            Composer(conversation: conversation, keyboardUp: keyboard.inset > 0)
         }
+        // Down: the box ends above the home indicator, its ground reaching
+        // under it. Up: it ends where the keyboard begins.
+        .padding(.bottom, keyboard.aboveSafeArea)
         .ignoresSafeArea(.keyboard)
         // A reader at the newest row keeps it in view as the keyboard rises.
         .onChange(of: keyboard.inset) { _, _ in
