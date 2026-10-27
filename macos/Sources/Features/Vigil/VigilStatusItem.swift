@@ -151,6 +151,14 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         menu.addItem(create)
 
         menu.addItem(.separator())
+        // vigil drive's settings (its grants, their state, the button for
+        // each): opening the helper's app shows them (vigil-drive.app).
+        let drive = NSMenuItem(title: "vigil drive Permissions…", action: #selector(openDrive(_:)), keyEquivalent: "")
+        drive.target = self
+        drive.image = NSImage(systemSymbolName: "steeringwheel", accessibilityDescription: nil)
+        menu.addItem(drive)
+
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit and Kill Every Workspace", action: #selector(quitForReal(_:)), keyEquivalent: "")
         quit.target = self
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
@@ -159,6 +167,16 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func quitForReal(_ sender: NSMenuItem) {
         VigilWorkspaces.shared.quitForReal()
+    }
+
+    @objc private func openDrive(_ sender: NSMenuItem) {
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "dev.vigil.drive") else {
+            lifecycleLog.error("vigil-drive.app is not installed", ["bundle": "dev.vigil.drive"])
+            return
+        }
+        NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            if let error { lifecycleLog.error("could not open vigil-drive.app", ["error": error.localizedDescription]) }
+        }
     }
 
     private func sessionItem(_ title: String, _ action: Selector, _ name: String, _ symbol: String? = nil) -> NSMenuItem {
