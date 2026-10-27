@@ -2,707 +2,707 @@ import GhosttyKit
 import SwiftUI
 import UIKit
 
-    /// The UIView for a terminal surface on the phone: libghostty's Metal
-    /// terminal, attached to a vigild pane over the app's transport (the
-    /// stream it reads is a descriptor the app owns, a socketpair end
-    /// bridged to tether).
-    ///
-    /// Four facts about a surface are FOUR properties here, never
-    /// inferred from one another (the phone's whole first day of bugs was
-    /// one bit standing in for all of them):
-    ///  - `presentation`: how the grid is shown (which grid, at what
-    ///    content scale, scaled by how much, anchored where);
-    ///  - `attended`: the terminal has the user's attention (cursor,
-    ///    focus events); set by the screen that shows it;
-    ///  - `keyboardWanted`: the software keyboard is up; a tap wants it,
-    ///    the strip's hide button and iOS's own dismissal drop it;
-    ///  - size ownership: an explicit `claimSize` (the surface is born
-    ///    with `vigil_explicit_claim`; focus never claims).
-    ///
-    /// Layout is ONE authority: `layoutSubviews` computes the framebuffer
-    /// from the presentation and reports it to the core only when it
-    /// changed. SwiftUI hands this view a frame and nothing else.
-    final class TerminalSurface: UIView, ObservableObject {
-        // MARK: Receipts
+/// The UIView for a terminal surface on the phone: libghostty's Metal
+/// terminal, attached to a vigild pane over the app's transport (the
+/// stream it reads is a descriptor the app owns, a socketpair end
+/// bridged to tether).
+///
+/// Four facts about a surface are FOUR properties here, never
+/// inferred from one another (the phone's whole first day of bugs was
+/// one bit standing in for all of them):
+///  - `presentation`: how the grid is shown (which grid, at what
+///    content scale, scaled by how much, anchored where);
+///  - `attended`: the terminal has the user's attention (cursor,
+///    focus events); set by the screen that shows it;
+///  - `keyboardWanted`: the software keyboard is up; a tap wants it,
+///    the strip's hide button and iOS's own dismissal drop it;
+///  - size ownership: an explicit `claimSize` (the surface is born
+///    with `vigil_explicit_claim`; focus never claims).
+///
+/// Layout is ONE authority: `layoutSubviews` computes the framebuffer
+/// from the presentation and reports it to the core only when it
+/// changed. SwiftUI hands this view a frame and nothing else.
+final class TerminalSurface: UIView, ObservableObject {
+    // MARK: Receipts
 
-        /// Every fact this view learns or decides goes through here; the
-        /// app routes it to its receipts (a `surface` event: a fixed
-        /// message and its fields, this surface's pane among them).
-        static var report: (_ message: String, _ fields: [String: any Sendable]) -> Void = { _, _ in }
-        private func receipt(_ message: String, _ fields: [String: any Sendable] = [:]) {
-            Self.report(message, fields.merging(["pane": paneId]) { mine, _ in mine })
+    /// Every fact this view learns or decides goes through here; the
+    /// app routes it to its receipts (a `surface` event: a fixed
+    /// message and its fields, this surface's pane among them).
+    static var report: (_ message: String, _ fields: [String: any Sendable]) -> Void = { _, _ in }
+    private func receipt(_ message: String, _ fields: [String: any Sendable] = [:]) {
+        Self.report(message, fields.merging(["pane": paneId]) { mine, _ in mine })
+    }
+    /// The pane this surface shows.
+    let paneId: String
+
+    /// What the program running in the pane calls it (OSC 0/2).
+    @Published var title: String = ""
+
+    private(set) var surface: ghostty_surface_t?
+
+    /// A phone reads at 8pt (the Mac's 13 minus five loupe taps).
+    private static let fontSize: Float32 = 8
+
+    /// A surface reading `pane`'s stream from `stream`, a descriptor it
+    /// owns from here on (the attach closes it). It never claims the
+    /// pane's pty size by focus: only an own-size screen claims,
+    /// explicitly (`claimSize`), and a fit viewport mirrors the owner's
+    /// grid.
+    init(_ app: ghostty_app_t, pane: String, stream: Int32) {
+        paneId = pane
+        // A non-zero initial frame so the render layer is never 0×0.
+        super.init(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        var config = ghostty_surface_config_new()
+        config.userdata = Unmanaged.passUnretained(self).toOpaque()
+        config.platform_tag = GHOSTTY_PLATFORM_IOS
+        config.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(
+            uiview: Unmanaged.passUnretained(self).toOpaque()))
+        // The view is in no window yet; `syncScale` applies the
+        // window's scale at the first layout.
+        config.scale_factor = appliedScale
+        config.font_size = Self.fontSize
+        config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
+        config.vigil_fd = stream
+        config.vigil_explicit_claim = true
+        surface = pane.withCString { attach in
+            config.vigil_attach = attach
+            return ghostty_surface_new(app, &config)
         }
-        /// The pane this surface shows.
-        let paneId: String
-
-        /// What the program running in the pane calls it (OSC 0/2).
-        @Published var title: String = ""
-
-        private(set) var surface: ghostty_surface_t?
-
-        /// A phone reads at 8pt (the Mac's 13 minus five loupe taps).
-        private static let fontSize: Float32 = 8
-
-        /// A surface reading `pane`'s stream from `stream`, a descriptor it
-        /// owns from here on (the attach closes it). It never claims the
-        /// pane's pty size by focus: only an own-size screen claims,
-        /// explicitly (`claimSize`), and a fit viewport mirrors the owner's
-        /// grid.
-        init(_ app: ghostty_app_t, pane: String, stream: Int32) {
-            paneId = pane
-            // A non-zero initial frame so the render layer is never 0×0.
-            super.init(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
-            var config = ghostty_surface_config_new()
-            config.userdata = Unmanaged.passUnretained(self).toOpaque()
-            config.platform_tag = GHOSTTY_PLATFORM_IOS
-            config.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(
-                uiview: Unmanaged.passUnretained(self).toOpaque()))
-            // The view is in no window yet; `syncScale` applies the
-            // window's scale at the first layout.
-            config.scale_factor = appliedScale
-            config.font_size = Self.fontSize
-            config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
-            config.vigil_fd = stream
-            config.vigil_explicit_claim = true
-            surface = pane.withCString { attach in
-                config.vigil_attach = attach
-                return ghostty_surface_new(app, &config)
-            }
-            guard let surface else {
-                receipt("ghostty_surface_new failed")
-                return
-            }
-            // Born unfocused and unclaimed: a screen decides both.
-            ghostty_surface_set_focus(surface, false)
-            proxy.owner = self
-            addSubview(proxy)
-            installScrollGesture()
-            NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive),
-                                                   name: UIApplication.willResignActiveNotification, object: nil)
-            receipt("born")
+        guard let surface else {
+            receipt("ghostty_surface_new failed")
+            return
         }
+        // Born unfocused and unclaimed: a screen decides both.
+        ghostty_surface_set_focus(surface, false)
+        proxy.owner = self
+        addSubview(proxy)
+        installScrollGesture()
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive),
+                                               name: UIApplication.willResignActiveNotification, object: nil)
+        receipt("born")
+    }
 
-        required init?(coder: NSCoder) {
-            fatalError("init(coder:) is not supported for this view")
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported for this view")
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        guard let surface else { return }
+        ghostty_surface_free(surface)
+    }
+
+    /// End the core surface NOW (the attach client closes; the daemon
+    /// hands the pty size on if this client owned it), whoever still
+    /// holds the view.
+    func detach() {
+        claimSize(false)
+        keyboardWanted = false
+        if isFirstResponder { _ = resignFirstResponder() }
+        guard let surface else { return }
+        self.surface = nil
+        ghostty_surface_free(surface)
+        receipt("detached")
+    }
+
+    // MARK: Presentation
+
+    struct Grid: Equatable {
+        let rows: Int
+        let cols: Int
+    }
+
+    /// How the grid is shown. `grid` nil = the view's own frame is the
+    /// terminal (own-size). `contentScale` 0 = the display's scale.
+    /// `scale` is a picture scale applied AFTER rendering (a
+    /// thumbnail, a fit); `anchorBottom` shows the grid's bottom when
+    /// it is taller than the frame (a terminal's action is at the
+    /// bottom).
+    struct Presentation: Equatable {
+        var grid: Grid?
+        var contentScale: CGFloat = 0
+        var scale: CGFloat = 1
+        var anchorBottom = false
+
+        static let own = Presentation()
+    }
+
+    private(set) var presentation: Presentation = .own {
+        didSet { if presentation != oldValue { setNeedsLayout() } }
+    }
+
+    func present(_ p: Presentation) {
+        // A stale fit host can finish an update during a takeover. Once
+        // claimed, only own layout can resize until an explicit yield.
+        guard !sizeClaimed || p.grid == nil else { return }
+        presentation = p
+    }
+
+    /// The content scale the presentation asks for, resolved.
+    private var wantedScale: CGFloat {
+        let display = window?.screen.scale ?? traitCollection.displayScale
+        return presentation.contentScale > 0 ? presentation.contentScale : display
+    }
+
+    /// The content scale the core currently has (the surface config's
+    /// screen scale at birth, then whatever `syncScale` applied).
+    private var appliedScale: CGFloat = UIScreen.main.scale
+
+    /// Make the core's content scale the wanted one; idempotent.
+    @discardableResult
+    private func syncScale() -> CGFloat {
+        let scale = wantedScale
+        guard let surface, scale != appliedScale else { return scale }
+        ghostty_surface_set_content_scale(surface, scale, scale)
+        appliedScale = scale
+        contentScaleFactor = scale
+        receipt("content scale", ["scale": Double(scale)])
+        return scale
+    }
+
+    /// Framebuffer pixels for the presentation at the applied scale:
+    /// the core's own answer for a grid (`ghostty_surface_size_for_grid`,
+    /// cell metrics + explicit padding), the frame for own-size.
+    private func framebuffer(scale: CGFloat) -> (w: UInt32, h: UInt32)? {
+        guard let surface else { return nil }
+        if let g = presentation.grid {
+            let s = ghostty_surface_size_for_grid(surface, UInt16(g.rows), UInt16(g.cols))
+            guard s.cell_width_px > 0, s.cell_height_px > 0 else { return nil }
+            return (s.width_px, s.height_px)
         }
-
-        deinit {
-            NotificationCenter.default.removeObserver(self)
-            guard let surface else { return }
-            ghostty_surface_free(surface)
-        }
-
-        /// End the core surface NOW (the attach client closes; the daemon
-        /// hands the pty size on if this client owned it), whoever still
-        /// holds the view.
-        func detach() {
-            claimSize(false)
-            keyboardWanted = false
-            if isFirstResponder { _ = resignFirstResponder() }
-            guard let surface else { return }
-            self.surface = nil
-            ghostty_surface_free(surface)
-            receipt("detached")
-        }
-
-        // MARK: Presentation
-
-        struct Grid: Equatable {
-            let rows: Int
-            let cols: Int
-        }
-
-        /// How the grid is shown. `grid` nil = the view's own frame is the
-        /// terminal (own-size). `contentScale` 0 = the display's scale.
-        /// `scale` is a picture scale applied AFTER rendering (a
-        /// thumbnail, a fit); `anchorBottom` shows the grid's bottom when
-        /// it is taller than the frame (a terminal's action is at the
-        /// bottom).
-        struct Presentation: Equatable {
-            var grid: Grid?
-            var contentScale: CGFloat = 0
-            var scale: CGFloat = 1
-            var anchorBottom = false
-
-            static let own = Presentation()
-        }
-
-        private(set) var presentation: Presentation = .own {
-            didSet { if presentation != oldValue { setNeedsLayout() } }
-        }
-
-        func present(_ p: Presentation) {
-            // A stale fit host can finish an update during a takeover. Once
-            // claimed, only own layout can resize until an explicit yield.
-            guard !sizeClaimed || p.grid == nil else { return }
-            presentation = p
-        }
-
-        /// The content scale the presentation asks for, resolved.
-        private var wantedScale: CGFloat {
-            let display = window?.screen.scale ?? traitCollection.displayScale
-            return presentation.contentScale > 0 ? presentation.contentScale : display
-        }
-
-        /// The content scale the core currently has (the surface config's
-        /// screen scale at birth, then whatever `syncScale` applied).
-        private var appliedScale: CGFloat = UIScreen.main.scale
-
-        /// Make the core's content scale the wanted one; idempotent.
-        @discardableResult
-        private func syncScale() -> CGFloat {
-            let scale = wantedScale
-            guard let surface, scale != appliedScale else { return scale }
-            ghostty_surface_set_content_scale(surface, scale, scale)
-            appliedScale = scale
-            contentScaleFactor = scale
-            receipt("content scale", ["scale": Double(scale)])
-            return scale
-        }
-
-        /// Framebuffer pixels for the presentation at the applied scale:
-        /// the core's own answer for a grid (`ghostty_surface_size_for_grid`,
-        /// cell metrics + explicit padding), the frame for own-size.
-        private func framebuffer(scale: CGFloat) -> (w: UInt32, h: UInt32)? {
-            guard let surface else { return nil }
-            if let g = presentation.grid {
-                let s = ghostty_surface_size_for_grid(surface, UInt16(g.rows), UInt16(g.cols))
-                guard s.cell_width_px > 0, s.cell_height_px > 0 else { return nil }
-                return (s.width_px, s.height_px)
-            }
-            let w = UInt32(bounds.width * scale), h = UInt32(bounds.height * scale)
-            return w > 0 && h > 0 ? (w, h) : nil
-        }
-
-        /// The picture's size in points as presented (grid pixels at the
-        /// wanted scale, times the picture scale): the ONE number SwiftUI
-        /// frames are derived from. nil for own-size or unknown metrics.
-        var presentedSize: CGSize? {
-            guard presentation.grid != nil else { return nil }
-            let scale = syncScale()
-            guard let px = framebuffer(scale: scale) else { return nil }
-            return CGSize(width: CGFloat(px.w) / scale * presentation.scale,
-                          height: CGFloat(px.h) / scale * presentation.scale)
-        }
-
-        // MARK: Facts set by the screen
-
-        /// The terminal has the user's attention: cursor, focus events.
-        var attended = false {
-            didSet {
-                if !attended { claimSize(false) }
-                guard attended != oldValue, let surface else { return }
-                ghostty_surface_set_focus(surface, attended)
-                receipt("attended", ["attended": attended])
-                syncResponder()
-            }
-        }
-
-        /// On screen: the renderer runs; off screen it idles (occlusion).
-        var visible = true {
-            didSet {
-                guard visible != oldValue, let surface else { return }
-                ghostty_surface_set_occlusion(surface, visible)
-                receipt("visible", ["visible": visible])
-            }
-        }
-
-        /// Claim (true) or yield (false) the daemon's pty size. Only an
-        /// own-size viewport claims; a fit viewport mirrors the owner.
-        private(set) var sizeClaimed = false
-        private(set) var sizeClaimRequested = false
-        private var sizeAcknowledged = false
-
-        @discardableResult
-        func claimSize(_ claim: Bool) -> Bool {
-            guard let surface else { return false }
-            if claim {
-                // The request is the intent only. Whether it may be sent
-                // (attended, laid out by the own-size host, in an active
-                // scene) is decided where it is sent, in `layoutSubviews`:
-                // checked here, a pane reopened from the list (its surface
-                // not yet re-hosted, no window) was refused and opened at
-                // the Mac's grid (2026-10-16).
-                sizeClaimRequested = true
-                setNeedsLayout()
-                return true
-            }
-            sizeClaimRequested = false
-            sizeAcknowledged = false
-            guard sizeClaimed else { return false }
-            ghostty_surface_vigil_claim(surface, false)
-            sizeClaimed = false
-            receipt("yielded the pty size")
-            return false
-        }
-
-        func updateSizeOwner(_ owner: String) {
-            guard sizeClaimed, let surface else { return }
-            let token = "ghostty:\(getpid())/\(String(ghostty_surface_vigil_client_id(surface), radix: 16))"
-            if owner.split(separator: " ").contains(Substring(token)) {
-                sizeAcknowledged = true
-            } else if sizeAcknowledged {
-                receipt("another viewport took size; returning to mirror")
-                claimSize(false)
-            }
-        }
-
-        @objc private func appWillResignActive() {
-            // This also covers an async attach finishing after the screen's
-            // phase callback. Coming back active, the pane screen decides
-            // (bringing the app back on a pane is opening it again).
-            claimSize(false)
-            attended = false
-            keyboardWanted = false
-        }
-
-        /// The content receipt: FNV-1a of the viewport's plain text, hex,
-        /// comparable to the daemon's `screen` in `vigild dir`.
-        var screenHash: String {
-            guard let surface else { return "" }
-            return String(ghostty_surface_vigil_screen_hash(surface), radix: 16)
-        }
-        var screenSeen = ""
-        var screenStrikes = 0
-        var screenProven = false
-        var screenResyncs = 0
-
-        /// Re-request the screen (the app was suspended and missed the
-        /// stream).
-        func refreshFromDaemon() {
-            guard let surface else { return }
-            ghostty_surface_vigil_dump(surface)
-            receipt("dump requested")
-        }
-
-        // MARK: Keyboard
-
-        /// The software keyboard is up. Raised by a tap, dropped by the
-        /// strip's hide button or by iOS dismissing it (the proxy resigns
-        /// and reports). The terminal's focus does not move with it.
-        @Published var keyboardWanted = false {
-            didSet {
-                guard keyboardWanted != oldValue else { return }
-                receipt("keyboard wanted", ["wanted": keyboardWanted])
-                syncResponder()
-            }
-        }
-
-        /// The strip that rides the keyboard (esc, ctrl, arrows…).
-        var accessory: UIView? {
-            didSet {
-                proxy.accessory = accessory
-                if proxy.isFirstResponder { proxy.reloadInputViews() }
-            }
-        }
-
-        /// The keyboard's responder: a UIKeyInput child. The surface
-        /// itself is a plain first responder (hardware keys, no software
-        /// keyboard) whenever the keyboard is not wanted.
-        private let proxy = KeyboardProxy()
-
-        override var canBecomeFirstResponder: Bool { true }
-
-        private func syncResponder() {
-            guard window != nil else { return }
-            if keyboardWanted {
-                if !proxy.isFirstResponder { _ = proxy.becomeFirstResponder() }
-            } else {
-                if proxy.isFirstResponder { _ = proxy.resignFirstResponder() }
-                if attended, !isFirstResponder { _ = becomeFirstResponder() }
-            }
-        }
-
-        /// iOS took the keyboard down (interactive dismissal, a sheet, a
-        /// hardware keyboard): the fact follows.
-        fileprivate func keyboardProxyResigned() {
-            guard keyboardWanted else { return }
-            receipt("keyboard dismissed by the system")
-            keyboardWanted = false
-        }
-
-        final class KeyboardProxy: UIView, UIKeyInput {
-            weak var owner: TerminalSurface?
-            var accessory: UIView?
-            override var canBecomeFirstResponder: Bool { true }
-            override var inputAccessoryView: UIView? { accessory }
-            override func resignFirstResponder() -> Bool {
-                let ok = super.resignFirstResponder()
-                if ok { DispatchQueue.main.async { [weak self] in self?.owner?.keyboardProxyResigned() } }
-                return ok
-            }
-
-            var hasText: Bool { true }
-            func insertText(_ text: String) { owner?.typed(text) }
-            func deleteBackward() { owner?.sendKeys("\u{7f}") }
-
-            var keyboardType: UIKeyboardType { get { .asciiCapable } set {} }
-            var autocorrectionType: UITextAutocorrectionType { get { .no } set {} }
-            var autocapitalizationType: UITextAutocapitalizationType { get { .none } set {} }
-            var smartQuotesType: UITextSmartQuotesType { get { .no } set {} }
-            var smartDashesType: UITextSmartDashesType { get { .no } set {} }
-            var smartInsertDeleteType: UITextSmartInsertDeleteType { get { .no } set {} }
-            var spellCheckingType: UITextSpellCheckingType { get { .no } set {} }
-        }
-
-        // MARK: Input
-
-        /// Text or control bytes to the terminal, as a key event carrying
-        /// text (the IME path the Mac uses): escapes, control chars and
-        /// arrows all ride this.
-        func sendKeys(_ text: String) {
-            guard let surface, !text.isEmpty else { return }
-            var ev = ghostty_input_key_s()
-            ev.action = GHOSTTY_ACTION_PRESS
-            ev.mods = GHOSTTY_MODS_NONE
-            ev.consumed_mods = GHOSTTY_MODS_NONE
-            ev.keycode = 0
-            ev.unshifted_codepoint = 0
-            ev.composing = false
-            text.withCString { ptr in
-                ev.text = ptr
-                _ = ghostty_surface_key(surface, ev)
-            }
-        }
-
-        /// The strip's ctrl is a sticky modifier for the next typed letter.
-        var stickyControl = false
-
-        /// Text from the software keyboard. Its return key delivers "\n";
-        /// the terminal's Enter is "\r" (the hardware path already maps
-        /// it) — without this the on-screen return did nothing in every
-        /// TUI. Dictation can carry embedded newlines: same mapping.
-        func typed(_ text: String) {
-            let text = text.replacingOccurrences(of: "\n", with: "\r")
-            if stickyControl, let ch = text.lowercased().unicodeScalars.first, ch.value >= 0x61, ch.value <= 0x7a, text.count == 1 {
-                stickyControl = false
-                sendKeys(String(UnicodeScalar(ch.value - 0x60)!))
-                return
-            }
-            sendKeys(text)
-        }
-
-        /// Clipboard into the terminal, newlines as CRs (a multi-line
-        /// paste must not half-execute line by line as bare \n bytes).
-        func pasteClipboard() {
-            guard let s = UIPasteboard.general.string, !s.isEmpty else { return }
-            sendKeys(s.replacingOccurrences(of: "\n", with: "\r"))
-            receipt("pasted", ["chars": s.count])
-        }
-
-        /// A view point in the TERMINAL's logical space. The render is the
-        /// grid at `presentation.scale`, anchored bottom when taller than
-        /// the frame — a fit/desktop tap was off by exactly this transform
-        /// ("points too much ahead", 2026-09-01), and the keyboard inset
-        /// shrinking the frame made it worse. Own-size is the identity.
-        private func terminalPoint(_ p: CGPoint) -> CGPoint {
-            guard presentation.grid != nil, let surface else { return p }
-            let s = ghostty_surface_size(surface)
-            let shown = CGFloat(s.height_px) / appliedScale * presentation.scale
-            let originY = presentation.anchorBottom ? bounds.height - shown : 0
-            return CGPoint(x: p.x / presentation.scale,
-                           y: (p.y - originY) / presentation.scale)
-        }
-
-        /// A tap places the pointer and wants the keyboard; a scroll
-        /// never does (real estate is the whole game on a phone). A tap
-        /// while a selection stands only DISMISSES it (the keyboard does
-        /// not ride the same gesture — first tap clears, the next one
-        /// types).
-        @objc private func handleTap(_ g: UITapGestureRecognizer) {
-            guard let surface else { return }
-            let p = terminalPoint(g.location(in: self))
-            ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
-            if ghostty_surface_has_selection(surface) {
-                _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE)
-                _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE)
-                receipt("tap cleared selection")
-                return
-            }
-            receipt("tap", ["x": Int(p.x), "y": Int(p.y)])
-            keyboardWanted = true
-        }
-
-        // MARK: Selection (long-press drag = mouse selection; the core owns it)
-
-        private var editMenu: UIEditMenuInteraction?
-
-        fileprivate func installSelectionGesture(on sv: UIScrollView) {
-            let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
-            lp.minimumPressDuration = 0.35
-            sv.addGestureRecognizer(lp)
-            let menu = UIEditMenuInteraction(delegate: self)
-            addInteraction(menu)
-            editMenu = menu
-        }
-
-        /// Long-press drag IS mouse selection: press at the point, drag
-        /// extends, release keeps it and offers Copy/Paste. When the
-        /// program captures the mouse (claude does), SHIFT rides the
-        /// events — ghostty's own capture bypass — so a long-press means
-        /// selection there too, never a click into the program.
-        @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
-            guard let surface else { return }
-            let vp = g.location(in: self)
-            let p = terminalPoint(vp)
-            let mods = ghostty_surface_mouse_captured(surface) ? GHOSTTY_MODS_SHIFT : GHOSTTY_MODS_NONE
-            switch g.state {
-            case .began:
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                ghostty_surface_mouse_pos(surface, p.x, p.y, mods)
-                _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
-            case .changed:
-                ghostty_surface_mouse_pos(surface, p.x, p.y, mods)
-            case .ended, .cancelled:
-                _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
-                let sel = ghostty_surface_has_selection(surface)
-                receipt("long-press select", ["selection": sel])
-                if sel {
-                    // The menu anchors in VIEW space; the selection used
-                    // terminal space.
-                    editMenu?.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: vp))
-                }
-            default: break
-            }
-        }
-
-        var selectionText: String? {
-            guard let surface, ghostty_surface_has_selection(surface) else { return nil }
-            var t = ghostty_text_s()
-            guard ghostty_surface_read_selection(surface, &t), t.text != nil else { return nil }
-            defer { ghostty_surface_free_text(surface, &t) }
-            return String(data: Data(bytes: t.text, count: Int(t.text_len)), encoding: .utf8)
-        }
-
-        /// Standard edit actions: the edit menu's suggested rows AND
-        /// hardware ⌘C/⌘V ride these (pressesBegan lets ⌘ combos fall
-        /// through to the responder chain).
-        override func copy(_ sender: Any?) {
-            guard let s = selectionText else { return }
-            UIPasteboard.general.string = s
-            receipt("copied", ["chars": s.count])
-        }
-
-        override func paste(_ sender: Any?) { pasteClipboard() }
-
-        override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-            if action == #selector(copy(_:)) { return surface.map { ghostty_surface_has_selection($0) } ?? false }
-            if action == #selector(paste(_:)) { return UIPasteboard.general.hasStrings }
-            return super.canPerformAction(action, withSender: sender)
-        }
-
-        /// Hardware keyboard (reaches here from the proxy through the
-        /// responder chain, or directly while no keyboard is up): control
-        /// combos and navigation keys become their bytes; everything else
-        /// is the key's characters.
-        override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-            var handled = false
-            for press in presses {
-                guard let key = press.key else { continue }
-                if let bytes = Self.bytes(for: key) {
-                    sendKeys(bytes)
-                    handled = true
-                }
-            }
-            if !handled { super.pressesBegan(presses, with: event) }
-        }
-
-        private static func bytes(for key: UIKey) -> String? {
-            let mods = key.modifierFlags
-            switch key.keyCode {
-            case .keyboardEscape: return "\u{1b}"
-            case .keyboardTab: return "\t"
-            case .keyboardReturnOrEnter:
-                // shift+enter = the CSI-u encoding (what ghostty sends
-                // under the keyboard protocol claude negotiates): a line
-                // break, not a submit.
-                return mods.contains(.shift) ? "\u{1b}[13;2u" : "\r"
-            case .keyboardDeleteOrBackspace: return "\u{7f}"
-            case .keyboardUpArrow: return "\u{1b}[A"
-            case .keyboardDownArrow: return "\u{1b}[B"
-            case .keyboardRightArrow: return "\u{1b}[C"
-            case .keyboardLeftArrow: return "\u{1b}[D"
-            default: break
-            }
-            if mods.contains(.control), let ch = key.charactersIgnoringModifiers.lowercased().unicodeScalars.first,
-               ch.value >= 0x61, ch.value <= 0x7a {
-                return String(UnicodeScalar(ch.value - 0x60)!)
-            }
-            if mods.contains(.command) { return nil }
-            let text = key.characters
-            return text.isEmpty ? nil : text
-        }
-
-        /// Zoom = ghostty's own font-size actions (own-size mode; a fit
-        /// viewport zooms its picture instead).
-        func zoom(_ direction: Int) {
-            guard let surface else { return }
-            let action = direction > 0 ? "increase_font_size:1" : direction < 0 ? "decrease_font_size:1" : "reset_font_size"
-            let ok = action.withCString { ghostty_surface_binding_action(surface, $0, UInt(action.utf8.count)) }
-            receipt("zoom", ["action": action, "ok": ok])
-        }
-
-        // MARK: Scroll: a UIScrollView as the physics engine
-
-        /// Touch scrolling with Apple's physics: an invisible UIScrollView
-        /// OWNS the one-finger gesture (deceleration, momentum, rubber
-        /// band), and each offset change becomes a precise wheel event in
-        /// PIXELS at the finger, re-centered on an endless runway after
-        /// every hand-off.
-        private var scroller: UIScrollView?
-        private var lastOffset: CGPoint = .zero
-        private static let runway: CGFloat = 100_000
-
-        private func installScrollGesture() {
-            let sv = UIScrollView(frame: bounds)
-            sv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            sv.backgroundColor = .clear
-            sv.showsVerticalScrollIndicator = false
-            sv.showsHorizontalScrollIndicator = false
-            sv.alwaysBounceVertical = true
-            sv.contentInsetAdjustmentBehavior = .never
-            sv.decelerationRate = .normal
-            sv.delaysContentTouches = false
-            sv.contentSize = CGSize(width: bounds.width, height: Self.runway * 2)
-            sv.contentOffset = CGPoint(x: 0, y: Self.runway)
-            sv.delegate = self
-            lastOffset = sv.contentOffset
-            addSubview(sv)
-            scroller = sv
-            sv.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap(_:))))
-            installSelectionGesture(on: sv)
-        }
-
-        fileprivate func scrollerMoved(_ sv: UIScrollView) {
-            guard let surface else { return }
-            // Only the finger (or its momentum) is a scroll: a programmatic
-            // offset (the re-center, a frame change, a content-size reset)
-            // also fires didScroll, and a runway-sized delta sent the
-            // terminal to the top on its own (2026-08-29).
-            guard sv.isDragging || sv.isDecelerating else { lastOffset = sv.contentOffset; return }
-            let dy = lastOffset.y - sv.contentOffset.y
-            lastOffset = sv.contentOffset
-            guard dy != 0 else { return }
-            scrollReceipts += 1
-            if scrollReceipts % 20 == 1 { receipt("finger scroll", ["dy": Int(dy)]) }
-            // The core resolves scroll against the pointer: the finger is
-            // the pointer, placed before every delta — in TERMINAL space
-            // (a fit view's finger travels presentation.scale × the grid).
-            let p = terminalPoint(sv.panGestureRecognizer.location(in: self))
-            ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
-            // ghostty_input_scroll_mods_t bit 0: a precise (pixel) delta.
-            ghostty_surface_mouse_scroll(surface, 0, Double(dy * appliedScale / presentation.scale), ghostty_input_scroll_mods_t(1))
-        }
-
-        private var scrollReceipts = 0
-
-        fileprivate func scrollerSettled(_ sv: UIScrollView) {
-            let center = CGPoint(x: 0, y: Self.runway)
-            lastOffset = center
-            sv.contentOffset = center
-        }
-
-        // MARK: Facts from the core
-
-        /// The core's cell metrics changed (font set, font size changed):
-        /// every fit layout depends on them.
-        func cellMetricsDidChange(px: CGSize) {
-            receipt("cell metrics", ["width": Int(px.width), "height": Int(px.height)])
-            setNeedsLayout()
-        }
-
-        /// The renderer's own word on whether it draws (a GPU failure).
-        func rendererHealth(_ healthy: Bool) {
-            receipt("renderer health", ["healthy": healthy])
-        }
-
-        /// The owner's hook: a dead stream is the transport's fact, the
-        /// app decides (re-dial, drop).
-        var onStreamEnd: (() -> Void)?
-
-        func streamDidEnd(exitCode: Int, runtimeMs: Int) {
-            receipt("stream ended", ["exit": exitCode, "runtime": Duration.milliseconds(runtimeMs)])
-            onStreamEnd?()
-        }
-
-        // MARK: Layout: the ONE authority
-
-        override class var layerClass: AnyClass { CAMetalLayer.self }
-
-        private var lastReport: (w: UInt32, h: UInt32, scale: CGFloat)?
-        private var lastMirrorGrid: Grid?
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            setNeedsLayout()
+        let w = UInt32(bounds.width * scale), h = UInt32(bounds.height * scale)
+        return w > 0 && h > 0 ? (w, h) : nil
+    }
+
+    /// The picture's size in points as presented (grid pixels at the
+    /// wanted scale, times the picture scale): the ONE number SwiftUI
+    /// frames are derived from. nil for own-size or unknown metrics.
+    var presentedSize: CGSize? {
+        guard presentation.grid != nil else { return nil }
+        let scale = syncScale()
+        guard let px = framebuffer(scale: scale) else { return nil }
+        return CGSize(width: CGFloat(px.w) / scale * presentation.scale,
+                      height: CGFloat(px.h) / scale * presentation.scale)
+    }
+
+    // MARK: Facts set by the screen
+
+    /// The terminal has the user's attention: cursor, focus events.
+    var attended = false {
+        didSet {
+            if !attended { claimSize(false) }
+            guard attended != oldValue, let surface else { return }
+            ghostty_surface_set_focus(surface, attended)
+            receipt("attended", ["attended": attended])
             syncResponder()
         }
+    }
 
-        override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-            super.traitCollectionDidChange(previous)
-            if previous?.displayScale != traitCollection.displayScale { setNeedsLayout() }
-        }
-
-        /// libghostty renders into an IOSurfaceLayer it ADDS AS A SUBLAYER
-        /// of this view's layer (iOS views cannot swap their layer). Every
-        /// layout pass: sync the content scale, compute the framebuffer
-        /// from the presentation, report it to the core iff it changed,
-        /// and frame the render sublayer as the picture (bounds = the grid
-        /// in points, an affine picture scale, anchored top or bottom).
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            guard let surface, window != nil else { return }
-            let scale = syncScale()
-            guard let px = framebuffer(scale: scale) else {
-                receipt("size held: no cell metrics yet")
-                return
-            }
-            let changed = lastReport.map { $0.w != px.w || $0.h != px.h || $0.scale != scale } ?? true
-            if changed {
-                let first = lastReport == nil
-                ghostty_surface_set_size(surface, px.w, px.h)
-                lastReport = (px.w, px.h, scale)
-                // The grid is real now (the presentation's, laid out): the
-                // attach may speak, and the daemon's replay lands in it.
-                if first { ghostty_surface_vigil_viewport(surface); receipt("viewport declared") }
-                let s = ghostty_surface_size(surface)
-                receipt("size reported", [
-                    "width": Int(px.w), "height": Int(px.h), "scale": Double(scale),
-                    "mode": presentation.grid.map { "fit \($0.rows)x\($0.cols)" } ?? "own",
-                    "picture": Double(presentation.scale), "rows": Int(s.rows), "cols": Int(s.columns),
-                ])
-                // A mirror that just took a NEW owner grid holds bytes
-                // parsed at the old one, reflowed: garbage. Re-sync from
-                // the daemon (only a claimant is dumped otherwise).
-                if let g = presentation.grid, g != lastMirrorGrid {
-                    if lastMirrorGrid != nil { ghostty_surface_vigil_dump(surface); receipt("grid changed, dump requested") }
-                    lastMirrorGrid = g
-                }
-            }
-            if sizeClaimRequested, !sizeClaimed, presentation.grid == nil,
-               attended, UIApplication.shared.applicationState == .active,
-               window?.windowScene?.activationState == .foregroundActive {
-                ghostty_surface_vigil_claim(surface, true)
-                sizeClaimed = true
-                sizeAcknowledged = false
-                receipt("claimed the pty size after own layout")
-            }
-            let logical = CGSize(width: CGFloat(px.w) / scale, height: CGFloat(px.h) / scale)
-            let mine = Set(subviews.map { ObjectIdentifier($0.layer) })
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            for sub in layer.sublayers ?? [] where !mine.contains(ObjectIdentifier(sub)) {
-                sub.contentsScale = scale
-                sub.anchorPoint = .zero
-                sub.bounds = CGRect(origin: .zero, size: logical)
-                sub.setAffineTransform(CGAffineTransform(scaleX: presentation.scale, y: presentation.scale))
-                let shown = logical.height * presentation.scale
-                sub.position = CGPoint(x: 0, y: presentation.anchorBottom ? bounds.height - shown : 0)
-            }
-            CATransaction.commit()
-            scroller?.contentSize = CGSize(width: bounds.width, height: Self.runway * 2)
+    /// On screen: the renderer runs; off screen it idles (occlusion).
+    var visible = true {
+        didSet {
+            guard visible != oldValue, let surface else { return }
+            ghostty_surface_set_occlusion(surface, visible)
+            receipt("visible", ["visible": visible])
         }
     }
+
+    /// Claim (true) or yield (false) the daemon's pty size. Only an
+    /// own-size viewport claims; a fit viewport mirrors the owner.
+    private(set) var sizeClaimed = false
+    private(set) var sizeClaimRequested = false
+    private var sizeAcknowledged = false
+
+    @discardableResult
+    func claimSize(_ claim: Bool) -> Bool {
+        guard let surface else { return false }
+        if claim {
+            // The request is the intent only. Whether it may be sent
+            // (attended, laid out by the own-size host, in an active
+            // scene) is decided where it is sent, in `layoutSubviews`:
+            // checked here, a pane reopened from the list (its surface
+            // not yet re-hosted, no window) was refused and opened at
+            // the Mac's grid (2026-10-16).
+            sizeClaimRequested = true
+            setNeedsLayout()
+            return true
+        }
+        sizeClaimRequested = false
+        sizeAcknowledged = false
+        guard sizeClaimed else { return false }
+        ghostty_surface_vigil_claim(surface, false)
+        sizeClaimed = false
+        receipt("yielded the pty size")
+        return false
+    }
+
+    func updateSizeOwner(_ owner: String) {
+        guard sizeClaimed, let surface else { return }
+        let token = "ghostty:\(getpid())/\(String(ghostty_surface_vigil_client_id(surface), radix: 16))"
+        if owner.split(separator: " ").contains(Substring(token)) {
+            sizeAcknowledged = true
+        } else if sizeAcknowledged {
+            receipt("another viewport took size; returning to mirror")
+            claimSize(false)
+        }
+    }
+
+    @objc private func appWillResignActive() {
+        // This also covers an async attach finishing after the screen's
+        // phase callback. Coming back active, the pane screen decides
+        // (bringing the app back on a pane is opening it again).
+        claimSize(false)
+        attended = false
+        keyboardWanted = false
+    }
+
+    /// The content receipt: FNV-1a of the viewport's plain text, hex,
+    /// comparable to the daemon's `screen` in `vigild dir`.
+    var screenHash: String {
+        guard let surface else { return "" }
+        return String(ghostty_surface_vigil_screen_hash(surface), radix: 16)
+    }
+    var screenSeen = ""
+    var screenStrikes = 0
+    var screenProven = false
+    var screenResyncs = 0
+
+    /// Re-request the screen (the app was suspended and missed the
+    /// stream).
+    func refreshFromDaemon() {
+        guard let surface else { return }
+        ghostty_surface_vigil_dump(surface)
+        receipt("dump requested")
+    }
+
+    // MARK: Keyboard
+
+    /// The software keyboard is up. Raised by a tap, dropped by the
+    /// strip's hide button or by iOS dismissing it (the proxy resigns
+    /// and reports). The terminal's focus does not move with it.
+    @Published var keyboardWanted = false {
+        didSet {
+            guard keyboardWanted != oldValue else { return }
+            receipt("keyboard wanted", ["wanted": keyboardWanted])
+            syncResponder()
+        }
+    }
+
+    /// The strip that rides the keyboard (esc, ctrl, arrows…).
+    var accessory: UIView? {
+        didSet {
+            proxy.accessory = accessory
+            if proxy.isFirstResponder { proxy.reloadInputViews() }
+        }
+    }
+
+    /// The keyboard's responder: a UIKeyInput child. The surface
+    /// itself is a plain first responder (hardware keys, no software
+    /// keyboard) whenever the keyboard is not wanted.
+    private let proxy = KeyboardProxy()
+
+    override var canBecomeFirstResponder: Bool { true }
+
+    private func syncResponder() {
+        guard window != nil else { return }
+        if keyboardWanted {
+            if !proxy.isFirstResponder { _ = proxy.becomeFirstResponder() }
+        } else {
+            if proxy.isFirstResponder { _ = proxy.resignFirstResponder() }
+            if attended, !isFirstResponder { _ = becomeFirstResponder() }
+        }
+    }
+
+    /// iOS took the keyboard down (interactive dismissal, a sheet, a
+    /// hardware keyboard): the fact follows.
+    fileprivate func keyboardProxyResigned() {
+        guard keyboardWanted else { return }
+        receipt("keyboard dismissed by the system")
+        keyboardWanted = false
+    }
+
+    final class KeyboardProxy: UIView, UIKeyInput {
+        weak var owner: TerminalSurface?
+        var accessory: UIView?
+        override var canBecomeFirstResponder: Bool { true }
+        override var inputAccessoryView: UIView? { accessory }
+        override func resignFirstResponder() -> Bool {
+            let ok = super.resignFirstResponder()
+            if ok { DispatchQueue.main.async { [weak self] in self?.owner?.keyboardProxyResigned() } }
+            return ok
+        }
+
+        var hasText: Bool { true }
+        func insertText(_ text: String) { owner?.typed(text) }
+        func deleteBackward() { owner?.sendKeys("\u{7f}") }
+
+        var keyboardType: UIKeyboardType { get { .asciiCapable } set {} }
+        var autocorrectionType: UITextAutocorrectionType { get { .no } set {} }
+        var autocapitalizationType: UITextAutocapitalizationType { get { .none } set {} }
+        var smartQuotesType: UITextSmartQuotesType { get { .no } set {} }
+        var smartDashesType: UITextSmartDashesType { get { .no } set {} }
+        var smartInsertDeleteType: UITextSmartInsertDeleteType { get { .no } set {} }
+        var spellCheckingType: UITextSpellCheckingType { get { .no } set {} }
+    }
+
+    // MARK: Input
+
+    /// Text or control bytes to the terminal, as a key event carrying
+    /// text (the IME path the Mac uses): escapes, control chars and
+    /// arrows all ride this.
+    func sendKeys(_ text: String) {
+        guard let surface, !text.isEmpty else { return }
+        var ev = ghostty_input_key_s()
+        ev.action = GHOSTTY_ACTION_PRESS
+        ev.mods = GHOSTTY_MODS_NONE
+        ev.consumed_mods = GHOSTTY_MODS_NONE
+        ev.keycode = 0
+        ev.unshifted_codepoint = 0
+        ev.composing = false
+        text.withCString { ptr in
+            ev.text = ptr
+            _ = ghostty_surface_key(surface, ev)
+        }
+    }
+
+    /// The strip's ctrl is a sticky modifier for the next typed letter.
+    var stickyControl = false
+
+    /// Text from the software keyboard. Its return key delivers "\n";
+    /// the terminal's Enter is "\r" (the hardware path already maps
+    /// it) — without this the on-screen return did nothing in every
+    /// TUI. Dictation can carry embedded newlines: same mapping.
+    func typed(_ text: String) {
+        let text = text.replacingOccurrences(of: "\n", with: "\r")
+        if stickyControl, let ch = text.lowercased().unicodeScalars.first, ch.value >= 0x61, ch.value <= 0x7a, text.count == 1 {
+            stickyControl = false
+            sendKeys(String(UnicodeScalar(ch.value - 0x60)!))
+            return
+        }
+        sendKeys(text)
+    }
+
+    /// Clipboard into the terminal, newlines as CRs (a multi-line
+    /// paste must not half-execute line by line as bare \n bytes).
+    func pasteClipboard() {
+        guard let s = UIPasteboard.general.string, !s.isEmpty else { return }
+        sendKeys(s.replacingOccurrences(of: "\n", with: "\r"))
+        receipt("pasted", ["chars": s.count])
+    }
+
+    /// A view point in the TERMINAL's logical space. The render is the
+    /// grid at `presentation.scale`, anchored bottom when taller than
+    /// the frame — a fit/desktop tap was off by exactly this transform
+    /// ("points too much ahead", 2026-09-01), and the keyboard inset
+    /// shrinking the frame made it worse. Own-size is the identity.
+    private func terminalPoint(_ p: CGPoint) -> CGPoint {
+        guard presentation.grid != nil, let surface else { return p }
+        let s = ghostty_surface_size(surface)
+        let shown = CGFloat(s.height_px) / appliedScale * presentation.scale
+        let originY = presentation.anchorBottom ? bounds.height - shown : 0
+        return CGPoint(x: p.x / presentation.scale,
+                       y: (p.y - originY) / presentation.scale)
+    }
+
+    /// A tap places the pointer and wants the keyboard; a scroll
+    /// never does (real estate is the whole game on a phone). A tap
+    /// while a selection stands only DISMISSES it (the keyboard does
+    /// not ride the same gesture — first tap clears, the next one
+    /// types).
+    @objc private func handleTap(_ g: UITapGestureRecognizer) {
+        guard let surface else { return }
+        let p = terminalPoint(g.location(in: self))
+        ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
+        if ghostty_surface_has_selection(surface) {
+            _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE)
+            _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, GHOSTTY_MODS_NONE)
+            receipt("tap cleared selection")
+            return
+        }
+        receipt("tap", ["x": Int(p.x), "y": Int(p.y)])
+        keyboardWanted = true
+    }
+
+    // MARK: Selection (long-press drag = mouse selection; the core owns it)
+
+    private var editMenu: UIEditMenuInteraction?
+
+    fileprivate func installSelectionGesture(on sv: UIScrollView) {
+        let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        lp.minimumPressDuration = 0.35
+        sv.addGestureRecognizer(lp)
+        let menu = UIEditMenuInteraction(delegate: self)
+        addInteraction(menu)
+        editMenu = menu
+    }
+
+    /// Long-press drag IS mouse selection: press at the point, drag
+    /// extends, release keeps it and offers Copy/Paste. When the
+    /// program captures the mouse (claude does), SHIFT rides the
+    /// events — ghostty's own capture bypass — so a long-press means
+    /// selection there too, never a click into the program.
+    @objc private func handleLongPress(_ g: UILongPressGestureRecognizer) {
+        guard let surface else { return }
+        let vp = g.location(in: self)
+        let p = terminalPoint(vp)
+        let mods = ghostty_surface_mouse_captured(surface) ? GHOSTTY_MODS_SHIFT : GHOSTTY_MODS_NONE
+        switch g.state {
+        case .began:
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            ghostty_surface_mouse_pos(surface, p.x, p.y, mods)
+            _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
+        case .changed:
+            ghostty_surface_mouse_pos(surface, p.x, p.y, mods)
+        case .ended, .cancelled:
+            _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
+            let sel = ghostty_surface_has_selection(surface)
+            receipt("long-press select", ["selection": sel])
+            if sel {
+                // The menu anchors in VIEW space; the selection used
+                // terminal space.
+                editMenu?.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: vp))
+            }
+        default: break
+        }
+    }
+
+    var selectionText: String? {
+        guard let surface, ghostty_surface_has_selection(surface) else { return nil }
+        var t = ghostty_text_s()
+        guard ghostty_surface_read_selection(surface, &t), t.text != nil else { return nil }
+        defer { ghostty_surface_free_text(surface, &t) }
+        return String(data: Data(bytes: t.text, count: Int(t.text_len)), encoding: .utf8)
+    }
+
+    /// Standard edit actions: the edit menu's suggested rows AND
+    /// hardware ⌘C/⌘V ride these (pressesBegan lets ⌘ combos fall
+    /// through to the responder chain).
+    override func copy(_ sender: Any?) {
+        guard let s = selectionText else { return }
+        UIPasteboard.general.string = s
+        receipt("copied", ["chars": s.count])
+    }
+
+    override func paste(_ sender: Any?) { pasteClipboard() }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(copy(_:)) { return surface.map { ghostty_surface_has_selection($0) } ?? false }
+        if action == #selector(paste(_:)) { return UIPasteboard.general.hasStrings }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    /// Hardware keyboard (reaches here from the proxy through the
+    /// responder chain, or directly while no keyboard is up): control
+    /// combos and navigation keys become their bytes; everything else
+    /// is the key's characters.
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var handled = false
+        for press in presses {
+            guard let key = press.key else { continue }
+            if let bytes = Self.bytes(for: key) {
+                sendKeys(bytes)
+                handled = true
+            }
+        }
+        if !handled { super.pressesBegan(presses, with: event) }
+    }
+
+    private static func bytes(for key: UIKey) -> String? {
+        let mods = key.modifierFlags
+        switch key.keyCode {
+        case .keyboardEscape: return "\u{1b}"
+        case .keyboardTab: return "\t"
+        case .keyboardReturnOrEnter:
+            // shift+enter = the CSI-u encoding (what ghostty sends
+            // under the keyboard protocol claude negotiates): a line
+            // break, not a submit.
+            return mods.contains(.shift) ? "\u{1b}[13;2u" : "\r"
+        case .keyboardDeleteOrBackspace: return "\u{7f}"
+        case .keyboardUpArrow: return "\u{1b}[A"
+        case .keyboardDownArrow: return "\u{1b}[B"
+        case .keyboardRightArrow: return "\u{1b}[C"
+        case .keyboardLeftArrow: return "\u{1b}[D"
+        default: break
+        }
+        if mods.contains(.control), let ch = key.charactersIgnoringModifiers.lowercased().unicodeScalars.first,
+           ch.value >= 0x61, ch.value <= 0x7a {
+            return String(UnicodeScalar(ch.value - 0x60)!)
+        }
+        if mods.contains(.command) { return nil }
+        let text = key.characters
+        return text.isEmpty ? nil : text
+    }
+
+    /// Zoom = ghostty's own font-size actions (own-size mode; a fit
+    /// viewport zooms its picture instead).
+    func zoom(_ direction: Int) {
+        guard let surface else { return }
+        let action = direction > 0 ? "increase_font_size:1" : direction < 0 ? "decrease_font_size:1" : "reset_font_size"
+        let ok = action.withCString { ghostty_surface_binding_action(surface, $0, UInt(action.utf8.count)) }
+        receipt("zoom", ["action": action, "ok": ok])
+    }
+
+    // MARK: Scroll: a UIScrollView as the physics engine
+
+    /// Touch scrolling with Apple's physics: an invisible UIScrollView
+    /// OWNS the one-finger gesture (deceleration, momentum, rubber
+    /// band), and each offset change becomes a precise wheel event in
+    /// PIXELS at the finger, re-centered on an endless runway after
+    /// every hand-off.
+    private var scroller: UIScrollView?
+    private var lastOffset: CGPoint = .zero
+    private static let runway: CGFloat = 100_000
+
+    private func installScrollGesture() {
+        let sv = UIScrollView(frame: bounds)
+        sv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        sv.backgroundColor = .clear
+        sv.showsVerticalScrollIndicator = false
+        sv.showsHorizontalScrollIndicator = false
+        sv.alwaysBounceVertical = true
+        sv.contentInsetAdjustmentBehavior = .never
+        sv.decelerationRate = .normal
+        sv.delaysContentTouches = false
+        sv.contentSize = CGSize(width: bounds.width, height: Self.runway * 2)
+        sv.contentOffset = CGPoint(x: 0, y: Self.runway)
+        sv.delegate = self
+        lastOffset = sv.contentOffset
+        addSubview(sv)
+        scroller = sv
+        sv.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap(_:))))
+        installSelectionGesture(on: sv)
+    }
+
+    fileprivate func scrollerMoved(_ sv: UIScrollView) {
+        guard let surface else { return }
+        // Only the finger (or its momentum) is a scroll: a programmatic
+        // offset (the re-center, a frame change, a content-size reset)
+        // also fires didScroll, and a runway-sized delta sent the
+        // terminal to the top on its own (2026-08-29).
+        guard sv.isDragging || sv.isDecelerating else { lastOffset = sv.contentOffset; return }
+        let dy = lastOffset.y - sv.contentOffset.y
+        lastOffset = sv.contentOffset
+        guard dy != 0 else { return }
+        scrollReceipts += 1
+        if scrollReceipts % 20 == 1 { receipt("finger scroll", ["dy": Int(dy)]) }
+        // The core resolves scroll against the pointer: the finger is
+        // the pointer, placed before every delta — in TERMINAL space
+        // (a fit view's finger travels presentation.scale × the grid).
+        let p = terminalPoint(sv.panGestureRecognizer.location(in: self))
+        ghostty_surface_mouse_pos(surface, p.x, p.y, GHOSTTY_MODS_NONE)
+        // ghostty_input_scroll_mods_t bit 0: a precise (pixel) delta.
+        ghostty_surface_mouse_scroll(surface, 0, Double(dy * appliedScale / presentation.scale), ghostty_input_scroll_mods_t(1))
+    }
+
+    private var scrollReceipts = 0
+
+    fileprivate func scrollerSettled(_ sv: UIScrollView) {
+        let center = CGPoint(x: 0, y: Self.runway)
+        lastOffset = center
+        sv.contentOffset = center
+    }
+
+    // MARK: Facts from the core
+
+    /// The core's cell metrics changed (font set, font size changed):
+    /// every fit layout depends on them.
+    func cellMetricsDidChange(px: CGSize) {
+        receipt("cell metrics", ["width": Int(px.width), "height": Int(px.height)])
+        setNeedsLayout()
+    }
+
+    /// The renderer's own word on whether it draws (a GPU failure).
+    func rendererHealth(_ healthy: Bool) {
+        receipt("renderer health", ["healthy": healthy])
+    }
+
+    /// The owner's hook: a dead stream is the transport's fact, the
+    /// app decides (re-dial, drop).
+    var onStreamEnd: (() -> Void)?
+
+    func streamDidEnd(exitCode: Int, runtimeMs: Int) {
+        receipt("stream ended", ["exit": exitCode, "runtime": Duration.milliseconds(runtimeMs)])
+        onStreamEnd?()
+    }
+
+    // MARK: Layout: the ONE authority
+
+    override class var layerClass: AnyClass { CAMetalLayer.self }
+
+    private var lastReport: (w: UInt32, h: UInt32, scale: CGFloat)?
+    private var lastMirrorGrid: Grid?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        setNeedsLayout()
+        syncResponder()
+    }
+
+    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        super.traitCollectionDidChange(previous)
+        if previous?.displayScale != traitCollection.displayScale { setNeedsLayout() }
+    }
+
+    /// libghostty renders into an IOSurfaceLayer it ADDS AS A SUBLAYER
+    /// of this view's layer (iOS views cannot swap their layer). Every
+    /// layout pass: sync the content scale, compute the framebuffer
+    /// from the presentation, report it to the core iff it changed,
+    /// and frame the render sublayer as the picture (bounds = the grid
+    /// in points, an affine picture scale, anchored top or bottom).
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let surface, window != nil else { return }
+        let scale = syncScale()
+        guard let px = framebuffer(scale: scale) else {
+            receipt("size held: no cell metrics yet")
+            return
+        }
+        let changed = lastReport.map { $0.w != px.w || $0.h != px.h || $0.scale != scale } ?? true
+        if changed {
+            let first = lastReport == nil
+            ghostty_surface_set_size(surface, px.w, px.h)
+            lastReport = (px.w, px.h, scale)
+            // The grid is real now (the presentation's, laid out): the
+            // attach may speak, and the daemon's replay lands in it.
+            if first { ghostty_surface_vigil_viewport(surface); receipt("viewport declared") }
+            let s = ghostty_surface_size(surface)
+            receipt("size reported", [
+                "width": Int(px.w), "height": Int(px.h), "scale": Double(scale),
+                "mode": presentation.grid.map { "fit \($0.rows)x\($0.cols)" } ?? "own",
+                "picture": Double(presentation.scale), "rows": Int(s.rows), "cols": Int(s.columns),
+            ])
+            // A mirror that just took a NEW owner grid holds bytes
+            // parsed at the old one, reflowed: garbage. Re-sync from
+            // the daemon (only a claimant is dumped otherwise).
+            if let g = presentation.grid, g != lastMirrorGrid {
+                if lastMirrorGrid != nil { ghostty_surface_vigil_dump(surface); receipt("grid changed, dump requested") }
+                lastMirrorGrid = g
+            }
+        }
+        if sizeClaimRequested, !sizeClaimed, presentation.grid == nil,
+           attended, UIApplication.shared.applicationState == .active,
+           window?.windowScene?.activationState == .foregroundActive {
+            ghostty_surface_vigil_claim(surface, true)
+            sizeClaimed = true
+            sizeAcknowledged = false
+            receipt("claimed the pty size after own layout")
+        }
+        let logical = CGSize(width: CGFloat(px.w) / scale, height: CGFloat(px.h) / scale)
+        let mine = Set(subviews.map { ObjectIdentifier($0.layer) })
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for sub in layer.sublayers ?? [] where !mine.contains(ObjectIdentifier(sub)) {
+            sub.contentsScale = scale
+            sub.anchorPoint = .zero
+            sub.bounds = CGRect(origin: .zero, size: logical)
+            sub.setAffineTransform(CGAffineTransform(scaleX: presentation.scale, y: presentation.scale))
+            let shown = logical.height * presentation.scale
+            sub.position = CGPoint(x: 0, y: presentation.anchorBottom ? bounds.height - shown : 0)
+        }
+        CATransaction.commit()
+        scroller?.contentSize = CGSize(width: bounds.width, height: Self.runway * 2)
+    }
+}
 
 extension TerminalSurface: UIEditMenuInteractionDelegate {
     func editMenuInteraction(
