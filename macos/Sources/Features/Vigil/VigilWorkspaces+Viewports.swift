@@ -504,12 +504,16 @@ extension VigilWorkspaces {
         persist()
     }
 
-    /// Dock-icon reopen with no live window: the most recent session comes
-    /// back. A session is born by ⌘N alone, never by activating the app
-    /// (every ghost `born(window)` session came from this path). False
-    /// when nothing exists to reopen.
+    /// Dock-icon reopen with no live window: the most recent session in the
+    /// background comes back; with none in the background, the most recent
+    /// one still displayed (riding the quick terminal, or in a window that
+    /// is hidden or ordered out) comes to the front. A session is born by
+    /// ⌘N alone, never by activating the app (every ghost `born(window)`
+    /// session came from this path). False only when no workspace exists.
     func reopen() -> Bool {
-        guard let name = successor(excluding: "") else { return false }
+        let displayed = recent.first { workspaces[$0] != nil }
+            ?? workspaces.values.sorted { ($0.order, $0.label) < ($1.order, $1.label) }.first?.name
+        guard let name = successor(excluding: "") ?? displayed else { return false }
         lifecycleLog.info("reopened with no live window", ["workspace": name])
         open(name: name)
         return true
