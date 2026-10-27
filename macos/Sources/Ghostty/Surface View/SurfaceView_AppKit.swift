@@ -1916,8 +1916,11 @@ extension Ghostty {
         /// protocol's form), exactly as a typed Backspace.
         fileprivate func vigilTypeBackspace() {
             guard let surface = self.surface else { return }
+            guard let keycode = Ghostty.Input.Key.backspace.keyCode else {
+                preconditionFailure("Backspace has no native keycode in Ghostty.Input.Key")
+            }
             var key_ev = ghostty_input_key_s()
-            key_ev.keycode = UInt32(Ghostty.Input.Key.backspace.keyCode)
+            key_ev.keycode = UInt32(keycode)
             key_ev.text = nil
             key_ev.composing = false
             key_ev.mods = GHOSTTY_MODS_NONE
