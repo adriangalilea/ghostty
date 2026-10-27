@@ -33,6 +33,11 @@ enum VigilFixture: String {
     /// The same turn with the reply box taking the keyboard: the box on the
     /// keyboard, its ↑ ↓ and hide row, nothing over it.
     case conversationTyping = "conversation-typing"
+    /// A conversation opened as a phone saw one blank (2026-10-27): its
+    /// snapshot of 30 rows, a live update 80 ms later, then new rows and
+    /// live updates, each through `Conversation.receive` as the network's.
+    /// The list's own check says in the log whether it ever showed no row.
+    case conversationArriving = "conversation-arriving"
     /// The home tree: agent panes drawn by their glance (waiting, asked,
     /// working, done and waiting on its background work), a shell and an
     /// agent with no glance beside them, drawn as terminals.
@@ -66,6 +71,7 @@ struct VigilFixtureView: View {
             case .conversationBackground:
                 ConversationFixture(conversation: Self.conversation(Self.launching, live: Self.backgroundLive))
             case .conversationWorking: ConversationFixture(conversation: Self.atWorkConversation)
+            case .conversationArriving: ArrivingFixture()
             case .conversationTyping:
                 ConversationFixture(conversation: Self.atWorkConversation)
                     .onAppear { VigilPhone.shared.typeInto = Self.pane }
@@ -78,6 +84,8 @@ struct VigilFixtureView: View {
             }
         }
         .task {
+            // A replay says when it is done itself.
+            guard fixture != .conversationArriving else { return }
             // One turn of the run loop: the views are laid out and drawn.
             await Task.yield()
             print("fixture drawn")
@@ -468,6 +476,78 @@ extension VigilFixtureView {
 }
 
 /// The conversation as the pane screen shows it: under its bar.
+/// `conversation-arriving`: a feed's real timing replayed into an empty
+/// conversation opened as the app opens one (pushed onto a navigation
+/// stack, the snapshot landing mid-slide), then "fixture drawn". The
+/// snapshot is a real one when `/tmp/vigil-fixture-feed.json` holds it
+/// (`vigil-agent feed <pane> --once > …`: a person's conversation, so a
+/// file on the Mac, never in the repository), else made-up rows.
+private struct ArrivingFixture: View {
+    @State private var conversation = Conversation(ref: VigilFixtureView.pane)
+    @State private var path: [Int] = []
+    static let realFeed = "/tmp/vigil-fixture-feed.json"
+
+    /// Thirty-odd rows of every height the feed draws, ids unique per round.
+    private static var rows: [FeedEntry] {
+        (0..<2).flatMap { round in
+            (VigilFixtureView.turn + VigilFixtureView.long + VigilFixtureView.atWork).map { entry in
+                var entry = entry
+                entry.id = "\(round)-\(entry.id)"
+                entry.turn = entry.turn.map { "\(round)-\($0)" }
+                return entry
+            }
+        }
+    }
+
+    /// The first message, real or made up.
+    private static var snapshot: FeedMessage {
+        if let data = FileManager.default.contents(atPath: realFeed) {
+            do { return try JSONDecoder().decode(FeedMessage.self, from: data) } catch {
+                preconditionFailure("\(realFeed) is not a feed message: \(error)")
+            }
+        }
+        return .snapshot(FeedSnapshot(
+            pane: VigilFixtureView.pane.pane, agent: "claude", agentVersion: nil, conversation: "fixture",
+            entries: Array(rows.dropLast(3)), earlier: true,
+            cursor: FeedCursor(conversation: "fixture", parser: "fixture", offset: 0), live: VigilFixtureView.workingLive))
+    }
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            Color.clear
+                .navigationDestination(for: Int.self) { _ in
+                    ConversationView(conversation: conversation) {}
+                        .navigationBarTitleDisplayMode(.inline)
+                }
+        }
+            .task {
+                let cursor = FeedCursor(conversation: "fixture", parser: "fixture", offset: 0)
+                let tail = Self.rows.suffix(3).map { entry in
+                    var entry = entry
+                    entry.id = "new-\(entry.id)"
+                    return entry
+                }
+                try? await Task.sleep(for: .milliseconds(300))
+                // Opened as a row's tap opens it, the snapshot 220 ms into
+                // the slide (the phone's receipts: present 33.302, snapshot
+                // 33.522), a live update 80 ms after it.
+                path = [1]
+                try? await Task.sleep(for: .milliseconds(220))
+                print("fixture: \(FileManager.default.fileExists(atPath: Self.realFeed) ? "the real snapshot" : "made-up rows")")
+                conversation.receive(Self.snapshot)
+                try? await Task.sleep(for: .milliseconds(80))
+                conversation.receive(.live(FeedLive(state: .working, context: 75)))
+                for entry in tail {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    conversation.receive(.entries([entry], cursor: cursor))
+                    conversation.receive(.live(FeedLive(state: .working, context: 76)))
+                }
+                try? await Task.sleep(for: .milliseconds(800))
+                print("fixture drawn")
+            }
+    }
+}
+
 private struct ConversationFixture: View {
     let conversation: Conversation
     var body: some View {

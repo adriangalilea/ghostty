@@ -1,5 +1,6 @@
 import AuthzUI
 import GitViews
+import Log
 import MarkdownText
 import SwiftUI
 import VigilActivity
@@ -153,7 +154,7 @@ final class Conversation: ObservableObject {
                 switch step {
                 case .message(let message):
                     waiting = nil
-                    apply(message)
+                    receive(message)
                 case .waiting(let why):
                     waiting = why
                     VigilPhone.shared.receipts.warn("feed", "waiting", ["pane": ref.pane, "why": why])
@@ -167,7 +168,9 @@ final class Conversation: ObservableObject {
         task = nil
     }
 
-    private func apply(_ message: FeedMessage) {
+    /// One message of the pane's feed, as the Mac sent it: the feed's
+    /// follow calls it, and so does a fixture replaying a feed's timing.
+    func receive(_ message: FeedMessage) {
         switch message {
         case .snapshot(let snapshot):
             guard snapshot.schema == Feed.schema else {
@@ -410,6 +413,9 @@ struct ConversationView: View {
     @Environment(\.colorScheme) private var scheme
     @State private var position = ScrollPosition(idType: String.self)
     @State private var atBottom = true
+    /// Where each row is and what the list shows, checked after every
+    /// layout: rows held and none on screen is a blank list, said in the log.
+    @State private var witness = ListWitness()
 
     /// The bottom row's id: the live state, always last.
     private static let bottom = "live"
@@ -441,13 +447,17 @@ struct ConversationView: View {
     /// system's in light: switching to the terminal never changes it.
     private var ground: Color { scheme == .dark ? Color(VigilTheme.background) : Color(.systemBackground) }
 
+    /// A row's frame moved: kept, and the list checked.
+    private func framed(_ id: String, _ frame: CGRect) {
+        witness.rows[id] = frame
+        witness.check(pane: conversation.ref.pane, ids: conversation.visible.map(\.id) + [Self.bottom])
+    }
+
     /// The rows over the reply box, one column moved up by the keyboard as a
     /// fact (`KeyboardState`, the terminal's own pattern): no SwiftUI
     /// keyboard avoidance and nothing floating over the box (an iOS keyboard
     /// toolbar is a glass layer of its own that covered the box and took the
-    /// send button's taps). The column keeps its own size and is never
-    /// measured: sized from a GeometryReader, its first pass was empty and
-    /// the rows anchored to the bottom of nothing (a blank first open).
+    /// send button's taps). The column keeps its own size.
     private var screen: some View {
         VStack(spacing: 0) {
             rows
@@ -457,19 +467,21 @@ struct ConversationView: View {
         // under it. Up: it ends where the keyboard begins.
         .padding(.bottom, keyboard.aboveSafeArea)
         .ignoresSafeArea(.keyboard)
-        // A reader at the newest row keeps it in view as the keyboard rises.
-        .onChange(of: keyboard.inset) { _, _ in
-            guard atBottom else { return }
-            position.scrollTo(id: Self.bottom, anchor: .bottom)
-        }
     }
 
     private var rows: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
+            // Not lazy: the feed comes a page at a time (`Feed.page`, older
+            // pages asked as the top comes into view), so every row is built
+            // with its real height. A LazyVStack's estimates disagreed with
+            // the scroll offset on a first open and drew a stretch of
+            // nothing, blank until reopened (2026-10-27: scrolled to 4980 of
+            // a 5763 pt list, no row there).
+            VStack(alignment: .leading, spacing: 12) {
                 if conversation.more { EarlierRow(conversation: conversation) }
                 ForEach(conversation.visible) { entry in
                     EntryRow(entry: entry, conversation: conversation)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .scrollView) } action: { framed(entry.id, $0) }
                 }
                 if conversation.requestUnplaced {
                     VStack(alignment: .leading, spacing: 8) {
@@ -501,6 +513,7 @@ struct ConversationView: View {
                     .transition(.opacity)
                 }
                 LiveRow(live: conversation.live, shown: phone.directories[conversation.ref.host.id]?.panes[conversation.ref.pane]?.shown)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .scrollView) } action: { framed(Self.bottom, $0) }
                     .id(Self.bottom)
             }
             .scrollTargetLayout()
@@ -510,24 +523,25 @@ struct ConversationView: View {
         .scrollDismissesKeyboard(.interactively)
         .scrollPosition($position)
         .defaultScrollAnchor(.bottom)
+        // A reader at the newest row stays there as rows arrive and the
+        // keyboard takes room; one who scrolled up keeps their place. Held
+        // by layout, never by a scroll command: the rows are lazy, their
+        // heights estimates until drawn, and any scroll to the newest row in
+        // the first moment (animated or not) left the list over rows never
+        // built, blank until reopened (2026-10-27, the phone's receipts: a
+        // live update 80 ms after the snapshot, the content's height still
+        // moving 2396 → 7363 → 5763).
+        .defaultScrollAnchor(atBottom ? .bottom : .top, for: .sizeChanges)
         .onScrollGeometryChange(for: Bool.self) { geometry in
             geometry.visibleRect.maxY >= geometry.contentSize.height - 48
         } action: { _, now in
             atBottom = now
         }
-        // A reader at the newest row stays there as rows arrive; one who
-        // scrolled up keeps their place.
-        .onChange(of: conversation.revision) { _, revision in
-            phone.receipts.info("conversation", "revision", [
-                "pane": conversation.ref.pane, "revision": revision, "rows": conversation.visible.count, "atBottom": atBottom,
-            ])
-            guard atBottom else { return }
-            // A jump, never animated: the rows are lazy, their heights
-            // estimates until drawn, and an animated scroll across estimates
-            // ended over rows never built (the blank first open, 2026-10-27:
-            // a live update 0.1 s after the snapshot, the content's height
-            // still moving 2396 → 7363 → 5763).
-            position.scrollTo(id: Self.bottom, anchor: .bottom)
+        .onScrollGeometryChange(for: ListWitness.Scroll.self) { geometry in
+            .init(room: geometry.containerSize, content: geometry.contentSize.height, top: geometry.visibleRect.minY)
+        } action: { _, now in
+            witness.scroll = now
+            witness.check(pane: conversation.ref.pane, ids: conversation.visible.map(\.id) + [Self.bottom])
         }
         .overlay(alignment: .bottom) {
             if let missing = conversation.focusMissing {
@@ -563,6 +577,59 @@ struct ConversationView: View {
     }
 }
 
+/// What the conversation's list shows, checked after every layout that
+/// moves it: rows held and none of them on screen is a blank list, said in
+/// the log with the numbers that locate it, and said again when rows show.
+/// The first drawing of each open is said once (rows, rows on screen). Not
+/// observed: writing a frame here never redraws anything.
+@MainActor final class ListWitness {
+    struct Scroll: Equatable {
+        var room: CGSize = .zero
+        var content: CGFloat = 0
+        var top: CGFloat = 0
+    }
+
+    /// Each row's frame in the scroll view's visible space (`.scrollView`).
+    var rows: [String: CGRect] = [:]
+    var scroll = Scroll()
+    private var blank = false
+    private var drawn = false
+    private var checking = false
+
+    /// After the layout pass in progress, once however many asked.
+    func check(pane: String, ids: [String]) {
+        guard !checking else { return }
+        checking = true
+        DispatchQueue.main.async { [self] in
+            checking = false
+            guard scroll.room.height > 0, !ids.isEmpty else { return }
+            let screen = CGRect(origin: .zero, size: scroll.room)
+            let shown = ids.filter { rows[$0]?.intersects(screen) == true }.count
+            let receipts = VigilPhone.shared.receipts
+            let numbers: Fields = [
+                "pane": pane, "rows": ids.count, "onScreen": shown, "content": Int(scroll.content),
+                "top": Int(scroll.top), "room": Int(scroll.room.height),
+            ]
+            if shown == 0 {
+                guard !blank else { return }
+                blank = true
+                let nearest = ids.compactMap { rows[$0] }.min { abs($0.midY) < abs($1.midY) }
+                receipts.error("conversation", "the list shows no row", numbers.merging(
+                    ["nearestRowAt": nearest.map { Int($0.minY) } ?? -1, "framed": ids.filter { rows[$0] != nil }.count]) { $1 })
+                return
+            }
+            if blank {
+                blank = false
+                receipts.info("conversation", "the list shows rows again", numbers)
+            }
+            if !drawn {
+                drawn = true
+                receipts.info("conversation", "list drawn", numbers)
+            }
+        }
+    }
+}
+
 /// The top of what is held: older rows load as it comes into view.
 private struct EarlierRow: View {
     @ObservedObject var conversation: Conversation
@@ -577,7 +644,9 @@ private struct EarlierRow: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
             } else {
-                ProgressView().onAppear { conversation.loadEarlier() }
+                // When it is on screen, never merely built: in a stack that
+                // is not lazy, onAppear fires at once and would ask every page.
+                ProgressView().onScrollVisibilityChange { shown in if shown { conversation.loadEarlier() } }
             }
             Spacer()
         }
