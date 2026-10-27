@@ -1683,8 +1683,23 @@ pub const ReadThread = struct {
                     // shutting down.
                     error.NotOpenForReading,
                     error.InputOutput,
+                    // vigil: the attach backend lends this reader a unix
+                    // socket to a pane daemon, which a pty never is: a
+                    // daemon that died under its connection resets it, and
+                    // that end is the stream's end, not an impossibility.
+                    error.ConnectionResetByPeer,
+                    error.SocketUnconnected,
                     => {
                         log.info("io gather exiting", .{});
+                        fatal = true;
+                        break :gather;
+                    },
+
+                    // vigil: a socket's unmapped errno (a timeout, a use
+                    // after close) ends this reader loudly; `unreachable`
+                    // below is undefined behaviour in a fast build.
+                    error.Unexpected => {
+                        log.err("io gather unexpected error, exiting", .{});
                         fatal = true;
                         break :gather;
                     },
