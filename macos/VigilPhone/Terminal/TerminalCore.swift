@@ -39,7 +39,8 @@ final class TerminalCore: ObservableObject {
             supports_selection_clipboard: false,
             wakeup_cb: { _ in TerminalCore.wakeup() },
             action_cb: { _, target, action in TerminalCore.action(target, action) },
-            read_clipboard_cb: { _, _, _ in false },
+            // A program reading the clipboard (OSC 52) is not served here.
+            read_clipboard_cb: { _, _, _, _, _, _ in GHOSTTY_CLIPBOARD_READ_UNSUPPORTED },
             confirm_read_clipboard_cb: { _, _, _, _ in },
             write_clipboard_cb: { _, _, _, _, _ in },
             close_surface_cb: { _, _ in })
