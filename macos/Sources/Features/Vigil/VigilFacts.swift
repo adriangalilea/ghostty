@@ -46,7 +46,9 @@ final class VigilFacts: @unchecked Sendable {
     /// agent state and seen mark, the watch leases.
     private static let folders = ["panes", "state", "leases"]
 
-    init(root: String = NSHomeDirectory() + "/.local/state/vigil",
+    /// `root` is vigil's one folder as the host resolves it (VigilPaths:
+    /// `VIGIL_STATE` moves it), never guessed here.
+    init(root: String,
          beforeRead: @escaping @Sendable () -> Void = {},
          report: @escaping @Sendable (Event) -> Void,
          deliver: @escaping @Sendable (Snapshot) -> Void) {

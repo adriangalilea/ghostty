@@ -59,7 +59,7 @@ class VigilWorkspaces {
     /// Each pane whose glance file did not read, by the file revision last
     /// said (`paneGlance`): one warning per broken file, never per render.
     var unreadGlances: [String: String] = [:]
-    lazy var factsLoader = VigilFacts(report: { event in
+    lazy var factsLoader = VigilFacts(root: VigilPaths.root.path, report: { event in
         switch event {
         case .seenUnwritable(let pane, let error): factsLog.error("seen mark not written", ["pane": pane, "err": error])
         case .unwatchable(let folder): factsLog.error("folder not watched", ["folder": folder])

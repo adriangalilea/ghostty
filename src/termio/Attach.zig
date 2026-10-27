@@ -205,9 +205,28 @@ pub fn initTerminal(self: *Attach, term: *terminal.Terminal) void {
     self.grid_size = .{ .columns = term.cols, .rows = term.rows };
 }
 
+/// vigil's one folder, as VigilWire's `VigilPaths.root` resolves it
+/// (`VIGIL_STATE` moves it); `buf` holds it unless the variable does.
+fn stateRoot(buf: []u8) ![]const u8 {
+    if (sys.env("VIGIL_STATE")) |root| return root;
+    return std.mem.print(buf, "{s}/.local/state/vigil", .{sys.env("HOME") orelse return error.NoHome});
+}
+
+/// This pane's daemon file `<id>.<ext>` in the root's `panes/`
+/// (`VigilPaths.panes`).
+fn panePath(self: *Attach, buf: []u8, ext: []const u8) ![]const u8 {
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    return std.mem.print(buf, "{s}/panes/{s}.{s}", .{ try stateRoot(&root_buf), self.id, ext });
+}
+
+/// The installed vigild (VigilWire's `VigilPaths.vigild`), owned by the
+/// caller.
+fn vigildPath(alloc: Allocator) ![]const u8 {
+    return alloc.print("{s}/.local/bin/vigild", .{sys.env("HOME") orelse return error.NoHome});
+}
+
 fn sockPath(self: *Attach, buf: []u8) ![]const u8 {
-    const home = sys.env("HOME") orelse return error.NoHome;
-    return std.mem.print(buf, "{s}/.local/state/vigil/panes/{s}.sock", .{ home, self.id });
+    return self.panePath(buf, "sock");
 }
 
 fn connectSock(self: *Attach) !posix.fd_t {
@@ -266,13 +285,12 @@ fn connectHub(self: *Attach, host: []const u8) !posix.fd_t {
     return fd;
 }
 
-/// The hub's socket, as VigilWire's `VigilPaths.hub` names it
-/// (`VIGIL_AGENT_STATE` moves it).
+/// The hub's socket, as VigilWire's `VigilPaths.hub` names it (in
+/// `VIGIL_AGENT_STATE`, else the root's `agent/`).
 fn hubPath(buf: []u8) ![]const u8 {
-    return if (sys.env("VIGIL_AGENT_STATE")) |root|
-        try std.mem.print(buf, "{s}/hub.sock", .{root})
-    else
-        try std.mem.print(buf, "{s}/.local/state/vigil/agent/hub.sock", .{sys.env("HOME") orelse return error.NoHome});
+    if (sys.env("VIGIL_AGENT_STATE")) |agent| return std.mem.print(buf, "{s}/hub.sock", .{agent});
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    return std.mem.print(buf, "{s}/agent/hub.sock", .{try stateRoot(&root_buf)});
 }
 
 fn setDialing(self: *Attach, fd: posix.fd_t) void {
@@ -315,8 +333,7 @@ fn spawnDaemon(self: *Attach) !void {
     // reads its own `<id>.resume`, so it works on every spawn path.
     if (self.session) |s| try env.put("VIGIL_WORKSPACE", s);
 
-    const home = sys.env("HOME") orelse return error.NoHome;
-    const bin = try self.alloc.print("{s}/.local/bin/vigild", .{home});
+    const bin = try vigildPath(self.alloc);
     defer self.alloc.free(bin);
 
     var argv: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -820,9 +837,8 @@ pub fn getProcessInfo(self: *Attach, comptime info: ProcessInfo) ?ProcessInfo.Ty
 }
 
 fn readPidfile(self: *Attach) ?[]u8 {
-    const home = sys.env("HOME") orelse return null;
-    var buf: [512]u8 = undefined;
-    const path = std.mem.print(&buf, "{s}/.local/state/vigil/panes/{s}.pid", .{ home, self.id }) catch return null;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = self.panePath(&buf, "pid") catch return null;
     return std.Io.Dir.cwd().readFileAlloc(global.io(), path, self.alloc, .limited(256)) catch null;
 }
 
@@ -890,9 +906,8 @@ fn readThreadMain(
 }
 
 fn specExists(self: *Attach) bool {
-    const home = sys.env("HOME") orelse return false;
-    var buf: [512]u8 = undefined;
-    const path = std.mem.print(&buf, "{s}/.local/state/vigil/panes/{s}.spec", .{ home, self.id }) catch return false;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = self.panePath(&buf, "spec") catch return false;
     std.Io.Dir.cwd().access(global.io(), path, .{}) catch return false;
     return true;
 }
@@ -903,8 +918,7 @@ fn specExists(self: *Attach) bool {
 /// vigild serializes restores and a pane's lock admits one daemon, however
 /// many surfaces ask at once.
 fn restoreDaemons(self: *Attach) void {
-    const home = sys.env("HOME") orelse return;
-    const bin = self.alloc.print("{s}/.local/bin/vigild", .{home}) catch return;
+    const bin = vigildPath(self.alloc) catch return;
     defer self.alloc.free(bin);
     _ = birth(self.alloc, &.{ bin, "restore", self.id }, null) catch |err| log.warn("attach: {s} vigild restore failed err={}", .{ self.id, err });
 }
