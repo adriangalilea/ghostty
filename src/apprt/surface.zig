@@ -223,8 +223,22 @@ pub const Mailbox = struct {
                 "surface message dropped (app queue full), tag={s}",
                 .{@tagName(msg)},
             );
+            discard(msg);
         }
         return pushed;
+    }
+
+    /// vigil: what the receiving surface would have freed, freed for a
+    /// message that never reaches it (a kitty clipboard request's arena,
+    /// an allocated write request).
+    fn discard(msg: Message) void {
+        switch (msg) {
+            .kitty_clipboard_read => |req| req.destroy(),
+            .kitty_clipboard_write => |req| req.destroy(),
+            .clipboard_write => |w| w.req.deinit(),
+            .pwd_change => |w| w.deinit(),
+            else => {},
+        }
     }
 };
 
