@@ -202,7 +202,8 @@ final class VigilPhone: ObservableObject {
     private init() {
         TerminalSurface.report = { [weak self] message, fields in
             Task { @MainActor in self?.receipts.info("surface", message, fields) }
-        }    }
+        }
+    }
 
     // MARK: Macs (paired devices serving vigil/1)
 

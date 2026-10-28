@@ -14,8 +14,6 @@ final class TerminalCore: ObservableObject {
     /// The terminal's ground, from the theme: what every screen around a
     /// surface paints so the edges never flash another color.
     let background: Color
-    /// Kept for the app's lifetime: the core reads it as it makes surfaces.
-    private let config: ghostty_config_t
 
     nonisolated private static let log = Log.log.scope("terminal")
 
@@ -31,8 +29,10 @@ final class TerminalCore: ObservableObject {
             let diagnostic = ghostty_config_get_diagnostic(config, UInt32(at))
             Self.log.warn("config diagnostic", ["message": String(cString: diagnostic.message)])
         }
-        self.config = config
         background = Self.background(of: config)
+        // The app keeps its own copy (ghostty_app_new clones it); this one
+        // is done once the app exists.
+        defer { ghostty_config_free(config) }
 
         var runtime = ghostty_runtime_config_s(
             userdata: nil,

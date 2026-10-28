@@ -104,48 +104,74 @@ private struct TerminalFixture: View {
         let view = TerminalSurface(core.app, pane: "fixture", stream: ends[0])
         view.attended = true
         surfaceView = view
-        // The attach's frames (hello, sizes) are read and dropped, as a
-        // daemon that has nothing to say back would.
+        // Played as vigild plays it: the screen is sent once the client's
+        // first size arrives (the surface declared its viewport, laid out
+        // in its window), never into the placeholder grid before. The
+        // attach's other frames are read and dropped.
         let peer = ends[1]
-        Thread.detachNewThread {
-            var sink = [UInt8](repeating: 0, count: 4096)
-            while read(peer, &sink, sink.count) > 0 {}
+        await withCheckedContinuation { (sized: CheckedContinuation<Void, Never>) in
+            Thread.detachNewThread { Self.readFrames(peer, firstSize: sized) }
         }
         let bytes = Array(Self.screen.utf8)
         precondition(write(peer, bytes, bytes.count) == bytes.count, "the fixture's bytes were not written whole")
+        // Parsed: the title is the last thing the bytes set.
         for await title in view.$title.values where title == Self.title { break }
-        await Frames.next(2)
+        // Drawn: the renderer hands the render layer a new frame after that.
+        await Self.nextFrame(of: view)
         print("fixture drawn")
+    }
+
+    /// The attach's frames ([type][u16 LE length][payload]) until the
+    /// stream ends; `firstSize` resumes at the first size ('r').
+    nonisolated private static func readFrames(_ fd: Int32, firstSize: CheckedContinuation<Void, Never>) {
+        var pending: [UInt8] = []
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        var sized = false
+        while true {
+            let n = read(fd, &chunk, chunk.count)
+            guard n > 0 else { break }
+            pending += chunk[0..<n]
+            while pending.count >= 3 {
+                let length = Int(pending[1]) | Int(pending[2]) << 8
+                guard pending.count >= 3 + length else { break }
+                if pending[0] == UInt8(ascii: "r"), !sized {
+                    sized = true
+                    firstSize.resume()
+                }
+                pending.removeFirst(3 + length)
+            }
+        }
+        precondition(sized, "the fixture's stream ended before the surface sent its size")
+    }
+
+    /// The render layer's next frame: libghostty sets an IOSurface as its
+    /// `contents` on the main thread for every frame it presents.
+    private static func nextFrame(of view: TerminalSurface) async {
+        let mine = Set(view.subviews.map { ObjectIdentifier($0.layer) })
+        guard let render = view.layer.sublayers?.first(where: { !mine.contains(ObjectIdentifier($0)) }) else {
+            preconditionFailure("the surface has no render layer")
+        }
+        await withCheckedContinuation { (presented: CheckedContinuation<Void, Never>) in
+            let watch = FrameWatch(presented)
+            watch.observation = render.observe(\.contents, options: [.new]) { _, _ in watch.fire() }
+        }
     }
 }
 
-/// The display's own clock: resumes after `count` frames were shown.
-@MainActor
-private final class Frames: NSObject {
-    private var left: Int
-    private let done: CheckedContinuation<Void, Never>
-    private var link: CADisplayLink?
+/// One frame awaited: resumes once and stops watching.
+private final class FrameWatch: @unchecked Sendable {
+    // Main thread only: libghostty sets `contents` there, and the watch is
+    // made there.
+    var observation: NSKeyValueObservation?
+    private var presented: CheckedContinuation<Void, Never>?
 
-    private init(_ count: Int, _ done: CheckedContinuation<Void, Never>) {
-        left = count
-        self.done = done
-    }
+    init(_ presented: CheckedContinuation<Void, Never>) { self.presented = presented }
 
-    static func next(_ count: Int) async {
-        await withCheckedContinuation { done in
-            let frames = Frames(count, done)
-            let link = CADisplayLink(target: frames, selector: #selector(tick))
-            frames.link = link
-            link.add(to: .main, forMode: .common)
-        }
-    }
-
-    @objc private func tick() {
-        left -= 1
-        guard left == 0 else { return }
-        link?.invalidate()
-        link = nil
-        done.resume()
+    func fire() {
+        observation?.invalidate()
+        observation = nil
+        presented?.resume()
+        presented = nil
     }
 }
 
