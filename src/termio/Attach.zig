@@ -119,6 +119,11 @@ viewport: bool = false,
 /// Focus arrived before the viewport: the passive claim waits for it.
 focus_pending: bool = false,
 
+/// This attach created the pane's daemon (its first contact found none):
+/// the configured input is the new program's, typed once. Joining a live
+/// pane types nothing (backend.takesConfiguredInput).
+created_daemon: bool = false,
+
 /// Outbound frame queue: enqueueFrame appends (io thread, never blocks),
 /// the writer thread alone writes the socket. Order is total — resize and
 /// data frames share the one queue.
@@ -403,6 +408,7 @@ pub fn threadEnter(
     } else {
         const fd = self.connectSock() catch fd: {
             try self.spawnDaemon();
+            self.created_daemon = true;
             break :fd try self.connectSock();
         };
         self.sock_fd = fd;

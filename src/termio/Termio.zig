@@ -399,8 +399,10 @@ pub fn threadEnter(
     try self.backend.threadEnter(self.alloc, self, data);
     errdefer self.backend.threadExit(data);
 
-    // If we have inputs, then queue them all up.
-    for (inputs orelse &.{}) |input| switch (input) {
+    // If we have inputs, then queue them all up (vigil: only into a stream
+    // whose program starts with it, see takesConfiguredInput).
+    const queued: []const ThreadEnterState.Input = if (self.backend.takesConfiguredInput()) inputs orelse &.{} else &.{};
+    for (queued) |input| switch (input) {
         .string => |v| self.queueWrite(data, v, false) catch |err| {
             log.warn("failed to queue input string err={}", .{err});
             return error.InputFailed;

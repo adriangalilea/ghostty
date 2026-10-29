@@ -54,6 +54,18 @@ pub const Backend = union(Kind) {
         }
     }
 
+    /// vigil: whether the configured input (`input`, a surface's initial
+    /// input) belongs in this stream. Exec's child is born with every
+    /// thread; an attach often joins a pane long alive (a mount, a remount,
+    /// a mirror), and typing it there would type into a running program at
+    /// every click: only the attach that created the pane's daemon takes it.
+    pub fn takesConfiguredInput(self: *const Backend) bool {
+        return switch (self.*) {
+            .exec => true,
+            .attach => |*attach| attach.created_daemon,
+        };
+    }
+
     pub fn threadExit(self: *Backend, td: *termio.Termio.ThreadData) void {
         switch (self.*) {
             .exec => |*exec| exec.threadExit(td),
