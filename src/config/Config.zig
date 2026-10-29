@@ -1190,6 +1190,16 @@ command: ?Command = null,
 /// the agent ends the pane). Set per-surface through the embedding API only.
 @"vigil-command": ?[:0]const u8 = null,
 
+/// Vigil: the letters whose held repeats belong to macOS's press-and-hold
+/// accent popup, not the terminal (case-insensitive). Holding one shows the
+/// popup and types nothing more; the choice replaces the letter. Any other
+/// held letter repeats at full speed (an editor's `hjkl`), so its popup,
+/// if it has one, appears over the repeats it typed and replaces only the
+/// last. The default is Spanish's accents; add `c` for ç, `s` for ß and so
+/// on, never a letter an editor holds. Empty: every key repeats. Applies
+/// only while the press-and-hold setting is on (the fork's default).
+@"vigil-press-and-hold": ?[:0]const u8 = "aeioun",
+
 /// This is the same as "command", but only applies to the first terminal
 /// surface created when Ghostty starts. Subsequent terminal surfaces will use
 /// the `command` configuration.

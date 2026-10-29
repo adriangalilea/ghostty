@@ -331,6 +331,17 @@ extension Ghostty {
             }
         }
 
+        /// vigil: the letters whose held repeats the accent popup takes
+        /// (`vigil-press-and-hold`), lowercased.
+        var vigilPressAndHold: Set<Character> {
+            guard let config = self.config else { return [] }
+            var v: UnsafePointer<Int8>?
+            let key = "vigil-press-and-hold"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))),
+                  let ptr = v else { return [] }
+            return Set(String(cString: ptr).lowercased())
+        }
+
         var windowTitleFontFamily: String? {
             guard let config = self.config else { return nil }
             var v: UnsafePointer<Int8>?

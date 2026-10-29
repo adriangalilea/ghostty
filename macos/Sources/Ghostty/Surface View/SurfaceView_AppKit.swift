@@ -1625,16 +1625,19 @@ extension Ghostty {
                 // through interpretKeyEvents above), not the pty - forwarding
                 // them types nnnn under the popup. Deliberately NARROWER than
                 // native text views (which swallow every letter): terminals
-                // need letter repeats (hjkl in editors), so only the Spanish
-                // accent set is surrendered to the popup. Everything else -
-                // letters, digits, arrows, delete - repeats at full speed, as
-                // do modified holds (ctrl+n).
+                // need letter repeats (hjkl in editors), and macOS shows a
+                // popup for `l` too, so the popup cannot decide; the letters
+                // surrendered to it are the person's (`vigil-press-and-hold`,
+                // Spanish's by default). Everything else - letters, digits,
+                // arrows, delete - repeats at full speed, as do modified
+                // holds (ctrl+n).
                 if action == GHOSTTY_ACTION_REPEAT,
                    UserDefaults.ghostty.bool(forKey: "ApplePressAndHoldEnabled"),
-                   translationEvent.modifierFlags.intersection([.control, .option, .command]).isEmpty,
+                   translationEvent.modifierFlags.isDisjoint(with: [.control, .option, .command]),
                    let repeatChars = translationEvent.ghosttyCharacters,
                    repeatChars.count == 1,
-                   "aeiounAEIOUN".contains(repeatChars) {
+                   let held = repeatChars.lowercased().first,
+                   derivedConfig.vigilPressAndHold.contains(held) {
                     return
                 }
 
@@ -2258,6 +2261,8 @@ extension Ghostty {
             let windowTitleFontFamily: String?
             let windowAppearance: NSAppearance?
             let scrollbar: Ghostty.Config.Scrollbar
+            /// vigil: the letters whose held repeats the accent popup takes.
+            let vigilPressAndHold: Set<Character>
 
             init() {
                 self.backgroundColor = Color(NSColor.windowBackgroundColor)
@@ -2267,6 +2272,7 @@ extension Ghostty {
                 self.windowTitleFontFamily = nil
                 self.windowAppearance = nil
                 self.scrollbar = .system
+                self.vigilPressAndHold = []
             }
 
             init(_ config: Ghostty.Config) {
@@ -2277,6 +2283,7 @@ extension Ghostty {
                 self.windowTitleFontFamily = config.windowTitleFontFamily
                 self.windowAppearance = .init(ghosttyConfig: config)
                 self.scrollbar = config.scrollbar
+                self.vigilPressAndHold = config.vigilPressAndHold
             }
         }
 
