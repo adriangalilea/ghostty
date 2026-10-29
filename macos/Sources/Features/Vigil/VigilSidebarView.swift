@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Face
 import Ink
 import SwiftUI
@@ -92,10 +93,10 @@ struct VigilSidebarView: View {
                             .onEnded { value in model.tapped(at: value.location) })
                         .onDrop(of: [UTType.text], delegate: VigilTreeDrop(model: model))
                     }
-                    .onChange(of: model.selection) { selection in
+                    .onChange(of: model.selection) { _, selection in
                         if let selection { proxy.scrollTo(selection) }
                     }
-                    .onChange(of: activeLeafId) { id in
+                    .onChange(of: activeLeafId) { _, id in
                         // The viewport moved (auto-follow, ⌘⇧J, a click):
                         // the lit chain must be on screen, or the
                         // spotlight lies.
@@ -309,8 +310,11 @@ struct VigilSidebarView: View {
         let collapsed = collapse.hosts.contains(device)
         return HStack(spacing: 4) {
             chevron(collapsed: collapsed) {
-                if collapsed { collapse.hosts.remove(device) }
-                else { collapse.hosts.insert(device) }
+                if collapsed {
+                    collapse.hosts.remove(device)
+                } else {
+                    collapse.hosts.insert(device)
+                }
             }
             Image(systemName: "desktopcomputer")
             Text(title)
@@ -373,8 +377,11 @@ struct VigilSidebarView: View {
         return HStack(spacing: 4) {
             if hasChildren {
                 chevron(collapsed: collapsed) {
-                    if collapsed { model.collapsedSessions.remove(id) }
-                    else { model.collapsedSessions.insert(id) }
+                    if collapsed {
+                        model.collapsedSessions.remove(id)
+                    } else {
+                        model.collapsedSessions.insert(id)
+                    }
                 }
             } else {
                 Color.clear.frame(width: (Grid.chevron * scale), height: 1)
@@ -394,10 +401,11 @@ struct VigilSidebarView: View {
                     let manager = VigilWorkspaces.shared
                     guard let session = manager.workspaces[id] else { return }
                     manager.rename(name: id, label: session.label, emoji: emoji)
+                },
+                fallback: {
+                    Text("·").font(.system(size: 13 * scale))
                 }
-            ) {
-                Text("·").font(.system(size: 13 * scale))
-            }
+            )
             .opacity(row.stateTag == "windowed" ? 1 : 0.85)
             Spacer(minLength: 4)
             // Folded, who looks from elsewhere rolls up: a peek is never hidden.
@@ -473,8 +481,11 @@ struct VigilSidebarView: View {
         let collapsed = model.collapsedTabs.contains(tab.id)
         return HStack(spacing: 4) {
             chevron(collapsed: collapsed) {
-                if collapsed { model.collapsedTabs.remove(tab.id) }
-                else { model.collapsedTabs.insert(tab.id) }
+                if collapsed {
+                    model.collapsedTabs.remove(tab.id)
+                } else {
+                    model.collapsedTabs.insert(tab.id)
+                }
             }
             // Same silhouette either way (no layout flash on swap): the
             // FILLED variant marks the tab the window displays right now,

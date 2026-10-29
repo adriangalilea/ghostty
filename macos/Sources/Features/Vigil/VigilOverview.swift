@@ -219,67 +219,65 @@ class VigilOverview: NSObject {
         // ours app-wide. The monitor dies with the panel.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
-            return MainActor.assumeIsolated {
-                // The kill confirmation owns the keyboard: pass everything
-                // through so Enter/esc hit the alert's buttons, not us.
-                if self.modalActive { return event }
+            // The kill confirmation owns the keyboard: pass everything
+            // through so Enter/esc hit the alert's buttons, not us.
+            if self.modalActive { return event }
 
-                // The inline editor owns the keyboard: every key belongs to
-                // its fields (Enter commits via onSubmit); esc alone is ours
-                // and cancels the edit, not the overview.
-                if self.model.editing {
-                    if event.keyCode == 53 { self.cancelRename(); return nil }
-                    return event
-                }
+            // The inline editor owns the keyboard: every key belongs to
+            // its fields (Enter commits via onSubmit); esc alone is ours
+            // and cancels the edit, not the overview.
+            if self.model.editing {
+                if event.keyCode == 53 { self.cancelRename(); return nil }
+                return event
+            }
 
-                // The toggle shortcut closes from inside: while this panel is
-                // key there is no surface to run the keybind, so the monitor
-                // is the only one who can honor it. Read from config, never
-                // hardcoded.
-                if let config = VigilWorkspaces.shared.ghosttyApp?.config,
-                   let shortcut = config.keyboardShortcut(for: "vigil_overview"),
-                   Self.eventMatches(event, shortcut) {
-                    self.hide()
-                    return nil
-                }
+            // The toggle shortcut closes from inside: while this panel is
+            // key there is no surface to run the keybind, so the monitor
+            // is the only one who can honor it. Read from config, never
+            // hardcoded.
+            if let config = VigilWorkspaces.shared.ghosttyApp?.config,
+               let shortcut = config.keyboardShortcut(for: "vigil_overview"),
+               Self.eventMatches(event, shortcut) {
+                self.hide()
+                return nil
+            }
 
-                // The configured undo shortcut works from inside the panel
-                // (no surface here to run the keybind): exhume the last
-                // kill and refresh the grid so it reappears in place.
-                if let config = VigilWorkspaces.shared.ghosttyApp?.config,
-                   let shortcut = config.keyboardShortcut(for: "undo"),
-                   Self.eventMatches(event, shortcut) {
-                    (NSApp.delegate as? AppDelegate)?.undoManager.undo()
-                    self.model.entries = self.buildEntries()
-                    self.model.selection = min(self.model.selection, max(self.model.entries.count - 1, 0))
+            // The configured undo shortcut works from inside the panel
+            // (no surface here to run the keybind): exhume the last
+            // kill and refresh the grid so it reappears in place.
+            if let config = VigilWorkspaces.shared.ghosttyApp?.config,
+               let shortcut = config.keyboardShortcut(for: "undo"),
+               Self.eventMatches(event, shortcut) {
+                (NSApp.delegate as? AppDelegate)?.undoManager.undo()
+                self.model.entries = self.buildEntries()
+                self.model.selection = min(self.model.selection, max(self.model.entries.count - 1, 0))
+                self.refit()
+                return nil
+            }
+
+            switch event.keyCode {
+            case 123: self.model.move(-1); return nil // left
+            case 124: self.model.move(1); return nil // right
+            case 126: self.model.move(-self.model.columns); return nil // up
+            case 125: self.model.move(self.model.columns); return nil // down
+            case 45: self.createSession(); return nil // n
+            case 3: self.togglePinSelected(); return nil // f: floating (on top)
+            case 15: self.renameSelected(); return nil // r: rename session
+            case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
+            case 51: self.removeSelected(); return nil // backspace
+            case 53: // esc: leave the peek first, close second
+                if self.model.zoomed {
+                    self.model.zoomed = false
                     self.refit()
-                    return nil
+                } else {
+                    self.hide()
                 }
-
-                switch event.keyCode {
-                case 123: self.model.move(-1); return nil // left
-                case 124: self.model.move(1); return nil // right
-                case 126: self.model.move(-self.model.columns); return nil // up
-                case 125: self.model.move(self.model.columns); return nil // down
-                case 45: self.createSession(); return nil // n
-                case 3: self.togglePinSelected(); return nil // f: floating (on top)
-                case 15: self.renameSelected(); return nil // r: rename session
-                case 49: self.model.zoomed.toggle(); self.refit(); return nil // space
-                case 51: self.removeSelected(); return nil // backspace
-                case 53: // esc: leave the peek first, close second
-                    if self.model.zoomed {
-                        self.model.zoomed = false
-                        self.refit()
-                    } else {
-                        self.hide()
-                    }
-                    return nil
-                case 36, 76: // return, keypad enter
-                    if let entry = self.model.selected { self.activate(entry) }
-                    return nil
-                default:
-                    return event
-                }
+                return nil
+            case 36, 76: // return, keypad enter
+                if let entry = self.model.selected { self.activate(entry) }
+                return nil
+            default:
+                return event
             }
         }
     }
@@ -703,7 +701,9 @@ struct OverviewView: View {
                                 .foregroundColor(.orange)
                                 .monospacedDigit()
                         }
-                        Button(action: { onRecoverBurial(burial) }) {
+                        Button {
+                            onRecoverBurial(burial)
+                        } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "arrow.uturn.backward")
                                 Text("recover").font(.system(size: 12, weight: .semibold))
@@ -713,7 +713,9 @@ struct OverviewView: View {
                             .foregroundColor(.black)
                         }
                         .buttonStyle(.plain)
-                        Button(action: { onDismissBurial(burial) }) {
+                        Button {
+                            onDismissBurial(burial)
+                        } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(.secondary)
@@ -745,7 +747,7 @@ struct OverviewView: View {
                     if let image = live ?? entry.thumbnail {
                         Image(nsImage: image)
                             .resizable()
-                            .aspectRatio(contentMode: .fit)
+                            .scaledToFit()
                             .frame(maxWidth: peekSize.width - 12, maxHeight: peekSize.height - 90)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     } else {
@@ -852,7 +854,9 @@ struct OverviewView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.orange)
                         .lineLimit(1)
-                    Button(action: { onRelaunchDied(entry) }) {
+                    Button {
+                        onRelaunchDied(entry)
+                    } label: {
                         Text("relaunch")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.orange)
@@ -861,7 +865,9 @@ struct OverviewView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Type each command back into the pane it died in (panes with an idle shell only).")
-                    Button(action: { onDismissDied(entry) }) {
+                    Button {
+                        onDismissDied(entry)
+                    } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.secondary)
@@ -967,7 +973,7 @@ struct OverviewView: View {
                 RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.6))
                 if let thumb = entry.thumbnail {
                     Image(nsImage: thumb)
-                        .resizable().aspectRatio(contentMode: .fit)
+                        .resizable().scaledToFit()
                         .frame(maxWidth: cardSize.width - 8, maxHeight: cardSize.height - 8)
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 } else {
@@ -1036,7 +1042,6 @@ private struct DragReorder: ViewModifier {
         }
     }
 }
-
 
 /// Live drag & drop reordering: cards shift while hovering (dropEntered)
 /// and the final order persists on drop.

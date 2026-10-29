@@ -114,8 +114,8 @@ extension VigilWorkspaces {
         guard !busy.isEmpty, let host else { proceed(); return }
         host.confirmClose(
             messageText: "Close \(what)?",
-            informativeText: "\(busy.joined(separator: ", ")) still running\(mac.map { " on \($0)" } ?? ""). Closing the \(what.lowercased()) kills it (undo keeps it for \(Int(Self.killGrace))s).")
-        { proceed() }
+            informativeText: "\(busy.joined(separator: ", ")) still running\(mac.map { " on \($0)" } ?? ""). Closing the \(what.lowercased()) kills it (undo keeps it for \(Int(Self.killGrace))s)."
+        ) { proceed() }
     }
 
     /// A close in a viewport showing a workspace that lives elsewhere
@@ -123,7 +123,7 @@ extension VigilWorkspaces {
     /// command, after the same question a local close asks, answered from
     /// the home's own facts (its directory).
     func confirmRemoteClose(in controller: TerminalController, view: Ghostty.SurfaceView? = nil,
-                                    operation: String, confirm: Bool = true) -> Bool {
+                            operation: String, confirm: Bool = true) -> Bool {
         guard let composite = mirroredWorkspace(of: controller) else { return false }
         let target = view ?? controller.focusedSurface
         let revision = VigilRemote.shared.session(composite)?.session.layoutRevision

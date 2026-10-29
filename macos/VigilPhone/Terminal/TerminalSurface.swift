@@ -52,6 +52,11 @@ final class TerminalSurface: UIView, ObservableObject {
         paneId = pane
         // A non-zero initial frame so the render layer is never 0×0.
         super.init(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        // A new display scale (another screen) is a new framebuffer:
+        // layoutSubviews computes it.
+        registerForTraitChanges([UITraitDisplayScale.self]) { (view: TerminalSurface, _: UITraitCollection) in
+            view.setNeedsLayout()
+        }
         var config = ghostty_surface_config_new()
         config.userdata = Unmanaged.passUnretained(self).toOpaque()
         config.platform_tag = GHOSTTY_PLATFORM_IOS
@@ -146,7 +151,7 @@ final class TerminalSurface: UIView, ObservableObject {
 
     /// The content scale the core currently has (the surface config's
     /// screen scale at birth, then whatever `syncScale` applied).
-    private var appliedScale: CGFloat = UIScreen.main.scale
+    private var appliedScale: CGFloat = UITraitCollection.current.displayScale
 
     /// Make the core's content scale the wanted one; idempotent.
     @discardableResult
@@ -336,6 +341,9 @@ final class TerminalSurface: UIView, ObservableObject {
         func insertText(_ text: String) { owner?.typed(text) }
         func deleteBackward() { owner?.sendKeys("\u{7f}") }
 
+        // UITextInputTraits declares these settable; a terminal's keyboard is
+        // fixed, so what UIKit sets is ignored on purpose.
+        // swiftlint:disable unused_setter_value
         var keyboardType: UIKeyboardType { get { .asciiCapable } set {} }
         var autocorrectionType: UITextAutocorrectionType { get { .no } set {} }
         var autocapitalizationType: UITextAutocapitalizationType { get { .none } set {} }
@@ -343,6 +351,7 @@ final class TerminalSurface: UIView, ObservableObject {
         var smartDashesType: UITextSmartDashesType { get { .no } set {} }
         var smartInsertDeleteType: UITextSmartInsertDeleteType { get { .no } set {} }
         var spellCheckingType: UITextSpellCheckingType { get { .no } set {} }
+        // swiftlint:enable unused_setter_value
     }
 
     // MARK: Input
@@ -627,7 +636,7 @@ final class TerminalSurface: UIView, ObservableObject {
 
     // MARK: Layout: the ONE authority
 
-    override class var layerClass: AnyClass { CAMetalLayer.self }
+    override static var layerClass: AnyClass { CAMetalLayer.self }
 
     private var lastReport: (w: UInt32, h: UInt32, scale: CGFloat)?
     private var lastMirrorGrid: Grid?
@@ -636,11 +645,6 @@ final class TerminalSurface: UIView, ObservableObject {
         super.didMoveToWindow()
         setNeedsLayout()
         syncResponder()
-    }
-
-    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-        super.traitCollectionDidChange(previous)
-        if previous?.displayScale != traitCollection.displayScale { setNeedsLayout() }
     }
 
     /// libghostty renders into an IOSurfaceLayer it ADDS AS A SUBLAYER

@@ -36,7 +36,6 @@ extension VigilWorkspaces {
         VigilPaths.events
     }
 
-
     /// The drain offset survives relaunches: attention that fired while the
     /// app was CLOSED (a watcher verdict, a headless agent finishing in its
     /// daemon) is exactly the attention a relaunch must surface. Only ancient
@@ -324,6 +323,8 @@ extension VigilWorkspaces {
         try? "\(size)".write(to: eventsOffsetURL, atomically: true, encoding: .utf8)
 
         var changed = false
+        // Lossy on purpose: a bad byte reads as U+FFFD, the rest still reads.
+        // swiftlint:disable:next optional_data_string_conversion
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
             guard let event = try? JSONDecoder().decode(WakeEvent.self, from: Data(line.utf8)) else { continue }
             changed = attend(event: event.event, pane: event.pane, container: event.container) || changed

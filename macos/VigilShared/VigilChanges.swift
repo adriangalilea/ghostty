@@ -50,6 +50,8 @@ struct VigilGitSource: Git.Source {
 
     func contents(_ path: String, in target: Git.ChangeScope.Target) async throws -> String {
         let scope = try JSONEncoder().encode(Git.ChangeScope(target: target))
+        // Lossy on purpose: a bad byte reads as U+FFFD, the rest of the file still shows.
+        // swiftlint:disable:next optional_data_string_conversion
         return String(decoding: try await git(GitCall(kind: .contents, repo: root, scope: scope, path: path)), as: UTF8.self)
     }
 
@@ -101,14 +103,20 @@ struct VigilChanges: View {
                                     guard let path = edits.files.first(where: { $0.whole && Self.names($0, file.path) })?.path else {
                                         throw Unread(description: "not shown whole")
                                     }
+                                    // Lossy on purpose, as above.
+                                    // swiftlint:disable:next optional_data_string_conversion
                                     return String(decoding: try await git(GitCall(kind: .file, path: path)), as: UTF8.self)
                                 }
                         }
+                    // The coercions restate the stored types: without them the
+                    // Swift 5 mode checker reads these @Sendable closures as
+                    // non-Sendable inside a view builder and warns.
                     case .repo(let root):
-                        GitBrowser(source: VigilGitSource(git: git, watch: watch, root: root), agent: agent(root))
+                        GitBrowser(source: VigilGitSource(git: git as PaneGitCall, watch: watch as PaneGitWatch, root: root),
+                                   agent: agent(root))
                             .id(root)
                     case .open:
-                        FolderBrowser(git: git, places: places) { root in
+                        FolderBrowser(git: git as PaneGitCall, places: places) { root in
                             if !roots.contains(root) { opened.append(root) }
                             shown = .repo(root)
                         }

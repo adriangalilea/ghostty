@@ -36,9 +36,8 @@ struct VigilNameCell<Fallback: View>: View {
                     .onExitCommand { editing = false }
                     .onAppear { focused = true }
                     // Clicking away commits, like every inline rename on
-                    // this platform. (Deployment target is 13, so this is
-                    // the single-argument onChange.)
-                    .onChange(of: focused) { now in if !now { commit() } }
+                    // this platform.
+                    .onChange(of: focused) { _, now in if !now { commit() } }
             } else {
                 Text(title)
                     .font(font)

@@ -35,11 +35,11 @@ extension VigilWorkspaces {
         /// The agent's conversation (its glance), while one runs there: its
         /// id (Claude's session id, what `c -r` and its logs name) and its
         /// name (what the agent's own UI calls it).
-        var conversation: String? = nil
-        var conversationName: String? = nil
+        var conversation: String?
+        var conversationName: String?
         /// What its agent runs in the background now (its glance): counted,
         /// with the first running task's title.
-        var background: PaneGlance.Background? = nil
+        var background: PaneGlance.Background?
 
         /// The ids we communicate by, each only where it exists: the
         /// pane's daemon id, its conversation's name and id.
@@ -86,7 +86,7 @@ extension VigilWorkspaces {
         /// A remote host's session (VigilRemote): the header text of the
         /// host group it sits under; nil = this Mac. Row ids of remote
         /// workspaces are `device/name`.
-        var host: String? = nil
+        var host: String?
 
         /// The ONE tab whose row the tree elides: a lone tab that carries
         /// no information of its own (no name, no face). A lone NAMED tab

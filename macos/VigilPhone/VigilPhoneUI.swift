@@ -1213,13 +1213,13 @@ struct PaneScreen: View {
                     do { return try await VigilPhone.shared.git(call, in: current) } catch {
                         throw PaneGitCallFailed(description: VigilLink.reason(error))
                     }
-                }, watch: { [phone = VigilPhone.shared, current] root in phone.gitChanges(root, in: current) }) { quote in
+                }, watch: { [phone = VigilPhone.shared, current] root in phone.gitChanges(root, in: current) }, quote: { quote in
                     setMode(.conversation)
                     conversation?.quote = quote.markdown
-                } show: { entry in
+                }, show: { entry in
                     setMode(.conversation)
                     conversation?.show(entry)
-                }
+                })
                 // Another pane is another Mac's question: read again.
                 .id(current)
             case .terminal:
@@ -1507,9 +1507,9 @@ struct PaneTitle: View {
     var body: some View {
         VStack(spacing: 1) {
             Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
-            (state.map { Text($0).foregroundStyle(tint) + Text(" · ") } ?? Text(""))
+            let lead = (state.map { Text("\(Text($0).foregroundStyle(tint)) · ") } ?? Text(""))
                 .font(.caption2.weight(.medium))
-                + Text(host).font(.caption2).foregroundStyle(.secondary)
+            Text("\(lead)\(Text(host).font(.caption2).foregroundStyle(.secondary))")
         }
         .lineLimit(1)
         .padding(.horizontal, 14).padding(.vertical, 6)

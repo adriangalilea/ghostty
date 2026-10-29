@@ -236,13 +236,17 @@ struct VigilIdentityEditor: View {
 
             HStack(spacing: 6) {
                 ForEach(recents.prefix(8), id: \.self) { emoji in
-                    Button(action: { draft.emoji = emoji }) {
+                    Button {
+                        draft.emoji = emoji
+                    } label: {
                         Text(emoji).font(.system(size: 13))
                     }
                     .buttonStyle(.plain)
                 }
                 Spacer(minLength: 0)
-                Button(action: { picking.toggle() }) {
+                Button {
+                    picking.toggle()
+                } label: {
                     Image(systemName: "face.smiling")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.secondary)
@@ -252,10 +256,10 @@ struct VigilIdentityEditor: View {
                 .popover(isPresented: $picking, arrowEdge: .bottom) {
                     emojiPicker
                 }
-                Button(action: {
+                Button {
                     focus = .emoji
                     NSApp.orderFrontCharacterPalette(nil)
-                }) {
+                } label: {
                     Image(systemName: "keyboard")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.secondary)
@@ -280,10 +284,10 @@ struct VigilIdentityEditor: View {
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 2), count: 10),
                       spacing: 2) {
                 ForEach(VigilIdentity.palette, id: \.self) { emoji in
-                    Button(action: {
+                    Button {
                         draft.emoji = emoji
                         picking = false
-                    }) {
+                    } label: {
                         Text(emoji)
                             .font(.system(size: 16))
                             .frame(width: 26, height: 26)
@@ -350,11 +354,16 @@ struct VigilEmojiPickerView: View {
                     .font(.system(size: 12))
                     .focused($searching)
                     .onSubmit {
-                        if let typed { onPick(typed) }
-                        else if let first = matches.first { onPick(first) }
+                        if let typed {
+                            onPick(typed)
+                        } else if let first = matches.first {
+                            onPick(first)
+                        }
                     }
                 if !query.isEmpty {
-                    Button(action: { query = "" }) {
+                    Button {
+                        query = ""
+                    } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
@@ -367,7 +376,9 @@ struct VigilEmojiPickerView: View {
 
             // A pasted or typed face is offered as itself, first.
             if let typed {
-                Button(action: { onPick(typed) }) {
+                Button {
+                    onPick(typed)
+                } label: {
                     HStack(spacing: 6) {
                         Text(typed).font(.system(size: 18))
                         Text("use this one").font(.system(size: 11)).foregroundColor(.secondary)
@@ -386,7 +397,9 @@ struct VigilEmojiPickerView: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 2), count: 10),
                           spacing: 2) {
                     ForEach(matches, id: \.self) { emoji in
-                        Button(action: { onPick(emoji) }) {
+                        Button {
+                            onPick(emoji)
+                        } label: {
                             Text(emoji)
                                 .font(.system(size: 16))
                                 .frame(width: 26, height: 26)

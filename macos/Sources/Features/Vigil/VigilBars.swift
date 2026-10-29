@@ -22,7 +22,7 @@ final class VigilBars {
         keyMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { event in
-            MainActor.assumeIsolated { VigilBars.shared.route(event) }
+            VigilBars.shared.route(event)
         }
         // A workspace sitting blocked is followed as soon as its vetoes
         // lift (the app active, another key window, control mode left),
@@ -151,7 +151,7 @@ final class VigilBars {
     }
 
     func toggleControlMode() {
-        controlMode ? exitControlMode() : enterControlMode()
+        if controlMode { exitControlMode() } else { enterControlMode() }
     }
 
     func enterControlMode() {
@@ -427,6 +427,6 @@ struct VigilSidebarToggle: View {
         }
         .padding(.leading, 8)
         .frame(height: 28)
-        .onChange(of: on) { shown in if !shown { sizing = false } }
+        .onChange(of: on) { _, shown in if !shown { sizing = false } }
     }
 }

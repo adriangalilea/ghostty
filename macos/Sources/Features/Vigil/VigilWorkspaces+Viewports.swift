@@ -10,7 +10,6 @@ import VigilWire
 extension VigilWorkspaces {
     // MARK: Floating (the quick terminal hosts one tab of a session)
 
-
     func quickController(create: Bool) -> QuickTerminalController? {
         guard let delegate = NSApp.delegate as? AppDelegate else { return nil }
         if !create && !delegate.quickControllerInitialized { return nil }
@@ -225,7 +224,6 @@ extension VigilWorkspaces {
         let pane: String
         let view: Ghostty.SurfaceView
     }
-
 
     func mirroredWorkspace(of controller: TerminalController) -> String? {
         mirrorViewports.object(forKey: controller) as String?
@@ -865,7 +863,6 @@ extension VigilWorkspaces {
         }
     }
 
-
     /// Swap WHICH tab of the CURRENT session this window displays: the
     /// mounted tab releases (its daemons keep its exact state), the captured
     /// tab materializes in place. The viewport rule, one level down.
@@ -1056,8 +1053,9 @@ extension VigilWorkspaces {
             return
         }
         if let view = liveView(attachId: paneId) {
-            for case let controller as TerminalController in dockMap.keyEnumerator() {
-                if closeDockTenantIfHosted(view, in: controller, withConfirmation: true) { return }
+            for case let controller as TerminalController in dockMap.keyEnumerator()
+            where closeDockTenantIfHosted(view, in: controller, withConfirmation: true) {
+                return
             }
             if let controller = view.window?.windowController as? TerminalController {
                 controller.closeSurface(view, withConfirmation: true)

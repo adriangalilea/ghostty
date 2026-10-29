@@ -16,7 +16,9 @@ struct VigilFaceButton<Fallback: View>: View {
     @State private var hovering = false
 
     var body: some View {
-        Button(action: { picking = true }) {
+        Button {
+            picking = true
+        } label: {
             HStack(spacing: 3 * scale) {
                 Group {
                     if let emoji, let first = emoji.first {

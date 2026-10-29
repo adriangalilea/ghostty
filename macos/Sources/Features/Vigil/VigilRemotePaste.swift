@@ -34,6 +34,7 @@ enum VigilRemotePaste {
         // text paste, as everywhere.
         if modifiers == .command, NSPasteboard.general.string(forType: .string) != nil { return false }
         let started = Date()
+        let like = KeyOrigin(event)
         DispatchQueue.global(qos: .userInitiated).async {
             let failure: String?
             do {
@@ -50,7 +51,7 @@ enum VigilRemotePaste {
                         "device": device, "bytes": png.count, "ms": Int(Date().timeIntervalSince(started) * 1000),
                     ])
                 }
-                pasteKey(into: surface, like: event)
+                pasteKey(into: surface, like: like)
             }
         }
         return true
@@ -66,11 +67,27 @@ enum VigilRemotePaste {
         return png
     }
 
+    /// What the synthesized ⌃V copies from the original key event, as values
+    /// that may cross to the main actor (an NSEvent may not).
+    private struct KeyOrigin: Sendable {
+        let location: NSPoint
+        let timestamp: TimeInterval
+        let windowNumber: Int
+        let keyCode: UInt16
+
+        init(_ event: NSEvent) {
+            location = event.locationInWindow
+            timestamp = event.timestamp
+            windowNumber = event.windowNumber
+            keyCode = event.keyCode
+        }
+    }
+
     /// ⌃V to the pane, as the keyboard would send it.
-    private static func pasteKey(into surface: Ghostty.SurfaceView, like event: NSEvent) {
+    private static func pasteKey(into surface: Ghostty.SurfaceView, like event: KeyOrigin) {
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             guard let key = NSEvent.keyEvent(
-                with: type, location: event.locationInWindow, modifierFlags: .control,
+                with: type, location: event.location, modifierFlags: .control,
                 timestamp: event.timestamp, windowNumber: event.windowNumber, context: nil,
                 characters: "\u{16}", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: event.keyCode)
             else { continue }

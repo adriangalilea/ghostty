@@ -65,7 +65,7 @@ class VigilWorkspaces {
         case .unwatchable(let folder): factsLog.error("folder not watched", ["folder": folder])
         case .slowRead(let revision, let elapsed): factsLog.warn("slow read", ["revision": revision, "elapsed": elapsed])
         }
-    }) { [weak self] snapshot in
+    }, deliver: { [weak self] snapshot in
         Task { @MainActor [weak self] in
             guard let self, snapshot.revision > self.facts.revision else { return }
             let sidebarChanged = snapshot.sidebarRevision != self.facts.sidebarRevision
@@ -86,7 +86,7 @@ class VigilWorkspaces {
             }
             if sidebarChanged { NotificationCenter.default.post(name: Self.stateDidChange, object: nil) }
         }
-    }
+    })
 
     /// One tab's live runtime while it has no window: its split tree (views
     /// alive, daemons attached) and its dock, if any. Held by the session's
@@ -294,7 +294,7 @@ class VigilWorkspaces {
         var label: String
         /// The session's face: 1–3 emoji, display-only ornament (never
         /// identity, same rule as the label). nil = none.
-        var emoji: String? = nil
+        var emoji: String?
         var cwd: String
         /// Warm view runtimes for tabs currently in NO window: a cache so
         /// re-display is instant (views alive, daemons attached). Display
@@ -304,7 +304,7 @@ class VigilWorkspaces {
         /// then rebuilds from `tabs` (resurrect).
         var held: [TabRuntime] = []
         /// Set while one tab rides the quick terminal.
-        var float: FloatRuntime? = nil
+        var float: FloatRuntime?
         var attention: Attention = .none
         var attentionSince: Date?
         /// THE REGISTRY: every pane this session owns, live or captured, one
@@ -323,7 +323,7 @@ class VigilWorkspaces {
         /// hidden, persisted; nil = the app-wide default (the last toggle
         /// anywhere). Per window, never global: toggling one window must
         /// not repaint another.
-        var sidebar: Bool? = nil
+        var sidebar: Bool?
         /// Loaded intent: this session had a WINDOW when the app last
         /// recorded it (crash or shutdown), so launch restores it as one.
         /// Detached-in-background workspaces load with this false and stay
@@ -589,7 +589,7 @@ class VigilWorkspaces {
         NotificationCenter.default.addObserver(
             forName: Self.stateDidChange, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.syncLocalMirrorLayouts()
+            MainActor.assumeIsolated { self?.syncLocalMirrorLayouts() }
         }
         // The summon engine subscribes to the same chokepoints; next tick,
         // never re-entrant with this init.
@@ -860,7 +860,7 @@ class VigilWorkspaces {
     /// dying with the husk); an emptied burial is dropped; a held runtime
     /// releases the pane's view so no two trees ever hold one daemon. The
     /// one primitive under every move and every re-claim.
-    func takePane(_ id: String) -> (pane: Registry.Pane, tabLabel: String?, tabEmoji: String?, origin: Registry.Origin?)? {
+    func takePane(_ id: String) -> TakenPane? {
         guard let at = locate(id) else { return nil }
         var session = (at.buried ? graveyard[at.owner] : workspaces[at.owner])!
         var tab = session.tabs[at.tab]
@@ -922,7 +922,16 @@ class VigilWorkspaces {
         // tab, or (the tab emptied) at the tab's position.
         let origin = at.buried ? nil : Registry.Origin(
             workspace: at.owner, tab: at.tab, beside: emptied ? nil : tab.panes.first?.id, dock: fromDock ? true : nil)
-        return (pane, emptied ? tab.label : nil, emptied ? tab.emoji : nil, origin)
+        return TakenPane(pane: pane, tabLabel: emptied ? tab.label : nil, tabEmoji: emptied ? tab.emoji : nil, origin: origin)
+    }
+
+    /// What `takePane` hands the taker: the pane, the emptied tab's name and
+    /// face (nil when the tab stays), and where it stood.
+    struct TakenPane {
+        let pane: Registry.Pane
+        let tabLabel: String?
+        let tabEmoji: String?
+        let origin: Registry.Origin?
     }
 
     /// One live view as a registry pane, carrying the remembered facts of
@@ -1386,8 +1395,8 @@ class VigilWorkspaces {
             guard window.isVisible || window.isMiniaturized else { continue }
             guard !controller.surfaceTree.isEmpty else { continue }
 
-            let existing = window.titlebarAccessoryViewControllers.enumerated()
-                .first { $0.element is VigilTitlebarAccessory }
+            let existing = window.titlebarAccessoryViewControllers
+                .first { $0 is VigilTitlebarAccessory }
 
             // native mode: the bar is ALWAYS visible (one height
             // everywhere). sidebar mode: no bar at
@@ -1419,15 +1428,19 @@ class VigilWorkspaces {
                 onEditIdentity: name.map { n in { VigilIdentity.editModal(name: n) } },
                 onTogglePin: { [weak self, weak controller] in
                     guard let controller else { return }
-                    if let name { self?.togglePinWorkspace(name) }
-                    else { self?.togglePin(controller); self?.persist() }
+                    if let name {
+                        self?.togglePinWorkspace(name)
+                    } else {
+                        self?.togglePin(controller)
+                        self?.persist()
+                    }
                 },
                 onToggleDock: name == nil ? nil : { [weak self, weak controller] in
                     guard let controller else { return }
                     self?.toggleDock(controller)
                 })
 
-            if let hosting = existing?.element.view as? NSHostingView<VigilWindowMark> {
+            if let hosting = existing?.view as? NSHostingView<VigilWindowMark> {
                 hosting.rootView = mark
                 hosting.setFrameSize(hosting.fittingSize)
             } else {
@@ -1530,7 +1543,6 @@ class VigilWorkspaces {
         }
     }
 }
-
 
 extension TerminalController {
     /// A new tab in an existing window hosting an EXISTING split tree: the

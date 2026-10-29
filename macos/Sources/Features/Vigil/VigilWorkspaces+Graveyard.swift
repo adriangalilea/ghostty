@@ -373,7 +373,6 @@ extension VigilWorkspaces {
         guard !ids.isEmpty else { return }
         let bin = Self.vigildBin
         let sorted = ids.sorted()
-        let stateDir = vigildStateDir
         let agentDir = agentStateDir
         DispatchQueue.global(qos: .userInitiated).async {
             let p = Process()
@@ -424,6 +423,8 @@ extension VigilWorkspaces {
             let status = try PaneBirth.run(["restore"], vouch: Self.vouch, output: handle, errors: handle)
             try? handle.close()
             let data = (try? Data(contentsOf: report)) ?? Data()
+            // Lossy on purpose: a bad byte reads as U+FFFD, the rest still reads.
+            // swiftlint:disable:next optional_data_string_conversion
             let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
             let respawned = lines.filter { $0.hasSuffix(" up") }.count
             if respawned > 0 || status != 0 {

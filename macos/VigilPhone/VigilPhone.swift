@@ -379,12 +379,12 @@ final class VigilPhone: ObservableObject {
         let id: String
         let kind: Kind
         let title: String
-        var subtitle: String? = nil
-        var emoji: String? = nil
+        var subtitle: String?
+        var emoji: String?
         /// A pane's own state as shown; nodes above carry the cluster.
-        var state: AgentState? = nil
+        var state: AgentState?
         /// Why a pane waits, when it waits.
-        var flavor: BlockFlavor? = nil
+        var flavor: BlockFlavor?
         var alive: Bool = true
         /// An agent (Claude, Codex) runs in the pane: it has a conversation
         /// to draw, and its screen opens on it.
@@ -393,10 +393,10 @@ final class VigilPhone: ObservableObject {
         /// only while that agent is the pane's program): its row draws it
         /// instead of a live terminal. nil: a shell, a command, a Mac whose
         /// broker publishes none; its row is the terminal, as ever.
-        var glance: PaneGlance? = nil
+        var glance: PaneGlance?
         /// A pane's state in the words every surface uses.
         var words: String { alive ? (state ?? .idle).words(flavor) : "Not running" }
-        var pane: PaneRef? = nil
+        var pane: PaneRef?
         /// The owner's grid, for the row's live preview.
         var rows: Int = 0
         var cols: Int = 0
@@ -404,20 +404,20 @@ final class VigilPhone: ObservableObject {
         /// A pane's place in words that tell it apart from every other pane
         /// on its Mac (`Directory.path`, the one rule): what a row outside the
         /// tree (Following, Switch to, the pane screen) calls it.
-        var path: String? = nil
+        var path: String?
         /// A pane's priority when it is not normal (high rings through
         /// Focus, low never rings), as the Mac's sidebar marks it.
-        var priority: Registry.Priority? = nil
+        var priority: Registry.Priority?
         /// A pane open on another Mac right now.
         var onAnotherMac: Bool = false
         /// The pane following this row follows (pane rows only: a follow is
         /// a pane, whatever runs in it).
-        var followPane: String? = nil
+        var followPane: String?
         /// The pane a new tab or split made from this row stands beside (a
         /// workspace's: its last tab's first pane, so a new tab goes last;
         /// a tab's: its first pane; a pane's: itself). nil for a dock
         /// tenant, which anchors neither, and for a Mac.
-        var anchor: String? = nil
+        var anchor: String?
         var children: [Node] = []
 
         /// The Mac's tether root (every id below a Mac starts with it).
@@ -1034,6 +1034,8 @@ final class VigilPhone: ObservableObject {
     /// Presses one of the agent's keys in its pane; the Mac's account of
     /// what it did (it checks each step against the transcript).
     func press(_ key: PaneKey, in ref: PaneRef) async throws -> String {
+        // Lossy on purpose: a bad byte reads as U+FFFD, the rest still reads.
+        // swiftlint:disable:next optional_data_string_conversion
         let said = String(decoding: try await VigilLink.call(linked(), device: ref.host.id, .key(ref.pane, key)), as: UTF8.self)
         receipts.info("feed", "key pressed", ["mac": ref.host.name, "pane": ref.pane, "key": key.rawValue, "said": said])
         return said

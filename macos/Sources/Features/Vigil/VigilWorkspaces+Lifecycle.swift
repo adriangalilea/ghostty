@@ -983,8 +983,11 @@ extension VigilWorkspaces {
             return
         }
         if source == target {
-            isDock ? moveLog.info("dock tenant already in its workspace", ["pane": paneId, "workspace": source])
-                : splitOut(paneId: paneId, in: source)
+            if isDock {
+                moveLog.info("dock tenant already in its workspace", ["pane": paneId, "workspace": source])
+            } else {
+                splitOut(paneId: paneId, in: source)
+            }
             return
         }
         var vacatedController: TerminalController?

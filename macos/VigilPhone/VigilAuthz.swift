@@ -168,11 +168,16 @@ final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
     }
 
     /// A question answered, withdrawn or expired elsewhere: its
-    /// notification goes.
-    func application(_ application: UIApplication, didReceiveRemoteNotification info: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
-        guard let id = RequestNotification.retraction(info) else { return .noData }
+    /// notification goes. The completion form, run where UIKit calls it
+    /// (main) and finished there: the payload is not Sendable, so it never
+    /// crosses to another actor, as the async form would make it.
+    nonisolated func application(
+        _ application: UIApplication, didReceiveRemoteNotification info: [AnyHashable: Any],
+        fetchCompletionHandler completion: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        guard let id = RequestNotification.retraction(info) else { return completion(.noData) }
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
-        return .newData
+        completion(.newData)
     }
 
     /// Open, the app is the surface: the notification only joins the list.

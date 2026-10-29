@@ -113,7 +113,7 @@ final class VigilSidebarHost: NSVisualEffectView {
                 model.exitHintMode()
                 model.onLeaveControl?()
             case 36: // return: commit the typed hint, else the selection
-                model.hintBuffer.isEmpty ? model.activateSelection() : model.commitHint()
+                if model.hintBuffer.isEmpty { model.activateSelection() } else { model.commitHint() }
             case 41: model.jumpAttention()  // ; = attention head
             case 126: model.move(-1)
             case 125: model.move(1)
@@ -269,8 +269,11 @@ final class VigilSidebarModel: ObservableObject {
         // preview. Staleness guard: a drag cancelled OUTSIDE the bar (no
         // delegate fires) un-dims and reverts within a tick or two.
         if draggingItem != nil {
-            if Date().timeIntervalSince(dragStarted) > 3 { draggingItem = nil }
-            else { return }
+            if Date().timeIntervalSince(dragStarted) > 3 {
+                draggingItem = nil
+            } else {
+                return
+            }
         }
         let snapT0 = Date()
         let fresh = VigilWorkspaces.shared.sidebarSnapshot()

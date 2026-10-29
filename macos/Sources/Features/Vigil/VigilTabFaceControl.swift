@@ -130,9 +130,7 @@ enum VigilTabFaces {
     private static func installMonitorOnce() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
-            MainActor.assumeIsolated {
-                handleClick(event) ? nil : event
-            }
+            handleClick(event) ? nil : event
         }
     }
 
