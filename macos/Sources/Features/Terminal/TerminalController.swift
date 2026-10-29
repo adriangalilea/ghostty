@@ -728,6 +728,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// registry knows.
     var vigilOwnsLifecycle: Bool { surfaceTree.contains(where: \.isVigilPane) }
 
+    /// vigil: a workspace's tab, or a mirror of one: it closes only through
+    /// vigil (closeTab, closeWindow), never through upstream's immediate
+    /// closes that another tab of its window may start ("Close Other Tabs"
+    /// from a tab of no workspace).
+    var vigilClosesItself: Bool {
+        VigilWorkspaces.shared.workspaceName(of: self) != nil
+            || VigilWorkspaces.shared.mirroredWorkspace(of: self) != nil
+    }
+
     /// This is called anytime a node in the surface tree is being removed.
     override func closeSurface(
         _ node: SplitTree<Ghostty.SurfaceView>.Node,
@@ -751,8 +760,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // included: buried with its undo, asked only when something
             // runs. Upstream's immediate close would take it out from under
             // the registry; it stays for windows of no workspace.
-            if withConfirmation || VigilWorkspaces.shared.workspaceName(of: self) != nil
-                || VigilWorkspaces.shared.mirroredWorkspace(of: self) != nil {
+            if withConfirmation || vigilClosesItself {
                 closeTab(nil)
             } else {
                 closeTabImmediately()
@@ -824,7 +832,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // We ignore any non-terminal tabs. They don't currently exist and we can't
             // properly undo them anyways so I'd rather ignore them and get a bug report
             // later if and when we introduce non-terminal tabs.
-            if let controller = window.windowController as? TerminalController {
+            if let controller = window.windowController as? TerminalController,
+               !controller.vigilClosesItself {
                 // We must not register a redo, because it messes with our own redo
                 // that we register later.
                 controller.closeTabImmediately(registerRedo: false)
@@ -869,7 +878,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         for (_, candidate) in tabsToClose {
-            if let controller = candidate.windowController as? TerminalController {
+            if let controller = candidate.windowController as? TerminalController,
+               !controller.vigilClosesItself {
                 controller.closeTabImmediately(registerRedo: false)
             }
         }

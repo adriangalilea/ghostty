@@ -199,8 +199,7 @@ final class ScriptWindow: NSObject {
             // vigil: a workspace's window closes as its red button does
             // (detached, nothing dies); upstream's immediate close would
             // empty every tab's tree, which vigil reads as panes closed.
-            if VigilWorkspaces.shared.workspaceName(of: managedTerminalController) != nil
-                || VigilWorkspaces.shared.mirroredWorkspace(of: managedTerminalController) != nil {
+            if managedTerminalController.vigilClosesItself {
                 managedTerminalController.closeWindow(nil)
                 return nil
             }
