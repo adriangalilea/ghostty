@@ -373,6 +373,12 @@ fn drainMailbox(
                     self.flags.linefeed_mode,
                 );
             },
+            .reply_small => |v| try io.queueReply(data, v.data[0..v.len], self.flags.linefeed_mode),
+            .reply_stable => |v| try io.queueReply(data, v, self.flags.linefeed_mode),
+            .reply_alloc => |v| {
+                defer v.alloc.free(v.data);
+                try io.queueReply(data, v.data, self.flags.linefeed_mode);
+            },
         }
     }
 

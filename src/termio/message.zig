@@ -110,6 +110,16 @@ pub const Message = union(enum) {
     /// Write where the data is allocated and must be freed.
     write_alloc: WriteReq.Alloc,
 
+    /// vigil: writes the terminal itself makes (an answer to a program's
+    /// query, a report a mode asked for), never a person's input; one per
+    /// write variant, as flat as theirs (the message's size is guarded).
+    /// Exec writes them like any other; the attach backend sends them as
+    /// their own frame, so a pane on several screens hears them from one
+    /// viewer (the size owner, vigild's rule) instead of from every one.
+    reply_small: WriteReq.Small,
+    reply_stable: WriteReq.Stable,
+    reply_alloc: WriteReq.Alloc,
+
     /// The payload of the kitty_clipboard_grant_* messages. The
     /// password is allocated and must be freed.
     pub const KittyClipboardGrant = struct {
@@ -128,6 +138,17 @@ pub const Message = union(enum) {
         };
     }
 
+    /// vigil: the same write as the terminal's own `reply`; any other
+    /// message unchanged.
+    pub fn asReply(self: Message) Message {
+        return switch (self) {
+            .write_small => |v| .{ .reply_small = v },
+            .write_stable => |v| .{ .reply_stable = v },
+            .write_alloc => |v| .{ .reply_alloc = v },
+            else => self,
+        };
+    }
+
     /// Free resources owned by a message that will not be processed.
     /// The message is invalid after this call.
     pub fn deinit(self: *const Message) void {
@@ -136,7 +157,7 @@ pub const Message = union(enum) {
                 v.ptr.deinit();
                 v.alloc.destroy(v.ptr);
             },
-            .write_alloc => |v| v.alloc.free(v.data),
+            .write_alloc, .reply_alloc => |v| v.alloc.free(v.data),
             .kitty_clipboard_grant_read,
             .kitty_clipboard_grant_write,
             => |v| v.alloc.free(v.pw),

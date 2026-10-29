@@ -1000,6 +1000,9 @@ fn queueIo(
             .write_small,
             .write_stable,
             .write_alloc,
+            .reply_small,
+            .reply_stable,
+            .reply_alloc,
             => {
                 msg.deinit();
                 return;
@@ -1145,9 +1148,9 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
 
             // We always use an allocating message because we don't know
             // the length of the title and this isn't a performance critical
-            // path.
+            // path. (vigil: the terminal's reply, termio.Message.reply.)
             self.queueIo(.{
-                .write_alloc = .{
+                .reply_alloc = .{
                     .alloc = self.alloc,
                     .data = data,
                 },
@@ -6534,7 +6537,8 @@ fn completeClipboardReadOSC52(
     const encoded = enc.encode(buf[prefix.len..], data);
     assert(encoded.len == size);
 
-    self.queueIo(.{ .write_alloc = .{
+    // vigil: the terminal's reply (termio.Message.reply).
+    self.queueIo(.{ .reply_alloc = .{
         .alloc = self.alloc,
         .data = buf,
     } }, .unlocked);
@@ -6645,7 +6649,8 @@ fn kittyClipboardStatus(
         .terminator = terminator,
     }).encode(&aw.writer);
 
-    self.queueIo(.{ .write_alloc = .{
+    // vigil: the terminal's reply (termio.Message.reply).
+    self.queueIo(.{ .reply_alloc = .{
         .alloc = self.alloc,
         .data = try aw.toOwnedSlice(),
     } }, .unlocked);
@@ -6701,7 +6706,8 @@ fn completeKittyClipboardRead(
         .terminator = req.terminator,
     }).encode(&aw.writer);
 
-    self.queueIo(.{ .write_alloc = .{
+    // vigil: the terminal's reply (termio.Message.reply).
+    self.queueIo(.{ .reply_alloc = .{
         .alloc = self.alloc,
         .data = try aw.toOwnedSlice(),
     } }, .unlocked);

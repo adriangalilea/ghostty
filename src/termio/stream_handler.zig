@@ -149,7 +149,9 @@ pub const StreamHandler = struct {
     }
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
-        self.termio_mailbox.send(msg, self.renderer_state.mutex);
+        // vigil: every write the parser makes answers the program (it never
+        // carries a person's input): sent as the terminal's own reply.
+        self.termio_mailbox.send(msg.asReply(), self.renderer_state.mutex);
         self.termio_messaged = true;
     }
 
@@ -2011,8 +2013,9 @@ test "kitty clipboard write: oversized text replies EFBIG" {
     try testing.expect(response != null);
     const msg = response.?;
     defer msg.deinit();
+    // vigil: the parser's writes reach the mailbox as the terminal's reply.
     switch (msg) {
-        .write_alloc => |v| try testing.expectEqualStrings(
+        .reply_alloc => |v| try testing.expectEqualStrings(
             "\x1B]5522;type=write:status=EFBIG:id=macos\x1B\\",
             v.data,
         ),

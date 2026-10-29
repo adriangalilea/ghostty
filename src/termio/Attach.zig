@@ -334,7 +334,9 @@ fn sendHello(self: *Attach, kind: []const u8) void {
     var buf: [64]u8 = undefined;
     // "mirror" tells the daemon this client never adopts the size unowned:
     // it renders whatever grid the owner has and claims only explicitly.
-    const hello = std.mem.print(&buf, "{s} ghostty:{d}/{x}{s}", .{ kind, std.c.getpid(), self.client_id, if (self.explicit_claim) " mirror" else "" }) catch return;
+    // "replies": this terminal's own words come as 'a' frames, apart from
+    // keystrokes (queueReply), so vigild takes them from one viewer.
+    const hello = std.mem.print(&buf, "{s} ghostty:{d}/{x} replies{s}", .{ kind, std.c.getpid(), self.client_id, if (self.explicit_claim) " mirror" else "" }) catch return;
     self.enqueueFrame('h', hello);
 }
 
@@ -796,13 +798,25 @@ pub fn queueWrite(
 ) !void {
     _ = alloc;
     _ = td;
+    self.queueFrames('d', data, linefeed);
+}
+
+/// The terminal's own words (an answer to a query, a report a mode asked
+/// for) as 'a' frames: vigild types them only from the pane's size owner,
+/// so a pane on several screens answers once (PROTOCOL.md).
+pub fn queueReply(self: *Attach, data: []const u8, linefeed: bool) void {
+    self.queueFrames('a', data, linefeed);
+}
+
+/// `data` as frames of `typ`, each at most a frame's payload.
+fn queueFrames(self: *Attach, typ: u8, data: []const u8, linefeed: bool) void {
     if (self.write_fd < 0) return;
 
     if (!linefeed) {
         var i: usize = 0;
         while (i < data.len) {
             const end = @min(data.len, i + 0xffff);
-            self.enqueueFrame('d', data[i..end]);
+            self.enqueueFrame(typ, data[i..end]);
             i = end;
         }
         return;
@@ -813,7 +827,7 @@ pub fn queueWrite(
     var buf_i: usize = 0;
     for (data) |ch| {
         if (buf_i >= buf.len - 1) {
-            self.enqueueFrame('d', buf[0..buf_i]);
+            self.enqueueFrame(typ, buf[0..buf_i]);
             buf_i = 0;
         }
         buf[buf_i] = ch;
@@ -823,7 +837,7 @@ pub fn queueWrite(
             buf_i += 1;
         }
     }
-    if (buf_i > 0) self.enqueueFrame('d', buf[0..buf_i]);
+    if (buf_i > 0) self.enqueueFrame(typ, buf[0..buf_i]);
 }
 
 pub fn childExitedAbnormally(

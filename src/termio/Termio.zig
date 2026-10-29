@@ -464,6 +464,17 @@ pub inline fn queueWrite(
     try self.backend.queueWrite(self.alloc, td, data, linefeed);
 }
 
+/// vigil: queueWrite for the terminal's own words (an answer, a report),
+/// never a person's input (termio.Message.reply).
+pub inline fn queueReply(
+    self: *Termio,
+    td: *ThreadData,
+    data: []const u8,
+    linefeed: bool,
+) !void {
+    try self.backend.queueReply(self.alloc, td, data, linefeed);
+}
+
 /// Update the configuration.
 pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !void {
     // The remainder of this function is modifying terminal state or
@@ -591,7 +602,7 @@ fn sizeReportLocked(self: *Termio, td: *ThreadData, style: termio.Message.SizeRe
         report_size,
     );
 
-    try self.queueWrite(td, writer.buffered(), false);
+    try self.queueReply(td, writer.buffered(), false);
 }
 
 /// Reset the synchronized output mode. This is usually called by timer
@@ -694,7 +705,7 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
             log.err("error encoding focus event err={}", .{err});
             return;
         };
-        try self.queueWrite(td, writer.buffered(), false);
+        try self.queueReply(td, writer.buffered(), false);
     }
 
     // We always notify our backend of focus changes.
@@ -796,7 +807,7 @@ pub fn colorSchemeReportLocked(self: *Termio, td: *ThreadData, force: bool) !voi
     var buf: [terminalpkg.device_status.max_color_scheme_report_encode_size]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try terminalpkg.device_status.encodeColorSchemeReport(&writer, scheme);
-    try self.queueWrite(td, writer.buffered(), false);
+    try self.queueReply(td, writer.buffered(), false);
 }
 
 /// Sends a visibility report to the pty. Unforced reports are only sent while
@@ -820,7 +831,7 @@ pub fn visibilityReport(
         &writer,
         if (visible) .potentially_visible else .not_visible,
     );
-    try self.queueWrite(td, writer.buffered(), false);
+    try self.queueReply(td, writer.buffered(), false);
 }
 
 /// ThreadData is the data created and stored in the termio thread

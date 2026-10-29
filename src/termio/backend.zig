@@ -131,6 +131,22 @@ pub const Backend = union(Kind) {
         }
     }
 
+    /// vigil: the terminal's own words (termio.Message.reply). Exec's pty
+    /// has one terminal, so a reply is a write; the attach backend sends
+    /// its own frame for vigild to take from one viewer.
+    pub fn queueReply(
+        self: *Backend,
+        alloc: Allocator,
+        td: *termio.Termio.ThreadData,
+        data: []const u8,
+        linefeed: bool,
+    ) !void {
+        switch (self.*) {
+            .exec => |*exec| try exec.queueWrite(alloc, td, data, linefeed),
+            .attach => |*attach| attach.queueReply(data, linefeed),
+        }
+    }
+
     pub fn childExitedAbnormally(
         self: *Backend,
         gpa: Allocator,
