@@ -1,5 +1,4 @@
 import AppKit
-import Earcon
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -124,7 +123,7 @@ final class VigilSidebarHost: NSVisualEffectView {
                    chars.count == 1, chars.first!.isLetter {
                     model.hintType(chars)
                 } else {
-                    _ = Earcon.knock.play()
+                    VigilSummon.cue(.knock)
                 }
             }
             return
@@ -372,7 +371,7 @@ final class VigilSidebarModel: ObservableObject {
     func hintType(_ char: String) {
         let candidate = hintBuffer + char
         guard hintLabels.contains(where: { $0.value.hasPrefix(candidate) }) else {
-            _ = Earcon.knock.play() // invalid letter: ignored, buffer stands
+            VigilSummon.cue(.knock) // invalid letter: ignored, buffer stands
             return
         }
         hintBuffer = candidate
@@ -415,7 +414,7 @@ final class VigilSidebarModel: ObservableObject {
         if let exact = hintLabels.first(where: { $0.value == hintBuffer }) {
             activateHint(exact.key)
         } else {
-            _ = Earcon.knock.play()
+            VigilSummon.cue(.knock)
         }
     }
 
@@ -430,7 +429,7 @@ final class VigilSidebarModel: ObservableObject {
     func jumpAttention() {
         exitHintMode()
         guard let name = VigilWorkspaces.shared.mostUrgentName else {
-            _ = Earcon.knock.play()
+            VigilSummon.cue(.knock)
             return
         }
         selection = name

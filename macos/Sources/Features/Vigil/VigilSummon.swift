@@ -132,19 +132,23 @@ final class VigilSummon {
     /// The waiting cue, the earcon family's own (two notes rising): only
     /// for a blocker nothing narrates. No system sound: the machine's own
     /// voice is the earcon family.
-    static func chime() {
-        if !Earcon.waiting.play() {
-            summonLog.error("waiting cue silent: output player refused")
-        }
-    }
+    static func chime() { cue(.waiting) }
 
     /// The attention pair's falling half: an agent finished on a pane you
     /// cannot see (a visible ending is seen; news is what you cannot see).
-    static func doneChime() {
-        if !Earcon.ended.play() {
-            summonLog.error("ended cue silent: output player refused")
+    static func doneChime() { cue(.ended) }
+
+    /// Every cue vigil plays, played off the main thread: `AVAudioPlayer.play`
+    /// waits for the output device to start when it was idle, and on main
+    /// that froze the app 650 ms per turn-end chime (the watchdog's stacks,
+    /// 2026-10-26 to 10-30). One serial queue keeps cues in the order asked;
+    /// the receipt is still the player's own answer.
+    nonisolated static func cue(_ earcon: Earcon) {
+        cues.async {
+            if !earcon.play() { summonLog.error("\(earcon.rawValue) cue silent: output player refused") }
         }
     }
+    nonisolated private static let cues = DispatchQueue(label: "vigil.cues", qos: .userInteractive)
 
     private func announce() {
         let manager = VigilWorkspaces.shared
