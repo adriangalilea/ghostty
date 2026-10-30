@@ -16,7 +16,7 @@ struct VigilPhoneApp: App {
         Record.keep(service: "vigil-phone")
         _core = StateObject(wrappedValue: TerminalCore())
         // A made-up tree is in place before the first frame.
-        if VigilFixture.asked == .home { VigilPhone.shared.fixture(VigilFixtureView.home) }
+        if VigilFixture.asked == .home { VigilPhone.shared.fixture(VigilFixtureView.home, folded: VigilFixtureView.homeFolded) }
     }
 
     var body: some Scene {

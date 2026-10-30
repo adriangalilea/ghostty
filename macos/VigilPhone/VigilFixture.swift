@@ -418,17 +418,31 @@ extension VigilFixtureView {
                                     rows: 40, cols: 120, path: "minerlab › fish", followPane: "vigil-lively-harbor-93",
                                     anchor: "vigil-lively-harbor-93")
         let older = agent("vigil-lively-harbor-94", "claude", .working, glance: nil)
+        // A launch that failed while nobody looked: it stays, marked.
+        func ended(_ pane: String, _ title: String, code: Int?, signal: Int?, ago: Double, _ command: String) -> VigilPhone.Node {
+            VigilPhone.Node(id: "fixture/lively-harbor/\(pane)", kind: .pane, title: title, alive: false,
+                            ended: PaneEnd(code: code, signal: signal, closed: false, at: now - ago,
+                                           argv: ["/opt/homebrew/bin/fish", "-lc", command], cwd: "/Users/you/minerlab"),
+                            path: "minerlab › \(title)", followPane: pane, anchor: pane)
+        }
+        let failed = ended("vigil-lively-harbor-95", "ssh", code: 255, signal: nil, ago: 420,
+                           "ssh ml-research-1 systemd-run --user --unit=codex-fit codex exec")
+        let killed = ended("vigil-lively-harbor-96", "python3", code: nil, signal: 9, ago: 1800, "python3 train.py")
         var workspace = VigilPhone.Node(id: "fixture/lively-harbor", kind: .workspace, title: "minerlab", emoji: "⛏️",
                                         anchor: "vigil-lively-harbor-93")
         workspace.children = [
             tab(0, "scorer", [codex]),
             tab(1, "minerlab 1", [waiting, asked]),
-            tab(2, "minerlab 2", [done, shell, older]),
+            tab(2, "minerlab 2", [done, shell, older, failed]),
+            tab(3, "training", [killed]),
         ]
         var mac = VigilPhone.Node(id: "host:fixture", kind: .host, title: Self.mac)
         mac.children = [workspace]
         return [mac]
     }()
+
+    /// The "training" tab folded: its ended pane rolls up into its row.
+    static let homeFolded: Set<String> = ["fixture/lively-harbor/t3"]
 }
 
 // MARK: - A conversation, made up

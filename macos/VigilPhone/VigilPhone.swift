@@ -386,6 +386,10 @@ final class VigilPhone: ObservableObject {
         /// Why a pane waits, when it waits.
         var flavor: BlockFlavor?
         var alive: Bool = true
+        /// Its program ended badly and nobody opened it yet (`PaneEnd`, the
+        /// Mac sidebar's red mark): it stays listed until opened or closed
+        /// on its Mac.
+        var ended: PaneEnd?
         /// An agent (Claude, Codex) runs in the pane: it has a conversation
         /// to draw, and its screen opens on it.
         var agent: Bool = false
@@ -395,7 +399,7 @@ final class VigilPhone: ObservableObject {
         /// broker publishes none; its row is the terminal, as ever.
         var glance: PaneGlance?
         /// A pane's state in the words every surface uses.
-        var words: String { alive ? (state ?? .idle).words(flavor) : "Not running" }
+        var words: String { alive ? (state ?? .idle).words(flavor) : ended.map { "Ended, \($0.how)" } ?? "Not running" }
         var pane: PaneRef?
         /// The owner's grid, for the row's live preview.
         var rows: Int = 0
@@ -432,6 +436,8 @@ final class VigilPhone: ObservableObject {
         var cluster: [AgentState] {
             AgentState.cluster(leaves.filter(\.alive).map { $0.state ?? .idle })
         }
+        /// The ended panes under this one, the row's red mark when folded.
+        var ends: [PaneEnd] { leaves.compactMap(\.ended) }
         /// Every pane node under this one.
         var leaves: [Node] {
             if kind == .pane { return [self] }
@@ -448,7 +454,10 @@ final class VigilPhone: ObservableObject {
 
     /// A made-up tree, for review only (`VigilFixture`): nothing is
     /// followed or dialed for it.
-    func fixture(_ tree: [Node]) { nodes = tree }
+    func fixture(_ tree: [Node], folded: Set<String> = []) {
+        nodes = tree
+        collapsed = folded
+    }
 
     // MARK: Following: a pane on the Lock Screen
 
@@ -887,6 +896,7 @@ final class VigilPhone: ObservableObject {
                                 state: truth?.shown,
                                 flavor: truth?.shown == .blocked ? truth?.token?.flavor : nil,
                                 alive: alive,
+                                ended: alive ? nil : truth?.ended,
                                 agent: alive && Program.runsAgent(truth?.tree ?? []),
                                 glance: alive ? truth?.meaning : nil,
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: path) : nil,

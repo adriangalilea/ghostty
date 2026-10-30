@@ -363,7 +363,13 @@ struct TreeNodeView: View {
             }
             Spacer(minLength: 4)
             if node.kind == .pane && !node.alive {
-                Text("Not running").font(.caption2).foregroundStyle(.tertiary)
+                if let ended = node.ended {
+                    EndedMark(ends: [ended])
+                } else {
+                    Text("Not running").font(.caption2).foregroundStyle(.tertiary)
+                }
+            } else if node.kind != .pane && folded {
+                EndedMark(ends: node.ends)
             }
             // A glance row wears its state as its glyph.
             if node.glance == nil { cluster }
@@ -501,6 +507,36 @@ struct TreeNodeView: View {
         .frame(minWidth: 8)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(states.map(\.words).joined(separator: ", "))
+    }
+}
+
+// MARK: - Ended mark
+
+/// A program that ended badly while nobody looked, as the Mac's sidebar
+/// marks it: red, how it ended for one pane, how many for a folded row (so
+/// folding never hides one). It is opened or closed on its Mac, where its
+/// final screen is.
+struct EndedMark: View {
+    let ends: [PaneEnd]
+
+    var body: some View {
+        if !ends.isEmpty {
+            HStack(spacing: 3) {
+                Image(systemName: "xmark.octagon.fill")
+                Text(ends.count == 1 ? "Ended · \(ends[0].how) · \(Self.time(ends[0].at))" : "\(ends.count) ended")
+                    .lineLimit(1)
+            }
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.red)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(ends.count == 1
+                ? "Its program ended, \(ends[0].how), at \(Self.time(ends[0].at)): \(ends[0].program)"
+                : "\(ends.count) programs ended")
+        }
+    }
+
+    private static func time(_ at: Double) -> String {
+        Date(timeIntervalSince1970: at).formatted(date: .omitted, time: .shortened)
     }
 }
 
