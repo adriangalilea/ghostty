@@ -280,7 +280,17 @@ final class VigilSidebarModel: ObservableObject {
         if snapshotTook > .milliseconds(25) {
             sidebarLog.info("snapshot slow", ["took": snapshotTook])
         }
-        if fresh != rows { rows = fresh }
+        if fresh != rows {
+            // Each dot that moves, as this sidebar draws it: with the facts'
+            // own "state taken" line, a dot that lags its file names the
+            // step it lagged in (2026-10-30, two dots stale for minutes).
+            let before = Dictionary(rows.flatMap(\.tabs).flatMap(\.panes).map { ($0.id, $0.state) }, uniquingKeysWith: { a, _ in a })
+            for pane in fresh.flatMap(\.tabs).flatMap(\.panes) where before[pane.id].map({ $0 != pane.state }) ?? false {
+                sidebarLog.info("dot", ["pane": pane.id, "was": before[pane.id]??.rawValue ?? "none",
+                                         "now": pane.state?.rawValue ?? "none"])
+            }
+            rows = fresh
+        }
         let freshBurials = VigilWorkspaces.shared.sidebarBurials()
         if freshBurials != burials { burials = freshBurials }
         let hint = VigilWorkspaces.shared.nextAskHint()

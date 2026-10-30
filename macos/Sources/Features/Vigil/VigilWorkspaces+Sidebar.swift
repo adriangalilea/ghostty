@@ -40,6 +40,8 @@ extension VigilWorkspaces {
         /// What its agent runs in the background now (its glance): counted,
         /// with the first running task's title.
         var background: PaneGlance.Background?
+        /// Its program ended badly and nobody opened it yet (`PaneEnd`).
+        var ended: PaneEnd?
 
         /// The ids we communicate by, each only where it exists: the
         /// pane's daemon id, its conversation's name and id.
@@ -184,7 +186,8 @@ extension VigilWorkspaces {
                 priority: pane.priority ?? .normal,
                 conversation: meaning?.conversation,
                 conversationName: meaning?.title,
-                background: meaning?.background)
+                background: meaning?.background,
+                ended: facts.ended)
         }
 
         var rows: [SidebarWorkspaceRow] = []
@@ -285,18 +288,29 @@ extension VigilWorkspaces {
     /// it): read by the broker for every request it files from then on and
     /// by the hub's board for how loudly a followed pane rings.
     func setPriority(pane: String, _ priority: Registry.Priority) {
+        guard editPane(pane, { $0.priority = priority == .normal ? nil : priority }) else {
+            return sidebarLog.error("priority not stored: nothing owns the pane", ["pane": pane])
+        }
+        sidebarLog.info("priority set", ["pane": pane, "priority": priority.rawValue])
+        persist()
+    }
+
+    /// Edit a pane where the registry holds it (a tab's split or its dock),
+    /// in any workspace. False when nothing owns it.
+    @discardableResult
+    func editPane(_ pane: String, _ edit: (inout Registry.Pane) -> Void) -> Bool {
         var landed = false
         for (name, session) in workspaces {
             var tabs = session.tabs
             var hit = false
             for index in tabs.indices {
                 for pindex in tabs[index].panes.indices where tabs[index].panes[pindex].id == pane {
-                    tabs[index].panes[pindex].priority = priority == .normal ? nil : priority
+                    edit(&tabs[index].panes[pindex])
                     hit = true
                 }
                 if var dock = tabs[index].dock {
                     for dindex in dock.panes.indices where dock.panes[dindex].id == pane {
-                        dock.panes[dindex].priority = priority == .normal ? nil : priority
+                        edit(&dock.panes[dindex])
                         hit = true
                     }
                     tabs[index].dock = dock
@@ -308,9 +322,7 @@ extension VigilWorkspaces {
                 landed = true
             }
         }
-        guard landed else { return sidebarLog.error("priority not stored: nothing owns the pane", ["pane": pane]) }
-        sidebarLog.info("priority set", ["pane": pane, "priority": priority.rawValue])
-        persist()
+        return landed
     }
 
     func priority(ofPane pane: String) -> Registry.Priority {

@@ -409,7 +409,10 @@ struct VigilSidebarView: View {
             .opacity(row.stateTag == "windowed" ? 1 : 0.85)
             Spacer(minLength: 4)
             // Folded, who looks from elsewhere rolls up: a peek is never hidden.
-            if collapsed { lookerGlyphs(row.tabs.flatMap(\.panes).flatMap(\.lookers)) }
+            if collapsed {
+                endedRollup(row.tabs.flatMap(\.panes))
+                lookerGlyphs(row.tabs.flatMap(\.panes).flatMap(\.lookers))
+            }
             followKeycap(id)
             // No lifecycle tag on the row: every session is ALIVE by
             // construction (daemons carry it); the only honest distinction
@@ -526,7 +529,10 @@ struct VigilSidebarView: View {
                     .background(Capsule().fill(Color.primary.opacity(0.08)))
             }
             Spacer(minLength: 4)
-            if collapsed { lookerGlyphs(tab.panes.flatMap(\.lookers)) }
+            if collapsed {
+                endedRollup(tab.panes)
+                lookerGlyphs(tab.panes.flatMap(\.lookers))
+            }
             followKeycap(tab.id)
             // The tab's class slot is free; collapsed, it wears the
             // descendants' antenna so a listener never vanishes.
@@ -807,6 +813,7 @@ struct VigilSidebarView: View {
     /// it, its priority (high rings through Focus, low never rings).
     private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         HStack(spacing: 3 * scale) {
+            if let ended = pane.ended { endedMark([ended]) }
             if let background = pane.background { backgroundMark(background) }
             lookerGlyphs(pane.lookers)
             if pane.followed {
@@ -819,6 +826,38 @@ struct VigilSidebarView: View {
             }
         }
     }
+
+    /// A program that ended badly while nobody looked: red, with how (one
+    /// pane) or how many (a folded tab or workspace, so collapse never hides
+    /// it). Hovering says how and when each ended and what it ran; opening
+    /// the pane shows its final screen, closing it clears it.
+    @ViewBuilder
+    private func endedMark(_ ends: [PaneEnd]) -> some View {
+        if !ends.isEmpty {
+            HStack(spacing: 1) {
+                Image(systemName: "xmark.octagon.fill").font(.system(size: 8 * scale, weight: .semibold))
+                Text(ends.count == 1 ? ends[0].how : "\(ends.count) ended")
+                    .font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.red)
+            .help((ends.map { end in
+                "Its program ended, \(end.how), at \(Self.endTime.string(from: Date(timeIntervalSince1970: end.at))): \(end.program)"
+            } + ["Open it to see its final screen; close it to clear this."]).joined(separator: "\n"))
+        }
+    }
+
+    private func endedRollup(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
+        endedMark(panes.compactMap(\.ended))
+    }
+
+    private static let endTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .medium
+        formatter.doesRelativeDateFormatting = true
+        return formatter
+    }()
 
     @ViewBuilder
     private func lookerGlyphs(_ lookers: [Viewer]) -> some View {

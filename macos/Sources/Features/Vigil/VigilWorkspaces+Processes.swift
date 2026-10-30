@@ -93,10 +93,34 @@ extension VigilWorkspaces {
     /// (`Directory.Facts`, what `vigild dir` would print for it), so the
     /// sidebar names its rows by the very rule the phone and a remote
     /// sidebar apply to the same pane (`Directory.titles`).
+    /// The pane's spec is on disk: its daemon runs, is starting, or died
+    /// with the machine (only a deliberate end removes it).
+    nonisolated static func specExists(_ pane: String) -> Bool {
+        FileManager.default.fileExists(atPath: VigilPaths.panes.appendingPathComponent("\(pane).spec").path)
+    }
+
+    /// Its program ended badly and the record is still unopened.
+    nonisolated static func endRecorded(_ pane: String) -> Bool {
+        FileManager.default.fileExists(atPath: VigilPaths.panes.appendingPathComponent("\(pane).ended").path)
+    }
+
     func paneFacts(_ pane: String) -> Directory.Facts {
         Directory.Facts(alive: true, tree: paneFileLines(pane, "tree"),
                         pid: paneFileLines(pane, "pid").joined(separator: "\n"),
-                        title: paneFileLines(pane, "title").first, glance: paneGlance(pane))
+                        title: paneFileLines(pane, "title").first, glance: paneGlance(pane), ended: paneEnd(pane))
+    }
+
+    /// `panes/<pane>.ended`: its program ended badly and nobody has opened
+    /// it yet (`PaneEnd`). A record that does not read is said once per
+    /// change of the file, and the pane is drawn unmarked.
+    func paneEnd(_ pane: String) -> PaneEnd? {
+        guard let file = facts.files["panes/\(pane).ended"] else { return nil }
+        do { return try JSONDecoder().decode(PaneEnd.self, from: file.data) } catch {
+            if unreadEnds.updateValue(file.revision, forKey: pane) != file.revision {
+                sidebarLog.warn("ended record not read: the pane is drawn unmarked", ["pane": pane, "err": error])
+            }
+            return nil
+        }
     }
 
     /// The pane's glance (`state/<pane>.glance`, its broker's), nil when it

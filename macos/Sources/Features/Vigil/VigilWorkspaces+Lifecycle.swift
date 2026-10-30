@@ -82,6 +82,12 @@ extension VigilWorkspaces {
         let running = startDaemon(pane: panes[0], session: name)
         lifecycleLog.info("born through the api", ["workspace": name, "label": label, "window": openWindow, "running": running])
         if openWindow { open(name: name) } else { persist() }
+        if running, !openWindow {
+            // No window will learn its end from a stream: the snapshots do,
+            // and a command already over by now is answered at once.
+            bornUnseen.insert(panes[0].id)
+            closeFinished([panes[0].id])
+        }
         return Birth(name: name, pane: panes[0], running: running)
     }
 
@@ -541,8 +547,20 @@ extension VigilWorkspaces {
         config.workingDirectory = pane.cwd
         config.environmentVariables["VIGIL_WORKSPACE"] = name
         config.vigilAttach = pane.id
-        config.command = pane.command
+        config.command = openEnded(pane) ? nil : pane.command
         return config
+    }
+
+    /// A pane whose program ended badly opens as a shell in its folder,
+    /// never its command again (a launcher would launch twice); vigild shows
+    /// the final screen and how it ended above the prompt and spends the
+    /// record. The command leaves the registry here, so no later mount or
+    /// restore runs it either. True when the pane is such a pane.
+    private func openEnded(_ pane: Registry.Pane) -> Bool {
+        guard !Self.daemonAlive(pane.id), Self.endRecorded(pane.id) else { return false }
+        if pane.command != nil { editPane(pane.id) { $0.command = nil } }
+        lifecycleLog.info("ended pane opened as a shell", ["pane": pane.id, "was": pane.command])
+        return true
     }
 
     /// A captured dock comes back as live tenant surfaces: their daemons

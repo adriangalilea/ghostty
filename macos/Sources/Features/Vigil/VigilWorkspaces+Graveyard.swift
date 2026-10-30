@@ -475,6 +475,15 @@ extension VigilWorkspaces {
             try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry + ".seal"))
             daemonLog.info("stale resume pointer removed", ["pane": id])
         }
+        // An ended record whose pane nothing holds any more: nobody can open
+        // it, and no close will come to remove it.
+        for entry in entries where entry.hasSuffix(".ended") && entry.hasPrefix("vigil-") {
+            let id = String(entry.dropLast(".ended".count))
+            guard !owned.contains(id), !Self.daemonAlive(id) else { continue }
+            try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry))
+            try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry + ".txt"))
+            daemonLog.info("ended record of a pane nothing holds removed", ["pane": id])
+        }
         for entry in (try? fm.contentsOfDirectory(atPath: agentStateDir.path)) ?? []
         where entry.hasSuffix(".state") || entry.hasSuffix(".seen") {
             let id = String(entry.prefix(upTo: entry.lastIndex(of: ".")!))
@@ -483,18 +492,22 @@ extension VigilWorkspaces {
         }
     }
 
-    /// A program that FINISHED closes its pane, whether or not a window
-    /// shows it. Its daemon ended and took its spec along (`exit`, a
+    /// A program that FINISHED cleanly closes its pane, whether or not a
+    /// window shows it. Its daemon ended and took its spec along (`exit`, a
     /// one-shot command done: the spec is the first file vigild removes),
     /// so the ids given are panes whose daemon is not starting: at launch,
-    /// or one whose pidfile just left. A spec still on disk is machine
-    /// death, restore's to answer. A placed pane learns the end from its
-    /// stream and ghostty's exit path buries it; this is the same close for
-    /// a pane no window shows, whose command would otherwise run again at
-    /// its next mount. A workspace whose every pane finished is killed whole.
+    /// one whose pidfile just left, or a birth no snapshot saw running
+    /// (`bornUnseen`). A spec still on disk is machine death, restore's to
+    /// answer. A placed pane learns the end from its stream and ghostty's
+    /// exit path buries it; this is the same close for a pane no window
+    /// shows, whose command would otherwise run again at its next mount. A
+    /// program that ended badly left its record (`<pane>.ended`): that pane
+    /// stays, marked, for the person to open or close (Adrian 2026-10-30:
+    /// an end nobody saw is lost visibility). A workspace whose every pane
+    /// finished is killed whole.
     func closeFinished(_ ids: some Sequence<String>) {
         var finished: [String: [String]] = [:]
-        for id in ids where !FileManager.default.fileExists(atPath: VigilPaths.panes.appendingPathComponent("\(id).spec").path) {
+        for id in ids where !Self.specExists(id) && !Self.endRecorded(id) {
             if let view = liveView(attachId: id), placed(view) { continue }
             guard let at = locate(id), !at.buried else { continue }
             finished[at.owner, default: []].append(id)

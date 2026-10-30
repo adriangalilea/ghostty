@@ -59,6 +59,14 @@ class VigilWorkspaces {
     /// Each pane whose glance file did not read, by the file revision last
     /// said (`paneGlance`): one warning per broken file, never per render.
     var unreadGlances: [String: String] = [:]
+    /// The same for each pane's ended record (`paneEnd`).
+    var unreadEnds: [String: String] = [:]
+    /// Panes born headless (`apiNewWorkspace`) whose pidfile no snapshot has
+    /// shown yet. A one-shot command can be born and gone between two reads,
+    /// so its pidfile never leaves a snapshot and its end was never noticed:
+    /// the dead rows of 2026-10-30. Until a snapshot shows the pidfile, its
+    /// absence is the end.
+    var bornUnseen: Set<String> = []
     lazy var factsLoader = VigilFacts(root: VigilPaths.root.path, report: { event in
         switch event {
         case .seenUnwritable(let pane, let error): factsLog.error("seen mark not written", ["pane": pane, "err": error])
@@ -70,11 +78,22 @@ class VigilWorkspaces {
             guard let self, snapshot.revision > self.facts.revision else { return }
             let sidebarChanged = snapshot.sidebarRevision != self.facts.sidebarRevision
             let ended = self.facts.revision == 0 ? [] : Self.commandsEnded(from: self.facts, to: snapshot)
-            // A daemon that just ended: its pidfile left the folder.
-            let gone = self.facts.files.keys.filter { $0.hasPrefix("panes/") && $0.hasSuffix(".pid") && snapshot.files[$0] == nil }
+            // A daemon that just ended: its pidfile left the folder, or it
+            // was born and gone before any snapshot showed it.
+            let left = self.facts.files.keys.filter { $0.hasPrefix("panes/") && $0.hasSuffix(".pid") && snapshot.files[$0] == nil }
                 .map { String($0.dropFirst("panes/".count).dropLast(".pid".count)) }
+            self.bornUnseen = self.bornUnseen.filter { snapshot.files["panes/\($0).pid"] == nil }
+            // What each pane's state became, as this thread took it: a dot
+            // that lags its file is read here, never guessed (2026-10-30).
+            for (key, file) in snapshot.files where key.hasSuffix(".state") && self.facts.files[key]?.revision != file.revision {
+                factsLog.info("state taken", ["pane": String(key.dropFirst("state/".count).dropLast(".state".count)),
+                                                "state": file.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                                                "revision": snapshot.revision])
+            }
             self.facts = snapshot
-            self.closeFinished(gone)
+            self.closeFinished(Set(left).union(self.bornUnseen))
+            // Answered: a birth whose spec is gone was closed or marked ended.
+            self.bornUnseen = self.bornUnseen.filter { Self.specExists($0) }
             // Owner grids and the content receipt read these facts.
             self.syncOwnerGrids()
             // A long command that just ended is news, the same as an
