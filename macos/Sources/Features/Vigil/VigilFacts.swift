@@ -1,9 +1,15 @@
 #if os(macOS)
+import CoreServices
 import Darwin
 import Foundation
 
-/// Files are observations, never the session ownership registry. The kernel
-/// invalidates them; one worker reads them and publishes an immutable revision.
+/// Files are observations, never the session ownership registry. FSEvents
+/// names each file that changed; one worker reads exactly those and publishes
+/// an immutable revision. A folder is listed whole only at start and when
+/// FSEvents says it lost track (dropped events, a folder replaced): a pane's
+/// process list is rewritten every few seconds while its agent works, and
+/// listing and stat'ing every pane's files for each such rewrite was most of
+/// the app's idle CPU (2026-10-30: 32 panes, ~5% of a core).
 final class VigilFacts: @unchecked Sendable {
     struct File: Equatable, Sendable {
         let data: Data
@@ -38,7 +44,14 @@ final class VigilFacts: @unchecked Sendable {
     private let report: @Sendable (Event) -> Void
     private let beforeRead: @Sendable () -> Void
     private var current = Snapshot()
-    private var directories: [String: DispatchSourceFileSystemObject] = [:]
+    private var stream: FSEventStreamRef?
+    /// The root as FSEvents spells the paths it reports (symlinks resolved).
+    private var resolvedRoot = ""
+    /// Files FSEvents named since the last read (`folder/name`).
+    private var changed: Set<String> = []
+    /// Folders to list whole on the next read: all of them at start, one
+    /// whose events FSEvents could not deliver one by one.
+    private var rescan: Set<String> = Set(VigilFacts.folders)
     private var processes: [Int32: DispatchSourceProcess] = [:]
     private var pending = false
     private var stopped = false
@@ -62,9 +75,14 @@ final class VigilFacts: @unchecked Sendable {
     func stop() {
         queue.async {
             self.stopped = true
-            self.directories.values.forEach { $0.cancel() }
+            if let stream = self.stream {
+                FSEventStreamStop(stream)
+                FSEventStreamInvalidate(stream)
+                FSEventStreamRelease(stream)
+                self.stream = nil
+            }
             self.processes.values.forEach { $0.cancel() }
-            self.directories.removeAll(); self.processes.removeAll()
+            self.processes.removeAll()
         }
     }
 
@@ -79,6 +97,7 @@ final class VigilFacts: @unchecked Sendable {
             if Self.read(path + ".seen")?.text.trimmingCharacters(in: .whitespacesAndNewlines) == revision { return }
             do {
                 try Data((revision + "\n").utf8).write(to: URL(fileURLWithPath: path + ".seen"), options: .atomic)
+                self.changed.insert("state/" + pane + ".seen")
                 self.invalidate()
             } catch { self.report(.seenUnwritable(pane: pane, error: error)) }
         }
@@ -95,24 +114,78 @@ final class VigilFacts: @unchecked Sendable {
         }
     }
 
-    private func watchDirectories() {
-        for folder in Self.folders where directories[folder] == nil {
-            let path = root + "/" + folder
-            try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
-            let fd = open(path, O_EVTONLY | O_CLOEXEC | O_NOFOLLOW)
-            guard fd >= 0 else { report(.unwatchable(folder: folder)); continue }
-            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd,
-                eventMask: [.write, .delete, .rename], queue: queue)
-            source.setEventHandler { [weak self, weak source] in
-                guard let self, let source else { return }
-                if !source.data.isDisjoint(with: [.delete, .rename]) {
-                    self.directories.removeValue(forKey: folder)?.cancel()
-                }
-                self.invalidate()
+    /// One stream over the three folders, started once and never re-armed:
+    /// FSEvents follows a path, so a folder deleted and made again is still
+    /// watched (its own event asks for a listing).
+    private func watch() {
+        guard stream == nil else { return }
+        for folder in Self.folders {
+            try? FileManager.default.createDirectory(atPath: root + "/" + folder, withIntermediateDirectories: true)
+        }
+        // realpath, never URL.resolvingSymlinksInPath: Foundation strips a
+        // leading /private, which FSEvents keeps (/var is /private/var).
+        guard let resolved = realpath(root, nil) else {
+            Self.folders.forEach { report(.unwatchable(folder: $0)) }
+            return
+        }
+        resolvedRoot = String(cString: resolved)
+        free(resolved)
+        var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
+                                           retain: nil, release: nil, copyDescription: nil)
+        let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
+            guard let info else { return }
+            let facts = Unmanaged<VigilFacts>.fromOpaque(info).takeUnretainedValue()
+            let names = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
+            facts.observed(names, Array(UnsafeBufferPointer(start: flags, count: count)))
+        }
+        // No latency and no defer: the first change after a quiet moment is
+        // read at once, and a burst arrives as one batch of names.
+        let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer |
+                                             kFSEventStreamCreateFlagUseCFTypes)
+        let paths = Self.folders.map { resolvedRoot + "/" + $0 } as CFArray
+        guard let created = FSEventStreamCreate(nil, callback, &context, paths,
+                FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0, flags) else {
+            Self.folders.forEach { report(.unwatchable(folder: $0)) }
+            return
+        }
+        FSEventStreamSetDispatchQueue(created, queue)
+        guard FSEventStreamStart(created) else {
+            FSEventStreamInvalidate(created); FSEventStreamRelease(created)
+            Self.folders.forEach { report(.unwatchable(folder: $0)) }
+            return
+        }
+        stream = created
+    }
+
+    /// What FSEvents named, as keys to read again; anything it could not name
+    /// one by one is a folder to list whole.
+    private func observed(_ paths: [String], _ flags: [FSEventStreamEventFlags]) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let lost = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagUserDropped |
+                                           kFSEventStreamEventFlagKernelDropped | kFSEventStreamEventFlagRootChanged)
+        for (path, flag) in zip(paths, flags) {
+            if flag & lost != 0 { rescan.formUnion(Self.folders); continue }
+            guard path.hasPrefix(resolvedRoot + "/") else { continue }
+            let parts = path.dropFirst(resolvedRoot.count + 1).split(separator: "/", omittingEmptySubsequences: true)
+            guard let folder = parts.first.map(String.init), Self.folders.contains(folder) else { continue }
+            switch parts.count {
+            case 1: rescan.insert(folder)
+            case 2: changed.insert(folder + "/" + parts[1])
+            default: continue
             }
-            source.setCancelHandler { close(fd) }
-            directories[folder] = source
-            source.resume()
+        }
+        invalidate()
+    }
+
+    private static func wanted(_ key: String) -> Bool {
+        let parts = key.split(separator: "/")
+        guard parts.count == 2 else { return false }
+        let ext = parts[1].split(separator: ".").last.map(String.init) ?? ""
+        switch parts[0] {
+        case "panes": return ["pid", "tree", "died", "size", "screen", "viewers", "command", "title"].contains(ext)
+        case "state": return ["state", "seen", "glance"].contains(ext)
+        case "leases": return ext == "json"
+        default: return false
         }
     }
 
@@ -120,18 +193,18 @@ final class VigilFacts: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         let began = ContinuousClock.now
         beforeRead()
-        watchDirectories()
-        var files: [String: File] = [:]
-        for folder in Self.folders {
-            let names = (try? FileManager.default.contentsOfDirectory(atPath: root + "/" + folder)) ?? []
-            for name in names {
-                let ext = name.split(separator: ".").last.map(String.init) ?? ""
-                let wanted = folder == "panes" ? ["pid", "tree", "died", "size", "screen", "viewers", "command", "title"].contains(ext)
-                    : folder == "state" ? ["state", "seen", "glance"].contains(ext) : ext == "json"
-                guard wanted else { continue }
-                let key = folder + "/" + name
-                if let file = Self.read(root + "/" + key, previous: current.files[key]) { files[key] = file }
+        watch()
+        var touched = changed
+        for folder in rescan {
+            for name in (try? FileManager.default.contentsOfDirectory(atPath: root + "/" + folder)) ?? [] {
+                touched.insert(folder + "/" + name)
             }
+            touched.formUnion(current.files.keys.filter { $0.hasPrefix(folder + "/") })
+        }
+        changed.removeAll(); rescan.removeAll()
+        var files = current.files
+        for key in touched where Self.wanted(key) {
+            files[key] = Self.read(root + "/" + key, previous: current.files[key])
         }
         var leases: [Lease] = []
         for (key, file) in files where key.hasPrefix("leases/") {
@@ -139,11 +212,13 @@ final class VigilFacts: @unchecked Sendable {
             if kill(lease.pid, 0) == 0 { leases.append(lease) } else {
                 try? FileManager.default.removeItem(atPath: root + "/" + key)
                 files[key] = nil
+                touched.insert(key)
             }
         }
         leases.sort { ($0.pane, $0.pid, $0.note) < ($1.pane, $1.pid, $1.note) }
         watchProcesses(Set(leases.map(\.pid)))
-        guard files != current.files || leases != current.leases || current.revision == 0 else { return }
+        let moved = touched.filter { files[$0] != current.files[$0] }
+        guard !moved.isEmpty || leases != current.leases || current.revision == 0 else { return }
         // Renderer receipts can change on every output beat. They update the
         // cache, but never invalidate a sidebar whose inputs stayed identical.
         // Identical means the BYTES: a tree rewritten with the same lines (a
@@ -152,16 +227,13 @@ final class VigilFacts: @unchecked Sendable {
         // A glance is rewritten with every tool call its agent makes; the
         // sidebar draws only its conversation (agent, id, name).
         let sidebarChanged = current.revision == 0 || leases != current.leases ||
-            files.contains { key, file in
+            moved.contains { key in
                 guard Self.sidebarKey(key) else { return false }
-                if key.hasSuffix(".tree") { return current.files[key]?.data != file.data }
-                if key.hasSuffix(".glance") {
-                    guard let before = current.files[key] else { return true }
-                    return Self.conversation(before) != Self.conversation(file)
-                }
-                return current.files[key] != file
-            } ||
-            current.files.keys.contains { Self.sidebarKey($0) && files[$0] == nil }
+                guard let file = files[key], let before = current.files[key] else { return true }
+                if key.hasSuffix(".tree") { return before.data != file.data }
+                if key.hasSuffix(".glance") { return Self.conversation(before) != Self.conversation(file) }
+                return true
+            }
         current = Snapshot(revision: current.revision + 1,
             sidebarRevision: current.sidebarRevision + (sidebarChanged ? 1 : 0), files: files, leases: leases)
         deliver(current)
