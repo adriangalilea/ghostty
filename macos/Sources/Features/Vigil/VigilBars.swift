@@ -1,4 +1,5 @@
 import AppKit
+import Ink
 import SwiftUI
 
 /// The two custom side bars of every terminal window (NEVER native
@@ -397,21 +398,12 @@ struct VigilSidebarToggle: View {
             .accessibilityHidden(!on)
             .popover(isPresented: $sizing, arrowEdge: .bottom) {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("Sidebar size").font(.headline)
-                        Spacer()
-                        Text("\(Int(VigilSidebarSize.bounded(fontSize) / VigilSidebarSize.compact * 100))%")
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack(spacing: 10) {
-                        Text("A").font(.system(size: 11))
-                            .accessibilityHidden(true)
-                        Slider(value: $fontSize, in: VigilSidebarSize.range, step: 1)
-                            .accessibilityLabel("Sidebar size")
-                        Text("A").font(.system(size: 20))
-                            .accessibilityHidden(true)
-                    }
+                    // The size said beside its name, as a share of the compact one.
+                    InkSlider(
+                        "Sidebar size", value: $fontSize, in: VigilSidebarSize.range, step: 1,
+                        format: { "\(Int(VigilSidebarSize.bounded($0) / VigilSidebarSize.compact * 100))%" },
+                        minimum: .symbol("textformat.size.smaller"), maximum: .symbol("textformat.size.larger"),
+                        readout: .always)
                     HStack {
                         Button("Reset") { VigilSidebarSize.reset() }
                             .disabled(fontSize == VigilSidebarSize.compact)
