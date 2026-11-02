@@ -117,7 +117,8 @@ struct NewWorkspaceSheet: View {
     let landed: @MainActor (PaneRef) -> Void
     @EnvironmentObject private var model: VigilPhone
     @Environment(\.dismiss) private var dismiss
-    @State private var hostId: String = ""
+    /// The Mac it is made on; nil until one is chosen (no tab lit).
+    @State private var hostId: String?
     @State private var folder: String = "~"
     @State private var typedFolder = ""
     @State private var command: String?
@@ -157,7 +158,7 @@ struct NewWorkspaceSheet: View {
             Form {
                 if model.hosts.count > 1 || host == nil {
                     Section("Mac") {
-                        InkTabs($hostId, model.hosts.map { InkTab($0.name, $0.id) })
+                        InkTabs($hostId, model.hosts.map { InkTab($0.name, Optional($0.id)) })
                             .accessibilityLabel("Mac")
                     }
                 }
@@ -186,7 +187,7 @@ struct NewWorkspaceSheet: View {
             model.failure = nil
             // The Mac is the context's (a Mac's row, a pane's), else yours
             // to pick; preset only when one Mac alone can take it.
-            hostId = compose.host?.id ?? model.onlyReachable?.id ?? ""
+            hostId = compose.host?.id ?? model.onlyReachable?.id
             if let start = compose.folder { folder = start }
         }
         // A failure said here is read here: it does not follow you out.
@@ -194,7 +195,7 @@ struct NewWorkspaceSheet: View {
         .onChange(of: hostId) { old, _ in
             // Another Mac's folders are its own: a folder picked from the
             // last one's list goes back to home.
-            if !old.isEmpty { folder = "~" }
+            if old != nil { folder = "~" }
         }
     }
 
