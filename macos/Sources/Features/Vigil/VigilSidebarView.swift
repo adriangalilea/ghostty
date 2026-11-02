@@ -724,7 +724,7 @@ struct VigilSidebarView: View {
 
     /// Ink's one copy action, for the rows' Copy items (a menu has no
     /// place to show its confirmation; the pasteboard is the receipt).
-    static let copied = CopyFeedback()
+    static let copied = InkCopyFeedback()
 
     /// The ids we speak by, dim beside the name and never louder than it:
     /// the conversation's name when the row's title is not it (you named
@@ -734,7 +734,7 @@ struct VigilSidebarView: View {
     private func paneIdentity(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         let named = pane.conversationName.flatMap { $0 == pane.title ? nil : $0 }
         if let dim = named ?? pane.identifiers.first?.value {
-            MiddleTruncate(dim, tail: named == nil ? "-" : 6)
+            InkMiddleTruncate(dim, tail: named == nil ? "-" : 6)
                 .font(.system(size: 9 * scale, design: named == nil ? .monospaced : .default))
                 .foregroundStyle(.secondary.opacity(0.7))
                 .layoutPriority(-1)

@@ -574,7 +574,7 @@ struct GlanceRow<Marks: View>: View {
             }
             card.padding(.leading, 21)
             if let pane = node.followPane {
-                MiddleTruncate(pane, tail: "-").font(.caption2.monospaced())
+                InkMiddleTruncate(pane, tail: "-").font(.caption2.monospaced())
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 21)
             }
@@ -669,7 +669,7 @@ struct CopyItem: View {
 
     var body: some View {
         Button {
-            CopyFeedback().copy(value)
+            InkCopyFeedback().copy(value)
             VigilPhone.shared.receipts.info("copy", label, ["value": value])
         } label: {
             Label(label, systemImage: "doc.on.doc")
