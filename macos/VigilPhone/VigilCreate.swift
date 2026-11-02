@@ -1,4 +1,5 @@
 import AuthzGlance
+import Ink
 import SwiftUI
 import VigilWire
 
@@ -156,13 +157,8 @@ struct NewWorkspaceSheet: View {
             Form {
                 if model.hosts.count > 1 || host == nil {
                     Section("Mac") {
-                        Picker("Mac", selection: $hostId) {
-                            ForEach(model.hosts) { host in
-                                Text(host.name).tag(host.id)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
+                        InkTabs($hostId, model.hosts.map { InkTab($0.name, $0.id) })
+                            .accessibilityLabel("Mac")
                     }
                 }
                 folderSection

@@ -208,14 +208,13 @@ struct VigilSidebarView: View {
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(followMode == .off ? .secondary : .primary)
                 }
-                Picker("", selection: $followModeRaw) {
-                    Text("Do nothing").tag(VigilFollowMode.off.rawValue)
-                    Text("Summon it").tag(VigilFollowMode.summon.rawValue)
-                    Text("Jump to it").tag(VigilFollowMode.window.rawValue)
-                }
-                .pickerStyle(.segmented)
+                InkTabs($followModeRaw, [
+                    InkTab("Do nothing", VigilFollowMode.off.rawValue),
+                    InkTab("Summon it", VigilFollowMode.summon.rawValue),
+                    InkTab("Jump to it", VigilFollowMode.window.rawValue),
+                ])
                 .controlSize(.mini)
-                .labelsHidden()
+                .accessibilityLabel("When something needs you")
                 .onChange(of: followModeRaw) { _, _ in
                     NotificationCenter.default.post(name: VigilWorkspaces.modeDidChange, object: nil)
                 }
