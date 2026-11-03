@@ -94,7 +94,7 @@ import VigilWire
     /// home took it, else why not, in the words the screen shows.
     func answer(device: String, request: String, _ decision: Decision) async -> String? {
         guard let home = home(of: device) else { return "Its Mac does not let vigil answer yet." }
-        let fields: Fields = ["request": String(request.prefix(8)), "action": decision.action ?? "answers"]
+        let fields: LogFields = ["request": String(request.prefix(8)), "action": decision.action ?? "answers"]
         switch await runtime.answer((request, home), decision) {
         case .answered:
             VigilPhone.shared.receipts.info("authz", "answered here", fields)

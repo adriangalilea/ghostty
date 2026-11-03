@@ -34,21 +34,21 @@ final class VigilReceipts: ObservableObject {
     @Published private(set) var all: [Receipt] = []
     private var count = 0
 
-    func info(_ scope: String, _ message: String, _ fields: Fields = [:]) {
+    func info(_ scope: String, _ message: String, _ fields: LogFields = [:]) {
         Log.log.scope(scope).info(message, fields)
         show(scope, .info, message, fields)
     }
-    func warn(_ scope: String, _ message: String, _ fields: Fields = [:]) {
+    func warn(_ scope: String, _ message: String, _ fields: LogFields = [:]) {
         Log.log.scope(scope).warn(message, fields)
         show(scope, .warn, message, fields)
     }
-    func error(_ scope: String, _ message: String, _ fields: Fields = [:]) {
+    func error(_ scope: String, _ message: String, _ fields: LogFields = [:]) {
         Log.log.scope(scope).error(message, fields)
         show(scope, .error, message, fields)
     }
 
     /// In the list only: an event another component records itself.
-    func show(_ scope: String, _ level: Receipt.Level, _ message: String, _ fields: Fields) {
+    func show(_ scope: String, _ level: Receipt.Level, _ message: String, _ fields: LogFields) {
         count += 1
         let rendered = fields.sorted { $0.key < $1.key }.map { "\($0.key)=\(Self.text($0.value))" }
         all.append(Receipt(id: count, time: Date(), scope: scope, level: level, message: message,
@@ -583,7 +583,7 @@ final class VigilPhone: ObservableObject {
                 let request = WorkspaceCommand.Request.burial(burial.name, operation)
                 let data = try await VigilLink.call(linked(), device: burial.host.id, .session(try request.line))
                 let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
-                let fields: Fields = ["op": operation, "mac": burial.host.name, "workspace": burial.name]
+                let fields: LogFields = ["op": operation, "mac": burial.host.name, "workspace": burial.name]
                 if outcome.ok {
                     receipts.info("burial", "committed", fields)
                 } else {
@@ -674,7 +674,7 @@ final class VigilPhone: ObservableObject {
         if let why = request.refusal { throw CreateError.refused(why) }
         creating = birth
         defer { creating = nil }
-        let fields: Fields = ["id": request.id.uuidString, "what": birth.noun, "mac": host.name,
+        let fields: LogFields = ["id": request.id.uuidString, "what": birth.noun, "mac": host.name,
                               "command": birth.command ?? "shell", "anchor": request.anchor]
         receipts.info("create", "sent", fields)
         // Not connected is nothing sent: said as a refusal, never "may have".
@@ -794,7 +794,7 @@ final class VigilPhone: ObservableObject {
         }
         let request = WorkspaceCommand.Request(session: place.workspace.name, revision: revision,
                                                operation: closing.tab ? "close_tab" : "close_pane", anchor: closing.anchor)
-        let fields: Fields = ["id": request.id.uuidString, "op": request.operation, "mac": host.name, "anchor": closing.anchor]
+        let fields: LogFields = ["id": request.id.uuidString, "op": request.operation, "mac": host.name, "anchor": closing.anchor]
         receipts.info("close", "sent", fields)
         Task {
             do {

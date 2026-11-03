@@ -606,7 +606,7 @@ struct ConversationView: View {
             let screen = CGRect(origin: .zero, size: scroll.room)
             let shown = ids.filter { rows[$0]?.intersects(screen) == true }.count
             let receipts = VigilPhone.shared.receipts
-            let numbers: Fields = [
+            let numbers: LogFields = [
                 "pane": pane, "rows": ids.count, "onScreen": shown, "content": Int(scroll.content),
                 "top": Int(scroll.top), "room": Int(scroll.room.height),
             ]
