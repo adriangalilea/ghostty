@@ -58,9 +58,15 @@ pub fn init(
     // libghostty-vt headers under include/ghostty/, which would trigger
     // "umbrella header does not include header" warnings from Clang's
     // module system.
+    //
+    // vigil: both sit in a folder named for the module. Xcode copies every
+    // linked xcframework's Headers into one include/ folder, so two static
+    // xcframeworks with a module map at the root of Headers collide
+    // ("Multiple commands produce include/module.modulemap"): the app links
+    // swift-utils' CellsCore, laid out that way too.
     const wf = b.addWriteFiles();
-    _ = wf.addCopyFile(b.path("include/ghostty.h"), "ghostty.h");
-    _ = wf.addCopyFile(b.path("include/module.modulemap"), "module.modulemap");
+    _ = wf.addCopyFile(b.path("include/ghostty.h"), "GhosttyKit/ghostty.h");
+    _ = wf.addCopyFile(b.path("include/module.modulemap"), "GhosttyKit/module.modulemap");
     const headers = wf.getDirectory();
 
     // The xcframework wraps our ghostty library so that we can link
