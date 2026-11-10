@@ -347,7 +347,11 @@ struct TreeNodeView: View {
             } else {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 5) {
-                        if let e = node.emoji { Text(e).font(font) }
+                        if case .agent(let agent) = node.face, AgentMark.knows(agent) {
+                            AgentMark(agent: agent, size: 15)
+                        } else if let e = node.emoji {
+                            Text(e).font(font)
+                        }
                         Text(node.title)
                             .font(font)
                             .foregroundStyle(node.alive ? .primary : .secondary)
@@ -564,7 +568,11 @@ struct GlanceRow<Marks: View>: View {
                     .foregroundStyle(state.tint)
                     .frame(width: 16)
                     .accessibilityLabel(state.words(node.flavor))
-                if let e = node.emoji { Text(e).font(.subheadline) }
+                if case .agent(let agent) = node.face, AgentMark.knows(agent) {
+                    AgentMark(agent: agent, size: 15)
+                } else if let e = node.emoji {
+                    Text(e).font(.subheadline)
+                }
                 Text(node.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                 Image(systemName: "bubble.left.and.text.bubble.right")
                     .font(.caption2)

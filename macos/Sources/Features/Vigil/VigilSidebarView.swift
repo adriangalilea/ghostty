@@ -637,9 +637,16 @@ struct VigilSidebarView: View {
                     }
                 }
             ) {
-                Image(systemName: pane.isDock ? "sidebar.right" : "terminal")
-                    .font(.system(size: 8 * scale))
-                    .foregroundColor(Color.secondary.opacity(0.8))
+                // No emoji of its own: its agent's mark when one runs in it
+                // (VigilWire's `PaneFace`, the phone's rule too), else the
+                // glyph of where it sits.
+                if case .agent(let agent) = PaneFace.of(emoji: nil, program: pane.program), AgentMark.knows(agent) {
+                    AgentMark(agent: agent, size: 11 * scale)
+                } else {
+                    Image(systemName: pane.isDock ? "sidebar.right" : "terminal")
+                        .font(.system(size: 8 * scale))
+                        .foregroundColor(Color.secondary.opacity(0.8))
+                }
             }
             paneIdentity(pane)
             Spacer(minLength: 4)

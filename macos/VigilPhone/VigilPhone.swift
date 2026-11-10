@@ -463,6 +463,9 @@ final class VigilPhone: ObservableObject {
         /// An agent (Claude, Codex) runs in the pane: it has a conversation
         /// to draw, and its screen opens on it.
         var agent: Bool = false
+        /// What its row wears before its name (VigilWire's `PaneFace`: its
+        /// emoji, else its agent's mark, the Mac sidebar's rule).
+        var face: PaneFace = .plain
         /// What its agent means right now (its Mac's `PaneGlance`, believed
         /// only while that agent is the pane's program): its row draws it
         /// instead of a live terminal. nil: a shell, a command, a Mac whose
@@ -969,6 +972,7 @@ final class VigilPhone: ObservableObject {
                                 alive: alive,
                                 ended: alive ? nil : truth?.ended,
                                 agent: alive && Program.runsAgent(truth?.tree ?? []),
+                                face: PaneFace.of(emoji: p.emoji, program: alive ? Program.agent(in: truth?.tree ?? []) : nil),
                                 glance: alive ? truth?.meaning : nil,
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: path) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
