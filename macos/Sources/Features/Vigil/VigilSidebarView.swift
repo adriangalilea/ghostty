@@ -449,6 +449,11 @@ struct VigilSidebarView: View {
             return NSItemProvider(object: id as NSString)
         }
         .contextMenu {
+            // A workspace of another Mac is that Mac's to rename, merge or
+            // kill; from here it can be brought.
+            if row.host != nil, let remote = VigilRemote.split(id) {
+                Button("Bring Here…") { VigilWorkspaces.shared.bringWithSheet(device: remote.device, workspace: remote.name) }
+            } else {
             Button("Rename…") { VigilIdentity.editModal(name: id) }
             if model.rows.count > 1 {
                 Menu("Merge Into") {
@@ -462,6 +467,7 @@ struct VigilSidebarView: View {
             Divider()
             Button("Kill…", role: .destructive) {
                 VigilWorkspaces.shared.killWithConfirm(name: id)
+            }
             }
         }
         .help("\(row.label) (\(row.id)) · \(row.stateTag)")

@@ -270,6 +270,9 @@ extension VigilWorkspaces {
             let cwd = (asked as NSString).expandingTildeInPath
             return birthReply(request, apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
         }
+        // A workspace of another Mac, brought here as itself: `session` names
+        // it there, never a workspace of this registry.
+        if request.operation == "bring" { return bring(request) }
         guard var session = workspaces[request.session] else {
             return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
         }

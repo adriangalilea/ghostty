@@ -507,7 +507,10 @@ extension VigilWorkspaces {
     /// finished is killed whole.
     func closeFinished(_ ids: some Sequence<String>) {
         var finished: [String: [String]] = [:]
-        for id in ids where !Self.specExists(id) && !Self.endRecorded(id) {
+        // A pane brought from another Mac and not opened yet has no daemon
+        // by design: it never started, so it did not finish.
+        let dormant = dormantPanes
+        for id in ids where !Self.specExists(id) && !Self.endRecorded(id) && !dormant.contains(id) {
             if let view = liveView(attachId: id), placed(view) { continue }
             guard let at = locate(id), !at.buried else { continue }
             finished[at.owner, default: []].append(id)

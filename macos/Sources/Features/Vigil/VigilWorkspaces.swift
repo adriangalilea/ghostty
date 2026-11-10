@@ -91,6 +91,8 @@ class VigilWorkspaces {
                                                 "revision": snapshot.revision])
             }
             self.facts = snapshot
+            // A brought pane whose daemon now exists was opened.
+            self.wake(self.dormantPanes.filter { snapshot.files["panes/\($0).pid"] != nil })
             self.closeFinished(Set(left).union(self.bornUnseen))
             // Answered: a birth whose spec is gone was closed or marked ended.
             self.bornUnseen = self.bornUnseen.filter { Self.specExists($0) }
