@@ -24,6 +24,11 @@ final class VigilRemote: ObservableObject {
         /// receipts dropped: they are the phone's, never a row's).
         var directory: Directory?
         var error: String?
+        /// When its last document arrived: live, moments ago; away, when it
+        /// was last heard (kept on disk across launches, `KeptDirectory`).
+        var received: Date?
+        /// Out of reach with a directory still held: drawn as it last was.
+        var away: Bool { error != nil && directory != nil }
     }
 
     @Published private(set) var hosts: [Host] = []
@@ -69,7 +74,77 @@ final class VigilRemote: ObservableObject {
         hubWatch?.cancel()
         hubWatch = nil
         unfollowAll()
+        for host in hosts { keep(host.device) }
         remoteLog.info("directories no longer followed")
+    }
+
+    // MARK: A Mac that is away is still listed (PORTABILITY.md)
+
+    /// Macs whose directory moved since it was last written to disk.
+    private var unkept = Set<String>()
+    private var keeping: DispatchWorkItem?
+
+    /// A live directory moves several times a second: it is written when
+    /// its Mac goes out of reach, when the app stops, and otherwise half a
+    /// minute after its first unwritten change, so a crash of this app loses
+    /// at most that of a Mac's last shape.
+    private func keepSoon(_ device: String) {
+        unkept.insert(device)
+        guard keeping == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.keeping = nil
+                for device in self.unkept { self.keep(device) }
+            }
+        }
+        keeping = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: work)
+    }
+
+    private func keep(_ device: String) {
+        guard unkept.remove(device) != nil, let host = host(device), let directory = host.directory, let received = host.received
+        else { return }
+        let kept = KeptDirectory(device: device, name: host.name, received: received.timeIntervalSince1970, directory: directory)
+        DispatchQueue.global(qos: .utility).async {
+            do { try kept.write(in: VigilPaths.away) } catch {
+                remoteLog.error("directory not kept: this Mac will not be listed once away, after a relaunch", ["host": kept.name, "err": error])
+            }
+        }
+    }
+
+    /// A Mac first heard of in this launch, drawn from what was kept of it
+    /// until its own directory arrives.
+    private func kept(_ peer: Local.Peer) -> Host {
+        var host = Host(device: peer.id, name: peer.name)
+        do {
+            guard let kept = try KeptDirectory.read(peer.id, in: VigilPaths.away) else { return host }
+            host.directory = kept.directory
+            host.received = Date(timeIntervalSince1970: kept.received)
+            host.error = "not heard yet"
+            remoteLog.info("kept directory read", [
+                "host": peer.name, "received": kept.received, "workspaces": kept.directory.workspaces.count, "panes": kept.directory.panes.count,
+            ])
+        } catch {
+            remoteLog.error("kept directory unreadable: the Mac is listed empty until it answers", ["host": peer.name, "err": error])
+        }
+        return host
+    }
+
+    private static let awayDay: DateFormatter = {
+        let format = DateFormatter()
+        format.setLocalizedDateFormatFromTemplate("dMMMHHmm")
+        return format
+    }()
+    private static let awayHour: DateFormatter = {
+        let format = DateFormatter()
+        format.setLocalizedDateFormatFromTemplate("HHmm")
+        return format
+    }()
+
+    /// "away since 9 Nov 02:05", today's as the hour alone.
+    static func awaySince(_ received: Date) -> String {
+        "away since " + (Calendar.current.isDateInToday(received) ? awayHour : awayDay).string(from: received)
     }
 
     private func unfollowAll() {
@@ -144,7 +219,7 @@ final class VigilRemote: ObservableObject {
             if let index = hosts.firstIndex(where: { $0.device == peer.id }) {
                 hosts[index].name = peer.name
             } else {
-                hosts.append(Host(device: peer.id, name: peer.name))
+                hosts.append(kept(peer))
             }
             follow(peer.id)
         }
@@ -195,7 +270,14 @@ final class VigilRemote: ObservableObject {
     private func failed(_ device: String, _ why: String) {
         guard let index = hosts.firstIndex(where: { $0.device == device }), hosts[index].error != why else { return }
         remoteLog.warn("out of reach", ["host": hosts[index].name, "why": why])
+        // Away since now, when it was reachable until now: a quiet Mac's
+        // last document can be hours old while it was here all along.
+        if hosts[index].error == nil, hosts[index].directory != nil {
+            hosts[index].received = Date()
+            unkept.insert(device)
+        }
         hosts[index].error = why
+        keep(device)
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
@@ -245,6 +327,8 @@ final class VigilRemote: ObservableObject {
             return dir.panes[split.name] != nil
         }
         hosts[index].directory = dir
+        hosts[index].received = Date()
+        keepSoon(device)
         VigilWorkspaces.shared.remoteDirectoryChanged(device)
         VigilWorkspaces.shared.syncOwnerGrids()
         hosts[index].error = nil
@@ -264,14 +348,20 @@ final class VigilRemote: ObservableObject {
         var rows: [VigilWorkspaces.SidebarWorkspaceRow] = []
         for host in hosts {
             let hostLabel = host.directory?.host ?? host.name
-            let header = host.error.map { "\(hostLabel) (\($0))" } ?? hostLabel
+            // Away, the header says since when; the reason is the log's (and
+            // the row's tooltip would repeat "no path to …" on every row).
+            let header: String =
+                if host.away, let received = host.received { "\(hostLabel) · \(Self.awaySince(received))" }
+                else { host.error.map { "\(hostLabel) (\($0))" } ?? hostLabel }
             guard let dir = host.directory else {
                 rows.append(.init(
                     id: Self.compositeId(host.device, ""), emoji: nil, label: "…",
                     stateTag: "remote", attention: .none, states: [], tabs: [], host: header))
                 continue
             }
-            for session in dir.ordered {
+            // An away Mac's workspaces by what last mattered; a live one's in
+            // its own order.
+            for session in host.away ? dir.byLastActivity : dir.ordered {
                 let composite = Self.compositeId(host.device, session.name)
                 var tabs: [VigilWorkspaces.SidebarTab] = []
                 for (index, tab) in (session.tabs ?? []).enumerated() {
@@ -313,7 +403,7 @@ final class VigilRemote: ObservableObject {
                     id: composite,
                     emoji: session.emoji,
                     label: session.label,
-                    stateTag: "remote",
+                    stateTag: host.away ? "away" : "remote",
                     attention: states.contains(.blocked) ? .input : (states.contains(.done) ? .done : .none),
                     states: AgentState.cluster(states),
                     tabs: tabs,

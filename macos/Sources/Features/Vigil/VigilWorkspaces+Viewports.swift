@@ -337,6 +337,13 @@ extension VigilWorkspaces {
             remoteLog.warn("mount refused: workspace unknown or unreachable", ["workspace": composite])
             return nil
         }
+        // An away Mac is listed as it last was, but there is no terminal to
+        // show: a viewport opened on it would dial a Mac that is not there.
+        // A viewport already open on it keeps redialing until it is back.
+        if VigilRemote.shared.host(device)?.away == true, viewport.flatMap(mirroredWorkspace(of:)) != composite {
+            remoteLog.info("not opened: its Mac is away", ["workspace": composite, "host": VigilRemote.shared.host(device)?.name ?? device])
+            return nil
+        }
         let rawAnchor = anchor.flatMap { VigilRemote.split($0)?.name }
         let tabs = session.tabs ?? []
         let tab = rawAnchor.flatMap { a in tabs.first { $0.paneIds.contains(a) } } ?? tabs.first

@@ -183,6 +183,66 @@ final class VigilPhone: ObservableObject {
         var attempts: Int
     }
     private(set) var down: [String: Down] = [:] { didSet { rebuildTree() } }
+
+    // MARK: A Mac that is away is still listed (`KeptDirectory`)
+
+    /// Where each Mac's last directory is kept: this app's own folder.
+    private static let away = URL.applicationSupportDirectory.appendingPathComponent("away")
+    /// Macs whose directory moved since it was last written.
+    private var unkept = Set<String>()
+    private var keeping: Task<Void, Never>?
+
+    /// Written when its Mac goes out of reach, when the app leaves the
+    /// screen, and otherwise half a minute after its first unwritten change:
+    /// a live directory moves several times a second.
+    private func keepSoon(_ device: String) {
+        unkept.insert(device)
+        guard keeping == nil else { return }
+        keeping = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard let self else { return }
+            self.keeping = nil
+            self.keepAll()
+        }
+    }
+
+    /// Every unwritten directory, now (the app leaving the screen calls it).
+    func keepAll() {
+        for device in unkept { keep(device, heard: down[device]?.since ?? Date()) }
+    }
+
+    private func keep(_ device: String, heard: Date) {
+        guard unkept.remove(device) != nil, let directory = directories[device],
+              let name = hosts.first(where: { $0.id == device })?.name else { return }
+        let kept = KeptDirectory(device: device, name: name, received: heard.timeIntervalSince1970, directory: directory.projected)
+        do { try kept.write(in: Self.away) } catch {
+            receipts.error("dir", "not kept: this Mac will not be listed once away, after a relaunch", ["mac": name, "err": "\(error)"])
+        }
+    }
+
+    /// A Mac with nothing on screen yet, drawn from what was kept of it
+    /// until its own directory arrives.
+    private func readKept(_ host: Host) {
+        guard directories[host.id] == nil else { return }
+        do {
+            guard let kept = try KeptDirectory.read(host.id, in: Self.away) else { return }
+            down[host.id] = Down(since: Date(timeIntervalSince1970: kept.received), reason: "not heard yet", attempts: 0)
+            directories[host.id] = kept.directory
+            receipts.info("dir", "kept directory read", [
+                "mac": host.name, "received": kept.received, "workspaces": kept.directory.workspaces.count, "panes": kept.directory.panes.count,
+            ])
+        } catch {
+            receipts.error("dir", "kept directory unreadable: the Mac is listed empty until it answers", ["mac": host.name, "err": "\(error)"])
+        }
+    }
+
+    /// "away since 9 Nov 02:05", today's as the hour alone.
+    static func awaySince(_ date: Date) -> String {
+        "away since " + (Calendar.current.isDateInToday(date)
+            ? date.formatted(date: .omitted, time: .shortened)
+            : date.formatted(.dateTime.day().month(.abbreviated).hour().minute()))
+    }
+
     @Published private(set) var nodes: [Node] = []
     /// Nothing happens in this app without a receipt here.
     let receipts = VigilReceipts()
@@ -269,7 +329,10 @@ final class VigilPhone: ObservableObject {
                 followWatches[id] = nil
             }
         }
-        for host in hosts { watch(host) }
+        for host in hosts {
+            readKept(host)
+            watch(host)
+        }
         // Each Mac learns where this phone's agents activity is reached and
         // what is followed there.
         VigilAgents.macs(Dictionary(uniqueKeysWithValues: hosts.map { host in
@@ -347,14 +410,21 @@ final class VigilPhone: ObservableObject {
                         ])
                     }
                     self.directories[host.id] = dir
+                    self.keepSoon(host.id)
                 case .waiting:
                     // Every attempt is a receipt: a repeat is evidence (how
                     // long, how often), never noise to fold away.
                     let why = step.reason ?? "out of reach"
+                    let wentAway = self.down[host.id] == nil
                     var now = self.down[host.id] ?? Down(since: Date(), reason: why, attempts: 0)
                     now.attempts += 1
                     now.reason = why
                     self.down[host.id] = now
+                    // Reachable until now: kept as away since this moment.
+                    if wentAway, self.directories[host.id] != nil {
+                        self.unkept.insert(host.id)
+                        self.keep(host.id, heard: now.since)
+                    }
                     self.receipts.warn("dir", "attempt failed", [
                         "mac": host.name, "attempt": now.attempts, "why": why, "down_since": now.since,
                     ])
@@ -874,13 +944,14 @@ final class VigilPhone: ObservableObject {
             // old as the outage, and the row says from when.
             let subtitle: String? = down[host.id].map { d in
                 let attempt = "attempt \(d.attempts)"
-                return dir == nil ? "\(d.reason) · \(attempt)" : "as of \(Self.clock(d.since)) · \(d.reason) · \(attempt)"
+                return dir == nil ? "\(d.reason) · \(attempt)" : "\(Self.awaySince(d.since)) · \(d.reason) · \(attempt)"
             } ?? (dir == nil ? "connecting…" : nil)
             var node = Node(id: "host:\(host.id)", kind: .host,
                             title: dir?.host ?? host.name,
                             subtitle: subtitle)
             guard let dir else { return node }
-            node.children = dir.ordered.map { s in
+            // An away Mac's workspaces by what last mattered.
+            node.children = (down[host.id] == nil ? dir.ordered : dir.byLastActivity).map { s in
                 let tabs = s.tabs ?? []
                 let sid = "\(host.id)/\(s.name)"
                 var sess = Node(id: sid, kind: .workspace, title: s.label, emoji: s.emoji,

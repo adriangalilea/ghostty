@@ -67,7 +67,9 @@ struct VigilSidebarView: View {
                                     if let device, collapse.hosts.contains(device) {
                                         EmptyView()
                                     } else {
-                                        sessionGroup(row)
+                                        // An away Mac's rows are what it
+                                        // last was, not what it is: dimmed.
+                                        sessionGroup(row).opacity(row.stateTag == "away" ? 0.55 : 1)
                                     }
                                 }
                             }

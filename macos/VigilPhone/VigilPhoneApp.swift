@@ -45,7 +45,11 @@ struct VigilPhoneApp: App {
                 .onChange(of: phase, initial: true) { _, phase in
                     switch phase {
                     case .active: VigilAuthz.shared.start()
-                    case .background: VigilAuthz.shared.leave()
+                    case .background:
+                        // Each Mac's directory as it is now, kept before the
+                        // links close: what is listed if it is away next time.
+                        VigilPhone.shared.keepAll()
+                        VigilAuthz.shared.leave()
                     default: break
                     }
                     VigilPhone.shared.scene(active: phase == .active)
