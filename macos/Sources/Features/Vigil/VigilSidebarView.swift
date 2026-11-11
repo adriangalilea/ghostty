@@ -949,12 +949,13 @@ struct VigilSidebarView: View {
         }
     }
 
-    /// Its background work, counted (agents, shells and the rest together);
+    /// Its background work, counted (agents, shells, the rest and what a
+    /// turn left running in no account of the agent's, together);
     /// hovering says each count and what the first one is for.
     private func backgroundMark(_ background: PaneGlance.Background) -> some View {
         HStack(spacing: 1) {
             Image(systemName: "gearshape.2").font(.system(size: 8 * scale, weight: .semibold))
-            Text("\(background.agents + background.shells + background.others)")
+            Text("\(background.agents + background.shells + background.others + background.left)")
                 .font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
         }
         .foregroundStyle(.secondary)

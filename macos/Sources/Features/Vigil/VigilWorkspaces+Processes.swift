@@ -58,7 +58,12 @@ extension VigilWorkspaces {
     /// daemon's pidfile line 3 = the deep foreground pid): a pane is busy
     /// only while a real program holds the tty, never a shell at its prompt.
     func busyPrograms(panes: [String]) -> [String] {
-        panes.compactMap { paneForegroundLabel($0) }
+        // The program holding each tty, and what its agent runs beside the
+        // conversation (background agents and shells, processes a turn left
+        // running): a close ends those too, so the question names them.
+        panes.flatMap { pane in
+            [paneForegroundLabel(pane), paneGlance(pane)?.background.map { "\($0.words) in the background" }].compactMap { $0 }
+        }
     }
 
     /// The busy programs of everything a session owns.

@@ -1572,6 +1572,7 @@ private struct BackgroundLine: View {
         case .fork: "arrow.triangle.branch"
         case .shell: "terminal"
         case .monitor: "waveform.path.ecg"
+        case .process: "gearshape"
         case .other: "circle.dashed"
         }
     }
@@ -1582,6 +1583,7 @@ private struct BackgroundLine: View {
         case .fork: "Fork"
         case .shell: "Background shell"
         case .monitor: "Monitor"
+        case .process: "Left running"
         case .other: "Background task"
         }
     }

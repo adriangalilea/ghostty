@@ -256,12 +256,16 @@ final class VigilFacts: @unchecked Sendable {
     }
 
     /// What a sidebar draws of a glance file (VigilWire's `PaneGlance`): its
-    /// agent, conversation id and name, and whether another agent process
-    /// is refused there (the row's mark); nil when it does not read (the
-    /// reader that names the pane says why).
+    /// agent, conversation id and name, whether another agent process is
+    /// refused there, and its background work (the row's marks); nil when
+    /// it does not read (the reader that names the pane says why).
     static func conversation(_ file: File) -> [String]? {
         guard let object = try? JSONSerialization.jsonObject(with: file.data) as? [String: Any] else { return nil }
-        return ["agent", "conversation", "name"].map { object[$0] as? String ?? "" } + [object["refused"] == nil ? "" : "refused"]
+        let background = (object["background"] as? [String: Any]).map { work in
+            ["agents", "shells", "others", "left"].map { "\(work[$0] as? Int ?? 0)" }.joined(separator: " ") + " " + (work["title"] as? String ?? "")
+        }
+        return ["agent", "conversation", "name"].map { object[$0] as? String ?? "" }
+            + [object["refused"] == nil ? "" : "refused", background ?? ""]
     }
 
     private static func sidebarKey(_ key: String) -> Bool {
