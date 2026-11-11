@@ -965,8 +965,11 @@ struct VigilSidebarView: View {
                 // Gears at work, by swift-utils' `InkTurningGears`: each turns
                 // on its own axis in the render server, still when the window
                 // is out of sight (a SwiftUI one re-renders the bar every frame).
-                InkTurningGears(size: 9 * scale, color: .yellow, period: 3)
+                InkTurningGears(size: 14 * scale, color: .yellow, period: 3)
             }
+            // Its own width, whatever the row has left: squeezed, the count
+            // was the first thing clipped.
+            .fixedSize()
             .help(backgrounds.filter { $0.tasks > 0 }.flatMap { ["In the background: \($0.words)"] + [$0.title].compactMap { $0 } }
                 .joined(separator: "\n"))
         }
