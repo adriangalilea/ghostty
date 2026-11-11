@@ -829,11 +829,10 @@ struct VigilSidebarView: View {
         .buttonStyle(.plain)
     }
 
-    /// The sentry's antenna is LIT: a declared lease, or survivor
-    /// processes under a QUIET pane (hidden while the agent works - tool
-    /// churn would blink it; a survivor under a quiet pane is the signal).
+    /// The sentry's antenna is LIT: a declared lease, or something alive
+    /// here that no agent accounts for (`SidebarPane.sentries`).
     private func watchActive(_ pane: VigilWorkspaces.SidebarPane) -> Bool {
-        !pane.watchNotes.isEmpty || (pane.state != .working && !pane.watchProcs.isEmpty)
+        !pane.sentries.isEmpty
     }
 
     /// The sentry's antenna, in the pane row's class slot: something is
@@ -961,10 +960,13 @@ struct VigilSidebarView: View {
         let count = backgrounds.reduce(0) { $0 + $1.tasks }
         if count > 0 {
             HStack(spacing: 1) {
-                Image(systemName: "gearshape.2").font(.system(size: 8 * scale, weight: .semibold))
                 Text("\(count)").font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.yellow)
+                // Turning while they run, by swift-utils' `InkEndless`: the
+                // render server's animation, still when the window is out
+                // of sight (a SwiftUI one re-renders the bar every frame).
+                InkEndless("gearshape.2", motion: .turn(period: 4), size: 8 * scale, color: .yellow)
             }
-            .foregroundStyle(.yellow)
             .help(backgrounds.filter { $0.tasks > 0 }.flatMap { ["In the background: \($0.words)"] + [$0.title].compactMap { $0 } }
                 .joined(separator: "\n"))
         }
@@ -980,7 +982,7 @@ struct VigilSidebarView: View {
     private func watchGlyph(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         Group {
             if watchActive(pane) {
-                antennaGlyph(pane.watchNotes + pane.watchProcs)
+                antennaGlyph(pane.sentries)
             }
         }
         .frame(width: Grid.classSlot)
@@ -1000,7 +1002,7 @@ struct VigilSidebarView: View {
         let watching = panes.filter { watchActive($0) }
         return Group {
             if !watching.isEmpty {
-                antennaGlyph(watching.flatMap { $0.watchNotes + $0.watchProcs })
+                antennaGlyph(watching.flatMap(\.sentries))
             }
         }
         .frame(width: Grid.classSlot)
@@ -1099,7 +1101,7 @@ struct VigilSidebarView: View {
 /// CABasicAnimation runs in the render server: zero app-side work per
 /// frame.
 ///
-/// `behind` (an agent at rest, its own agents or shells still working) is
+/// `behind` (an agent at rest, its own background agents still working) is
 /// the working arc alone, slower, with no body under it.
 struct VigilStateDot: View {
     let dot: PaneDot?

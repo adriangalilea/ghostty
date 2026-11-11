@@ -29,6 +29,18 @@ extension VigilWorkspaces {
         /// Underived truth: background processes alive under the pane
         /// beyond its program (tree file argv, shortened).
         var watchProcs: [String] = []
+        /// What a Claude pane's turns left running in no account of the
+        /// agent's, by command (its glance's `left`); nil where no broker
+        /// says (a shell, Codex, a pane with no agent).
+        var left: [String]?
+        /// What the antenna stands for: a declared watch, and what is alive
+        /// here that no agent accounts for. On a Claude pane that is the
+        /// broker's word (its own tool servers and the shells its gear
+        /// counts are not it); elsewhere, the processes beyond the pane's
+        /// program while it is quiet.
+        var sentries: [String] {
+            watchNotes + (left ?? (state != .working ? watchProcs : []))
+        }
         /// Who looks at it from off its Mac (its daemon's `viewers`).
         var lookers: [Viewer] = []
         /// A phone follows it (the hub's board).
@@ -192,6 +204,7 @@ extension VigilWorkspaces {
                 emoji: pane.emoji,
                 watchNotes: leases[pane.id]?.map(\.note) ?? [],
                 watchProcs: paneWatchers(pane.id),
+                left: meaning?.agent == "claude" ? (meaning?.background?.commands ?? []) : nil,
                 lookers: Viewer.parse(paneFileLines(pane.id, "viewers").joined(separator: "\n")),
                 followed: phoneFollows.contains(pane.id),
                 priority: pane.priority ?? .normal,
