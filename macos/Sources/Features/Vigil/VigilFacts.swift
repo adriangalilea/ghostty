@@ -183,7 +183,7 @@ final class VigilFacts: @unchecked Sendable {
         let ext = parts[1].split(separator: ".").last.map(String.init) ?? ""
         switch parts[0] {
         case "panes": return ["pid", "tree", "died", "size", "screen", "viewers", "command", "title", "ended"].contains(ext)
-        case "state": return ["state", "seen", "glance"].contains(ext)
+        case "state": return ["state", "seen", "glance", "conflict"].contains(ext)
         case "leases": return ext == "json"
         default: return false
         }

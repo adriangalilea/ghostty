@@ -375,6 +375,9 @@ struct TreeNodeView: View {
             } else if node.kind != .pane && folded {
                 EndedMark(ends: node.ends)
             }
+            if node.kind == .pane || folded {
+                ConflictMark(conflicts: node.conflicts)
+            }
             // A glance row wears its state as its glyph.
             if node.glance == nil { cluster }
             // A Mac's own `+`: a workspace there, its Mac obvious.
@@ -541,6 +544,86 @@ struct EndedMark: View {
 
     private static func time(_ at: Double) -> String {
         Date(timeIntervalSince1970: at).formatted(date: .omitted, time: .shortened)
+    }
+}
+
+// MARK: - Conflict mark
+
+/// A conversation written on two Macs, as the Mac's sidebar marks it: red,
+/// the other Mac's name for one pane, how many for a folded row. A tap
+/// shows both copies (which Mac, when it was last written, what each holds
+/// past what they share); which one goes on is said on the pane's own Mac.
+struct ConflictMark: View {
+    let conflicts: [PaneConflict]
+    @State private var showing: PaneConflict?
+
+    var body: some View {
+        if let first = conflicts.first {
+            Button {
+                if conflicts.count == 1 { showing = first }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.triangle.branch")
+                    Text(conflicts.count == 1 ? "Written on \(first.mac) too" : "\(conflicts.count) written twice")
+                        .lineLimit(1)
+                }
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(conflicts.count == 1
+                ? "This conversation was written on its Mac and on \(first.mac)"
+                : "\(conflicts.count) conversations were written on two Macs")
+            .sheet(item: $showing) { conflict in ConflictDetail(conflict: conflict) }
+        }
+    }
+}
+
+extension PaneConflict: @retroactive Identifiable {
+    public var id: String { "\(device) \(agent) \(conversation)" }
+}
+
+/// Both copies of a conflicted conversation, one under the other.
+struct ConflictDetail: View {
+    let conflict: PaneConflict
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("Neither copy was touched. Say which one goes on from its pane on the Mac: its mark there opens both, with the ways to go on.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                side("Its Mac", conflict.here, whole: true)
+                side(conflict.mac, conflict.there, whole: conflict.whole)
+            }
+            .navigationTitle("Written on two Macs")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+
+    private func side(_ name: String, _ side: PaneConflict.Side, whole: Bool) -> some View {
+        Section(name) {
+            LabeledContent("Since they parted", value: side.turns == 1 ? "1 prompt" : "\(side.turns) prompts")
+            if let written = side.written {
+                LabeledContent("Last written", value: Date(timeIntervalSince1970: written).formatted(.relative(presentation: .named)))
+            }
+            if let prompt = side.prompt { fact("Last asked", prompt) }
+            if let said = side.said { fact("Last said", said) }
+            if !whole {
+                Label("Not all of it has arrived on its Mac yet.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote).foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func fact(_ name: String, _ words: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name).font(.caption).foregroundStyle(.secondary)
+            Text(words).font(.callout)
+        }
     }
 }
 

@@ -107,7 +107,19 @@ extension VigilWorkspaces {
     func paneFacts(_ pane: String) -> Directory.Facts {
         Directory.Facts(alive: true, tree: paneFileLines(pane, "tree"),
                         pid: paneFileLines(pane, "pid").joined(separator: "\n"),
-                        title: paneFileLines(pane, "title").first, glance: paneGlance(pane), ended: paneEnd(pane))
+                        title: paneFileLines(pane, "title").first, glance: paneGlance(pane), ended: paneEnd(pane),
+                        conflict: paneConflict(pane))
+    }
+
+    /// `state/<pane>.conflict`: its conversation was written on this Mac and
+    /// on another and nobody has said which copy goes on (`PaneConflict`,
+    /// vigil-agent's). One that does not read leaves the pane unmarked.
+    func paneConflict(_ pane: String) -> PaneConflict? {
+        guard let file = facts.files["state/\(pane).conflict"] else { return nil }
+        do { return try JSONDecoder().decode(PaneConflict.self, from: file.data) } catch {
+            sidebarLog.warn("conflict record not read: the pane is drawn unmarked", ["pane": pane, "err": error])
+            return nil
+        }
     }
 
     /// `panes/<pane>.ended`: its program ended badly and nobody has opened

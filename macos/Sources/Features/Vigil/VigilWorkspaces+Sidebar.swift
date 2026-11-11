@@ -49,6 +49,9 @@ extension VigilWorkspaces {
         /// refused, since then (its glance): what the row says is not
         /// following that process's work.
         var refused: Double?
+        /// Its conversation was written on its Mac and on another, and
+        /// nobody has said which copy goes on (`PaneConflict`).
+        var conflict: PaneConflict?
 
         /// The ids we communicate by, each only where it exists: the
         /// pane's daemon id, its conversation's name and id.
@@ -196,7 +199,8 @@ extension VigilWorkspaces {
                 background: meaning?.background,
                 ended: facts.ended,
                 arrived: pane.dormant == true ? pane.from : nil,
-                refused: meaning?.refused)
+                refused: meaning?.refused,
+                conflict: facts.conflict)
         }
 
         var rows: [SidebarWorkspaceRow] = []

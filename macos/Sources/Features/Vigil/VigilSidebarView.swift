@@ -414,6 +414,7 @@ struct VigilSidebarView: View {
             // Folded, who looks from elsewhere rolls up: a peek is never hidden.
             if collapsed {
                 endedRollup(row.tabs.flatMap(\.panes))
+                conflictMark(row.tabs.flatMap(\.panes).compactMap(\.conflict), pane: nil)
                 lookerGlyphs(row.tabs.flatMap(\.panes).flatMap(\.lookers))
             }
             followKeycap(id)
@@ -540,6 +541,7 @@ struct VigilSidebarView: View {
             Spacer(minLength: 4)
             if collapsed {
                 endedRollup(tab.panes)
+                conflictMark(tab.panes.compactMap(\.conflict), pane: nil)
                 lookerGlyphs(tab.panes.flatMap(\.lookers))
             }
             followKeycap(tab.id)
@@ -699,6 +701,11 @@ struct VigilSidebarView: View {
                     }
                 }
             }
+            // Its conversation was written on two Macs: both copies, and
+            // which goes on.
+            if let paneId = pane.paneId, pane.conflict != nil {
+                Button("Conflict…") { VigilWorkspaces.shared.conflictSheet(pane: paneId) }
+            }
             // A pane of another Mac's workspace can come alone.
             if pane.paneId == nil, let remote = VigilRemote.split(session), let there = VigilRemote.split(id)?.name {
                 Button("Bring Here…") {
@@ -843,6 +850,7 @@ struct VigilSidebarView: View {
         HStack(spacing: 3 * scale) {
             if let ended = pane.ended { endedMark([ended]) }
             if let arrived = pane.arrived { arrivedMark([arrived]) }
+            if let conflict = pane.conflict { conflictMark([conflict], pane: pane.paneId) }
             if let refused = pane.refused {
                 mark("person.2.slash.fill", .orange,
                      "Another agent process reports under this pane and is refused, since \(Self.endTime.string(from: Date(timeIntervalSince1970: refused))): this row is not following its work. It is likely this conversation moved to the background; close that one, or resume it here.")
@@ -893,6 +901,32 @@ struct VigilSidebarView: View {
             .foregroundStyle(.secondary)
             .help("Brought from \(first.mac), \(Self.endTime.string(from: Date(timeIntervalSince1970: first.at))). "
                 + (arrivals.count == 1 ? "Not opened here yet: opening it starts it." : "\(arrivals.count) panes not opened here yet: opening one starts it."))
+        }
+    }
+
+    /// A conversation written on two Macs, nobody having said which copy
+    /// goes on: red, with the other Mac's name (one pane) or how many (a
+    /// folded tab or workspace, so collapse never hides it). On a pane of
+    /// this Mac a press opens the sheet that settles it; another Mac's
+    /// conflict is that Mac's to settle.
+    @ViewBuilder
+    private func conflictMark(_ conflicts: [PaneConflict], pane: String?) -> some View {
+        if let first = conflicts.first {
+            let mark = HStack(spacing: 1) {
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 8 * scale, weight: .semibold))
+                Text(conflicts.count == 1 ? first.mac : "\(conflicts.count) written twice")
+                    .font(.system(size: 9 * scale, weight: .medium)).lineLimit(1)
+            }
+            .foregroundStyle(.red)
+            .help(conflicts.count == 1
+                ? "This conversation was written on this pane's Mac and on \(first.mac). Neither copy was touched."
+                    + (pane == nil ? " It is settled on its own Mac." : " Click to see both and say which goes on.")
+                : "\(conflicts.count) conversations here were written on two Macs. Unfold to settle each.")
+            if let pane, conflicts.count == 1 {
+                Button { VigilWorkspaces.shared.conflictSheet(pane: pane) } label: { mark }.buttonStyle(.plain)
+            } else {
+                mark
+            }
         }
     }
 

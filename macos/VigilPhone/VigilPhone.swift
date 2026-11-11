@@ -460,6 +460,10 @@ final class VigilPhone: ObservableObject {
         /// Mac sidebar's red mark): it stays listed until opened or closed
         /// on its Mac.
         var ended: PaneEnd?
+        /// Its conversation was written on its Mac and on another, and
+        /// nobody has said which copy goes on (`PaneConflict`, the Mac
+        /// sidebar's mark): settled on its Mac.
+        var conflict: PaneConflict?
         /// An agent (Claude, Codex) runs in the pane: it has a conversation
         /// to draw, and its screen opens on it.
         var agent: Bool = false
@@ -511,6 +515,8 @@ final class VigilPhone: ObservableObject {
         }
         /// The ended panes under this one, the row's red mark when folded.
         var ends: [PaneEnd] { leaves.compactMap(\.ended) }
+        /// The conflicts under this one, the row's mark when folded.
+        var conflicts: [PaneConflict] { leaves.compactMap(\.conflict) }
         /// Every pane node under this one.
         var leaves: [Node] {
             if kind == .pane { return [self] }
@@ -971,6 +977,7 @@ final class VigilPhone: ObservableObject {
                                 flavor: truth?.shown == .blocked ? truth?.token?.flavor : nil,
                                 alive: alive,
                                 ended: alive ? nil : truth?.ended,
+                                conflict: truth?.conflict,
                                 agent: alive && Program.runsAgent(truth?.tree ?? []),
                                 face: PaneFace.of(emoji: p.emoji, program: alive ? Program.agent(in: truth?.tree ?? []) : nil),
                                 glance: alive ? truth?.meaning : nil,

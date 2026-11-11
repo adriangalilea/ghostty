@@ -755,9 +755,15 @@ final class VigilSidebarModel: ObservableObject {
             } else {
                 manager.open(name: name)
             }
+        // A pane whose conversation was written on two Macs asks which copy
+        // goes on before its opening resumes one of them (Not Now: it stays
+        // closed).
         case .tab(let name, let anchor, _):
+            let panes = manager.workspaces[name]?.tabs.first { tab in anchor.map(tab.paneIds.contains) == true }?.paneIds ?? []
+            if let asks = manager.conflictToAsk(among: panes), !manager.conflictSheet(pane: asks) { return }
             manager.activateTab(name: name, anchor: anchor, in: hostController)
         case .pane(let name, let paneId):
+            if let asks = manager.conflictToAsk(among: paneId.map { [$0] } ?? []), !manager.conflictSheet(pane: asks) { return }
             manager.activatePane(name: name, paneId: paneId, in: hostController)
         }
         onLeaveControl?() // landing hands the keyboard back
