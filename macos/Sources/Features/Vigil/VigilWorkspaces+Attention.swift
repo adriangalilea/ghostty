@@ -425,14 +425,19 @@ extension VigilWorkspaces {
     /// on a Mac nobody sits at (one served only remotely, its display kept
     /// awake) shows a pane no one sees: seen needs a person here since the
     /// pane changed, or every question that lands on screen there reads as
-    /// answered-by-eye and nothing rings anywhere.
+    /// answered-by-eye and nothing rings anywhere. A person who touched it
+    /// within `stillHere` before the pane changed is still at it: a prompt
+    /// sent and answered while they watch is read, with no key pressed after.
     nonisolated static func personActed(after moment: Date) -> Bool {
         // The HID system's clock: events a program posts never reset it,
         // so an agent cannot make a pane read as seen.
         let idle = CGEventSource.secondsSinceLastEventType(
             .hidSystemState, eventType: CGEventType(rawValue: UInt32.max)!)
-        return Date(timeIntervalSinceNow: -idle) > moment
+        return Date(timeIntervalSinceNow: -idle) > moment.addingTimeInterval(-stillHere)
     }
+    /// How long after their last key or pointer move a person counts as
+    /// still looking at what is in front of them.
+    nonisolated static let stillHere: TimeInterval = 60
 
     func ackVisiblePanes() {
         guard NSApp.isActive, let window = NSApp.keyWindow else { return }
