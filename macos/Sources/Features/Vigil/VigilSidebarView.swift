@@ -962,10 +962,10 @@ struct VigilSidebarView: View {
             HStack(spacing: 1) {
                 Text("\(count)").font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
                     .foregroundStyle(.yellow)
-                // Turning while they run, by swift-utils' `InkEndless`: the
-                // render server's animation, still when the window is out
-                // of sight (a SwiftUI one re-renders the bar every frame).
-                InkEndless("gearshape.2", motion: .turn(period: 4), size: 8 * scale, color: .yellow)
+                // Gears at work, by swift-utils' `InkTurningGears`: each turns
+                // on its own axis in the render server, still when the window
+                // is out of sight (a SwiftUI one re-renders the bar every frame).
+                InkTurningGears(size: 9 * scale, color: .yellow, period: 3)
             }
             .help(backgrounds.filter { $0.tasks > 0 }.flatMap { ["In the background: \($0.words)"] + [$0.title].compactMap { $0 } }
                 .joined(separator: "\n"))
