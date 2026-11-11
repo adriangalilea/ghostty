@@ -28,6 +28,11 @@ struct BringSheetRows: View {
                                     .font(.system(size: 11)).foregroundStyle(.orange)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
+                            if !line.also.isEmpty {
+                                Text("Also alive under it there: \(line.also.joined(separator: ", "))")
+                                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                             if line.work == nil {
                                 Label(Bring.Line.workNotKnown, systemImage: "questionmark.circle")
                                     .font(.system(size: 11)).foregroundStyle(.secondary)
