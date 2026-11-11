@@ -507,7 +507,7 @@ extension VigilWorkspaces {
             for pane in ownedPaneIds(session) {
                 guard let state = paneAgentState(pane), let need = Need(state.state, flavor: state.flavor),
                       (lastAck(pane) ?? .distantPast) < state.since else { continue }
-                entries.append(AttentionEntry(candidate: SummonCandidate(name: session.name, pane: pane, since: state.since), need: need))
+                entries.append(AttentionEntry(candidate: SummonCandidate(name: session.name, pane: pane, since: state.since, revision: state.revision), need: need))
             }
         }
         for candidate in remoteAttention() {
@@ -541,6 +541,9 @@ extension VigilWorkspaces {
         let name: String
         let pane: String
         let since: Date
+        /// The revision its own Mac gave the state it is in: what a cue is
+        /// rung for, once (`VigilSummon.rung`).
+        let revision: String
     }
 
     /// The summon's queue, DERIVED on every read (state files + ownership,
@@ -610,7 +613,7 @@ extension VigilWorkspaces {
                     let isMidTurn = token.state == .blocked && token.flavor?.midTurn == true
                     if let midTurn, midTurn != isMidTurn { continue }
                     result.append(SummonCandidate(name: VigilRemote.compositeId(host.device, session.name),
-                        pane: VigilRemote.compositeId(host.device, pane), since: VigilRemote.shared.arrival(device: host.device, pane: pane, revision: revision)))
+                        pane: VigilRemote.compositeId(host.device, pane), since: VigilRemote.shared.arrival(device: host.device, pane: pane, revision: revision), revision: revision))
                 }
             }
         }
@@ -639,7 +642,7 @@ extension VigilWorkspaces {
                 guard let s = paneAgentState(pane) else { continue }
                 let ended = s.state == .done || (s.state == .blocked && s.flavor?.midTurn != true)
                 guard ended else { continue }
-                out.append(SummonCandidate(name: session.name, pane: pane, since: s.since))
+                out.append(SummonCandidate(name: session.name, pane: pane, since: s.since, revision: s.revision))
             }
         }
         return out.sorted { $0.since < $1.since }
@@ -655,7 +658,7 @@ extension VigilWorkspaces {
             for pane in ownedPaneIds(session) {
                 guard let s = paneAgentState(pane), s.state == .blocked,
                       s.flavor?.midTurn == true else { continue }
-                out.append(SummonCandidate(name: session.name, pane: pane, since: s.since))
+                out.append(SummonCandidate(name: session.name, pane: pane, since: s.since, revision: s.revision))
             }
         }
         return out.sorted { $0.since < $1.since }

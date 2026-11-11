@@ -1,6 +1,7 @@
 import AppKit
 import AskKit
 import Earcon
+import VigilWire
 
 /// Follow has three modes, one control (two toggles that both move focus
 /// would fight; a mode selector cannot):
@@ -120,14 +121,47 @@ final class VigilSummon {
         }
     }
 
-    /// One chime per (pane, block): every mid-turn blocker DINGS, visible
-    /// or hidden, windowed or not — noise is the contract (a prompt never
-    /// passes in silence); presence only decides whether anything moves.
-    private var chimed: [String: Date] = [:]
-    /// One soft ding per (pane, turn end): a turn that ended — finished
-    /// or asking — is NEWS, not an interruption; different sound, no
-    /// glass moves (the eye and ⌘⇧H already carry it).
-    private var chimedDone: [String: Date] = [:]
+    /// What was rung for: each pane's state revision, the one its own Mac
+    /// gave that state. A cue is for an event, and the event is that
+    /// revision: rung once, whatever happens to the way this Mac hears of
+    /// it. Kept on disk and never dropped because a pane stopped being
+    /// listed: a Mac out of reach and back, or this app restarted, rings
+    /// nothing again, and a turn that ended while its Mac was away rings
+    /// once when it is heard (its revision is new). Held as memory keyed by
+    /// pane and dropped when the pane left the list, every old ending on an
+    /// M5 in and out of reach rang at each return (2026-11-11).
+    private struct Rung: Codable, Equatable {
+        var revision: String
+        var at: Double
+    }
+    private var rung: [String: Rung] = VigilSummon.readRung() {
+        didSet { if rung != oldValue { Self.writeRung(rung) } }
+    }
+    private static let rungFile = VigilPaths.root.appendingPathComponent("rung.json")
+    private static let rungKept = 2000
+
+    private static func readRung() -> [String: Rung] {
+        guard let data = try? Data(contentsOf: rungFile) else { return [:] }
+        return (try? JSONDecoder().decode([String: Rung].self, from: data)) ?? [:]
+    }
+
+    private static func writeRung(_ rung: [String: Rung]) {
+        // The oldest go first, far past any number of panes that exist.
+        var kept = rung
+        if kept.count > rungKept {
+            kept = Dictionary(uniqueKeysWithValues: kept.sorted { $0.value.at > $1.value.at }.prefix(rungKept).map { ($0.key, $0.value) })
+        }
+        do { try JSONEncoder().encode(kept).write(to: rungFile, options: .atomic) } catch {
+            summonLog.error("what was rung for not saved", ["err": error])
+        }
+    }
+
+    /// Whether this state of the pane is news: not rung for yet. Marks it.
+    private func news(_ candidate: VigilWorkspaces.SummonCandidate) -> Bool {
+        guard rung[candidate.pane]?.revision != candidate.revision else { return false }
+        rung[candidate.pane] = Rung(revision: candidate.revision, at: Date().timeIntervalSince1970)
+        return true
+    }
 
     /// The waiting cue, the earcon family's own (two notes rising): only
     /// for a blocker nothing narrates. No system sound: the machine's own
@@ -147,50 +181,38 @@ final class VigilSummon {
 
     private func announce() {
         let manager = VigilWorkspaces.shared
-        let asks = manager.midTurnAsks()
-        // The ledger lives exactly as long as its blocks: entries for
-        // panes no longer mid-turn-blocked drop here, so the map is
-        // bounded by the open-ask count forever. Lost on app restart by
-        // design — a still-open ask re-chimes once, the unseen-relight
-        // doctrine in audio.
-        let open = Set(asks.map(\.pane))
-        chimed = chimed.filter { open.contains($0.key) }
         // ONE chime per tick however many asks landed together — three
-        // overlapping dings are noise about noise. The log makes every
-        // chime auditable: "I heard nothing" vs "nothing fired" must be
-        // distinguishable from the log alone.
-        var fresh = false
-        for ask in asks where (chimed[ask.pane] ?? .distantPast) < ask.since {
+        // overlapping dings are noise about noise. The log names every
+        // pane a cue was for: "I heard nothing" vs "nothing fired", and
+        // "what was that for", are answered from the log alone.
+        var waiting: [String] = []
+        for ask in manager.midTurnAsks() {
             // ONE cue per moment, owned by the layer that owns it. A blocker
             // the ask lane carries (narrated now, or queued in the inbox to
             // be narrated next) gets the ask's own cues - narration, the
             // ears-open earcon, accepted/unheard - and a chime on top would
             // be a second sound for the same permission on every command.
-            // Not marked chimed: an ask that times out
-            // unanswered leaves the pane blocked with nothing carrying it,
-            // and THEN the chime does its job.
+            // Not marked rung: an ask that times out unanswered leaves the
+            // pane blocked with nothing carrying it, and THEN the chime
+            // does its job.
             if VigilHarnessCoordinator.shared.carries(pane: ask.pane) { continue }
-            chimed[ask.pane] = ask.since
-            fresh = true
+            if news(ask) { waiting.append(ask.pane) }
         }
-        if fresh {
-            summonLog.info("waiting cue")
+        if !waiting.isEmpty {
+            summonLog.info("waiting cue", ["panes": waiting])
             Self.chime()
         }
         // Ended turns ring softer — news, not interruption — and news is
         // what you cannot see: a turn ending on screen is seen, and a cue
-        // for every visible message would be a sound per message.
-        let done = manager.turnEnds()
-        let openDone = Set(done.map(\.pane))
-        chimedDone = chimedDone.filter { openDone.contains($0.key) }
-        var freshDone = false
-        for d in done where (chimedDone[d.pane] ?? .distantPast) < d.since {
-            chimedDone[d.pane] = d.since
-            if manager.paneOnAnyScreen(d.pane) { continue }
-            freshDone = true
+        // for every visible message would be a sound per message. One
+        // already seen anywhere (this Mac, another, the phone) is no news.
+        var ended: [String] = []
+        for end in manager.turnEnds() where news(end) {
+            if manager.paneOnAnyScreen(end.pane) || manager.paneDisplayState(end.pane) == .idle { continue }
+            ended.append(end.pane)
         }
-        if freshDone {
-            summonLog.info("ended cue")
+        if !ended.isEmpty {
+            summonLog.info("ended cue", ["panes": ended])
             Self.doneChime()
         }
     }
