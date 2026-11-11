@@ -413,6 +413,7 @@ struct VigilSidebarView: View {
             arrivedMark(row.tabs.flatMap(\.panes).compactMap(\.arrived))
             // Folded, who looks from elsewhere rolls up: a peek is never hidden.
             if collapsed {
+                backgroundMark(row.tabs.flatMap(\.panes).compactMap(\.background))
                 endedRollup(row.tabs.flatMap(\.panes))
                 conflictMark(row.tabs.flatMap(\.panes).compactMap(\.conflict), pane: nil)
                 lookerGlyphs(row.tabs.flatMap(\.panes).flatMap(\.lookers))
@@ -444,7 +445,7 @@ struct VigilSidebarView: View {
             id: id,
             hovered: hovered == id,
             activity: model.isFront(row) ? (collapsed ? .leaf : .chain) : .none,
-            state: collapsed ? row.states.first : nil))
+            state: collapsed ? row.states.first?.state : nil))
         .background(reportHit(id: id, kind: .session(id)))
         .contentShape(Rectangle())
         .onDrag {
@@ -540,6 +541,7 @@ struct VigilSidebarView: View {
             }
             Spacer(minLength: 4)
             if collapsed {
+                backgroundMark(tab.panes.compactMap(\.background))
                 endedRollup(tab.panes)
                 conflictMark(tab.panes.compactMap(\.conflict), pane: nil)
                 lookerGlyphs(tab.panes.flatMap(\.lookers))
@@ -556,7 +558,7 @@ struct VigilSidebarView: View {
             }
             Group {
                 if collapsed {
-                    dotCluster(AgentState.cluster(tab.panes.compactMap(\.state)))
+                    dotCluster(PaneDot.cluster(tab.panes.compactMap(\.dot)))
                 } else {
                     dotSlot(nil)
                 }
@@ -571,7 +573,7 @@ struct VigilSidebarView: View {
             hovered: hovered == tab.id,
             activity: model.isFront(tab) ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed
-                ? AgentState.cluster(tab.panes.compactMap(\.state)).first
+                ? PaneDot.cluster(tab.panes.compactMap(\.dot)).first?.state
                 : nil))
         .background(reportHit(id: tab.id, kind: .tab(session: session, anchor: tab.anchor)))
         .contentShape(Rectangle())
@@ -669,7 +671,7 @@ struct VigilSidebarView: View {
             paneMarks(pane)
             followKeycap(id)
             watchGlyph(pane)
-            dotSlot(pane.state)
+            dotSlot(pane.dot)
         }
         .frame(height: 20 * scale)
         .padding(.leading, (Grid.indent * scale) * CGFloat(level) + (Grid.chevron * scale))
@@ -855,7 +857,7 @@ struct VigilSidebarView: View {
                 mark("person.2.slash.fill", .orange,
                      "Another agent process reports under this pane and is refused, since \(Self.endTime.string(from: Date(timeIntervalSince1970: refused))): this row is not following its work. It is likely this conversation moved to the background; close that one, or resume it here.")
             }
-            if let background = pane.background { backgroundMark(background) }
+            if let background = pane.background { backgroundMark([background]) }
             lookerGlyphs(pane.lookers)
             if pane.followed {
                 mark("pin.fill", .primary.opacity(0.75), "Followed on iPhone: its stalls and ends ring there")
@@ -949,17 +951,23 @@ struct VigilSidebarView: View {
         }
     }
 
-    /// Its background work, counted (agents, shells, the rest and what a
-    /// turn left running in no account of the agent's, together);
-    /// hovering says each count and what the first one is for.
-    private func backgroundMark(_ background: PaneGlance.Background) -> some View {
-        HStack(spacing: 1) {
-            Image(systemName: "gearshape.2").font(.system(size: 8 * scale, weight: .semibold))
-            Text("\(background.agents + background.shells + background.others + background.left)")
-                .font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
+    /// The background work its agent accounts for, counted as the agent
+    /// counts it under its prompt (agents, shells, the rest). A process a
+    /// turn left running in no account of its is the antenna's, with every
+    /// other process alive under the pane. Hovering says each count and
+    /// what the first one is for. On a folded tab or workspace: its panes'.
+    @ViewBuilder
+    private func backgroundMark(_ backgrounds: [PaneGlance.Background]) -> some View {
+        let count = backgrounds.reduce(0) { $0 + $1.tasks }
+        if count > 0 {
+            HStack(spacing: 1) {
+                Image(systemName: "gearshape.2").font(.system(size: 8 * scale, weight: .semibold))
+                Text("\(count)").font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
+            }
+            .foregroundStyle(.yellow)
+            .help(backgrounds.filter { $0.tasks > 0 }.flatMap { ["In the background: \($0.words)"] + [$0.title].compactMap { $0 } }
+                .joined(separator: "\n"))
         }
-        .foregroundStyle(.secondary)
-        .help((["In the background: \(background.words)"] + [background.title].compactMap { $0 }).joined(separator: "\n"))
     }
 
     private func mark(_ symbol: String, _ color: Color, _ help: String) -> some View {
@@ -1000,15 +1008,15 @@ struct VigilSidebarView: View {
 
     /// Fixed-width dot column: absent state reserves the slot, so the
     /// right rail never wiggles.
-    private func dotSlot(_ state: AgentState?) -> some View {
-        VigilStateDot(state: state)
+    private func dotSlot(_ dot: PaneDot?) -> some View {
+        VigilStateDot(dot: dot)
             .frame(width: Grid.dot)
     }
 
     /// The collapsed rollup: one dot per distinct descendant state,
     /// overlapped (negative gap), blocked leftmost so the most urgent
     /// reads first. Grows inward; the right rail edge never moves.
-    private func dotCluster(_ states: [AgentState]) -> some View {
+    private func dotCluster(_ states: [PaneDot]) -> some View {
         HStack(spacing: -2) {
             if states.isEmpty {
                 Color.clear.frame(width: 7, height: 7)
@@ -1017,8 +1025,8 @@ struct VigilSidebarView: View {
                 // positional, not by state. Plain overlap - the ring
                 // borders keep overlapping same-colour dots countable (a
                 // destinationOut punch-out cannot composite CA-layer dots).
-                ForEach(Array(states.enumerated()), id: \.offset) { _, state in
-                    VigilStateDot(state: state)
+                ForEach(Array(states.enumerated()), id: \.offset) { _, dot in
+                    VigilStateDot(dot: dot)
                 }
             }
         }
@@ -1090,36 +1098,63 @@ struct VigilSidebarView: View {
 /// main during a pure Metal scroll: the terminal stutters).
 /// CABasicAnimation runs in the render server: zero app-side work per
 /// frame.
+///
+/// `behind` (an agent at rest, its own agents or shells still working) is
+/// the working arc alone, slower, with no body under it.
 struct VigilStateDot: View {
-    let state: AgentState?
+    let dot: PaneDot?
 
     var body: some View {
-        VigilDotLayer(state: state)
+        VigilDotLayer(dot: dot)
             .frame(width: 7, height: 7)
     }
 }
 
 private struct VigilDotLayer: NSViewRepresentable {
-    let state: AgentState?
+    let dot: PaneDot?
 
     func makeNSView(context: Context) -> VigilDotNSView { VigilDotNSView() }
     func updateNSView(_ view: VigilDotNSView, context: Context) {
-        view.apply(state)
+        view.apply(dot)
     }
 }
 
 final class VigilDotNSView: NSView {
-    private var current: AgentState??
+    private var current: PaneDot??
 
     override var intrinsicContentSize: NSSize { NSSize(width: 7, height: 7) }
 
-    func apply(_ state: AgentState?) {
-        if current == state { return }
-        current = state
+    func apply(_ dot: PaneDot?) {
+        if current == dot { return }
+        current = dot
         wantsLayer = true
         guard let layer else { return }
         layer.sublayers?.forEach { $0.removeFromSuperlayer() }
         let rect = CGRect(x: 0, y: 0, width: 7, height: 7)
+        let state: AgentState?
+        switch dot {
+        case .state(let shown): state = shown
+        case nil: state = nil
+        case .behind:
+            let arc = CAShapeLayer()
+            arc.frame = rect
+            let path = CGMutablePath()
+            path.addArc(center: CGPoint(x: 3.5, y: 3.5), radius: 3, startAngle: 0, endAngle: .pi * 1.5, clockwise: false)
+            arc.path = path
+            arc.strokeColor = NSColor.systemYellow.withAlphaComponent(0.8).cgColor
+            arc.fillColor = nil
+            arc.lineWidth = 1
+            arc.lineCap = .round
+            layer.addSublayer(arc)
+            let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+            spin.fromValue = 0
+            spin.toValue = -2 * Double.pi
+            spin.duration = 2.2
+            spin.repeatCount = .infinity
+            arc.add(spin, forKey: "spin")
+            toolTip = "Its turn is over; its background work still runs"
+            return
+        }
         switch state {
         case .working:
             // Faint body + bright arc, the arc rotating in the render

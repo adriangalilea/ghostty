@@ -453,6 +453,8 @@ final class VigilPhone: ObservableObject {
         var emoji: String?
         /// A pane's own state as shown; nodes above carry the cluster.
         var state: AgentState?
+        /// A pane's dot (`PaneDot`, the rule the Mac's sidebar draws by).
+        var dot: PaneDot?
         /// Why a pane waits, when it waits.
         var flavor: BlockFlavor?
         var alive: Bool = true
@@ -508,10 +510,10 @@ final class VigilPhone: ObservableObject {
         /// This node and every node under it.
         var all: [Node] { [self] + children.flatMap(\.all) }
 
-        /// The dots this node shows when collapsed (`AgentState.cluster`,
-        /// the Mac sidebar's rule), its own state for a pane.
-        var cluster: [AgentState] {
-            AgentState.cluster(leaves.filter(\.alive).map { $0.state ?? .idle })
+        /// The dots this node shows when collapsed (`PaneDot.cluster`, the
+        /// Mac sidebar's rule), its own dot for a pane.
+        var cluster: [PaneDot] {
+            PaneDot.cluster(leaves.filter(\.alive).map { $0.dot ?? .state(.idle) })
         }
         /// The ended panes under this one, the row's red mark when folded.
         var ends: [PaneEnd] { leaves.compactMap(\.ended) }
@@ -974,6 +976,7 @@ final class VigilPhone: ObservableObject {
                     let path = dir.path(of: p.id) ?? title
                     return Node(id: "\(sid)/\(p.id)", kind: .pane, title: title, emoji: p.emoji,
                                 state: truth?.shown,
+                                dot: truth?.dot,
                                 flavor: truth?.shown == .blocked ? truth?.token?.flavor : nil,
                                 alive: alive,
                                 ended: alive ? nil : truth?.ended,

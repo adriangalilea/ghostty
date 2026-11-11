@@ -19,6 +19,8 @@ extension VigilWorkspaces {
         let title: String         // display: the one naming rule (`Directory.titles`)
         let program: String?      // the argv truth alone; nil = just a shell
         let state: AgentState?
+        /// Its dot, by the one rule every surface draws (`PaneDot`).
+        var dot: PaneDot? { state.map { $0.dot(background: background) } }
         let isDock: Bool
         var emoji: String?        // the pane's custom face
         /// Declared watch leases (notes) on this pane - the sentry's own
@@ -91,9 +93,8 @@ extension VigilWorkspaces {
         let label: String
         let stateTag: String      // Place.rawValue, or "remote"
         let attention: Attention
-        /// Distinct descendant states, priority-ordered (blocked first),
-        /// idle only when it is the only one: the collapsed row's cluster.
-        let states: [AgentState]
+        /// The collapsed row's cluster: its panes' dots (`PaneDot.cluster`).
+        let states: [PaneDot]
         let tabs: [SidebarTab]
         /// A remote host's session (VigilRemote): the header text of the
         /// host group it sits under; nil = this Mac. Row ids of remote
@@ -241,7 +242,7 @@ extension VigilWorkspaces {
                 label: session.label,
                 stateTag: place(name).rawValue,
                 attention: session.attention,
-                states: AgentState.cluster(tabs.flatMap(\.panes).compactMap(\.state)),
+                states: PaneDot.cluster(tabs.flatMap(\.panes).compactMap(\.dot)),
                 tabs: tabs))
         }
         return rows + VigilRemote.shared.sidebarRows()
