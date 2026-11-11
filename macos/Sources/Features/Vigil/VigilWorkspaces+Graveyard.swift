@@ -66,6 +66,8 @@ extension VigilWorkspaces {
         // A corpse never renders: its daemons stay alive for the grace,
         // its renderers must not.
         setOcclusion(false, session.held)
+        var session = session
+        if session.movedTo == nil { session.movedTo = movingTo }
         graveyard[name] = session
         graveyardDeadlines[name] = Date().addingTimeInterval(Self.killGrace)
 
@@ -123,15 +125,17 @@ extension VigilWorkspaces {
     }
 
     func sidebarBurials() -> [SidebarBurial] {
-        func from(_ origin: Registry.Origin?, _ label: (String) -> String?) -> String? {
-            origin.map { "\(label($0.workspace) ?? $0.workspace) › tab \($0.tab + 1)" }
+        func from(_ origin: Registry.Origin?, moved: String?, _ label: (String) -> String?) -> String? {
+            let parts = [moved.map { "moved to \($0)" }, origin.map { "\(label($0.workspace) ?? $0.workspace) › tab \($0.tab + 1)" }]
+                .compactMap { $0 }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
         }
         let here = graveyard.values.compactMap { burial -> SidebarBurial? in
             guard let deadline = graveyardDeadlines[burial.name] else { return nil }
             return SidebarBurial(
                 id: burial.name, name: burial.name, emoji: burial.emoji, label: burial.label,
                 remaining: max(0, Int(deadline.timeIntervalSinceNow)),
-                from: from(burial.buriedFrom) { workspaces[$0]?.label }, device: nil, mac: nil)
+                from: from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }, device: nil, mac: nil)
         }
         let elsewhere = VigilRemote.shared.hosts.flatMap { host -> [SidebarBurial] in
             let listed = host.directory?.workspaces ?? []
@@ -140,7 +144,7 @@ extension VigilWorkspaces {
                 return SidebarBurial(
                     id: VigilRemote.compositeId(host.device, burial.name), name: burial.name, emoji: burial.emoji,
                     label: burial.label, remaining: max(0, Int(until.timeIntervalSinceNow)),
-                    from: from(burial.buriedFrom) { name in listed.first { $0.name == name }?.label },
+                    from: from(burial.buriedFrom, moved: burial.movedTo) { name in listed.first { $0.name == name }?.label },
                     device: host.device, mac: host.name)
             }
         }

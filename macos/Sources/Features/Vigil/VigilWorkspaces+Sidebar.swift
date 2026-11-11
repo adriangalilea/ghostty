@@ -42,6 +42,13 @@ extension VigilWorkspaces {
         var background: PaneGlance.Background?
         /// Its program ended badly and nobody opened it yet (`PaneEnd`).
         var ended: PaneEnd?
+        /// Brought from another Mac and not opened here yet: the pane it
+        /// was there (`Registry.Arrival`).
+        var arrived: Registry.Arrival?
+        /// Another agent process keeps reporting under this pane and is
+        /// refused, since then (its glance): what the row says is not
+        /// following that process's work.
+        var refused: Double?
 
         /// The ids we communicate by, each only where it exists: the
         /// pane's daemon id, its conversation's name and id.
@@ -187,7 +194,9 @@ extension VigilWorkspaces {
                 conversation: meaning?.conversation,
                 conversationName: meaning?.title,
                 background: meaning?.background,
-                ended: facts.ended)
+                ended: facts.ended,
+                arrived: pane.dormant == true ? pane.from : nil,
+                refused: meaning?.refused)
         }
 
         var rows: [SidebarWorkspaceRow] = []

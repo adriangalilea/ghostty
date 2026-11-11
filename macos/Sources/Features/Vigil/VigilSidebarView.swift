@@ -409,6 +409,8 @@ struct VigilSidebarView: View {
             )
             .opacity(row.stateTag == "windowed" ? 1 : 0.85)
             Spacer(minLength: 4)
+            // Where it came from, folded or not, until its panes are opened.
+            arrivedMark(row.tabs.flatMap(\.panes).compactMap(\.arrived))
             // Folded, who looks from elsewhere rolls up: a peek is never hidden.
             if collapsed {
                 endedRollup(row.tabs.flatMap(\.panes))
@@ -594,6 +596,12 @@ struct VigilSidebarView: View {
                     }
                 }
             }
+            // A tab of another Mac's workspace can come alone.
+            if let remote = VigilRemote.split(session), let pane = tab.anchor.flatMap(VigilRemote.split)?.name {
+                Button("Bring Here…") {
+                    VigilWorkspaces.shared.bringWithSheet(device: remote.device, workspace: remote.name, anchor: pane, part: .tab)
+                }
+            }
             Button("Close Tab…", role: .destructive) {
                 VigilWorkspaces.shared.closeTabFromSidebar(
                     name: session, anchor: tab.anchor, in: model.hostController)
@@ -689,6 +697,12 @@ struct VigilSidebarView: View {
                         VigilSidebarView.copied.copy(id.value)
                         sidebarLog.info("copied", ["what": id.label, "pane": pane.id])
                     }
+                }
+            }
+            // A pane of another Mac's workspace can come alone.
+            if pane.paneId == nil, let remote = VigilRemote.split(session), let there = VigilRemote.split(id)?.name {
+                Button("Bring Here…") {
+                    VigilWorkspaces.shared.bringWithSheet(device: remote.device, workspace: remote.name, anchor: there, part: .pane)
                 }
             }
             if let paneId = pane.paneId {
@@ -828,6 +842,11 @@ struct VigilSidebarView: View {
     private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         HStack(spacing: 3 * scale) {
             if let ended = pane.ended { endedMark([ended]) }
+            if let arrived = pane.arrived { arrivedMark([arrived]) }
+            if let refused = pane.refused {
+                mark("person.2.slash.fill", .orange,
+                     "Another agent process reports under this pane and is refused, since \(Self.endTime.string(from: Date(timeIntervalSince1970: refused))): this row is not following its work. It is likely this conversation moved to the background; close that one, or resume it here.")
+            }
             if let background = pane.background { backgroundMark(background) }
             lookerGlyphs(pane.lookers)
             if pane.followed {
@@ -858,6 +877,22 @@ struct VigilSidebarView: View {
             .help((ends.map { end in
                 "Its program ended, \(end.how), at \(Self.endTime.string(from: Date(timeIntervalSince1970: end.at))): \(end.program)"
             } + ["Open it to see its final screen; close it to clear this."]).joined(separator: "\n"))
+        }
+    }
+
+    /// Brought from another Mac and not opened here: that Mac's name (one
+    /// pane's, or a workspace's panes rolled up). It leaves a pane's row
+    /// when the pane is opened, since from then it runs here.
+    @ViewBuilder
+    private func arrivedMark(_ arrivals: [Registry.Arrival]) -> some View {
+        if let first = arrivals.first {
+            HStack(spacing: 1) {
+                Image(systemName: "arrow.down.to.line").font(.system(size: 8 * scale, weight: .semibold))
+                Text(first.mac).font(.system(size: 9 * scale, weight: .medium)).lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+            .help("Brought from \(first.mac), \(Self.endTime.string(from: Date(timeIntervalSince1970: first.at))). "
+                + (arrivals.count == 1 ? "Not opened here yet: opening it starts it." : "\(arrivals.count) panes not opened here yet: opening one starts it."))
         }
     }
 

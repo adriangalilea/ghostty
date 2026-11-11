@@ -385,7 +385,8 @@ final class VigilRemote: ObservableObject {
                             conversation: truth?.meaning?.conversation,
                             conversationName: truth?.meaning?.title,
                             background: truth?.meaning?.background,
-                            ended: truth?.ended)
+                            ended: truth?.ended,
+                            refused: truth?.meaning?.refused)
                     }
                     let anchor = all.first.map { Self.compositeId(host.device, $0.id) }
                     tabs.append(.init(

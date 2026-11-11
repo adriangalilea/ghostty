@@ -273,6 +273,8 @@ extension VigilWorkspaces {
         // A workspace of another Mac, brought here as itself: `session` names
         // it there, never a workspace of this registry.
         if request.operation == "bring" { return bring(request) }
+        // Panes of a workspace here that another Mac brought: they close.
+        if request.operation == "moved" { return moved(request) }
         guard var session = workspaces[request.session] else {
             return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
         }

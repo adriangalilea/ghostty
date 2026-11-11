@@ -500,7 +500,11 @@ extension VigilWorkspaces {
         // First tab gets the window; the rest come back as NATIVE tabs
         // behind it (ghostty's regular tab UX, exactly).
         let usable = tabs.filter { !$0.panes.isEmpty }
-        guard let first = usable.first else { return }
+        // Sidebar mode shows one tab: the one the keyboard was last in
+        // (`front`), else the first. Native tabs come back in their order.
+        let front = workspaces[name]!.front
+        let shown = nativeTabs ? nil : usable.first { tab in front.map(tab.paneIds.contains) == true }
+        guard let first = shown ?? usable.first else { return }
         let panes = first.panes
         let firstIndex = min(first.layout?.firstLeaf ?? 0, panes.count - 1)
         guard let anchorView = surface(for: panes[firstIndex], configFor: configFor) else { return }
@@ -537,6 +541,7 @@ extension VigilWorkspaces {
         }
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        if shown != nil { focusLanding(controller, on: front) }
     }
 
     /// A pane's resurrection config: cwd + session identity + its native

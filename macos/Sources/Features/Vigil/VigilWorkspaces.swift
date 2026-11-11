@@ -350,6 +350,11 @@ class VigilWorkspaces {
         /// Detached-in-background workspaces load with this false and stay
         /// background: startup rebuilds the workspace exactly as it was.
         var foreground: Bool = false
+        /// The pane last under the keyboard in it (`Registry.Workspace.front`),
+        /// written at the seen chokepoint, read when launch opens its window.
+        var front: String?
+        /// A burial of panes brought to another Mac: that Mac's name.
+        var movedTo: String?
         /// Live while windowed (refreshed on overview open), frozen at the
         /// moment of detach while it holds runtimes. Runtime-only.
         var thumbnail: NSImage?
@@ -403,6 +408,9 @@ class VigilWorkspaces {
     var graveyard: [String: Workspace] = [:] { didSet { savePending() } }
     var graveyardDeadlines: [String: Date] = [:] { didSet { savePending() } }
     static let killGrace: TimeInterval = 120
+    /// While panes that another Mac brought are being closed here
+    /// (`moved`): that Mac's name, stamped on each burial they make.
+    var movingTo: String?
 
     /// Most recently active workspaces, newest first: the successor order
     /// when the session you are in dies (the tab-close semantic: the
@@ -1232,10 +1240,10 @@ class VigilWorkspaces {
         refreshWorkspaceRevisions()
         persisting = false
         var entries = workspaces.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, front: $0.front)
         }
         entries += graveyard.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo)
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
@@ -1546,12 +1554,14 @@ class VigilWorkspaces {
             session.pinned = entry.pinned ?? false
             session.sidebar = entry.sidebar
             session.foreground = entry.foreground ?? false
+            session.front = entry.front
             session.thumbnail = NSImage(
                 contentsOfFile: dumpsDir(entry.name).appendingPathComponent("thumb.png").path)
             if let deadline = entry.buriedUntil {
                 // Buried across a relaunch: honor the remaining grace (the
                 // daemons are still out there), reap immediately if spent.
                 session.buriedFrom = entry.buriedFrom
+                session.movedTo = entry.movedTo
                 graveyard[entry.name] = session
                 graveyardDeadlines[entry.name] = deadline
                 let wait = max(deadline.timeIntervalSinceNow, 0) + 1

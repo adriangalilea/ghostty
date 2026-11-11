@@ -449,6 +449,12 @@ extension VigilWorkspaces {
             return
         }
         if let name { touchRecent(name) }
+        // Where the keyboard is in this workspace: what launch shows again.
+        if let name, let controller = window.windowController as? TerminalController,
+           let pane = controller.focusedSurface?.vigilAttachId, controller.focusedSurface?.vigilHost == nil,
+           workspaces[name] != nil, workspaces[name]!.front != pane {
+            workspaces[name]!.front = pane
+        }
         var changed = false
         for view in views {
             guard let pane = view.vigilAttachId,
