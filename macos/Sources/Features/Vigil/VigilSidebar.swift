@@ -775,21 +775,17 @@ final class VigilSidebarModel: ObservableObject {
     }
 
     /// A press on a row that holds others, a workspace or a tab, one rule:
-    /// folded, it opens; open and the one you are in, it folds (there is
-    /// nowhere to go); anywhere else, the press goes there, open. So one
-    /// press always ends with the row's children showing, and only a press
-    /// on the open row you are already in folds it. `folded` is the set the
-    /// row's kind folds in.
+    /// it opens the row when folded and goes there. A press never folds:
+    /// folding is its thread line's (a press that folded the row you were
+    /// in read as the row vanishing under the pointer). `folded` is the set
+    /// the row's kind folds in.
     func holderClicked(_ item: NavItem, isFront: Bool, folded: ReferenceWritableKeyPath<VigilSidebarModel, Set<String>>) {
-        if self[keyPath: folded].contains(item.id) {
-            self[keyPath: folded].remove(item.id)
-            if isFront { selection = item.id; return }
-        } else if isFront {
-            self[keyPath: folded].insert(item.id)
+        self[keyPath: folded].remove(item.id)
+        if isFront {
             selection = item.id
-            return
+        } else {
+            activate(item)
         }
-        activate(item)
     }
 
     func collapseSelection() {

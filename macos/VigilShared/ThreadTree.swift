@@ -50,6 +50,8 @@ struct ThreadTreeMetrics: Equatable {
 struct ThreadChildren<Content: View>: View {
     let level: Int
     let metrics: ThreadTreeMetrics
+    /// Between two children, when they are blocks of their own.
+    var spacing: CGFloat = 0
     var hovering: (Bool) -> Void = { _ in }
     let fold: () -> Void
     @ViewBuilder let content: () -> Content
@@ -57,7 +59,7 @@ struct ThreadChildren<Content: View>: View {
     @State private var lit = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0, content: content)
+        VStack(alignment: .leading, spacing: spacing, content: content)
             .opacity(lit ? 0.4 : 1)
             .animation(.easeOut(duration: 0.12), value: lit)
             .overlay(alignment: .leading) { line }
