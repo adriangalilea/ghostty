@@ -39,7 +39,10 @@ struct VigilFaceButton<Fallback: View>: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help("Pick a face")
-        .popover(isPresented: $picking, arrowEdge: .bottom) {
+        // Beside the face, over the terminal: under it, the picker is far
+        // wider than the sidebar's edge leaves room for, and its arrow was
+        // squeezed into its own corner.
+        .popover(isPresented: $picking, arrowEdge: .trailing) {
             VigilEmojiPickerView(selected: emoji) { picked in
                 onPick(picked)
                 picking = false

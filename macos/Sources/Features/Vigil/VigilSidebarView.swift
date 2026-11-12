@@ -22,6 +22,12 @@ struct VigilSidebarView: View {
     /// row's text, by the one rule the phone's rows use (`PaneMarkSizes`).
     private var marks: PaneMarkSizes { PaneMarkSizes(text: 11 * scale) }
     @State private var hovered: String?
+    /// The row whose thread line is under the pointer. While one is, no row
+    /// wears the hover: a press there folds, it does not open the row
+    /// behind the pointer, and the lit line with its block says so.
+    @State private var hoveredLine: String?
+
+    private func rowHovered(_ id: String) -> Bool { hovered == id && hoveredLine == nil }
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
 
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
@@ -366,11 +372,25 @@ struct VigilSidebarView: View {
             .fixedSize()
     }
 
-    /// A folded row's count as the button that opens it.
-    private func unfold(_ count: Int, _ open: @escaping () -> Void) -> some View {
-        Button(action: open) { foldedCount(count).contentShape(Rectangle()) }
-            .buttonStyle(.plain)
-            .help("Unfold")
+    /// A folded row's count as the button that opens it: under the pointer
+    /// it takes the accent and its row drops the hover, as a thread line
+    /// does, since a press here unfolds and does not open the row.
+    private func unfold(_ key: String, _ count: Int, _ open: @escaping () -> Void) -> some View {
+        let lit = hoveredLine == key
+        return Button {
+            hoveredLine = nil
+            open()
+        } label: {
+            foldedCount(count)
+                .overlay(Capsule().fill(Color.accentColor.opacity(lit ? 0.45 : 0)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerStyle(.link)
+        .onHover { inside in
+            if inside { hoveredLine = key } else if hoveredLine == key { hoveredLine = nil }
+        }
+        .accessibilityLabel("Unfold")
     }
 
     /// An open row's thread line, over its children's block: under the
@@ -378,17 +398,42 @@ struct VigilSidebarView: View {
     /// draws a reply's (ui's `comment-thread`). A press anywhere on it
     /// folds the row; it takes no column of its own, the children's indent
     /// is its room.
-    private func threadLine(level: Int, fold: @escaping () -> Void) -> some View {
-        Button(action: fold) {
-            Rectangle().fill(Color.primary.opacity(0.16)).frame(width: 1)
+    ///
+    /// Under the pointer the line says what a press does before it is
+    /// made: it thickens into the accent, the rows it would fold away dim
+    /// (`foldable`), no row behind it wears the hover, and the pointer is
+    /// the hand of a thing to press.
+    private func threadLine(_ key: String, level: Int, fold: @escaping () -> Void) -> some View {
+        let lit = hoveredLine == key
+        return Button {
+            hoveredLine = nil
+            fold()
+        } label: {
+            Capsule().fill(lit ? Color.accentColor : Color.primary.opacity(0.16))
+                .frame(width: lit ? 2 : 1)
                 .padding(.vertical, 2)
                 .frame(width: Grid.lineHit, alignment: .center)
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Fold")
+        .pointerStyle(.link)
+        .onHover { inside in
+            if inside { hoveredLine = key } else if hoveredLine == key { hoveredLine = nil }
+        }
+        .accessibilityLabel("Fold")
         .padding(.leading, rowInsets(level: level).leading + (Grid.face * scale - Grid.lineHit) / 2)
+    }
+
+    /// An open row's children with its thread line over them: the rows a
+    /// press on the line folds away, dimmed while the pointer is on it.
+    private func foldable<Children: View>(
+        _ key: String, level: Int, fold: @escaping () -> Void, @ViewBuilder children: () -> Children
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0, content: children)
+            .opacity(hoveredLine == key ? 0.4 : 1)
+            .animation(.easeOut(duration: 0.12), value: hoveredLine == key)
+            .overlay(alignment: .leading) { threadLine(key, level: level, fold: fold) }
     }
 
     // MARK: Session group (one block per session)
@@ -399,7 +444,7 @@ struct VigilSidebarView: View {
             sessionRow(row, collapsed: collapsed)
                 .id(row.id)
             if !collapsed, !row.tabs.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
+                foldable(row.id, level: 0, fold: { model.collapsedSessions.insert(row.id) }) {
                     if let tab = row.soleTab {
                         ForEach(tab.panes) { pane in
                             paneRow(pane, session: row.id, tab: tab, level: 1)
@@ -408,20 +453,14 @@ struct VigilSidebarView: View {
                         ForEach(row.tabs) { tab in
                             tabRow(tab, session: row.id)
                             if !model.collapsedTabs.contains(tab.id) {
-                                VStack(alignment: .leading, spacing: 0) {
+                                foldable(tab.id, level: 1, fold: { model.collapsedTabs.insert(tab.id) }) {
                                     ForEach(tab.panes) { pane in
                                         paneRow(pane, session: row.id, tab: tab, level: 2)
                                     }
                                 }
-                                .overlay(alignment: .leading) {
-                                    threadLine(level: 1) { model.collapsedTabs.insert(tab.id) }
-                                }
                             }
                         }
                     }
-                }
-                .overlay(alignment: .leading) {
-                    threadLine(level: 0) { model.collapsedSessions.insert(row.id) }
                 }
             }
         }
@@ -472,7 +511,7 @@ struct VigilSidebarView: View {
             )
             .opacity(row.stateTag == "windowed" ? 1 : 0.85)
             if collapsed, !row.tabs.isEmpty {
-                unfold(row.soleTab?.panes.count ?? row.tabs.count) { model.collapsedSessions.remove(id) }
+                unfold(id, row.soleTab?.panes.count ?? row.tabs.count) { model.collapsedSessions.remove(id) }
             }
             Spacer(minLength: 4)
             // The row's marks, one gap between any two, the dots last on
@@ -503,7 +542,7 @@ struct VigilSidebarView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
             id: id,
-            hovered: hovered == id,
+            hovered: rowHovered(id),
             activity: model.isFront(row) ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed ? row.states.first?.state : nil))
         .background(reportHit(id: id, kind: .session(id)))
@@ -584,7 +623,7 @@ struct VigilSidebarView: View {
                     .font(.system(size: 9 * scale))
                     .foregroundColor(tab.captured ? .secondary : .primary.opacity(0.8))
             }
-            if collapsed { unfold(tab.panes.count) { model.collapsedTabs.remove(tab.id) } }
+            if collapsed { unfold(tab.id, tab.panes.count) { model.collapsedTabs.remove(tab.id) } }
             Spacer(minLength: 4)
             HStack(spacing: marks.gap) {
                 // Collapsed, it wears what its panes wear, their antenna
@@ -605,7 +644,7 @@ struct VigilSidebarView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
             id: tab.id,
-            hovered: hovered == tab.id,
+            hovered: rowHovered(tab.id),
             activity: model.isFront(tab) ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed
                 ? PaneDot.cluster(tab.panes.flatMap(\.dots)).first?.state
@@ -718,7 +757,7 @@ struct VigilSidebarView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
             id: id,
-            hovered: hovered == id,
+            hovered: rowHovered(id),
             activity: model.isFocused(pane) ? .leaf : .none,
             state: pane.state))
         .background(reportHit(
