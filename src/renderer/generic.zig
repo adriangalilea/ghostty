@@ -2718,6 +2718,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             } else null;
 
+            // Shared border edges resolve against the rows above and below,
+            // so a dirty row also dirties its neighbours.
+            if (!rebuild and state.border_sets.items.len > 0) {
+                var prev = false;
+                var y: usize = 0;
+                while (y < row_len) : (y += 1) {
+                    const was = row_dirty[y];
+                    if (prev or (y + 1 < row_len and row_dirty[y + 1])) row_dirty[y] = true;
+                    prev = was;
+                }
+            }
+
             for (
                 0..,
                 row_raws[0..row_len],
@@ -2743,6 +2755,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     y,
                     row,
                     cells,
+                    .{
+                        if (y_usize > 0) row_cells[y_usize - 1].items(.raw) else null,
+                        if (y_usize + 1 < row_len) row_cells[y_usize + 1].items(.raw) else null,
+                    },
                     preedit_range,
                     selection,
                     highlights,
@@ -2927,6 +2943,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             y: terminal.size.CellCountInt,
             row: terminal.page.Row,
             cells: *std.MultiArrayList(terminal.RenderState.Cell),
+            /// Raw cells of the rows above and below, for shared border edges.
+            neighbors: [2]?[]const terminal.page.Cell,
             preedit_range: ?PreeditRange,
             selection: ?[2]terminal.size.CellCountInt,
             highlights: *const std.ArrayList(terminal.RenderState.Highlight),
@@ -2989,6 +3007,31 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             var shaper_run: ?font.shape.TextRun = try run_iter.next(self.alloc);
             var shaper_cells: ?[]const font.shape.Cell = null;
             var shaper_cells_i: usize = 0;
+
+            // Border-only cells render even when they have no glyph or when
+            // text is concealed. The foreground lists enforce global layering.
+            const border_sets = state.border_sets.items;
+            const Lookup = struct {
+                fn set(sets: []const terminal.borders.Set, raws: ?[]const terminal.page.Cell, x: usize) ?terminal.borders.Set {
+                    const r = raws orelse return null;
+                    if (x >= r.len) return null;
+                    const id = r[x].border_id;
+                    return if (id == 0 or id > sets.len) null else sets[id - 1];
+                }
+            };
+            for (cells_raw[0..cells_len], 0..) |cell, x| {
+                if (cell.border_id == 0 or cell.border_id > border_sets.len) continue;
+                const row_raw: []const terminal.page.Cell = cells_raw[0..cells_len];
+                const raw = border_sets[cell.border_id - 1];
+                const around: terminal.borders.Neighbors = .{
+                    .left = if (x > 0) Lookup.set(border_sets, row_raw, x - 1) else null,
+                    .right = Lookup.set(border_sets, row_raw, x + 1),
+                    .above = Lookup.set(border_sets, neighbors[0], x),
+                    .below = Lookup.set(border_sets, neighbors[1], x),
+                };
+                const strokes = terminal.borders.resolve(raw, around.left, around.right, around.above, around.below);
+                try self.addBorders(@intCast(x), @intCast(y), raw, strokes, around);
+            }
 
             for (
                 0..,
@@ -3368,6 +3411,75 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     );
                 };
             }
+        }
+
+        fn addBorders(
+            self: *Self,
+            x: terminal.size.CellCountInt,
+            y: terminal.size.CellCountInt,
+            raw: terminal.borders.Set,
+            strokes: [12]terminal.borders.Stroke,
+            around: terminal.borders.Neighbors,
+        ) !void {
+            const Sink = struct {
+                renderer: *Self,
+                x: terminal.size.CellCountInt,
+                y: terminal.size.CellCountInt,
+
+                pub fn rect(sink: @This(), r: terminal.borders.Rect) !void {
+                    const self_ = sink.renderer;
+                    // Clip overflow at the viewport, keeping padding undecorated.
+                    const cw: i32 = @intCast(self_.grid_metrics.cell_width);
+                    const ch: i32 = @intCast(self_.grid_metrics.cell_height);
+                    const left = @max(r.x, -@as(i32, sink.x) * cw);
+                    const top = @max(r.y, -@as(i32, sink.y) * ch);
+                    const right = @min(r.x + r.w, (@as(i32, self_.cells.size.columns) - sink.x) * cw);
+                    const bottom = @min(r.y + r.h, (@as(i32, self_.cells.size.rows) - sink.y) * ch);
+                    if (right <= left or bottom <= top) return;
+                    const stroke = r.stroke;
+                    const colors = &self_.terminal_state.colors;
+                    const rgb: terminal.color.RGB = if (r.outside.kind != .none) switch (r.outside.kind) {
+                        .none, .rgb => .{
+                            .r = @truncate(r.outside.color >> 16),
+                            .g = @truncate(r.outside.color >> 8),
+                            .b = @truncate(r.outside.color),
+                        },
+                        .palette => colors.palette[@as(u8, @truncate(r.outside.color))],
+                        .default => colors.background,
+                    } else switch (stroke.color_kind) {
+                        .rgb => .{
+                            .r = @truncate(stroke.color >> 16),
+                            .g = @truncate(stroke.color >> 8),
+                            .b = @truncate(stroke.color),
+                        },
+                        .palette => self_.terminal_state.colors.palette[@as(u8, @truncate(stroke.color))],
+                        .fg => self_.terminal_state.colors.foreground,
+                    };
+                    const cell: shaderpkg.CellText = .{
+                        .atlas = .solid,
+                        .grid_pos = .{ sink.x, sink.y },
+                        .color = .{ rgb.r, rgb.g, rgb.b, r.alpha },
+                        .glyph_size = .{ @intCast(right - left), @intCast(bottom - top) },
+                        .bearings = .{ @intCast(left), @intCast(ch - top) },
+                        .bools = .{ .no_min_contrast = true },
+                    };
+                    if (r.outside.kind != .none) {
+                        try self_.cells.add(self_.alloc, .border_fill, cell);
+                    } else if (stroke.above) {
+                        try self_.cells.add(self_.alloc, .border_above, cell);
+                    } else {
+                        try self_.cells.add(self_.alloc, .border_below, cell);
+                    }
+                }
+            };
+            try terminal.borders.geometry(
+                Sink{ .renderer = self, .x = x, .y = y },
+                raw,
+                strokes,
+                around,
+                self.grid_metrics.cell_width,
+                self.grid_metrics.cell_height,
+            );
         }
 
         /// Add an underline decoration to the specified cell
