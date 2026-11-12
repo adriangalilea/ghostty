@@ -175,6 +175,15 @@ extension VigilWorkspaces {
                 break
             case .open(let pane):
                 self?.openRemotePane(device: device, pane: pane)
+            case .changes(let pane, let repository):
+                // The sheet names a folder as this Mac would; its Mac reads
+                // it under its own home.
+                let there = directory.home.map { home in
+                    repository == here ? home : repository.hasPrefix(here + "/") ? home + repository.dropFirst(here.count) : repository
+                } ?? repository
+                VigilChangesPanel.show(
+                    pane: VigilRemote.compositeId(device, pane), title: Bring.Group.name(of: repository), repository: there,
+                    in: parent?.windowController as? TerminalController)
             case .bring:
                 guard let self else { return }
                 let reply = self.applySessionCommand(.bring(name, from: device, anchor: anchor, part: part))

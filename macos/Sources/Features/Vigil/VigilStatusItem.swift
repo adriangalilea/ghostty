@@ -163,6 +163,17 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         quit.target = self
         quit.image = NSImage(systemSymbolName: "power", accessibilityDescription: nil)
         menu.addItem(quit)
+        Self.showImages(in: menu)
+    }
+
+    /// macOS 27 hides a menu item's image unless the item asks for it: a
+    /// row's symbol here is its state (where a workspace is, whether it
+    /// needs you), so every item with one asks.
+    static func showImages(in menu: NSMenu) {
+        for item in menu.items {
+            if item.image != nil { item.preferredImageVisibility = .visible }
+            if let submenu = item.submenu { showImages(in: submenu) }
+        }
     }
 
     @objc private func quitForReal(_ sender: NSMenuItem) {

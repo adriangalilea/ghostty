@@ -32,7 +32,12 @@ final class BringDialogModel: ObservableObject {
 
     /// How the dialog ends: brought or not, or toward a pane on the other Mac.
     var close: (Outcome) -> Void = { _ in }
-    enum Outcome { case cancel, bring, open(pane: String) }
+    enum Outcome {
+        case cancel, bring, open(pane: String)
+        /// Toward what a repository holds there: a pane of it and its top
+        /// level as this Mac names it.
+        case changes(pane: String, repository: String)
+    }
 
     init(device: String, workspace: String, anchor: String, part: Registry.Workspace.Part?, mac: String, what: String,
          away: String?, lines: [Bring.Line]) {
@@ -86,32 +91,40 @@ final class BringDialogModel: ObservableObject {
         }
     }
 
-    /// What this Mac does about a need by itself, as its button says it; nil:
-    /// nothing here does.
-    func action(for need: Bring.Need) -> String? {
-        switch need.kind {
-        case .clone: need.remote != nil && need.root != nil ? "Clone Here" : nil
-        case .fetch: need.root != nil ? "Fetch" : nil
-        case .thereOnly: away == nil ? "Open on \(mac)" : nil
-        case .folder, .transcript, .running: nil
-        }
+    /// The same needs as a person settles them: a repository once, with
+    /// everything about it (`Bring.groups`, the command line's sheet too).
+    var groups: [Bring.Group] { Bring.groups(lines) }
+
+    /// What this Mac does about a repository by itself, as its button says
+    /// it; nil: nothing here does.
+    func hereAction(for group: Bring.Group) -> String? {
+        guard let need = group.here.first else { return nil }
+        return need.kind == .clone ? "Clone Here" : "Fetch"
     }
 
-    func settle(_ standing: Bring.Standing) {
-        let need = standing.need
-        switch need.kind {
-        case .clone:
-            reload(settling: [need], saying: "Cloning…")
-        case .fetch:
-            reload(settling: [need], saying: "Fetching…")
-        case .thereOnly:
-            // Settled where it is: a pane of that repository, on its Mac.
-            guard let pane = standing.panes.first?.pane else { return }
-            lifecycleLog.info("bring: opening the pane that holds what is only there", ["pane": pane, "mac": mac, "need": need.text])
-            close(.open(pane: pane))
-        case .folder, .transcript, .running:
-            break
-        }
+    /// What is being done about a repository right now, in words.
+    func working(on group: Bring.Group) -> String? {
+        group.needs.lazy.compactMap { self.working[$0.text] }.first
+    }
+
+    func settleHere(_ group: Bring.Group) {
+        guard let need = group.here.first else { return }
+        reload(settling: group.here, saying: need.kind == .clone ? "Cloning…" : "Fetching…")
+    }
+
+    /// Work that is only on its Mac is settled where it is: a pane of that
+    /// repository, there.
+    func openThere(_ group: Bring.Group) {
+        guard let pane = group.panes.first?.pane else { return }
+        lifecycleLog.info("bring: opening the pane that holds what is only there", ["pane": pane, "mac": mac, "repository": group.root ?? ""])
+        close(.open(pane: pane))
+    }
+
+    /// What a repository holds there, read from its Mac by the Changes view
+    /// (the same reader the sheet's counts come from).
+    func showChanges(_ group: Bring.Group) {
+        guard let pane = group.panes.first?.pane, let root = group.root else { return }
+        close(.changes(pane: pane, repository: root))
     }
 
     /// Everything this Mac can do by itself, at once (`vigil move --settle`).
@@ -122,6 +135,8 @@ final class BringDialogModel: ObservableObject {
 struct BringDialog: View {
     @ObservedObject var model: BringDialogModel
     static let width: CGFloat = 540
+    static let tallest: CGFloat = 520
+    @State private var listHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -138,13 +153,13 @@ struct BringDialog: View {
                     if let error = model.readError {
                         Label(error, systemImage: "xmark.octagon.fill").font(.system(size: 11)).foregroundStyle(.red)
                     }
-                    let standing = model.standing
-                    if !standing.isEmpty {
+                    let groups = model.groups
+                    if !groups.isEmpty {
                         section("Before it moves", "What this Mac lacks, or \(model.mac) alone has. Bringing it anyway leaves these as they are.") {
-                            ForEach(standing) { row($0) }
+                            ForEach(groups) { row($0) }
                         }
                     }
-                    section(standing.isEmpty ? "Nothing stands in the way" : "Its panes", nil) {
+                    section(groups.isEmpty ? "Nothing stands in the way" : "Its panes", nil) {
                         ForEach(Array(model.lines.enumerated()), id: \.offset) { _, line in pane(line) }
                         if model.unknown {
                             Label(Bring.Line.workNotKnown, systemImage: "questionmark.circle")
@@ -155,8 +170,11 @@ struct BringDialog: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20).padding(.bottom, 14)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
             }
-            .frame(maxHeight: 420)
+            // A scroll view has no height of its own: it takes its list's,
+            // up to what a sheet may stand tall.
+            .frame(height: min(max(listHeight, 1), Self.tallest))
 
             Divider()
             HStack(spacing: 10) {
@@ -188,39 +206,55 @@ struct BringDialog: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
                 if let about {
-                    Text(about).font(.system(size: 10)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                    Text(about).font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
             rows()
         }
     }
 
-    /// One need: its mark, its sentence, the panes it holds back, and what
-    /// settles it.
-    private func row(_ standing: Bring.Standing) -> some View {
-        let need = standing.need
-        let working = model.working[need.text]
+    /// One repository (or one need of none): its name, everything about it a
+    /// line each, the panes it holds back, and beside it what settles it.
+    private func row(_ group: Bring.Group) -> some View {
+        let kind = group.here.first?.kind ?? group.needs[0].kind
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: Self.symbol(need.kind)).font(.system(size: 11)).foregroundStyle(Self.tint(need.kind)).frame(width: 14)
+            Image(systemName: Self.symbol(kind)).font(.system(size: 11)).foregroundStyle(Self.tint(kind)).frame(width: 14)
             VStack(alignment: .leading, spacing: 2) {
-                Text(need.text).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
-                Text(Self.held(standing.panes)).font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
-                if need.kind == .thereOnly, let away = model.away {
+                Text(group.title(home: NSHomeDirectory())).font(.system(size: 12, weight: .medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                if group.root != nil {
+                    ForEach(group.needs, id: \.text) { need in
+                        Text(need.brief ?? need.text).font(.system(size: 11)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let problem = model.failed[need.text] {
+                            Text(problem).font(.system(size: 10)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                if group.there, let away = model.away {
                     Text("\(model.mac) is away since \(away): it is settled there when it is back.")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
-                if let problem = model.failed[need.text] {
-                    Text(problem).font(.system(size: 10)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
-                }
+                Text("For \(group.held)").font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer(minLength: 8)
-            if let working {
+            if let working = model.working(on: group) {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text(working).font(.system(size: 11)).foregroundStyle(.secondary)
                 }
-            } else if let action = model.action(for: need) {
-                Button(action) { model.settle(standing) }.controlSize(.small)
+            } else {
+                VStack(alignment: .trailing, spacing: 4) {
+                    if let action = model.hereAction(for: group) {
+                        Button(action) { model.settleHere(group) }.controlSize(.small)
+                    }
+                    if group.there, model.away == nil {
+                        Button("Show Changes") { model.showChanges(group) }.controlSize(.small)
+                            .help("What it holds on \(model.mac), in this window's right bar")
+                        Button("Open on \(model.mac)") { model.openThere(group) }.controlSize(.small)
+                            .help("Open a pane of it on \(model.mac), to commit and push there")
+                    }
+                }
             }
         }
     }
@@ -249,13 +283,6 @@ struct BringDialog: View {
                     .help(line.lacks.joined(separator: "\n"))
             }
         }
-    }
-
-    private static func held(_ panes: [Bring.Line]) -> String {
-        let names = panes.map { $0.name ?? Directory.folder($0.folder, home: NSHomeDirectory()) }
-        return names.count <= 3
-            ? "For " + names.joined(separator: ", ")
-            : "For \(names.prefix(2).joined(separator: ", ")) and \(names.count - 2) more panes"
     }
 
     private static func symbol(_ kind: Bring.Need.Kind) -> String {

@@ -39,6 +39,8 @@ final class VigilDockHost: NSView {
     private var handle: VigilDragHandle!
     private weak var mounted: Ghostty.SurfaceView?
     private var mountedHost: NSHostingView<AnyView>?
+    /// The aside in front, by its id; nil while a tenant is.
+    private var mountedAside: String?
 
     init(controller: TerminalController) {
         self.controller = controller
@@ -51,11 +53,11 @@ final class VigilDockHost: NSView {
 
         handle = VigilDragHandle(
             base: { [weak controller] in
-                controller.flatMap { VigilWorkspaces.shared.dock(for: $0)?.width } ?? 340
+                controller.map { VigilBars.shared.rightBarWidth(of: $0) } ?? 340
             },
             apply: { [weak controller] width in
                 guard let controller else { return }
-                VigilWorkspaces.shared.setDockWidth(controller, width: width)
+                VigilBars.shared.setRightBarWidth(width, of: controller)
             },
             flip: true) // the dock grows when its left edge drags LEFT
         handle.translatesAutoresizingMaskIntoConstraints = false
@@ -93,18 +95,34 @@ final class VigilDockHost: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Idempotent: (re)build the strip for the runtime's tenants and mount
-    /// the active tenant's surface.
-    func present(runtime: VigilDockRuntime, controller: TerminalController) {
+    /// Idempotent: (re)build the strip for the runtime's tenants and the
+    /// window's aside, and mount what is in front: the aside's view, else
+    /// the active tenant's surface. `runtime` nil: no dock pane shows (none
+    /// exists, or the tab's dock is collapsed) and the aside has the bar.
+    func present(runtime: VigilDockRuntime?, aside: VigilBars.Aside?, asideFront: Bool, controller: TerminalController) {
         let stripView = VigilDockStrip(
-            tenants: runtime.views,
-            active: runtime.active,
+            tenants: runtime?.views ?? [],
+            active: asideFront ? -1 : runtime?.active ?? 0,
+            aside: aside.map { .init(title: $0.title, symbol: $0.symbol, front: asideFront, canPopOut: $0.popOut != nil) },
             onSelect: { [weak controller] index in
                 guard let controller else { return }
+                VigilBars.shared.aside(in: controller)?.front = false
                 VigilWorkspaces.shared.setDockActive(controller, index: index)
+            },
+            onAside: { [weak controller] act in
+                guard let controller else { return }
+                switch act {
+                case .select: VigilBars.shared.setAsideFront(true, in: controller)
+                case .close: VigilBars.shared.closeAside(in: controller)
+                case .popOut:
+                    let out = VigilBars.shared.aside(in: controller)?.popOut
+                    VigilBars.shared.closeAside(in: controller)
+                    out?()
+                }
             },
             onAdd: { [weak controller] in
                 guard let controller else { return }
+                VigilBars.shared.aside(in: controller)?.front = false
                 VigilWorkspaces.shared.addDockTenant(controller)
             },
             onClose: { [weak controller] index in
@@ -128,10 +146,18 @@ final class VigilDockHost: NSView {
             strip = hosting
         }
 
+        if asideFront, let aside {
+            guard mountedAside != aside.id else { return }
+            unmountContent()
+            mount(NSHostingView(rootView: AnyView(aside.view)))
+            mountedAside = aside.id
+            return
+        }
+        guard let runtime else { return }
         let target = runtime.views.indices.contains(runtime.active)
             ? runtime.views[runtime.active] : runtime.views.first
-        guard mounted !== target else { return }
-        unmountActive()
+        guard mounted !== target || mountedAside != nil else { return }
+        unmountContent()
         guard let target else { return }
         target.removeFromSuperview() // in case it was mounted elsewhere
         // Mount through the SAME wrapper real panes use: a naked
@@ -140,9 +166,13 @@ final class VigilDockHost: NSView {
         // so a raw mount rendered at a stale grid forever. SurfaceWrapper
         // also brings the resize overlay, progress bar, badges and split
         // dimming - the dock tenant IS a pane, just positionally special.
-        let hosting = NSHostingView(rootView: AnyView(
+        mount(NSHostingView(rootView: AnyView(
             Ghostty.SurfaceWrapper(surfaceView: target, isSplit: true)
-                .environmentObject(controller.ghostty)))
+                .environmentObject(controller.ghostty))))
+        mounted = target
+    }
+
+    private func mount(_ hosting: NSHostingView<AnyView>) {
         hosting.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(hosting)
         NSLayoutConstraint.activate([
@@ -152,21 +182,27 @@ final class VigilDockHost: NSView {
             hosting.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         mountedHost = hosting
-        mounted = target
     }
 
-    /// Collapse/teardown: unmount the visible tenant (it lives on in the
-    /// runtime) so a hidden dock holds no view in the window's hierarchy,
-    /// and the strip forgets its tenants: its rootView held the last
-    /// presented runtime's SurfaceViews strongly, which kept closed
-    /// tenants alive (and their sockets open) for as long as the window
-    /// never presented another dock.
-    func unmountActive() {
+    /// What is in front leaves the bar: a tenant lives on in its runtime,
+    /// an aside in its window's `VigilBars.Aside`.
+    private func unmountContent() {
         mountedHost?.removeFromSuperview()
         mountedHost = nil
         mounted?.removeFromSuperview()
         mounted = nil
-        strip?.rootView = VigilDockStrip(tenants: [], active: 0, onSelect: { _ in }, onAdd: {}, onClose: { _ in })
+        mountedAside = nil
+    }
+
+    /// Collapse/teardown: a hidden dock holds no view in the window's
+    /// hierarchy, and the strip forgets its tenants: its rootView held the
+    /// last presented runtime's SurfaceViews strongly, which kept closed
+    /// tenants alive (and their sockets open) for as long as the window
+    /// never presented another dock.
+    func unmountActive() {
+        unmountContent()
+        strip?.rootView = VigilDockStrip(
+            tenants: [], active: 0, aside: nil, onSelect: { _ in }, onAside: { _ in }, onAdd: {}, onClose: { _ in })
     }
 }
 
@@ -174,9 +210,21 @@ final class VigilDockHost: NSView {
 /// published title), a close on the active chip, and a + spawning a fresh
 /// tenant shell in the tab's cwd.
 struct VigilDockStrip: View {
+    /// The window's aside as its chip draws it.
+    struct AsideChip {
+        let title: String
+        let symbol: String
+        let front: Bool
+        let canPopOut: Bool
+    }
+    enum AsideAct { case select, close, popOut }
+
     let tenants: [Ghostty.SurfaceView]
+    /// The tenant in front; none while the aside is.
     let active: Int
+    let aside: AsideChip?
     var onSelect: (Int) -> Void
+    var onAside: (AsideAct) -> Void
     var onAdd: () -> Void
     var onClose: (Int) -> Void
 
@@ -184,6 +232,7 @@ struct VigilDockStrip: View {
         HStack(spacing: 4) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 3) {
+                    if let aside { asideChip(aside) }
                     ForEach(Array(tenants.enumerated()), id: \.1.id) { index, view in
                         chip(index: index, view: view)
                     }
@@ -200,6 +249,34 @@ struct VigilDockStrip: View {
         }
         .padding(.horizontal, 6)
         .frame(height: 26)
+    }
+
+    /// The aside's chip: what it is and whose, and on the one in front its
+    /// way to a window of its own and its close (which ends nothing).
+    private func asideChip(_ aside: AsideChip) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: aside.symbol).font(.system(size: 9, weight: .semibold))
+            Text(aside.title).font(.system(size: 10, weight: .medium)).lineLimit(1).frame(maxWidth: 160)
+            if aside.front {
+                if aside.canPopOut {
+                    Button { onAside(.popOut) } label: {
+                        Image(systemName: "macwindow").font(.system(size: 8, weight: .semibold)).foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Move it to a window of its own.")
+                }
+                Button { onAside(.close) } label: {
+                    Image(systemName: "xmark").font(.system(size: 7, weight: .bold)).foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close it (nothing stops running).")
+            }
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 18)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(aside.front ? 0.14 : 0.05)))
+        .contentShape(Rectangle())
+        .onTapGesture { onAside(.select) }
     }
 
     private func chip(index: Int, view: Ghostty.SurfaceView) -> some View {

@@ -19,6 +19,13 @@ extension VigilWorkspaces {
     /// creates it with one shell tenant in the tab's cwd. Collapse hides
     /// the surface, the daemon keeps running (the detach mechanism).
     func toggleDock(_ controller: TerminalController) {
+        // An aside alone in the bar is what the toggle closes: opening a
+        // shell beside it is the strip's +.
+        let tenantsShown = dockMap.object(forKey: controller).map { !$0.collapsed && !$0.views.isEmpty } ?? false
+        if !tenantsShown, VigilBars.shared.aside(in: controller) != nil {
+            VigilBars.shared.closeAside(in: controller)
+            return
+        }
         if let runtime = dockMap.object(forKey: controller) {
             runtime.collapsed.toggle()
         } else {

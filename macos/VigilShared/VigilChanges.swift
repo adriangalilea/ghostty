@@ -72,6 +72,9 @@ struct VigilChanges: View {
     /// Opens the conversation on an edit's call (its feed entry id), where
     /// the host has one.
     let show: ((String) -> Void)?
+    /// A repository to open on (its top level on the pane's Mac), when the
+    /// host was asked about one; else what the agent edited comes first.
+    var opening: String?
 
     enum Shown: Hashable {
         case edits
@@ -194,7 +197,10 @@ struct VigilChanges: View {
             let repos = read.sorted { ($0.edits != nil ? 0 : 1) < ($1.edits != nil ? 0 : 1) }
             self.edits = edits
             self.repos = repos
-            if shown == nil {
+            if shown == nil, let opening {
+                if !roots.contains(opening) { opened.append(opening) }
+                shown = .repo(opening)
+            } else if shown == nil {
                 // What the agent edited when it did; else the pane's repository.
                 shown = !edits.files.isEmpty ? .edits : repos.first.map { .repo($0.root) } ?? .edits
             }

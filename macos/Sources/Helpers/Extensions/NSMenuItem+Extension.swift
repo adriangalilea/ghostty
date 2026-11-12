@@ -6,6 +6,10 @@ extension NSMenuItem {
         // We only set on macOS 26 when icons on menu items became the norm.
         if #available(macOS 26, *) {
             image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+            // vigil: macOS 27 hides menu item images unless the item asks
+            // (upstream has not adopted `preferredImageVisibility` yet); the
+            // sidebar's menus show theirs, so the menu bar's do too.
+            preferredImageVisibility = .visible
         }
     }
 }

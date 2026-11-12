@@ -1453,7 +1453,7 @@ class VigilWorkspaces {
                 label: name.flatMap { workspaces[$0]?.label },
                 emoji: name.flatMap { workspaces[$0]?.emoji },
                 pinned: pinned,
-                dockOpen: dockMap.object(forKey: controller).map { !$0.collapsed } ?? false,
+                dockOpen: (dockMap.object(forKey: controller).map { !$0.collapsed } ?? false) || VigilBars.shared.aside(in: controller) != nil,
                 onEditIdentity: name.map { n in { VigilIdentity.editModal(name: n) } },
                 onTogglePin: { [weak self, weak controller] in
                     guard let controller else { return }

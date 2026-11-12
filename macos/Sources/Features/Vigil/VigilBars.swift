@@ -247,6 +247,80 @@ final class VigilBars {
         setSidebarVisible(!sidebarVisible(for: controller), for: controller)
     }
 
+    // MARK: The right bar's aside
+
+    /// What a window's right bar shows that is no terminal: a pane's
+    /// changes. It sits beside the tab's dock panes as one more chip of
+    /// their strip, belongs to its window (it stays while tabs swap under
+    /// it: it is about the pane it was asked for), lives in memory alone,
+    /// and owns nothing a close could kill.
+    final class Aside {
+        let id: String
+        let title: String
+        let symbol: String
+        let view: AnyView
+        /// To a window of its own, where it has one.
+        let popOut: (() -> Void)?
+        /// Shown, over the active dock pane.
+        var front = true
+        var width: CGFloat = 520
+
+        init(id: String, title: String, symbol: String, view: AnyView, popOut: (() -> Void)? = nil) {
+            self.id = id
+            self.title = title
+            self.symbol = symbol
+            self.view = view
+            self.popOut = popOut
+        }
+    }
+
+    private let asides = NSMapTable<TerminalController, Aside>.weakToStrongObjects()
+
+    func aside(in controller: TerminalController) -> Aside? { asides.object(forKey: controller) }
+
+    /// Asked again for what is already there brings it in front as it is
+    /// (its scroll and its choices kept).
+    func showAside(_ aside: Aside, in controller: TerminalController) {
+        if let standing = asides.object(forKey: controller), standing.id == aside.id {
+            standing.front = true
+        } else {
+            if let width = asides.object(forKey: controller)?.width { aside.width = width }
+            asides.setObject(aside, forKey: controller)
+        }
+        // The marks' sync is the bars' too: the titlebar's right-bar
+        // button follows the aside.
+        VigilWorkspaces.shared.syncWindowMarks()
+    }
+
+    func closeAside(in controller: TerminalController) {
+        asides.removeObject(forKey: controller)
+        VigilWorkspaces.shared.syncWindowMarks()
+    }
+
+    func setAsideFront(_ front: Bool, in controller: TerminalController) {
+        asides.object(forKey: controller)?.front = front
+        sync(controller)
+    }
+
+    /// The right bar's drag handle: the width of whichever is in front.
+    func rightBarWidth(of controller: TerminalController) -> CGFloat {
+        let runtime = VigilWorkspaces.shared.dock(for: controller)
+        let tenants = runtime.map { !$0.collapsed && !$0.views.isEmpty } ?? false
+        if let aside = asides.object(forKey: controller), aside.front || !tenants { return aside.width }
+        return runtime?.width ?? 340
+    }
+
+    func setRightBarWidth(_ width: CGFloat, of controller: TerminalController) {
+        let runtime = VigilWorkspaces.shared.dock(for: controller)
+        let tenants = runtime.map { !$0.collapsed && !$0.views.isEmpty } ?? false
+        if let aside = asides.object(forKey: controller), aside.front || !tenants {
+            aside.width = min(max(width, 320), 1100)
+            sync(controller)
+        } else {
+            VigilWorkspaces.shared.setDockWidth(controller, width: width)
+        }
+    }
+
     func syncAll() {
         for controller in TerminalController.all where controller.window != nil {
             sync(controller)
@@ -268,21 +342,20 @@ final class VigilBars {
         sidebar.widthConstraint.constant = sidebarWidth
         if showSidebar { sidebar.model.refresh(reason: "bars") }
 
-        // Right: the tab's dock.
+        // Right: the tab's dock panes, and the window's aside beside them.
         let manager = VigilWorkspaces.shared
         let runtime = manager.dock(for: controller)
-        let showDock = runtime.map { !$0.collapsed && !$0.views.isEmpty } ?? false
+        let aside = asides.object(forKey: controller)
+        let tenants = runtime.map { !$0.collapsed && !$0.views.isEmpty } ?? false
         var dockWidth: CGFloat = 0
-        if let runtime {
+        if tenants || aside != nil {
             let dock = ensureDock(container, controller: controller)
-            dock.isHidden = !showDock
-            dock.widthConstraint.constant = runtime.width
-            if showDock {
-                dock.present(runtime: runtime, controller: controller)
-                dockWidth = runtime.width
-            } else {
-                dock.unmountActive()
-            }
+            // In front: the aside while it is, else the active dock pane.
+            let asideFront = aside.map { $0.front || !tenants } ?? false
+            dockWidth = asideFront ? aside!.width : runtime?.width ?? 340
+            dock.isHidden = false
+            dock.widthConstraint.constant = dockWidth
+            dock.present(runtime: tenants ? runtime : nil, aside: aside, asideFront: asideFront, controller: controller)
         } else if let dock = existingDock(container) {
             dock.isHidden = true
             dock.unmountActive()
