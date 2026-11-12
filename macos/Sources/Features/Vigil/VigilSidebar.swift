@@ -510,12 +510,8 @@ final class VigilSidebarModel: ObservableObject {
     func clicked(_ row: VigilHitRow) {
         switch row.kind {
         case .session(let name):
-            // A press anywhere on a folded row opens it, as well as going
-            // there: its count is a sign, not the only place to press.
-            collapsedSessions.remove(row.id)
-            activate(.init(id: row.id, kind: .session(name)))
+            sessionClicked(id: row.id, name: name, isFront: focus?.session == row.id)
         case .tab(let session, let anchor):
-            collapsedTabs.remove(row.id)
             tabClicked(id: row.id, session: session, anchor: anchor, isFront: focus?.tab == row.id)
         case .pane(let session, _, let paneId):
             activate(.init(id: row.id, kind: .pane(name: session, paneId: paneId)))
@@ -780,6 +776,21 @@ final class VigilSidebarModel: ObservableObject {
     /// tab focused and its panes showing. Only a click on an already-
     /// active, already-expanded tab collapses it (a toggle on the active
     /// one; never a collapse surprise on first click).
+    /// One rule for a press on a row that holds others, a workspace or a
+    /// tab: folded, it opens; open and the one you are in, it folds (there
+    /// is nowhere to go); anywhere else, the press goes there, open.
+    func sessionClicked(id: String, name: String, isFront: Bool) {
+        if collapsedSessions.contains(id) {
+            collapsedSessions.remove(id)
+            if isFront { selection = id; return }
+        } else if isFront {
+            collapsedSessions.insert(id)
+            selection = id
+            return
+        }
+        activate(.init(id: id, kind: .session(name)))
+    }
+
     func tabClicked(id: String, session: String, anchor: String?, isFront: Bool) {
         if collapsedTabs.contains(id) {
             collapsedTabs.remove(id)
