@@ -241,6 +241,9 @@ struct BringDialog: View {
                 Text(line.opens).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
+            if let idle = line.idle() {
+                Text(idle).font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
+            }
             if !line.needs.isEmpty {
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(.orange)
                     .help(line.lacks.joined(separator: "\n"))
