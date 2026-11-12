@@ -294,8 +294,11 @@ struct BurialTray: View {
     }
 }
 
-/// One row of the tree and, unfolded, its children. Chevron folds; the
-/// row body opens a pane. A folded row wears its cluster.
+/// One row of the tree and, unfolded, its children. The tree folds as the
+/// Mac's sidebar does (`ThreadTree.swift`): a press on an open row's thread
+/// line, under its face, folds it, and so does a press on a row that only
+/// holds others; a pane's row opens the pane. A folded row says how many it
+/// hides and wears their cluster.
 struct TreeNodeView: View {
     let node: VigilPhone.Node
     let depth: Int
@@ -312,7 +315,7 @@ struct TreeNodeView: View {
             if let ref = node.pane, node.glance == nil, node.rows > 0, node.cols > 0 {
                 NavigationLink(value: ref) {
                     PanePreview(ref: ref, grid: .init(rows: node.rows, cols: node.cols))
-                        .padding(.leading, CGFloat(depth) * Self.indent + Self.chevron + 6)
+                        .padding(.leading, Self.tree.leading(depth) + Self.tree.face + Self.gap)
                         .padding(.trailing, 4)
                         .padding(.bottom, 4)
                 }
@@ -320,42 +323,30 @@ struct TreeNodeView: View {
                 .simultaneousGesture(TapGesture().onEnded { model.receipts.info("tap", "preview", ["title": node.title, "pane": ref.pane]) })
             }
             if foldable && !folded {
-                ForEach(node.children) { child in
-                    TreeNodeView(node: child, depth: depth + 1)
+                ThreadChildren(level: depth, metrics: Self.tree, fold: toggle) {
+                    ForEach(node.children) { child in
+                        TreeNodeView(node: child, depth: depth + 1)
+                    }
                 }
             }
         }
     }
 
     @ViewBuilder private var row: some View {
-        let content = HStack(spacing: 6) {
-            Spacer().frame(width: CGFloat(depth) * Self.indent)
-            if foldable {
-                Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(folded ? 0 : 90))
-                    .frame(width: Self.chevron)
-                    .contentShape(Rectangle())
-                    .onTapGesture { toggle() }
-            } else {
-                Spacer().frame(width: Self.chevron)
-            }
-            icon
+        let content = HStack(spacing: Self.gap) {
             if let glance = node.glance {
+                // An agent pane's meaning is its own row, its state's glyph
+                // where a face would be.
                 GlanceRow(node: node, glance: glance) { marks }
             } else {
+                face.frame(width: Self.tree.face)
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 5) {
-                        if case .agent(let agent) = node.face, AgentMark.knows(agent) {
-                            AgentMark(agent: agent, size: 15)
-                        } else if let e = node.emoji {
-                            Text(e).font(font)
-                        }
                         Text(node.title)
                             .font(font)
                             .foregroundStyle(node.alive ? .primary : .secondary)
                             .lineLimit(1)
+                        if foldable && folded { ThreadFoldedCount(count: node.children.count, size: 11) }
                         marks
                     }
                     if let sub = node.subtitle {
@@ -392,7 +383,8 @@ struct TreeNodeView: View {
             }
         }
         .padding(.vertical, node.kind == .host ? 5 : 4)
-        .padding(.horizontal, 6)
+        .padding(.leading, Self.tree.leading(depth))
+        .padding(.trailing, Self.tree.edge)
         .frame(minHeight: 32)
         .background(node.kind == .host ? Color.secondary.opacity(0.08) : .clear,
                     in: RoundedRectangle(cornerRadius: 8))
@@ -446,10 +438,10 @@ struct TreeNodeView: View {
         }
     }
 
-    /// Steps of the tree: each level indents this much, after a chevron
-    /// column this wide.
-    static let indent: CGFloat = 12
-    static let chevron: CGFloat = 14
+    /// The tree's columns, a finger's (`ThreadTreeMetrics.touch`), and the
+    /// gap between a row's face and its name.
+    static let tree = ThreadTreeMetrics.touch
+    static let gap: CGFloat = 6
 
     /// Followed on this phone (its activity on the Lock Screen).
     private var following: Bool { node.followKey.map(model.followed.contains) == true }
@@ -497,13 +489,21 @@ struct TreeNodeView: View {
         }
     }
 
-    /// A Mac and a tab wear a glyph; a workspace is its face and name, a
-    /// pane its name and state dot.
-    @ViewBuilder private var icon: some View {
-        switch node.kind {
-        case .host: Image(systemName: "desktopcomputer").font(.footnote).foregroundStyle(.secondary)
-        case .tab: Image(systemName: "rectangle.on.rectangle").font(.caption2).foregroundStyle(.secondary)
-        case .workspace, .pane: EmptyView()
+    /// A row's face, in the tree's face column (its thread line runs under
+    /// the column's middle): its agent's mark or its emoji when it has one,
+    /// else the glyph of what it is, as the Mac's sidebar picks them.
+    @ViewBuilder private var face: some View {
+        if case .agent(let agent) = node.face, AgentMark.knows(agent) {
+            AgentMark(agent: agent, size: 15)
+        } else if let emoji = node.emoji {
+            Text(emoji).font(font)
+        } else {
+            switch node.kind {
+            case .host: Image(systemName: "desktopcomputer").font(.footnote).foregroundStyle(.secondary)
+            case .tab: Image(systemName: "rectangle.on.rectangle").font(.caption2).foregroundStyle(.secondary)
+            case .workspace: Text("·").font(font).foregroundStyle(.secondary)
+            case .pane: Image(systemName: "terminal").font(.caption2).foregroundStyle(.secondary)
+            }
         }
     }
 

@@ -22,12 +22,21 @@ struct VigilSidebarView: View {
     /// row's text, by the one rule the phone's rows use (`PaneMarkSizes`).
     private var marks: PaneMarkSizes { PaneMarkSizes(text: 11 * scale) }
     @State private var hovered: String?
-    /// The row whose thread line is under the pointer. While one is, no row
-    /// wears the hover: a press there folds, it does not open the row
-    /// behind the pointer, and the lit line with its block says so.
-    @State private var hoveredLine: String?
+    /// The row whose fold control (its thread line open, its count folded)
+    /// is under the pointer. While one is, no row wears the hover: a press
+    /// there folds or unfolds, it does not open the row behind the pointer,
+    /// and the lit control says so.
+    @State private var hoveredFold: String?
 
-    private func rowHovered(_ id: String) -> Bool { hovered == id && hoveredLine == nil }
+    private func rowHovered(_ id: String) -> Bool { hovered == id && hoveredFold == nil }
+
+    /// What a fold control of row `id` tells of the pointer (`ThreadChildren`,
+    /// `ThreadFolded`).
+    private func foldHover(_ id: String) -> (Bool) -> Void {
+        { inside in
+            if inside { hoveredFold = id } else if hoveredFold == id { hoveredFold = nil }
+        }
+    }
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
 
     private var followMode: VigilFollowMode { VigilFollowMode(rawValue: followModeRaw) ?? .summon }
@@ -38,28 +47,24 @@ struct VigilSidebarView: View {
     /// (stateDidChange, fed by the state-dir and vigild-dir watchers).
     private let burialCountdown = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    /// The tree's columns, in points at the compact size. A row is its
-    /// face, its name and its marks, with no column for a fold control: an
-    /// open row's thread line runs under its face through its children's
-    /// indent, and a press on it folds the row (`threadLine`).
-    ///
-    /// One distance on every side: a workspace's block holds its rows
-    /// `inset` inside its border, and a row holds its first glyph and its
-    /// last `edge` inside its fill. Each level steps in by `step`, which
-    /// leaves the line under a face clear of the faces below it.
+    /// The tree's columns and how it folds are the shared thread tree's
+    /// (`ThreadTree.swift`, the phone's tree too): a row is its face, its
+    /// name and its marks, an open row's line under its face folds it.
+    private var tree: ThreadTreeMetrics { .pointer(scale: scale) }
+
+    /// What is the sidebar's own beside the tree's columns. One distance on
+    /// every side: a workspace's block holds its rows `inset` inside its
+    /// border, and a row its first glyph and its last the tree's `edge`
+    /// inside its fill.
     private enum Grid {
-        static let face: CGFloat = VigilNameCell<EmptyView>.face
         static let icon: CGFloat = 20
-        static let step: CGFloat = 16
         static let gap: CGFloat = 4
-        static let edge: CGFloat = 6
         static let inset: CGFloat = 2
-        static let lineHit: CGFloat = 10
     }
 
     /// A row's insets: `level` steps in.
     private func rowInsets(level: Int) -> EdgeInsets {
-        EdgeInsets(top: 0, leading: Grid.edge + Grid.step * CGFloat(level) * scale, bottom: 0, trailing: Grid.edge)
+        EdgeInsets(top: 0, leading: tree.leading(level), bottom: 0, trailing: tree.edge)
     }
 
     var body: some View {
@@ -345,9 +350,12 @@ struct VigilSidebarView: View {
             }
         } label: {
             HStack(spacing: Grid.gap) {
-                Image(systemName: "desktopcomputer").frame(width: Grid.face * scale)
+                Image(systemName: "desktopcomputer").frame(width: tree.face)
                 Text(title).lineLimit(1)
-                if collapsed { foldedCount(model.rows.filter { VigilRemote.split($0.id)?.device == device }.count) }
+                if collapsed {
+                    ThreadFoldedCount(
+                        count: model.rows.filter { VigilRemote.split($0.id)?.device == device }.count, size: 9 * scale)
+                }
                 // How it stands, apart from its name: at the row's far
                 // end, smaller and plain, where a row's marks sit.
                 if let standing = host.standing {
@@ -371,80 +379,16 @@ struct VigilSidebarView: View {
         .padding(.horizontal, Grid.inset)
     }
 
-    /// What a folded row hides, counted, where its children would start:
-    /// the row's own sign that it is folded.
-    private func foldedCount(_ count: Int) -> some View {
-        Text("+\(count)")
-            .font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
-            .background(Capsule().fill(Color.primary.opacity(0.08)))
-            .fixedSize()
+    /// A folded row's count, the button that opens it.
+    private func unfold(_ id: String, _ count: Int, _ open: @escaping () -> Void) -> some View {
+        ThreadFolded(count: count, size: 9 * scale, hovering: foldHover(id), open: open)
     }
 
-    /// A folded row's count as the button that opens it: under the pointer
-    /// it takes the accent and its row drops the hover, as a thread line
-    /// does, since a press here unfolds and does not open the row.
-    private func unfold(_ key: String, _ count: Int, _ open: @escaping () -> Void) -> some View {
-        let lit = hoveredLine == key
-        return Button {
-            hoveredLine = nil
-            open()
-        } label: {
-            foldedCount(count)
-                .overlay(Capsule().fill(Color.accentColor.opacity(lit ? 0.45 : 0)))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .pointerStyle(.link)
-        .onHover { inside in
-            if inside { hoveredLine = key } else if hoveredLine == key { hoveredLine = nil }
-        }
-        .accessibilityLabel("Unfold")
-    }
-
-    /// An open row's thread line, over its children's block: under the
-    /// row's face, from its first child to its last, as a comment thread
-    /// draws a reply's (ui's `comment-thread`). A press anywhere on it
-    /// folds the row; it takes no column of its own, the children's indent
-    /// is its room.
-    ///
-    /// Under the pointer the line says what a press does before it is
-    /// made: it thickens into the accent, the rows it would fold away dim
-    /// (`foldable`), no row behind it wears the hover, and the pointer is
-    /// the hand of a thing to press.
-    private func threadLine(_ key: String, level: Int, fold: @escaping () -> Void) -> some View {
-        let lit = hoveredLine == key
-        return Button {
-            hoveredLine = nil
-            fold()
-        } label: {
-            Capsule().fill(lit ? Color.accentColor : Color.primary.opacity(0.16))
-                .frame(width: lit ? 2 : 1)
-                .padding(.vertical, 2)
-                .frame(width: Grid.lineHit, alignment: .center)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .pointerStyle(.link)
-        .onHover { inside in
-            if inside { hoveredLine = key } else if hoveredLine == key { hoveredLine = nil }
-        }
-        .accessibilityLabel("Fold")
-        .padding(.leading, rowInsets(level: level).leading + (Grid.face * scale - Grid.lineHit) / 2)
-    }
-
-    /// An open row's children with its thread line over them: the rows a
-    /// press on the line folds away, dimmed while the pointer is on it.
+    /// An open row's children with its thread line.
     private func foldable<Children: View>(
-        _ key: String, level: Int, fold: @escaping () -> Void, @ViewBuilder children: () -> Children
+        _ id: String, level: Int, fold: @escaping () -> Void, @ViewBuilder children: @escaping () -> Children
     ) -> some View {
-        VStack(alignment: .leading, spacing: 0, content: children)
-            .opacity(hoveredLine == key ? 0.4 : 1)
-            .animation(.easeOut(duration: 0.12), value: hoveredLine == key)
-            .overlay(alignment: .leading) { threadLine(key, level: level, fold: fold) }
+        ThreadChildren(level: level, metrics: tree, hovering: foldHover(id), fold: fold, content: children)
     }
 
     // MARK: Session group (one block per session)
@@ -533,19 +477,12 @@ struct VigilSidebarView: View {
             HStack(spacing: marks.gap) {
                 // Where it came from, folded or not, until its panes are opened.
                 arrivedMark(row.tabs.flatMap(\.panes).compactMap(\.arrived))
-                // Folded, what its panes wear rolls up: a peek, a listener
-                // or an ending is never hidden.
-                if collapsed {
-                    backgroundMark(row.tabs.flatMap(\.panes).compactMap(\.background))
-                    endedRollup(row.tabs.flatMap(\.panes))
-                    conflictMark(row.tabs.flatMap(\.panes).compactMap(\.conflict), pane: nil)
-                    lookerGlyphs(row.tabs.flatMap(\.panes).flatMap(\.lookers))
-                }
+                if collapsed { foldedMarks(row.tabs.flatMap(\.panes)) }
                 followKeycap(id)
-                if collapsed { watchRollup(row.tabs.flatMap(\.panes)) }
+                if collapsed { AntennaMark(what: row.tabs.flatMap(\.panes).flatMap(\.sentries), sizes: marks) }
                 // Expanded, the children speak for themselves; collapsed,
                 // the parent peeks: one dot per distinct state, overlapped.
-                dotCluster(collapsed ? row.states : [])
+                PaneDots(dots: collapsed ? row.states : [], sizes: marks)
             }
         }
         .frame(height: 26 * scale)
@@ -637,17 +574,10 @@ struct VigilSidebarView: View {
             if collapsed { unfold(tab.id, tab.panes.count) { model.collapsedTabs.remove(tab.id) } }
             Spacer(minLength: 4)
             HStack(spacing: marks.gap) {
-                // Collapsed, it wears what its panes wear, their antenna
-                // too: a listener never vanishes.
-                if collapsed {
-                    backgroundMark(tab.panes.compactMap(\.background))
-                    endedRollup(tab.panes)
-                    conflictMark(tab.panes.compactMap(\.conflict), pane: nil)
-                    lookerGlyphs(tab.panes.flatMap(\.lookers))
-                }
+                if collapsed { foldedMarks(tab.panes) }
                 followKeycap(tab.id)
-                if collapsed { watchRollup(tab.panes) }
-                dotCluster(collapsed ? PaneDot.cluster(tab.panes.flatMap(\.dots)) : [])
+                if collapsed { AntennaMark(what: tab.panes.flatMap(\.sentries), sizes: marks) }
+                PaneDots(dots: collapsed ? PaneDot.cluster(tab.panes.flatMap(\.dots)) : [], sizes: marks)
             }
         }
         .frame(height: 22 * scale)
@@ -756,11 +686,13 @@ struct VigilSidebarView: View {
             HStack(spacing: marks.gap) {
                 paneMarks(pane)
                 followKeycap(id)
-                antennaGlyph(pane.sentries)
+                // Its antenna takes room only when lit (`AntennaMark` draws
+                // nothing for an empty list).
+                AntennaMark(what: pane.sentries, sizes: marks)
                 // A dot per agent, drawn as a folded row's cluster is: each
                 // background agent not finished, then the pane's own on the
-                // rail.
-                dotCluster(pane.dots)
+                // rail. They grow inward; the rail's edge never moves.
+                PaneDots(dots: pane.dots, sizes: marks)
             }
         }
         .frame(height: 20 * scale)
@@ -910,7 +842,7 @@ struct VigilSidebarView: View {
     /// differs from the default: what its agent runs in the background,
     /// who looks from elsewhere (the phone, another Mac), a phone following
     /// it, its priority (high rings through Focus, low never rings). Its
-    /// antenna follows them on the row (`antennaGlyph`): a declared lease,
+    /// antenna follows them on the row (`AntennaMark`): a declared lease,
     /// or something alive here that no agent accounts for
     /// (`SidebarPane.sentries`), which is which in its tooltip. NOT an eye:
     /// the eye is vigil watching YOU, the antenna a process watching the
@@ -924,7 +856,10 @@ struct VigilSidebarView: View {
                 mark("person.2.slash.fill", .orange,
                      "Another agent process reports under this pane and is refused, since \(Self.endTime.string(from: Date(timeIntervalSince1970: refused))): this row is not following its work. It is likely this conversation moved to the background; close that one, or resume it here.")
             }
-            if let background = pane.background { backgroundMark([background]) }
+            // The shells its agent runs in the background, counted
+            // (`PaneGlance.Background.jobs`); its agents are dots of their
+            // own, what a turn left running the antenna's.
+            if let background = pane.background { GearsMark(backgrounds: [background], sizes: marks) }
             lookerGlyphs(pane.lookers)
             if pane.followed {
                 mark("pin.fill", .primary.opacity(0.75), "Followed on iPhone: its stalls and ends ring there")
@@ -999,8 +934,16 @@ struct VigilSidebarView: View {
         }
     }
 
-    private func endedRollup(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
+    /// What a folded row wears for the panes it hides, so a fold never hides
+    /// a background shell, an ending, a conflict or someone looking: each
+    /// mark's own rollup (a count, or the first with the rest in its
+    /// tooltip). Their antenna and their dots follow on the row.
+    @ViewBuilder
+    private func foldedMarks(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
+        GearsMark(backgrounds: panes.compactMap(\.background), sizes: marks)
         endedMark(panes.compactMap(\.ended))
+        conflictMark(panes.compactMap(\.conflict), pane: nil)
+        lookerGlyphs(panes.flatMap(\.lookers))
     }
 
     private static let endTime: DateFormatter = {
@@ -1018,43 +961,11 @@ struct VigilSidebarView: View {
         }
     }
 
-    /// The shells its agent runs in the background, counted
-    /// (`PaneGlance.Background.jobs`). Its background agents are dots of
-    /// their own; a process a turn left running in no account of its is the
-    /// antenna's. Hovering says each count and what the first one is for.
-    /// On a folded tab or workspace: its panes'.
-    /// Drawn by `GearsMark`, the one the phone draws too.
-    private func backgroundMark(_ backgrounds: [PaneGlance.Background]) -> some View {
-        GearsMark(backgrounds: backgrounds, sizes: marks)
-    }
-
     private func mark(_ symbol: String, _ color: Color, _ help: String) -> some View {
         Image(systemName: symbol)
             .font(marks.symbol)
             .foregroundStyle(color)
             .help(help)
-    }
-
-    /// The antenna, when there is something to say (`AntennaMark` draws
-    /// nothing for an empty list): it takes room only when lit.
-    private func antennaGlyph(_ what: [String]) -> some View {
-        AntennaMark(what: what, sizes: marks)
-    }
-
-    /// Collapse must not hide a listener: the antenna rolls up to the
-    /// collapsed tab/session row (same place, same yellow), carrying every
-    /// descendant's notes in one tooltip.
-    private func watchRollup(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
-        antennaGlyph(panes.flatMap(\.sentries))
-    }
-
-    /// A row's dots, drawn by `PaneDots` (the phone's rows draw the same):
-    /// a pane's own (a dot per agent), or a folded row's rollup, most
-    /// urgent first. They grow inward; the right rail edge never moves.
-    /// None: one dot's room, so a row's text ends where its neighbours'
-    /// does.
-    private func dotCluster(_ dots: [PaneDot]) -> some View {
-        PaneDots(dots: dots, sizes: marks)
     }
 
     /// A row's place in the DERIVED active chain: `leaf` = where keystrokes

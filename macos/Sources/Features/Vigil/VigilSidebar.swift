@@ -510,9 +510,12 @@ final class VigilSidebarModel: ObservableObject {
     func clicked(_ row: VigilHitRow) {
         switch row.kind {
         case .session(let name):
-            sessionClicked(id: row.id, name: name, isFront: focus?.session == row.id)
+            holderClicked(
+                .init(id: row.id, kind: .session(name)), isFront: focus?.session == row.id, folded: \.collapsedSessions)
         case .tab(let session, let anchor):
-            tabClicked(id: row.id, session: session, anchor: anchor, isFront: focus?.tab == row.id)
+            holderClicked(
+                .init(id: row.id, kind: .tab(name: session, anchor: anchor, id: row.id)),
+                isFront: focus?.tab == row.id, folded: \.collapsedTabs)
         case .pane(let session, _, let paneId):
             activate(.init(id: row.id, kind: .pane(name: session, paneId: paneId)))
         }
@@ -771,36 +774,22 @@ final class VigilSidebarModel: ObservableObject {
         onLeaveControl?() // landing hands the keyboard back
     }
 
-    /// Tab-row click, idempotent toward VISIBILITY:
-    /// activate, and expand if collapsed - one click always ends with the
-    /// tab focused and its panes showing. Only a click on an already-
-    /// active, already-expanded tab collapses it (a toggle on the active
-    /// one; never a collapse surprise on first click).
-    /// One rule for a press on a row that holds others, a workspace or a
-    /// tab: folded, it opens; open and the one you are in, it folds (there
-    /// is nowhere to go); anywhere else, the press goes there, open.
-    func sessionClicked(id: String, name: String, isFront: Bool) {
-        if collapsedSessions.contains(id) {
-            collapsedSessions.remove(id)
-            if isFront { selection = id; return }
+    /// A press on a row that holds others, a workspace or a tab, one rule:
+    /// folded, it opens; open and the one you are in, it folds (there is
+    /// nowhere to go); anywhere else, the press goes there, open. So one
+    /// press always ends with the row's children showing, and only a press
+    /// on the open row you are already in folds it. `folded` is the set the
+    /// row's kind folds in.
+    func holderClicked(_ item: NavItem, isFront: Bool, folded: ReferenceWritableKeyPath<VigilSidebarModel, Set<String>>) {
+        if self[keyPath: folded].contains(item.id) {
+            self[keyPath: folded].remove(item.id)
+            if isFront { selection = item.id; return }
         } else if isFront {
-            collapsedSessions.insert(id)
-            selection = id
+            self[keyPath: folded].insert(item.id)
+            selection = item.id
             return
         }
-        activate(.init(id: id, kind: .session(name)))
-    }
-
-    func tabClicked(id: String, session: String, anchor: String?, isFront: Bool) {
-        if collapsedTabs.contains(id) {
-            collapsedTabs.remove(id)
-            if isFront { selection = id; return }
-        } else if isFront {
-            collapsedTabs.insert(id)
-            selection = id
-            return
-        }
-        activate(.init(id: id, kind: .tab(name: session, anchor: anchor, id: id)))
+        activate(item)
     }
 
     func collapseSelection() {
