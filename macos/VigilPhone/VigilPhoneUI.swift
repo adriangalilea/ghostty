@@ -505,15 +505,17 @@ struct TreeNodeView: View {
     /// dot = agent state. A pane shows its own; a folded node its
     /// descendants' cluster; an unfolded node nothing (its children speak).
     @ViewBuilder private var cluster: some View {
-        let states: [PaneDot] = node.kind == .pane || folded ? node.cluster : []
+        // A pane: a dot per agent (its background agents, then its main
+        // one). A folded node: its panes' cluster.
+        let states: [PaneDot] = node.kind == .pane ? node.dots : (folded ? node.cluster : [])
         HStack(spacing: 3) {
             ForEach(Array(states.enumerated()), id: \.offset) { _, dot in
-                // At rest with its own agents still working: the working
-                // color as a ring, where a state is a filled dot.
-                if dot == .behind {
-                    Circle().strokeBorder(AgentState.working.tint, lineWidth: 2).frame(width: 8, height: 8)
+                // A background agent at work: the working color as a ring,
+                // where the main agent's state is a filled dot.
+                if let state = dot.state {
+                    Circle().fill(state.tint).frame(width: 8, height: 8)
                 } else {
-                    Circle().fill(dot.state.tint).frame(width: 8, height: 8)
+                    Circle().strokeBorder(AgentState.working.tint, lineWidth: 2).frame(width: 8, height: 8)
                 }
             }
         }

@@ -407,7 +407,7 @@ final class VigilRemote: ObservableObject {
                     label: session.label,
                     stateTag: host.away ? "away" : "remote",
                     attention: states.contains(.blocked) ? .input : (states.contains(.done) ? .done : .none),
-                    states: PaneDot.cluster(tabs.flatMap(\.panes).compactMap(\.dot)),
+                    states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.dots)),
                     tabs: tabs,
                     host: header))
             }

@@ -19,8 +19,9 @@ extension VigilWorkspaces {
         let title: String         // display: the one naming rule (`Directory.titles`)
         let program: String?      // the argv truth alone; nil = just a shell
         let state: AgentState?
-        /// Its dot, by the one rule every surface draws (`PaneDot`).
-        var dot: PaneDot? { state.map { $0.dot(background: background) } }
+        /// Its dots, by the one rule every surface draws (`PaneDot`): a dot
+        /// per background agent at work, then its main agent's.
+        var dots: [PaneDot] { state.map { $0.dots(background: background) } ?? [] }
         let isDock: Bool
         var emoji: String?        // the pane's custom face
         /// Declared watch leases (notes) on this pane - the sentry's own
@@ -255,7 +256,7 @@ extension VigilWorkspaces {
                 label: session.label,
                 stateTag: place(name).rawValue,
                 attention: session.attention,
-                states: PaneDot.cluster(tabs.flatMap(\.panes).compactMap(\.dot)),
+                states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.dots)),
                 tabs: tabs))
         }
         return rows + VigilRemote.shared.sidebarRows()

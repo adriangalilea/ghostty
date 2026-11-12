@@ -564,7 +564,7 @@ struct VigilSidebarView: View {
             }
             Group {
                 if collapsed {
-                    dotCluster(PaneDot.cluster(tab.panes.compactMap(\.dot)))
+                    dotCluster(PaneDot.cluster(tab.panes.flatMap(\.dots)))
                 } else {
                     dotSlot(nil)
                 }
@@ -579,7 +579,7 @@ struct VigilSidebarView: View {
             hovered: hovered == tab.id,
             activity: model.isFront(tab) ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed
-                ? PaneDot.cluster(tab.panes.compactMap(\.dot)).first?.state
+                ? PaneDot.cluster(tab.panes.flatMap(\.dots)).first?.state
                 : nil))
         .background(reportHit(id: tab.id, kind: .tab(session: session, anchor: tab.anchor)))
         .contentShape(Rectangle())
@@ -677,7 +677,9 @@ struct VigilSidebarView: View {
             paneMarks(pane)
             followKeycap(id)
             watchGlyph(pane)
-            dotSlot(pane.dot)
+            // A dot per agent, drawn as a folded row's cluster is: each
+            // background agent not finished, then the pane's own on the rail.
+            dotCluster(pane.dots)
         }
         .frame(height: 20 * scale)
         .padding(.leading, (Grid.indent * scale) * CGFloat(level) + (Grid.chevron * scale))
@@ -956,14 +958,14 @@ struct VigilSidebarView: View {
         }
     }
 
-    /// The background work its agent accounts for, counted as the agent
-    /// counts it under its prompt (agents, shells, the rest). A process a
-    /// turn left running in no account of its is the antenna's, with every
-    /// other process alive under the pane. Hovering says each count and
-    /// what the first one is for. On a folded tab or workspace: its panes'.
+    /// The shells its agent runs in the background, counted
+    /// (`PaneGlance.Background.jobs`). Its background agents are dots of
+    /// their own; a process a turn left running in no account of its is the
+    /// antenna's. Hovering says each count and what the first one is for.
+    /// On a folded tab or workspace: its panes'.
     @ViewBuilder
     private func backgroundMark(_ backgrounds: [PaneGlance.Background]) -> some View {
-        let count = backgrounds.reduce(0) { $0 + $1.tasks }
+        let count = backgrounds.reduce(0) { $0 + $1.jobs }
         if count > 0 {
             HStack(spacing: 1) {
                 Text("\(count)").font(.system(size: markText, weight: .medium).monospacedDigit())
@@ -978,7 +980,7 @@ struct VigilSidebarView: View {
             // Its own width, whatever the row has left: squeezed, the count
             // was the first thing clipped.
             .fixedSize()
-            .help(backgrounds.filter { $0.tasks > 0 }.flatMap { ["In the background: \($0.words)"] + [$0.title].compactMap { $0 } }
+            .help(backgrounds.filter { $0.jobs > 0 }.flatMap { ["In the background: \($0.words)"] + [$0.title].compactMap { $0 } }
                 .joined(separator: "\n"))
         }
     }
@@ -1112,8 +1114,8 @@ struct VigilSidebarView: View {
 /// CABasicAnimation runs in the render server: zero app-side work per
 /// frame.
 ///
-/// `behind` (an agent at rest, its own background agents still working) is
-/// the working arc alone, slower, with no body under it.
+/// `agent` (one of the pane's background agents, working) is the working
+/// arc alone, with no body under it: the main agent's dot has the body.
 struct VigilStateDot: View {
     let dot: PaneDot?
 
@@ -1148,7 +1150,7 @@ final class VigilDotNSView: NSView {
         switch dot {
         case .state(let shown): state = shown
         case nil: state = nil
-        case .behind:
+        case .agent:
             let arc = CAShapeLayer()
             arc.frame = rect
             let path = CGMutablePath()
@@ -1162,10 +1164,10 @@ final class VigilDotNSView: NSView {
             let spin = CABasicAnimation(keyPath: "transform.rotation.z")
             spin.fromValue = 0
             spin.toValue = -2 * Double.pi
-            spin.duration = 2.2
+            spin.duration = 1.1
             spin.repeatCount = .infinity
             arc.add(spin, forKey: "spin")
-            toolTip = "Its turn is over; its background work still runs"
+            toolTip = "A background agent of this pane, working"
             return
         }
         switch state {
