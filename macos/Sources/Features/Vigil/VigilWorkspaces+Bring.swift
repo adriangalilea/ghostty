@@ -1,4 +1,5 @@
 import AppKit
+import Ink
 import SwiftUI
 import VigilWire
 
@@ -162,6 +163,16 @@ extension VigilWorkspaces {
             device: device, workspace: name, anchor: anchor, part: part, mac: host.name, what: what,
             away: host.away ? host.received.map { String(VigilRemote.awaySince($0).dropFirst("away since ".count)) } : nil,
             lines: lines)
+        // The sheet names a folder as this Mac would; its Mac reads it under
+        // its own home.
+        model.there = { root in
+            guard let home = directory.home else { return root }
+            return root == here ? home : root.hasPrefix(here + "/") ? home + root.dropFirst(here.count) : root
+        }
+        model.changes = { [unowned model] group in
+            guard let pane = group.panes.first?.pane, let root = group.root else { return AnyView(EmptyView()) }
+            return AnyView(VigilChangesPanel.view(pane: VigilRemote.compositeId(device, pane), repository: model.there(root)).inkEmbedded())
+        }
         let panel = NSPanel(
             contentRect: .zero, styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
         panel.titleVisibility = .hidden
@@ -175,15 +186,6 @@ extension VigilWorkspaces {
                 break
             case .open(let pane):
                 self?.openRemotePane(device: device, pane: pane)
-            case .changes(let pane, let repository):
-                // The sheet names a folder as this Mac would; its Mac reads
-                // it under its own home.
-                let there = directory.home.map { home in
-                    repository == here ? home : repository.hasPrefix(here + "/") ? home + repository.dropFirst(here.count) : repository
-                } ?? repository
-                VigilChangesPanel.show(
-                    pane: VigilRemote.compositeId(device, pane), title: Bring.Group.name(of: repository), repository: there,
-                    in: parent?.windowController as? TerminalController)
             case .bring:
                 guard let self else { return }
                 let reply = self.applySessionCommand(.bring(name, from: device, anchor: anchor, part: part))

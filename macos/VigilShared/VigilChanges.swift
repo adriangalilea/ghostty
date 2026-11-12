@@ -72,8 +72,9 @@ struct VigilChanges: View {
     /// Opens the conversation on an edit's call (its feed entry id), where
     /// the host has one.
     let show: ((String) -> Void)?
-    /// A repository to open on (its top level on the pane's Mac), when the
-    /// host was asked about one; else what the agent edited comes first.
+    /// The one repository shown (its top level on the pane's Mac), when the
+    /// host was asked about one; else what the agent edited comes first and
+    /// the pane's repositories are offered beside it.
     var opening: String?
 
     enum Shown: Hashable {
@@ -91,7 +92,9 @@ struct VigilChanges: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if edits != nil || repos != nil { picker }
+            // Asked about one repository, it is that repository's page: the
+            // pane's edits and its other repositories are not offered.
+            if opening == nil, edits != nil || repos != nil { picker }
             Group {
                 if let failure {
                     GitStateView(.failed(Unread(description: failure), retry: { Task { await load() } }))

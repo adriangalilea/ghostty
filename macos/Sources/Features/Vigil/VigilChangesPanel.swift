@@ -1,6 +1,7 @@
 import AppKit
 import GitKit
 import GitViews
+import Ink
 import SwiftUI
 import VigilWire
 
@@ -8,18 +9,16 @@ import VigilWire
 /// its agent edited in the conversation, its repositories, any other
 /// repository on its Mac. A pane of this Mac is read by its hub
 /// (`Local.here`); another Mac's through the hub over tether, as the phone
-/// reads it. Shown in the window's right bar beside its tab's dock panes
-/// (`VigilBars.showAside`), where the terminal stays in view; from there it
-/// moves to a window of its own. A quote is copied as Markdown (the Mac has
-/// no reply box).
+/// reads it. Where it is shown is `show`'s rule. A quote is copied as
+/// Markdown (the Mac has no reply box).
 @MainActor
 enum VigilChangesPanel {
     private nonisolated static let hub = Local.Client(socket: VigilPaths.hub)
     private static var windows: [String: NSWindow] = [:]
 
     /// The view of `pane` as the sidebar knows it: a local pane id, or
-    /// `<tether root>/id` for another Mac's. `repository`: the one it opens
-    /// on, as a path on the pane's Mac.
+    /// `<tether root>/id` for another Mac's. `repository`: that one alone,
+    /// as a path on the pane's Mac (a Bring Here's dialog asks about one).
     static func view(pane: String, repository: String? = nil) -> some View {
         let remote = VigilRemote.split(pane)
         let id = remote?.name ?? pane
@@ -42,19 +41,22 @@ enum VigilChangesPanel {
         }, show: nil, opening: repository)
     }
 
-    /// In the right bar of `controller`'s window; with no window to show it
-    /// in (asked from the menu bar), a window of its own.
-    static func show(pane: String, title: String, repository: String? = nil, in controller: TerminalController?) {
-        guard let controller = controller ?? TerminalController.all.first(where: { $0.window?.isKeyWindow == true }) else {
-            window(pane: pane, title: title, repository: repository)
+    /// Changes appear where their subject is. A pane on screen in
+    /// `controller`'s window: that window's right bar, beside the terminal
+    /// they describe. Any other pane (another tab, another workspace,
+    /// another Mac): a window of its own, since no terminal here is theirs
+    /// to sit beside. (A Bring Here's dialog shows a repository's inside
+    /// itself, `BringDialog`.)
+    static func show(pane: String, title: String, in controller: TerminalController?) {
+        guard let controller, VigilBars.shared.panesOnScreen(in: controller).contains(pane) else {
+            window(pane: pane, title: title)
             return
         }
         VigilBars.shared.showAside(
             VigilBars.Aside(
-                id: "changes:\(pane):\(repository ?? "")", title: title, symbol: "plusminus",
-                view: AnyView(view(pane: pane, repository: repository)),
-                popOut: { window(pane: pane, title: title, repository: repository) }),
-            in: controller)
+                pane: pane, title: title, symbol: "plusminus",
+                view: AnyView(view(pane: pane).inkEmbedded()),
+                popOut: { window(pane: pane, title: title) }))
         sidebarLog.info("changes opened", ["pane": pane, "where": "right bar"])
     }
 

@@ -249,13 +249,15 @@ final class VigilBars {
 
     // MARK: The right bar's aside
 
-    /// What a window's right bar shows that is no terminal: a pane's
-    /// changes. It sits beside the tab's dock panes as one more chip of
-    /// their strip, belongs to its window (it stays while tabs swap under
-    /// it: it is about the pane it was asked for), lives in memory alone,
-    /// and owns nothing a close could kill.
+    /// What the right bar shows that is no terminal: a pane's changes. It
+    /// is about one pane and is shown only beside that pane: in the bar of
+    /// the window whose tab holds it, as one more chip of the dock's strip,
+    /// gone from the bar when another tab takes the window and back when
+    /// its tab returns. It lives in memory alone and owns nothing a close
+    /// could kill.
     final class Aside {
-        let id: String
+        /// The pane it is about (its daemon id).
+        let pane: String
         let title: String
         let symbol: String
         let view: AnyView
@@ -264,9 +266,11 @@ final class VigilBars {
         /// Shown, over the active dock pane.
         var front = true
         var width: CGFloat = 520
+        /// When it was last asked for: of a tab's several, the latest shows.
+        fileprivate var asked = Date()
 
-        init(id: String, title: String, symbol: String, view: AnyView, popOut: (() -> Void)? = nil) {
-            self.id = id
+        init(pane: String, title: String, symbol: String, view: AnyView, popOut: (() -> Void)? = nil) {
+            self.pane = pane
             self.title = title
             self.symbol = symbol
             self.view = view
@@ -274,31 +278,66 @@ final class VigilBars {
         }
     }
 
-    private let asides = NSMapTable<TerminalController, Aside>.weakToStrongObjects()
+    /// The panes with an aside, for whoever draws them (the sidebar's rows).
+    final class AsideMarks: ObservableObject {
+        @Published fileprivate(set) var panes: Set<String> = []
+    }
+    let asideMarks = AsideMarks()
 
-    func aside(in controller: TerminalController) -> Aside? { asides.object(forKey: controller) }
+    private var asides: [String: Aside] = [:] {
+        didSet { if Set(asides.keys) != asideMarks.panes { asideMarks.panes = Set(asides.keys) } }
+    }
 
-    /// Asked again for what is already there brings it in front as it is
-    /// (its scroll and its choices kept).
-    func showAside(_ aside: Aside, in controller: TerminalController) {
-        if let standing = asides.object(forKey: controller), standing.id == aside.id {
+    /// The panes a window shows now: its tab's splits and its dock's.
+    func panesOnScreen(in controller: TerminalController) -> Set<String> {
+        Set(controller.surfaceTree.compactMap(\.vigilAttachId))
+            .union(VigilWorkspaces.shared.dock(for: controller)?.views.compactMap(\.vigilAttachId) ?? [])
+    }
+
+    /// The aside this window's bar shows: the latest asked for among the
+    /// panes on screen in it.
+    func aside(in controller: TerminalController) -> Aside? {
+        let here = panesOnScreen(in: controller)
+        return asides.values.filter { here.contains($0.pane) }.max { $0.asked < $1.asked }
+    }
+
+    /// Asked again for a pane that has one brings it in front as it is (its
+    /// scroll and its choices kept).
+    func showAside(_ aside: Aside) {
+        // One whose pane has ended is forgotten here, where the next is asked.
+        let living = Set(VigilWorkspaces.shared.workspaces.values.flatMap { $0.tabs.flatMap(\.paneIds) })
+        asides = asides.filter { living.contains($0.key) }
+        if let standing = asides[aside.pane] {
             standing.front = true
+            standing.asked = Date()
         } else {
-            if let width = asides.object(forKey: controller)?.width { aside.width = width }
-            asides.setObject(aside, forKey: controller)
+            asides[aside.pane] = aside
         }
         // The marks' sync is the bars' too: the titlebar's right-bar
         // button follows the aside.
         VigilWorkspaces.shared.syncWindowMarks()
     }
 
+    func closeAside(pane: String) {
+        asides[pane] = nil
+        VigilWorkspaces.shared.syncWindowMarks()
+    }
+
     func closeAside(in controller: TerminalController) {
-        asides.removeObject(forKey: controller)
+        guard let pane = aside(in: controller)?.pane else { return }
+        closeAside(pane: pane)
+    }
+
+    /// A pane's aside in front again, in whichever window shows the pane.
+    func frontAside(pane: String) {
+        guard let aside = asides[pane] else { return }
+        aside.front = true
+        aside.asked = Date()
         VigilWorkspaces.shared.syncWindowMarks()
     }
 
     func setAsideFront(_ front: Bool, in controller: TerminalController) {
-        asides.object(forKey: controller)?.front = front
+        aside(in: controller)?.front = front
         sync(controller)
     }
 
@@ -306,14 +345,14 @@ final class VigilBars {
     func rightBarWidth(of controller: TerminalController) -> CGFloat {
         let runtime = VigilWorkspaces.shared.dock(for: controller)
         let tenants = runtime.map { !$0.collapsed && !$0.views.isEmpty } ?? false
-        if let aside = asides.object(forKey: controller), aside.front || !tenants { return aside.width }
+        if let aside = aside(in: controller), aside.front || !tenants { return aside.width }
         return runtime?.width ?? 340
     }
 
     func setRightBarWidth(_ width: CGFloat, of controller: TerminalController) {
         let runtime = VigilWorkspaces.shared.dock(for: controller)
         let tenants = runtime.map { !$0.collapsed && !$0.views.isEmpty } ?? false
-        if let aside = asides.object(forKey: controller), aside.front || !tenants {
+        if let aside = aside(in: controller), aside.front || !tenants {
             aside.width = min(max(width, 320), 1100)
             sync(controller)
         } else {
@@ -345,7 +384,7 @@ final class VigilBars {
         // Right: the tab's dock panes, and the window's aside beside them.
         let manager = VigilWorkspaces.shared
         let runtime = manager.dock(for: controller)
-        let aside = asides.object(forKey: controller)
+        let aside = aside(in: controller)
         let tenants = runtime.map { !$0.collapsed && !$0.views.isEmpty } ?? false
         var dockWidth: CGFloat = 0
         if tenants || aside != nil {

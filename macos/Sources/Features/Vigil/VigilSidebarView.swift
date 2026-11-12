@@ -29,8 +29,12 @@ struct VigilSidebarView: View {
     @State private var hoveredFold: String?
 
     private func rowHovered(_ id: String) -> Bool { hovered == id && hoveredFold == nil }
-    /// What `hovered` holds while the pointer is on a Mac's header.
-    private static let hostHover = "host:"
+    /// What `hovered` holds while the pointer is on a row that is no row of
+    /// the geometry map and says its own hover: a Mac's header, a pane's
+    /// aside.
+    private static let hostHover = "own:"
+    /// The panes whose changes stand in a right bar: each has a row under it.
+    @ObservedObject private var asides = VigilBars.shared.asideMarks
 
     /// What a fold control of row `id` tells of the pointer (`ThreadChildren`,
     /// `ThreadFolded`).
@@ -518,6 +522,7 @@ struct VigilSidebarView: View {
                     if let tab = row.soleTab {
                         ForEach(tab.panes) { pane in
                             paneRow(pane, session: row.id, tab: tab, level: 1)
+                            asideRow(pane, session: row.id, tab: tab, level: 2)
                         }
                     } else {
                         ForEach(row.tabs) { tab in
@@ -526,6 +531,7 @@ struct VigilSidebarView: View {
                                 foldable(tab.id, level: 1, fold: { model.collapsedTabs.insert(tab.id) }) {
                                     ForEach(tab.panes) { pane in
                                         paneRow(pane, session: row.id, tab: tab, level: 2)
+                                        asideRow(pane, session: row.id, tab: tab, level: 3)
                                     }
                                 }
                             }
@@ -758,6 +764,48 @@ struct VigilSidebarView: View {
             }
         }
         .overlay(alignment: .leading) { hintChip(tab.id, depth: 1) }
+    }
+
+    /// A pane's changes standing in a right bar, as a row under the pane:
+    /// what the bar holds is in the tree as a dock pane is. A press goes to
+    /// the pane and brings its changes in front; its menu moves them to a
+    /// window or closes them (which ends nothing).
+    @ViewBuilder private func asideRow(
+        _ pane: VigilWorkspaces.SidebarPane, session: String, tab: VigilWorkspaces.SidebarTab, level: Int
+    ) -> some View {
+        if let paneId = pane.paneId, asides.panes.contains(paneId) {
+            let hoverId = Self.hostHover + "aside:" + paneId
+            Button {
+                model.activate(.init(id: "\(tab.id)#\(pane.id)", kind: .pane(name: session, paneId: pane.paneId)))
+                VigilBars.shared.frontAside(pane: paneId)
+            } label: {
+                HStack(spacing: Grid.gap) {
+                    Image(systemName: "plusminus").font(.system(size: 9 * scale, weight: .semibold)).frame(width: Grid.icon)
+                    Text("Changes").font(.system(size: 11 * scale)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Image(systemName: "sidebar.right").font(.system(size: 9 * scale)).foregroundStyle(.tertiary)
+                }
+                .foregroundStyle(.secondary)
+                .frame(height: 22 * scale)
+                .padding(rowInsets(level: level))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(rowBackground(id: hoverId, hovered: hovered == hoverId))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { inside in hovered = inside ? hoverId : (hovered == hoverId ? nil : hovered) }
+            .contextMenu {
+                menu {
+                    Button {
+                        VigilBars.shared.closeAside(pane: paneId)
+                        VigilChangesPanel.window(pane: paneId, title: pane.title)
+                    } label: { Label("Move to Window", systemImage: "macwindow") }
+                    Divider()
+                    Button { VigilBars.shared.closeAside(pane: paneId) } label: { Label("Close Changes", systemImage: "xmark") }
+                }
+            }
+            .help("\(pane.title)'s changes, in the right bar")
+        }
     }
 
     private func paneRow(

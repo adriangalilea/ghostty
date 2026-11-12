@@ -32,12 +32,17 @@ final class BringDialogModel: ObservableObject {
 
     /// How the dialog ends: brought or not, or toward a pane on the other Mac.
     var close: (Outcome) -> Void = { _ in }
-    enum Outcome {
-        case cancel, bring, open(pane: String)
-        /// Toward what a repository holds there: a pane of it and its top
-        /// level as this Mac names it.
-        case changes(pane: String, repository: String)
-    }
+    enum Outcome { case cancel, bring, open(pane: String) }
+
+    /// The repository whose changes the dialog shows in the list's place;
+    /// nil: the list.
+    @Published var showing: Bring.Group?
+    /// A repository's top level as its own Mac names it, from this Mac's
+    /// name for it.
+    var there: (String) -> String = { $0 }
+    /// The view of what a repository holds there, from whoever can read it
+    /// (the app: the Changes view over the hub).
+    var changes: ((Bring.Group) -> AnyView)?
 
     init(device: String, workspace: String, anchor: String, part: Registry.Workspace.Part?, mac: String, what: String,
          away: String?, lines: [Bring.Line]) {
@@ -123,8 +128,9 @@ final class BringDialogModel: ObservableObject {
     /// What a repository holds there, read from its Mac by the Changes view
     /// (the same reader the sheet's counts come from).
     func showChanges(_ group: Bring.Group) {
-        guard let pane = group.panes.first?.pane, let root = group.root else { return }
-        close(.changes(pane: pane, repository: root))
+        guard group.root != nil, !group.panes.isEmpty else { return }
+        lifecycleLog.info("bring: showing what a repository holds there", ["mac": mac, "repository": group.root ?? ""])
+        showing = group
     }
 
     /// Everything this Mac can do by itself, at once (`vigil move --settle`).
@@ -136,9 +142,48 @@ struct BringDialog: View {
     @ObservedObject var model: BringDialogModel
     static let width: CGFloat = 540
     static let tallest: CGFloat = 520
+    /// The dialog while it shows a repository's changes: wide enough for a
+    /// diff's lines in the browser's one column, no wider than a small
+    /// window.
+    static let changesSize = CGSize(width: 760, height: 620)
     @State private var listHeight: CGFloat = 0
 
     var body: some View {
+        if let group = model.showing {
+            changes(group)
+        } else {
+            sheet
+        }
+    }
+
+    /// What a repository holds on the other Mac, in the sheet's own place:
+    /// the dialog stays the dialog (wider, for a diff's lines), nothing else
+    /// on screen moves, and the way back keeps the sheet as it was.
+    private func changes(_ group: Bring.Group) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Button { model.showing = nil } label: { Label("Back", systemImage: "chevron.left") }
+                    .keyboardShortcut(.cancelAction)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(group.title(home: NSHomeDirectory())) on \(model.mac)").font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Text(group.needs.compactMap(\.brief).joined(separator: " · "))
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if group.there, model.away == nil {
+                    Button("Open on \(model.mac)") { model.openThere(group) }
+                        .help("Open a pane of it on \(model.mac), to commit and push there")
+                }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            Divider()
+            (model.changes?(group) ?? AnyView(EmptyView()))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: Self.changesSize.width, height: Self.changesSize.height)
+    }
+
+    private var sheet: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Bring \(model.what) here from \(model.mac)").font(.system(size: 14, weight: .semibold))
@@ -250,7 +295,7 @@ struct BringDialog: View {
                     }
                     if group.there, model.away == nil {
                         Button("Show Changes") { model.showChanges(group) }.controlSize(.small)
-                            .help("What it holds on \(model.mac), in this window's right bar")
+                            .help("What it holds on \(model.mac), here in the dialog")
                         Button("Open on \(model.mac)") { model.openThere(group) }.controlSize(.small)
                             .help("Open a pane of it on \(model.mac), to commit and push there")
                     }
