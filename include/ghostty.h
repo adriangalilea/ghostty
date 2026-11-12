@@ -535,13 +535,14 @@ typedef struct {
   bool wait_after_command;
   ghostty_surface_context_e context;
   // Vigil: non-NULL/non-empty makes this surface attach to (or create) the
-  // vigild session daemon with this id instead of spawning a subprocess.
+  // vigild pane daemon with this id instead of spawning a subprocess.
   const char* GHOSTTY_NULLABLE vigil_attach;
-  // Vigil: ssh alias of the Mac that owns the daemon; NULL/empty = local.
+  // Vigil: the tether root of the Mac that owns the daemon, reached
+  // through this Mac's hub; NULL/empty = this Mac.
   const char* GHOSTTY_NULLABLE vigil_host;
   // Vigil: an already-connected stream to the daemon (a socketpair end the
-  // embedder pumps to its own transport: ssh on iOS, anything later); -1 =
-  // none. The surface reads and writes frames on it and closes it.
+  // embedder pumps to its own transport: tether on iOS); -1 = none. The
+  // surface reads and writes frames on it and closes it.
   int vigil_fd;
   // Vigil: focus never claims the daemon's pty size; only
   // ghostty_surface_vigil_claim does (a viewport mirroring another
