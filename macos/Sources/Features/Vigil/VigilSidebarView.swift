@@ -522,7 +522,7 @@ struct VigilSidebarView: View {
                     if let tab = row.soleTab {
                         ForEach(tab.panes) { pane in
                             paneRow(pane, session: row.id, tab: tab, level: 1)
-                            asideRow(pane, session: row.id, tab: tab, level: 2)
+                            asideRow(pane, session: row.id, tab: tab, level: 1)
                         }
                     } else {
                         ForEach(row.tabs) { tab in
@@ -531,7 +531,7 @@ struct VigilSidebarView: View {
                                 foldable(tab.id, level: 1, fold: { model.collapsedTabs.insert(tab.id) }) {
                                     ForEach(tab.panes) { pane in
                                         paneRow(pane, session: row.id, tab: tab, level: 2)
-                                        asideRow(pane, session: row.id, tab: tab, level: 3)
+                                        asideRow(pane, session: row.id, tab: tab, level: 2)
                                     }
                                 }
                             }
@@ -767,7 +767,9 @@ struct VigilSidebarView: View {
     }
 
     /// A pane's changes standing in a right bar, as a row under the pane:
-    /// what the bar holds is in the tree as a dock pane is. A press goes to
+    /// what the bar holds is in the tree as a dock pane is. It sits at its
+    /// pane's own level, its mark under the pane's face: one step further
+    /// in with no thread line of its own, it read as a row out of place. A press goes to
     /// the pane and brings its changes in front; its menu moves them to a
     /// window or closes them (which ends nothing).
     @ViewBuilder private func asideRow(
@@ -779,14 +781,17 @@ struct VigilSidebarView: View {
                 model.activate(.init(id: "\(tab.id)#\(pane.id)", kind: .pane(name: session, paneId: pane.paneId)))
                 VigilBars.shared.frontAside(pane: paneId)
             } label: {
-                HStack(spacing: Grid.gap) {
-                    Image(systemName: "plusminus").font(.system(size: 9 * scale, weight: .semibold)).frame(width: Grid.icon)
+                // The name cell's own columns (`VigilNameCell`): its mark sits
+                // in the face's column, its word where a pane's name starts.
+                HStack(spacing: 4 * scale) {
+                    Image(systemName: "plusminus").font(.system(size: 9 * scale, weight: .semibold))
+                        .frame(width: VigilNameCell.face * scale)
                     Text("Changes").font(.system(size: 11 * scale)).lineLimit(1)
                     Spacer(minLength: 0)
                     Image(systemName: "sidebar.right").font(.system(size: 9 * scale)).foregroundStyle(.tertiary)
                 }
                 .foregroundStyle(.secondary)
-                .frame(height: 22 * scale)
+                .frame(height: 20 * scale)
                 .padding(rowInsets(level: level))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(rowBackground(id: hoverId, hovered: hovered == hoverId))
