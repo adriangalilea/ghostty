@@ -17,12 +17,10 @@ struct VigilSidebarView: View {
     @ObservedObject private var collapse = VigilSidebarCollapse.shared
     @AppStorage(VigilSidebarSize.key) private var sidebarFontSize = VigilSidebarSize.compact
     private var scale: CGFloat { CGFloat(VigilSidebarSize.bounded(sidebarFontSize) / VigilSidebarSize.compact) }
-    /// One size for every mark on a row's right (the gears, the antenna, an
-    /// ending, a conflict, who looks, a pin, a priority) and one for the
-    /// words beside a mark: a mark of its own size read as more or less
-    /// than its neighbours (the gears at 14 beside an antenna at 8).
-    private var markSize: CGFloat { 11 * scale }
-    private var markText: CGFloat { 10 * scale }
+    /// Every mark on a row's right (the gears, the antenna, the dots, an
+    /// ending, a conflict, who looks, a pin, a priority) is sized from the
+    /// row's text, by the one rule the phone's rows use (`PaneMarkSizes`).
+    private var marks: PaneMarkSizes { PaneMarkSizes(text: 11 * scale) }
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
 
@@ -34,12 +32,28 @@ struct VigilSidebarView: View {
     /// (stateDidChange, fed by the state-dir and vigild-dir watchers).
     private let burialCountdown = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    /// The tree's columns, in points at the compact size. A row is inset
+    /// so its first glyph and its last sit `edge` from the row's ends: the
+    /// chevron's glyph is 8 wide in its column, so the row's leading
+    /// padding is `edge` less that slack. Each level steps in by `indent`,
+    /// whether or not the row has a chevron: a row without one starts
+    /// where its chevron's neighbour would.
     private enum Grid {
-        static let chevron: CGFloat = 18
+        static let chevron: CGFloat = 16
         static let icon: CGFloat = 20
-        static let indent: CGFloat = 18
-        static let dot: CGFloat = 12
-        static let classSlot: CGFloat = 14
+        static let indent: CGFloat = 12
+        static let gap: CGFloat = 4
+        static let edge: CGFloat = 8
+        static let leading: CGFloat = edge - (chevron - 8) / 2
+    }
+
+    /// A row's insets: `level` steps in, its content starting after the
+    /// chevron's column whether it has one or not.
+    private func rowInsets(level: Int, chevron: Bool) -> EdgeInsets {
+        EdgeInsets(
+            top: 0,
+            leading: Grid.leading + (Grid.indent * CGFloat(level) + (chevron ? 0 : Grid.chevron + Grid.gap)) * scale,
+            bottom: 0, trailing: Grid.edge)
     }
 
     var body: some View {
@@ -329,7 +343,8 @@ struct VigilSidebarView: View {
         .font(.system(size: 11 * scale, weight: .semibold))
         .foregroundStyle(.secondary)
         .padding(.top, 10)
-        .padding(.horizontal, 2)
+        .padding(.leading, Grid.leading)
+        .padding(.trailing, Grid.edge)
     }
 
     // MARK: Session group (one block per session)
@@ -415,37 +430,31 @@ struct VigilSidebarView: View {
             )
             .opacity(row.stateTag == "windowed" ? 1 : 0.85)
             Spacer(minLength: 4)
-            // Where it came from, folded or not, until its panes are opened.
-            arrivedMark(row.tabs.flatMap(\.panes).compactMap(\.arrived))
-            // Folded, who looks from elsewhere rolls up: a peek is never hidden.
-            if collapsed {
-                backgroundMark(row.tabs.flatMap(\.panes).compactMap(\.background))
-                endedRollup(row.tabs.flatMap(\.panes))
-                conflictMark(row.tabs.flatMap(\.panes).compactMap(\.conflict), pane: nil)
-                lookerGlyphs(row.tabs.flatMap(\.panes).flatMap(\.lookers))
-            }
-            followKeycap(id)
-            // No lifecycle tag on the row: every session is ALIVE by
-            // construction (daemons carry it); the only honest distinction
-            // is displayed-or-not, and the front tint + filled tab icons
-            // already say that. Full state stays in the tooltip.
-            // Collapsed, a descendant's antenna rolls up into the class
-            // slot (a hidden listener must stay visible).
-            Group {
-                if collapsed, row.tabs.flatMap(\.panes).contains(where: { watchActive($0) }) {
-                    watchRollup(row.tabs.flatMap(\.panes))
-                } else {
-                    Color.clear.frame(width: Grid.classSlot)
+            // The row's marks, one gap between any two, the dots last on
+            // the rail. No lifecycle tag: every session is ALIVE by
+            // construction (daemons carry it); displayed-or-not is said by
+            // the front tint and the filled tab icons, the rest by the
+            // tooltip.
+            HStack(spacing: marks.gap) {
+                // Where it came from, folded or not, until its panes are opened.
+                arrivedMark(row.tabs.flatMap(\.panes).compactMap(\.arrived))
+                // Folded, what its panes wear rolls up: a peek, a listener
+                // or an ending is never hidden.
+                if collapsed {
+                    backgroundMark(row.tabs.flatMap(\.panes).compactMap(\.background))
+                    endedRollup(row.tabs.flatMap(\.panes))
+                    conflictMark(row.tabs.flatMap(\.panes).compactMap(\.conflict), pane: nil)
+                    lookerGlyphs(row.tabs.flatMap(\.panes).flatMap(\.lookers))
                 }
-            }
-            // Expanded, the children speak for themselves; collapsed, the
-            // parent peeks: one dot per distinct state, overlapped.
-            Group {
-                if collapsed { dotCluster(row.states) } else { dotSlot(nil) }
+                followKeycap(id)
+                if collapsed { watchRollup(row.tabs.flatMap(\.panes)) }
+                // Expanded, the children speak for themselves; collapsed,
+                // the parent peeks: one dot per distinct state, overlapped.
+                dotCluster(collapsed ? row.states : [])
             }
         }
         .frame(height: 26 * scale)
-        .padding(.horizontal, 5)
+        .padding(rowInsets(level: 0, chevron: true))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
             id: id,
@@ -546,33 +555,22 @@ struct VigilSidebarView: View {
                     .background(Capsule().fill(Color.primary.opacity(0.08)))
             }
             Spacer(minLength: 4)
-            if collapsed {
-                backgroundMark(tab.panes.compactMap(\.background))
-                endedRollup(tab.panes)
-                conflictMark(tab.panes.compactMap(\.conflict), pane: nil)
-                lookerGlyphs(tab.panes.flatMap(\.lookers))
-            }
-            followKeycap(tab.id)
-            // The tab's class slot is free; collapsed, it wears the
-            // descendants' antenna so a listener never vanishes.
-            Group {
+            HStack(spacing: marks.gap) {
+                // Collapsed, it wears what its panes wear, their antenna
+                // too: a listener never vanishes.
                 if collapsed {
-                    watchRollup(tab.panes)
-                } else {
-                    Color.clear.frame(width: Grid.classSlot, height: 1)
+                    backgroundMark(tab.panes.compactMap(\.background))
+                    endedRollup(tab.panes)
+                    conflictMark(tab.panes.compactMap(\.conflict), pane: nil)
+                    lookerGlyphs(tab.panes.flatMap(\.lookers))
                 }
-            }
-            Group {
-                if collapsed {
-                    dotCluster(PaneDot.cluster(tab.panes.flatMap(\.dots)))
-                } else {
-                    dotSlot(nil)
-                }
+                followKeycap(tab.id)
+                if collapsed { watchRollup(tab.panes) }
+                dotCluster(collapsed ? PaneDot.cluster(tab.panes.flatMap(\.dots)) : [])
             }
         }
         .frame(height: 22 * scale)
-        .padding(.leading, (Grid.indent * scale))
-        .padding(.horizontal, 5)
+        .padding(rowInsets(level: 1, chevron: true))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
             id: tab.id,
@@ -674,16 +672,18 @@ struct VigilSidebarView: View {
             }
             paneIdentity(pane)
             Spacer(minLength: 4)
-            paneMarks(pane)
-            followKeycap(id)
-            watchGlyph(pane)
-            // A dot per agent, drawn as a folded row's cluster is: each
-            // background agent not finished, then the pane's own on the rail.
-            dotCluster(pane.dots)
+            HStack(spacing: marks.gap) {
+                paneMarks(pane)
+                followKeycap(id)
+                antennaGlyph(pane.sentries)
+                // A dot per agent, drawn as a folded row's cluster is: each
+                // background agent not finished, then the pane's own on the
+                // rail.
+                dotCluster(pane.dots)
+            }
         }
         .frame(height: 20 * scale)
-        .padding(.leading, (Grid.indent * scale) * CGFloat(level) + (Grid.chevron * scale))
-        .padding(.horizontal, 5)
+        .padding(rowInsets(level: level, chevron: false))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
             id: id,
@@ -803,7 +803,7 @@ struct VigilSidebarView: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
             .background(RoundedRectangle(cornerRadius: 3).fill(Color.yellow))
-            .padding(.leading, 4 + CGFloat(depth) * 18)
+            .padding(.leading, Grid.leading + CGFloat(depth) * Grid.indent * scale)
             .allowsHitTesting(false)
         }
     }
@@ -825,7 +825,7 @@ struct VigilSidebarView: View {
         return String(first)
     }
 
-    /// A real hitbox (18×20 full shape), not an 8pt glyph.
+    /// A real hitbox (its whole column, 20 high), not an 8pt glyph.
     private func chevron(collapsed: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: collapsed ? "chevron.right" : "chevron.down")
@@ -837,26 +837,17 @@ struct VigilSidebarView: View {
         .buttonStyle(.plain)
     }
 
-    /// The sentry's antenna is LIT: a declared lease, or something alive
-    /// here that no agent accounts for (`SidebarPane.sentries`).
-    private func watchActive(_ pane: VigilWorkspaces.SidebarPane) -> Bool {
-        !pane.sentries.isEmpty
-    }
-
-    /// The sentry's antenna, in the pane row's class slot: something is
-    /// alive under this pane beyond its program, LISTENING for the
-    /// outside world. NOT an eye - the eye is vigil's own vocabulary
-    /// (menu-bar identity, attention badge): eye = vigil watching YOU,
-    /// antenna = a process watching the WORLD. Yellow: a live listener
-    /// must read at a glance, and yellow is free on this rail (working's
-    /// yellow dot never shares a row - the antenna hides while working).
-    /// Declared vs derived lives in the tooltip (lease notes first).
     /// What a pane is to the world beyond this window, each only when it
     /// differs from the default: what its agent runs in the background,
     /// who looks from elsewhere (the phone, another Mac), a phone following
-    /// it, its priority (high rings through Focus, low never rings).
+    /// it, its priority (high rings through Focus, low never rings). Its
+    /// antenna follows them on the row (`antennaGlyph`): a declared lease,
+    /// or something alive here that no agent accounts for
+    /// (`SidebarPane.sentries`), which is which in its tooltip. NOT an eye:
+    /// the eye is vigil watching YOU, the antenna a process watching the
+    /// WORLD.
     private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
-        HStack(spacing: 3 * scale) {
+        HStack(spacing: marks.gap) {
             if let ended = pane.ended { endedMark([ended]) }
             if let arrived = pane.arrived { arrivedMark([arrived]) }
             if let conflict = pane.conflict { conflictMark([conflict], pane: pane.paneId) }
@@ -885,9 +876,9 @@ struct VigilSidebarView: View {
     private func endedMark(_ ends: [PaneEnd]) -> some View {
         if !ends.isEmpty {
             HStack(spacing: 1) {
-                Image(systemName: "xmark.octagon.fill").font(.system(size: markSize, weight: .semibold))
+                Image(systemName: "xmark.octagon.fill").font(marks.symbol)
                 Text(ends.count == 1 ? ends[0].how : "\(ends.count) ended")
-                    .font(.system(size: markText, weight: .medium).monospacedDigit())
+                    .font(marks.word.monospacedDigit())
                     .lineLimit(1)
             }
             .foregroundStyle(.red)
@@ -904,8 +895,8 @@ struct VigilSidebarView: View {
     private func arrivedMark(_ arrivals: [Registry.Arrival]) -> some View {
         if let first = arrivals.first {
             HStack(spacing: 1) {
-                Image(systemName: "arrow.down.to.line").font(.system(size: markSize, weight: .semibold))
-                Text(first.mac).font(.system(size: markText, weight: .medium)).lineLimit(1)
+                Image(systemName: "arrow.down.to.line").font(marks.symbol)
+                Text(first.mac).font(marks.word).lineLimit(1)
             }
             .foregroundStyle(.secondary)
             .help("Brought from \(first.mac), \(Self.endTime.string(from: Date(timeIntervalSince1970: first.at))). "
@@ -922,9 +913,9 @@ struct VigilSidebarView: View {
     private func conflictMark(_ conflicts: [PaneConflict], pane: String?) -> some View {
         if let first = conflicts.first {
             let mark = HStack(spacing: 1) {
-                Image(systemName: "arrow.triangle.branch").font(.system(size: markSize, weight: .semibold))
+                Image(systemName: "arrow.triangle.branch").font(marks.symbol)
                 Text(conflicts.count == 1 ? first.mac : "\(conflicts.count) written twice")
-                    .font(.system(size: markText, weight: .medium)).lineLimit(1)
+                    .font(marks.word).lineLimit(1)
             }
             .foregroundStyle(.red)
             .help(conflicts.count == 1
@@ -965,53 +956,36 @@ struct VigilSidebarView: View {
     /// On a folded tab or workspace: its panes'.
     /// Drawn by `GearsMark`, the one the phone draws too.
     private func backgroundMark(_ backgrounds: [PaneGlance.Background]) -> some View {
-        GearsMark(backgrounds: backgrounds, size: markSize, textSize: markText)
+        GearsMark(backgrounds: backgrounds, sizes: marks)
     }
 
     private func mark(_ symbol: String, _ color: Color, _ help: String) -> some View {
         Image(systemName: symbol)
-            .font(.system(size: markSize, weight: .semibold))
+            .font(marks.symbol)
             .foregroundStyle(color)
             .help(help)
     }
 
-    private func watchGlyph(_ pane: VigilWorkspaces.SidebarPane) -> some View {
-        Group {
-            if watchActive(pane) {
-                antennaGlyph(pane.sentries)
-            }
-        }
-        .frame(width: Grid.classSlot)
-    }
-
+    /// The antenna, when there is something to say (`AntennaMark` draws
+    /// nothing for an empty list): it takes room only when lit.
     private func antennaGlyph(_ what: [String]) -> some View {
-        AntennaMark(what: what, size: markSize)
+        AntennaMark(what: what, sizes: marks)
     }
 
     /// Collapse must not hide a listener: the antenna rolls up to the
-    /// collapsed tab/session row (same slot, same yellow), carrying every
+    /// collapsed tab/session row (same place, same yellow), carrying every
     /// descendant's notes in one tooltip.
     private func watchRollup(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
-        let watching = panes.filter { watchActive($0) }
-        return Group {
-            if !watching.isEmpty {
-                antennaGlyph(watching.flatMap(\.sentries))
-            }
-        }
-        .frame(width: Grid.classSlot)
-    }
-
-    /// Fixed-width dot column: absent state reserves the slot, so the
-    /// right rail never wiggles.
-    private func dotSlot(_ dot: PaneDot?) -> some View {
-        dotCluster(dot.map { [$0] } ?? [])
+        antennaGlyph(panes.flatMap(\.sentries))
     }
 
     /// A row's dots, drawn by `PaneDots` (the phone's rows draw the same):
     /// a pane's own (a dot per agent), or a folded row's rollup, most
     /// urgent first. They grow inward; the right rail edge never moves.
+    /// None: one dot's room, so a row's text ends where its neighbours'
+    /// does.
     private func dotCluster(_ dots: [PaneDot]) -> some View {
-        PaneDots(dots: dots).frame(minWidth: Grid.dot, alignment: .trailing)
+        PaneDots(dots: dots, sizes: marks)
     }
 
     /// A row's place in the DERIVED active chain: `leaf` = where keystrokes

@@ -461,8 +461,8 @@ struct TreeNodeView: View {
         // What runs beside its agent, as the Mac's sidebar draws it: the
         // gears with their count, the antenna. A folded row: its panes'.
         let backgrounds = (node.kind == .pane ? [node] : (folded ? node.leaves : [])).compactMap { $0.glance?.background }
-        GearsMark(backgrounds: backgrounds, size: 12, textSize: 11)
-        AntennaMark(what: backgrounds.flatMap(\.commands), size: 12)
+        GearsMark(backgrounds: backgrounds, sizes: Self.markSizes)
+        AntennaMark(what: backgrounds.flatMap(\.commands), sizes: Self.markSizes)
         if node.onAnotherMac {
             Image(systemName: "laptopcomputer").font(.caption2.weight(.bold)).foregroundStyle(.cyan)
                 .accessibilityLabel("Open on another Mac right now")
@@ -513,10 +513,13 @@ struct TreeNodeView: View {
         // A pane: a dot per agent (its background agents, then its main
         // one). A folded node: its panes' cluster.
         let states: [PaneDot] = node.kind == .pane ? node.dots : (folded ? node.cluster : [])
-        // The Mac's own drawing (`PaneDots`), a point larger for a finger's
-        // screen.
-        if !states.isEmpty { PaneDots(dots: states, size: 8) }
+        // The Mac's own drawing (`PaneDots`).
+        if !states.isEmpty { PaneDots(dots: states, sizes: Self.markSizes) }
     }
+
+    /// A row's marks, sized from a row's text (a point larger than the
+    /// Mac's sidebar, for a finger's screen).
+    static let markSizes = PaneMarkSizes(text: 12)
 }
 
 // MARK: - Ended mark

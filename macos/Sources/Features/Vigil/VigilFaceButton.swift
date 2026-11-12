@@ -19,7 +19,7 @@ struct VigilFaceButton<Fallback: View>: View {
         Button {
             picking = true
         } label: {
-            HStack(spacing: 3 * scale) {
+            HStack(spacing: 2 * scale) {
                 Group {
                     if let emoji, let first = emoji.first {
                         Text(String(first)).font(.system(size: 11 * scale))
@@ -33,7 +33,7 @@ struct VigilFaceButton<Fallback: View>: View {
                     .font(.system(size: 7 * scale, weight: .semibold))
                     .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 3 * scale)
+            .padding(.horizontal, 2 * scale)
             .padding(.vertical, 1 * scale)
             .background(
                 RoundedRectangle(cornerRadius: 4)

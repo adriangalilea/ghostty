@@ -50,7 +50,9 @@ final class VigilSidebarHost: NSVisualEffectView {
         NSLayoutConstraint.activate([
             hosting.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
             hosting.leadingAnchor.constraint(equalTo: leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
+            // Up to the divider: the drag handle lies over the tree's own
+            // margin, so the tree's two sides are inset alike.
+            hosting.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
             hosting.bottomAnchor.constraint(equalTo: bottomAnchor),
             handle.trailingAnchor.constraint(equalTo: trailingAnchor),
             handle.topAnchor.constraint(equalTo: topAnchor),
