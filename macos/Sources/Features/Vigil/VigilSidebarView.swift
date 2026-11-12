@@ -1004,28 +1004,14 @@ struct VigilSidebarView: View {
     /// Fixed-width dot column: absent state reserves the slot, so the
     /// right rail never wiggles.
     private func dotSlot(_ dot: PaneDot?) -> some View {
-        VigilStateDot(dot: dot)
-            .frame(width: Grid.dot)
+        dotCluster(dot.map { [$0] } ?? [])
     }
 
-    /// The collapsed rollup: one dot per distinct descendant state,
-    /// overlapped (negative gap), blocked leftmost so the most urgent
-    /// reads first. Grows inward; the right rail edge never moves.
-    private func dotCluster(_ states: [PaneDot]) -> some View {
-        HStack(spacing: -2) {
-            if states.isEmpty {
-                Color.clear.frame(width: 7, height: 7)
-            } else {
-                // Per-PANE dots: duplicates are the point, so identity is
-                // positional, not by state. Plain overlap - the ring
-                // borders keep overlapping same-colour dots countable (a
-                // destinationOut punch-out cannot composite CA-layer dots).
-                ForEach(Array(states.enumerated()), id: \.offset) { _, dot in
-                    VigilStateDot(dot: dot)
-                }
-            }
-        }
-        .frame(minWidth: Grid.dot, alignment: .trailing)
+    /// A row's dots, drawn by `PaneDots` (the phone's rows draw the same):
+    /// a pane's own (a dot per agent), or a folded row's rollup, most
+    /// urgent first. They grow inward; the right rail edge never moves.
+    private func dotCluster(_ dots: [PaneDot]) -> some View {
+        PaneDots(dots: dots).frame(minWidth: Grid.dot, alignment: .trailing)
     }
 
     /// A row's place in the DERIVED active chain: `leaf` = where keystrokes
@@ -1077,144 +1063,5 @@ struct VigilSidebarView: View {
         case .done: return Color.teal.opacity(0.06)
         case .idle, nil: return nil
         }
-    }
-}
-
-/// ONE indicator, the dot, and its motion IS the state: a spinning arc =
-/// working (something is literally in motion), a pulsing solid = blocked
-/// on you (it breathes until you answer), solid teal = done unseen,
-/// faint solid = idle. Identical 7pt footprint in every form: state
-/// changes never move layout.
-///
-/// The motion lives in CORE ANIMATION, never SwiftUI: `repeatForever`
-/// SwiftUI animations invalidate the hosting view's render loop every
-/// frame, and with one working claude visible the sidebar re-renders
-/// continuously on the main thread (SwiftUI renderDisplayList dominating
-/// main during a pure Metal scroll: the terminal stutters).
-/// CABasicAnimation runs in the render server: zero app-side work per
-/// frame.
-///
-/// `agent` (one of the pane's background agents, working) is the working
-/// arc alone, with no body under it: the main agent's dot has the body.
-struct VigilStateDot: View {
-    let dot: PaneDot?
-
-    var body: some View {
-        VigilDotLayer(dot: dot)
-            .frame(width: 7, height: 7)
-    }
-}
-
-private struct VigilDotLayer: NSViewRepresentable {
-    let dot: PaneDot?
-
-    func makeNSView(context: Context) -> VigilDotNSView { VigilDotNSView() }
-    func updateNSView(_ view: VigilDotNSView, context: Context) {
-        view.apply(dot)
-    }
-}
-
-final class VigilDotNSView: NSView {
-    private var current: PaneDot??
-
-    override var intrinsicContentSize: NSSize { NSSize(width: 7, height: 7) }
-
-    func apply(_ dot: PaneDot?) {
-        if current == dot { return }
-        current = dot
-        wantsLayer = true
-        guard let layer else { return }
-        layer.sublayers?.forEach { $0.removeFromSuperlayer() }
-        let rect = CGRect(x: 0, y: 0, width: 7, height: 7)
-        let state: AgentState?
-        switch dot {
-        case .state(let shown): state = shown
-        case nil: state = nil
-        case .agent:
-            let arc = CAShapeLayer()
-            arc.frame = rect
-            let path = CGMutablePath()
-            path.addArc(center: CGPoint(x: 3.5, y: 3.5), radius: 3, startAngle: 0, endAngle: .pi * 1.5, clockwise: false)
-            arc.path = path
-            arc.strokeColor = NSColor.systemYellow.withAlphaComponent(0.8).cgColor
-            arc.fillColor = nil
-            arc.lineWidth = 1
-            arc.lineCap = .round
-            layer.addSublayer(arc)
-            let spin = CABasicAnimation(keyPath: "transform.rotation.z")
-            spin.fromValue = 0
-            spin.toValue = -2 * Double.pi
-            spin.duration = 1.1
-            spin.repeatCount = .infinity
-            arc.add(spin, forKey: "spin")
-            toolTip = "A background agent of this pane, working"
-            return
-        }
-        switch state {
-        case .working:
-            // Faint body + bright arc, the arc rotating in the render
-            // server forever.
-            let body = CAShapeLayer()
-            body.frame = rect
-            body.path = CGPath(ellipseIn: rect, transform: nil)
-            body.fillColor = NSColor.systemYellow.withAlphaComponent(0.3).cgColor
-            layer.addSublayer(body)
-
-            let arc = CAShapeLayer()
-            arc.frame = rect
-            let path = CGMutablePath()
-            path.addArc(
-                center: CGPoint(x: 3.5, y: 3.5), radius: 3,
-                startAngle: 0, endAngle: .pi * 1.5, clockwise: false)
-            arc.path = path
-            arc.strokeColor = NSColor.systemYellow.cgColor
-            arc.fillColor = nil
-            arc.lineWidth = 1
-            arc.lineCap = .round
-            layer.addSublayer(arc)
-
-            let spin = CABasicAnimation(keyPath: "transform.rotation.z")
-            spin.fromValue = 0
-            spin.toValue = -2 * Double.pi
-            spin.duration = 1.1
-            spin.repeatCount = .infinity
-            arc.add(spin, forKey: "spin")
-        case .blocked:
-            let dot = ringLayer(.systemOrange, in: rect)
-            layer.addSublayer(dot)
-            let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 1.0
-            pulse.toValue = 0.35
-            pulse.duration = 0.9
-            pulse.autoreverses = true
-            pulse.repeatCount = .infinity
-            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            dot.add(pulse, forKey: "pulse")
-        case .done:
-            layer.addSublayer(ringLayer(.systemTeal, in: rect))
-        case .idle:
-            layer.addSublayer(ringLayer(.secondaryLabelColor.withAlphaComponent(0.6), in: rect))
-        case .unknown:
-            layer.addSublayer(ringLayer(.systemGray, in: rect))
-        case .interrupting:
-            layer.addSublayer(ringLayer(.systemYellow, in: rect))
-        case nil:
-            break
-        }
-        toolTip = state == .unknown ? "Agent state is unconfirmed" : state == .interrupting ? "Interruption requested; waiting for confirmation" : nil
-    }
-
-    /// Ring + translucent body (border at full colour, body ~55%): two
-    /// same-colour dots overlapping in a cluster stay countable because
-    /// the borders draw the boundary.
-    private func ringLayer(_ color: NSColor, in rect: CGRect) -> CAShapeLayer {
-        let dot = CAShapeLayer()
-        dot.frame = rect
-        let inset = rect.insetBy(dx: 0.5, dy: 0.5)
-        dot.path = CGPath(ellipseIn: inset, transform: nil)
-        dot.fillColor = color.withAlphaComponent(0.55).cgColor
-        dot.strokeColor = color.cgColor
-        dot.lineWidth = 1
-        return dot
     }
 }

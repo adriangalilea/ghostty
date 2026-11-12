@@ -7,6 +7,48 @@ import VigilWire
 /// marks, one meaning each; a pane's background agents are no mark, they are
 /// dots of their own (`PaneDot.agent`).
 
+/// A row's dots, by swift-utils' `InkStateDotCluster`: a pane's own (each
+/// background agent not finished, then its main agent's state) or a folded
+/// row's. How a dot looks for what it says is here and nowhere else.
+struct PaneDots: View {
+    let dots: [PaneDot]
+    var size: CGFloat = 7
+
+    var body: some View {
+        InkStateDotCluster(dots.map(Self.look), size: size)
+            .help(dots.map(Self.said).joined(separator: "\n"))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(dots.map(Self.said).joined(separator: ", "))
+    }
+
+    /// Its motion is the state: a turning arc is at work (the arc alone, a
+    /// background agent), a breathing dot waits on the person, a still one
+    /// in teal is done and unseen, a faint still one is at rest.
+    static func look(_ dot: PaneDot) -> InkStateDotCluster.Dot {
+        switch dot {
+        case .agent: .init(.turningArc, color: .yellow)
+        case .state(.working): .init(.turning, color: .yellow)
+        case .state(.blocked): .init(.pulsing, color: .orange)
+        case .state(.done): .init(.still, color: .teal)
+        case .state(.interrupting): .init(.still, color: .yellow)
+        case .state(.unknown): .init(.still, color: .gray)
+        case .state(.idle): .init(.still, color: .gray.opacity(0.6))
+        }
+    }
+
+    static func said(_ dot: PaneDot) -> String {
+        switch dot {
+        case .agent: "A background agent, not finished"
+        case .state(.working): "Working"
+        case .state(.blocked): "Waiting for you"
+        case .state(.done): "Done, not seen yet"
+        case .state(.interrupting): "Interruption requested; waiting for confirmation"
+        case .state(.unknown): "Its state is unconfirmed"
+        case .state(.idle): "At rest"
+        }
+    }
+}
+
 /// The shells its agent runs in the background: their count, then gears
 /// that turn while they run (`PaneGlance.Background.jobs`). Several
 /// backgrounds: a folded row's panes, summed. Nothing while there is none.

@@ -513,20 +513,9 @@ struct TreeNodeView: View {
         // A pane: a dot per agent (its background agents, then its main
         // one). A folded node: its panes' cluster.
         let states: [PaneDot] = node.kind == .pane ? node.dots : (folded ? node.cluster : [])
-        HStack(spacing: 3) {
-            ForEach(Array(states.enumerated()), id: \.offset) { _, dot in
-                // A background agent at work: the working color as a ring,
-                // where the main agent's state is a filled dot.
-                if let state = dot.state {
-                    Circle().fill(state.tint).frame(width: 8, height: 8)
-                } else {
-                    Circle().strokeBorder(AgentState.working.tint, lineWidth: 2).frame(width: 8, height: 8)
-                }
-            }
-        }
-        .frame(minWidth: 8)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(states.map(\.words).joined(separator: ", "))
+        // The Mac's own drawing (`PaneDots`), a point larger for a finger's
+        // screen.
+        if !states.isEmpty { PaneDots(dots: states, size: 8) }
     }
 }
 
