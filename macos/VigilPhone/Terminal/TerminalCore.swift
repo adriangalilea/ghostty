@@ -85,9 +85,9 @@ final class TerminalCore: ObservableObject {
             let size = CGSize(width: Double(action.action.cell_size.width), height: Double(action.action.cell_size.height))
             DispatchQueue.main.async { view.cellMetricsDidChange(px: size) }
         case GHOSTTY_ACTION_SET_TITLE:
-            guard let title = action.action.set_title.title.flatMap({ String(cString: $0, encoding: .utf8) }) else {
-                return false
-            }
+            // The header says a title is never NULL; one that is not UTF-8
+            // is not taken.
+            guard let title = String(cString: action.action.set_title.title, encoding: .utf8) else { return false }
             DispatchQueue.main.async { view.title = title }
         case GHOSTTY_ACTION_RENDERER_HEALTH:
             let healthy = action.action.renderer_health == GHOSTTY_RENDERER_HEALTH_HEALTHY

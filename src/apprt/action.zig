@@ -364,6 +364,12 @@ pub const Action = union(Key) {
     /// split or the window is fullscreen.
     resize_window: ResizeWindow,
 
+    /// Set the application window theme for this session.
+    set_window_theme: WindowTheme,
+
+    // Vigil's actions stay last, after upstream's (upstream appends here),
+    // in the order of `Key` below and of ghostty.h's ghostty_action_tag_e.
+
     /// vigil: open the most urgent session in the attention queue.
     vigil_next,
 
@@ -465,6 +471,7 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         move_tab_to_new_window,
         resize_window,
+        set_window_theme,
         vigil_next,
         vigil_detach_window,
         vigil_new_session,
@@ -656,6 +663,17 @@ pub const SecureInput = enum(c_int) {
 
     test "ghostty.h SecureInput" {
         try lib.checkGhosttyHEnum(SecureInput, "GHOSTTY_SECURE_INPUT_");
+    }
+};
+
+pub const WindowTheme = enum(c_int) {
+    config,
+    system,
+    light,
+    dark,
+
+    test "ghostty.h WindowTheme" {
+        try lib.checkGhosttyHEnum(WindowTheme, "GHOSTTY_ACTION_WINDOW_THEME_");
     }
 };
 
