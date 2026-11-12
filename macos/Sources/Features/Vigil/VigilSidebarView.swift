@@ -32,28 +32,28 @@ struct VigilSidebarView: View {
     /// (stateDidChange, fed by the state-dir and vigild-dir watchers).
     private let burialCountdown = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    /// The tree's columns, in points at the compact size. A row is inset
-    /// so its first glyph and its last sit `edge` from the row's ends: the
-    /// chevron's glyph is 8 wide in its column, so the row's leading
-    /// padding is `edge` less that slack. Each level steps in by `indent`,
-    /// whether or not the row has a chevron: a row without one starts
-    /// where its chevron's neighbour would.
+    /// The tree's columns, in points at the compact size. A row is its
+    /// face, its name and its marks, with no column for a fold control: an
+    /// open row's thread line runs under its face through its children's
+    /// indent, and a press on it folds the row (`threadLine`).
+    ///
+    /// One distance on every side: a workspace's block holds its rows
+    /// `inset` inside its border, and a row holds its first glyph and its
+    /// last `edge` inside its fill. Each level steps in by `step`, which
+    /// leaves the line under a face clear of the faces below it.
     private enum Grid {
-        static let chevron: CGFloat = 16
+        static let face: CGFloat = VigilNameCell<EmptyView>.face
         static let icon: CGFloat = 20
-        static let indent: CGFloat = 12
+        static let step: CGFloat = 16
         static let gap: CGFloat = 4
-        static let edge: CGFloat = 8
-        static let leading: CGFloat = edge - (chevron - 8) / 2
+        static let edge: CGFloat = 6
+        static let inset: CGFloat = 2
+        static let lineHit: CGFloat = 10
     }
 
-    /// A row's insets: `level` steps in, its content starting after the
-    /// chevron's column whether it has one or not.
-    private func rowInsets(level: Int, chevron: Bool) -> EdgeInsets {
-        EdgeInsets(
-            top: 0,
-            leading: Grid.leading + (Grid.indent * CGFloat(level) + (chevron ? 0 : Grid.chevron + Grid.gap)) * scale,
-            bottom: 0, trailing: Grid.edge)
+    /// A row's insets: `level` steps in.
+    private func rowInsets(level: Int) -> EdgeInsets {
+        EdgeInsets(top: 0, leading: Grid.edge + Grid.step * CGFloat(level) * scale, bottom: 0, trailing: Grid.edge)
     }
 
     var body: some View {
@@ -329,22 +329,66 @@ struct VigilSidebarView: View {
 
     private func hostHeader(_ title: String, device: String) -> some View {
         let collapsed = collapse.hosts.contains(device)
-        return HStack(spacing: 4) {
-            chevron(collapsed: collapsed) {
-                if collapsed {
-                    collapse.hosts.remove(device)
-                } else {
-                    collapse.hosts.insert(device)
-                }
+        // The whole header folds its Mac: it leads nowhere else.
+        return Button {
+            if collapsed {
+                collapse.hosts.remove(device)
+            } else {
+                collapse.hosts.insert(device)
             }
-            Image(systemName: "desktopcomputer")
-            Text(title)
+        } label: {
+            HStack(spacing: Grid.gap) {
+                Image(systemName: "desktopcomputer").frame(width: Grid.face * scale)
+                Text(title).lineLimit(1)
+                if collapsed { foldedCount(model.rows.filter { VigilRemote.split($0.id)?.device == device }.count) }
+            }
+            .font(.system(size: 11 * scale, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
-        .font(.system(size: 11 * scale, weight: .semibold))
-        .foregroundStyle(.secondary)
+        .buttonStyle(.plain)
+        .help(collapsed ? "Show \(title)'s workspaces" : "Hide \(title)'s workspaces")
         .padding(.top, 10)
-        .padding(.leading, Grid.leading)
-        .padding(.trailing, Grid.edge)
+        .padding(rowInsets(level: 0))
+        .padding(.horizontal, Grid.inset)
+    }
+
+    /// What a folded row hides, counted, where its children would start:
+    /// the row's own sign that it is folded.
+    private func foldedCount(_ count: Int) -> some View {
+        Text("+\(count)")
+            .font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(Color.primary.opacity(0.08)))
+            .fixedSize()
+    }
+
+    /// A folded row's count as the button that opens it.
+    private func unfold(_ count: Int, _ open: @escaping () -> Void) -> some View {
+        Button(action: open) { foldedCount(count).contentShape(Rectangle()) }
+            .buttonStyle(.plain)
+            .help("Unfold")
+    }
+
+    /// An open row's thread line, over its children's block: under the
+    /// row's face, from its first child to its last, as a comment thread
+    /// draws a reply's (ui's `comment-thread`). A press anywhere on it
+    /// folds the row; it takes no column of its own, the children's indent
+    /// is its room.
+    private func threadLine(level: Int, fold: @escaping () -> Void) -> some View {
+        Button(action: fold) {
+            Rectangle().fill(Color.primary.opacity(0.16)).frame(width: 1)
+                .padding(.vertical, 2)
+                .frame(width: Grid.lineHit, alignment: .center)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Fold")
+        .padding(.leading, rowInsets(level: level).leading + (Grid.face * scale - Grid.lineHit) / 2)
     }
 
     // MARK: Session group (one block per session)
@@ -354,24 +398,36 @@ struct VigilSidebarView: View {
         return VStack(alignment: .leading, spacing: 0) {
             sessionRow(row, collapsed: collapsed)
                 .id(row.id)
-            if !collapsed {
-                if let tab = row.soleTab {
-                    ForEach(tab.panes) { pane in
-                        paneRow(pane, session: row.id, tab: tab, level: 1)
-                    }
-                } else {
-                    ForEach(row.tabs) { tab in
-                        tabRow(tab, session: row.id)
-                        if !model.collapsedTabs.contains(tab.id) {
-                            ForEach(tab.panes) { pane in
-                                paneRow(pane, session: row.id, tab: tab, level: 2)
+            if !collapsed, !row.tabs.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let tab = row.soleTab {
+                        ForEach(tab.panes) { pane in
+                            paneRow(pane, session: row.id, tab: tab, level: 1)
+                        }
+                    } else {
+                        ForEach(row.tabs) { tab in
+                            tabRow(tab, session: row.id)
+                            if !model.collapsedTabs.contains(tab.id) {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    ForEach(tab.panes) { pane in
+                                        paneRow(pane, session: row.id, tab: tab, level: 2)
+                                    }
+                                }
+                                .overlay(alignment: .leading) {
+                                    threadLine(level: 1) { model.collapsedTabs.insert(tab.id) }
+                                }
                             }
                         }
                     }
                 }
+                .overlay(alignment: .leading) {
+                    threadLine(level: 0) { model.collapsedSessions.insert(row.id) }
+                }
             }
         }
-        .padding(.vertical, 2)
+        // Every row's fill sits the same distance inside the block's
+        // border, on all four sides.
+        .padding(Grid.inset)
         .background(ZStack {
             // The spotlight: the ACTIVE session's whole block lifts off
             // the list (wash + border), cool accent against the warm
@@ -393,21 +449,7 @@ struct VigilSidebarView: View {
 
     private func sessionRow(_ row: VigilWorkspaces.SidebarWorkspaceRow, collapsed: Bool) -> some View {
         let id = row.id
-        // The chevron NEVER blinks out from under the cursor: any session
-        // with content keeps it, however boring the content.
-        let hasChildren = !row.tabs.isEmpty
-        return HStack(spacing: 4) {
-            if hasChildren {
-                chevron(collapsed: collapsed) {
-                    if collapsed {
-                        model.collapsedSessions.remove(id)
-                    } else {
-                        model.collapsedSessions.insert(id)
-                    }
-                }
-            } else {
-                Color.clear.frame(width: (Grid.chevron * scale), height: 1)
-            }
+        return HStack(spacing: Grid.gap) {
             VigilNameCell(
                 emoji: row.emoji,
                 title: row.label,
@@ -429,6 +471,9 @@ struct VigilSidebarView: View {
                 }
             )
             .opacity(row.stateTag == "windowed" ? 1 : 0.85)
+            if collapsed, !row.tabs.isEmpty {
+                unfold(row.soleTab?.panes.count ?? row.tabs.count) { model.collapsedSessions.remove(id) }
+            }
             Spacer(minLength: 4)
             // The row's marks, one gap between any two, the dots last on
             // the rail. No lifecycle tag: every session is ALIVE by
@@ -454,7 +499,7 @@ struct VigilSidebarView: View {
             }
         }
         .frame(height: 26 * scale)
-        .padding(rowInsets(level: 0, chevron: true))
+        .padding(rowInsets(level: 0))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
             id: id,
@@ -493,7 +538,7 @@ struct VigilSidebarView: View {
         .opacity(hintFade(id) * dragSourceFade(.session(id)))
         .overlay {
             if model.dropTarget == id {
-                RoundedRectangle(cornerRadius: 5)
+                RoundedRectangle(cornerRadius: 4)
                     .strokeBorder(Color.accentColor, lineWidth: 1.5)
             }
         }
@@ -508,14 +553,7 @@ struct VigilSidebarView: View {
 
     private func tabRow(_ tab: VigilWorkspaces.SidebarTab, session: String) -> some View {
         let collapsed = model.collapsedTabs.contains(tab.id)
-        return HStack(spacing: 4) {
-            chevron(collapsed: collapsed) {
-                if collapsed {
-                    model.collapsedTabs.remove(tab.id)
-                } else {
-                    model.collapsedTabs.insert(tab.id)
-                }
-            }
+        return HStack(spacing: Grid.gap) {
             // Same silhouette either way (no layout flash on swap): the
             // FILLED variant marks the tab the window displays right now,
             // the outline is a tab resting in its capture (daemons running). A
@@ -546,14 +584,7 @@ struct VigilSidebarView: View {
                     .font(.system(size: 9 * scale))
                     .foregroundColor(tab.captured ? .secondary : .primary.opacity(0.8))
             }
-            if tab.panes.count > 1 {
-                Text("\(tab.panes.count)")
-                    .font(.system(size: 9 * scale, weight: .medium))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.primary.opacity(0.08)))
-            }
+            if collapsed { unfold(tab.panes.count) { model.collapsedTabs.remove(tab.id) } }
             Spacer(minLength: 4)
             HStack(spacing: marks.gap) {
                 // Collapsed, it wears what its panes wear, their antenna
@@ -570,7 +601,7 @@ struct VigilSidebarView: View {
             }
         }
         .frame(height: 22 * scale)
-        .padding(rowInsets(level: 1, chevron: true))
+        .padding(rowInsets(level: 1))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
             id: tab.id,
@@ -622,7 +653,7 @@ struct VigilSidebarView: View {
             * (tab.anchor.map { dragSourceFade(.tab(session: session, anchor: $0)) } ?? 1))
         .overlay {
             if let anchor = tab.anchor, model.dropTarget == "tab-\(anchor)" {
-                RoundedRectangle(cornerRadius: 5)
+                RoundedRectangle(cornerRadius: 4)
                     .strokeBorder(Color.accentColor, lineWidth: 1.5)
             }
         }
@@ -683,7 +714,7 @@ struct VigilSidebarView: View {
             }
         }
         .frame(height: 20 * scale)
-        .padding(rowInsets(level: level, chevron: false))
+        .padding(rowInsets(level: level))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground(
             id: id,
@@ -803,7 +834,7 @@ struct VigilSidebarView: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 1)
             .background(RoundedRectangle(cornerRadius: 3).fill(Color.yellow))
-            .padding(.leading, Grid.leading + CGFloat(depth) * Grid.indent * scale)
+            .padding(.leading, rowInsets(level: depth).leading)
             .allowsHitTesting(false)
         }
     }
@@ -823,18 +854,6 @@ struct VigilSidebarView: View {
     private func face(_ emoji: String?) -> String {
         guard let emoji, let first = emoji.first else { return "·" }
         return String(first)
-    }
-
-    /// A real hitbox (its whole column, 20 high), not an 8pt glyph.
-    private func chevron(collapsed: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                .font(.system(size: 8 * scale, weight: .semibold))
-                .foregroundColor(.secondary)
-                .frame(width: (Grid.chevron * scale), height: 20 * scale)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     /// What a pane is to the world beyond this window, each only when it
@@ -1008,21 +1027,21 @@ struct VigilSidebarView: View {
             // as the dots (collapsed parent wears the rollup, expanded
             // rows wear their own).
             if let tint = stateTint(state) {
-                RoundedRectangle(cornerRadius: 5).fill(tint)
+                RoundedRectangle(cornerRadius: 4).fill(tint)
             }
             switch activity {
             case .leaf:
-                RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.35))
+                RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.35))
             case .chain:
-                RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.12))
+                RoundedRectangle(cornerRadius: 4).fill(Color.accentColor.opacity(0.12))
             case .none:
                 EmptyView()
             }
             if hovered {
-                RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08))
+                RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.08))
             }
             if model.keyboardActive, model.selection == id {
-                RoundedRectangle(cornerRadius: 5)
+                RoundedRectangle(cornerRadius: 4)
                     .strokeBorder(Color.accentColor, lineWidth: 1.5)
             }
         }

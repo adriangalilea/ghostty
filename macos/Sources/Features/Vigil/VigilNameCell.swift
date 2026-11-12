@@ -71,8 +71,11 @@ struct VigilNameCell<Fallback: View>: View {
                 fallback()
             }
         }
-        .frame(width: 20 * scale)
+        .frame(width: Self.face * scale)
     }
+
+    /// A face's column, in points at the compact size, picked or not.
+    static var face: CGFloat { 18 }
 
     private func commit() {
         guard editing else { return }

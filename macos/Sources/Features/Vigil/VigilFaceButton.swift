@@ -1,11 +1,10 @@
 import SwiftUI
 
 /// THE face control. One component, one look, everywhere a thing has a
-/// name: sidebar session/tab/pane rows, and mounted persistently in every
-/// native tab. A classic pull-down: content, hairline separator, chevron,
-/// inside a container that lights under the cursor so the hit area is
-/// visible before you commit to it. Always present, never gated behind
-/// being in some edit mode.
+/// name: sidebar workspace, tab and pane rows. The face itself is the
+/// button that opens the picker, in a well that lights under the cursor
+/// so the hit area is visible before you commit to it. Always present,
+/// never gated behind being in some edit mode.
 struct VigilFaceButton<Fallback: View>: View {
     let emoji: String?
     var scale: CGFloat = 1
@@ -19,28 +18,22 @@ struct VigilFaceButton<Fallback: View>: View {
         Button {
             picking = true
         } label: {
-            HStack(spacing: 2 * scale) {
-                Group {
-                    if let emoji, let first = emoji.first {
-                        Text(String(first)).font(.system(size: 11 * scale))
-                    } else {
-                        fallback()
-                    }
+            // The face alone, as wide as a face that cannot be picked
+            // (`VigilNameCell.face`): a row's name starts in one place
+            // either way. Its well shows under the pointer, which is where
+            // it says it can be pressed; at rest a row is its face and its
+            // words, with no box around either.
+            Group {
+                if let emoji, let first = emoji.first {
+                    Text(String(first)).font(.system(size: 11 * scale))
+                } else {
+                    fallback()
                 }
-                .frame(width: 16 * scale)
-                Divider().frame(height: 9 * scale)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 7 * scale, weight: .semibold))
-                    .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 2 * scale)
-            .padding(.vertical, 1 * scale)
+            .frame(width: VigilNameCell<Fallback>.face * scale, height: 16 * scale)
             .background(
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.primary.opacity(hovering ? 0.15 : 0.06)))
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(Color.primary.opacity(hovering ? 0.28 : 0.10), lineWidth: 0.5))
+                    .fill(Color.primary.opacity(hovering ? 0.15 : 0)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
