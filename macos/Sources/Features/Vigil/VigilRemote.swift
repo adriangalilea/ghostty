@@ -350,9 +350,9 @@ final class VigilRemote: ObservableObject {
             let hostLabel = host.directory?.host ?? host.name
             // Away, the header says since when; the reason is the log's (and
             // the row's tooltip would repeat "no path to …" on every row).
-            let header: String =
-                if host.away, let received = host.received { "\(hostLabel) · \(Self.awaySince(received))" }
-                else { host.error.map { "\(hostLabel) (\($0))" } ?? hostLabel }
+            let header = VigilWorkspaces.SidebarWorkspaceRow.HostHeader(
+                name: hostLabel,
+                standing: host.away ? host.received.map(Self.awaySince) ?? host.error : host.error)
             guard let dir = host.directory else {
                 rows.append(.init(
                     id: Self.compositeId(host.device, ""), emoji: nil, label: "…",

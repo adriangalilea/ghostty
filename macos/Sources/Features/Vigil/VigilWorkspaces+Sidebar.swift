@@ -112,7 +112,16 @@ extension VigilWorkspaces {
         /// A remote host's session (VigilRemote): the header text of the
         /// host group it sits under; nil = this Mac. Row ids of remote
         /// workspaces are `device/name`.
-        var host: String?
+        var host: HostHeader?
+
+        /// A Mac's header: its name, and how it stands when that is not
+        /// "here and live" ("away since 12:34", why it cannot be read).
+        /// Two facts, drawn apart: joined in one string the standing read
+        /// as part of the Mac's name.
+        struct HostHeader: Equatable {
+            var name: String
+            var standing: String?
+        }
 
         /// The ONE tab whose row the tree elides: a lone tab that carries
         /// no information of its own (no name, no face). A lone NAMED tab

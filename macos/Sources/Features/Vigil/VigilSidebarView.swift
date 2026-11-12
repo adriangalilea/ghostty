@@ -333,7 +333,8 @@ struct VigilSidebarView: View {
 
     // MARK: Remote host header (one per other Mac)
 
-    private func hostHeader(_ title: String, device: String) -> some View {
+    private func hostHeader(_ host: VigilWorkspaces.SidebarWorkspaceRow.HostHeader, device: String) -> some View {
+        let title = host.name
         let collapsed = collapse.hosts.contains(device)
         // The whole header folds its Mac: it leads nowhere else.
         return Button {
@@ -347,6 +348,16 @@ struct VigilSidebarView: View {
                 Image(systemName: "desktopcomputer").frame(width: Grid.face * scale)
                 Text(title).lineLimit(1)
                 if collapsed { foldedCount(model.rows.filter { VigilRemote.split($0.id)?.device == device }.count) }
+                // How it stands, apart from its name: at the row's far
+                // end, smaller and plain, where a row's marks sit.
+                if let standing = host.standing {
+                    Spacer(minLength: Grid.gap)
+                    Text(standing)
+                        .font(.system(size: 9.5 * scale).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .layoutPriority(-1)
+                }
             }
             .font(.system(size: 11 * scale, weight: .semibold))
             .foregroundStyle(.secondary)
