@@ -282,6 +282,44 @@ extension VigilWorkspaces {
             return Reply(id: request.id, ok: true, code: "snapshot", message: "Home session topology revision.",
                          revision: session.layoutRevision, session: request.session)
         }
+        // A name, a priority, the workspace's own end: none of them moves a
+        // pane within it, so none compares a revision. Whoever asks (this
+        // Mac's sidebar, another Mac's, the phone), it is done here, where
+        // the workspace lives and every viewer reads it from.
+        func done(_ message: String) -> Reply {
+            sessionLog.info("session command committed", [
+                "id": request.id.uuidString, "operation": request.operation, "workspace": request.session, "anchor": request.anchor,
+            ])
+            return Reply(id: request.id, ok: true, code: "committed", message: message,
+                         revision: workspaces[request.session]?.layoutRevision, session: request.session)
+        }
+        let holds = { (pane: String) in session.tabs.contains { $0.members.contains { $0.id == pane } } }
+        switch request.operation {
+        case "rename":
+            switch request.part {
+            case nil:
+                rename(name: request.session, label: request.label ?? request.session, emoji: request.emoji)
+            case .tab?, .pane?:
+                guard holds(request.anchor),
+                      setCustomIdentity(key: (request.part == .tab ? "tab:" : "") + request.anchor, label: request.label, emoji: request.emoji) else {
+                    return .failure(request, "not_found", "That pane is no longer in this workspace on its Mac.")
+                }
+            }
+            return done("Renamed.")
+        case "priority":
+            guard let priority = request.priority, holds(request.anchor) else {
+                return .failure(request, "not_found", "That pane is no longer in this workspace on its Mac.")
+            }
+            setPriority(pane: request.anchor, priority)
+            return done("Priority set.")
+        case "close_workspace":
+            kill(name: request.session)
+            sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": request.operation, "workspace": request.session])
+            return Reply(id: request.id, ok: true, code: "committed", message: "Closed on its Mac; its undo keeps it for its grace.",
+                         revision: nil, session: request.session)
+        default:
+            break
+        }
         guard session.layoutRevision == request.revision else {
             return .failure(request, "conflict", "The workspace changed in the meantime. Look at it again and retry.")
         }

@@ -1021,6 +1021,12 @@ extension VigilWorkspaces {
     /// the registry (daemons alive, exhumable), confirming when the tree
     /// files say something runs.
     func closeTabFromSidebar(name: String, anchor: String?, in host: TerminalController?) {
+        // Another Mac's tab is closed at its home, open here or not.
+        let home = RowHome(row: name)
+        if home.device != nil, let anchor {
+            closeRow(home, anchor: home.there(anchor), tab: true, in: host)
+            return
+        }
         guard workspaces[name] != nil, let anchor else { return }
         if let view = liveView(attachId: anchor),
            let controller = view.window?.windowController as? TerminalController {
@@ -1050,13 +1056,10 @@ extension VigilWorkspaces {
     /// exactly when something runs.
     func closePaneFromSidebar(name: String, paneId: String?, in host: TerminalController?) {
         guard let paneId else { return }
-        if VigilRemote.split(name) != nil, let host {
-            guard mirroredWorkspace(of: host) == name, let remote = VigilRemote.split(paneId),
-                  let view = host.surfaceTree.first(where: { $0.vigilAttachId == remote.name }) else {
-                remoteCommandError(host, "Open this remote pane in the viewport before closing it.")
-                return
-            }
-            _ = confirmRemoteClose(in: host, view: view, operation: "close_pane")
+        // Another Mac's pane is closed at its home, open here or not.
+        let home = RowHome(row: name)
+        if home.device != nil {
+            closeRow(home, anchor: home.there(paneId), tab: false, in: host)
             return
         }
         if let view = liveView(attachId: paneId) {
