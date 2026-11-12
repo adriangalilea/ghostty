@@ -17,6 +17,12 @@ struct VigilSidebarView: View {
     @ObservedObject private var collapse = VigilSidebarCollapse.shared
     @AppStorage(VigilSidebarSize.key) private var sidebarFontSize = VigilSidebarSize.compact
     private var scale: CGFloat { CGFloat(VigilSidebarSize.bounded(sidebarFontSize) / VigilSidebarSize.compact) }
+    /// One size for every mark on a row's right (the gears, the antenna, an
+    /// ending, a conflict, who looks, a pin, a priority) and one for the
+    /// words beside a mark: a mark of its own size read as more or less
+    /// than its neighbours (the gears at 14 beside an antenna at 8).
+    private var markSize: CGFloat { 11 * scale }
+    private var markText: CGFloat { 10 * scale }
     @State private var hovered: String?
     @AppStorage(VigilFollowMode.key) private var followModeRaw = VigilFollowMode.summon.rawValue
 
@@ -877,9 +883,9 @@ struct VigilSidebarView: View {
     private func endedMark(_ ends: [PaneEnd]) -> some View {
         if !ends.isEmpty {
             HStack(spacing: 1) {
-                Image(systemName: "xmark.octagon.fill").font(.system(size: 8 * scale, weight: .semibold))
+                Image(systemName: "xmark.octagon.fill").font(.system(size: markSize, weight: .semibold))
                 Text(ends.count == 1 ? ends[0].how : "\(ends.count) ended")
-                    .font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
+                    .font(.system(size: markText, weight: .medium).monospacedDigit())
                     .lineLimit(1)
             }
             .foregroundStyle(.red)
@@ -896,8 +902,8 @@ struct VigilSidebarView: View {
     private func arrivedMark(_ arrivals: [Registry.Arrival]) -> some View {
         if let first = arrivals.first {
             HStack(spacing: 1) {
-                Image(systemName: "arrow.down.to.line").font(.system(size: 8 * scale, weight: .semibold))
-                Text(first.mac).font(.system(size: 9 * scale, weight: .medium)).lineLimit(1)
+                Image(systemName: "arrow.down.to.line").font(.system(size: markSize, weight: .semibold))
+                Text(first.mac).font(.system(size: markText, weight: .medium)).lineLimit(1)
             }
             .foregroundStyle(.secondary)
             .help("Brought from \(first.mac), \(Self.endTime.string(from: Date(timeIntervalSince1970: first.at))). "
@@ -914,9 +920,9 @@ struct VigilSidebarView: View {
     private func conflictMark(_ conflicts: [PaneConflict], pane: String?) -> some View {
         if let first = conflicts.first {
             let mark = HStack(spacing: 1) {
-                Image(systemName: "arrow.triangle.branch").font(.system(size: 8 * scale, weight: .semibold))
+                Image(systemName: "arrow.triangle.branch").font(.system(size: markSize, weight: .semibold))
                 Text(conflicts.count == 1 ? first.mac : "\(conflicts.count) written twice")
-                    .font(.system(size: 9 * scale, weight: .medium)).lineLimit(1)
+                    .font(.system(size: markText, weight: .medium)).lineLimit(1)
             }
             .foregroundStyle(.red)
             .help(conflicts.count == 1
@@ -960,12 +966,14 @@ struct VigilSidebarView: View {
         let count = backgrounds.reduce(0) { $0 + $1.tasks }
         if count > 0 {
             HStack(spacing: 1) {
-                Text("\(count)").font(.system(size: 9 * scale, weight: .medium).monospacedDigit())
+                Text("\(count)").font(.system(size: markText, weight: .medium).monospacedDigit())
                     .foregroundStyle(.yellow)
                 // Gears at work, by swift-utils' `InkTurningGears`: each turns
                 // on its own axis in the render server, still when the window
                 // is out of sight (a SwiftUI one re-renders the bar every frame).
-                InkTurningGears(size: 14 * scale, color: .yellow, period: 3)
+                // The pair fills the box a mark of `markSize` fills: its own
+                // size is that of the `gearshape.2` it stands for.
+                InkTurningGears(size: markSize, color: .yellow, period: 3)
             }
             // Its own width, whatever the row has left: squeezed, the count
             // was the first thing clipped.
@@ -977,7 +985,7 @@ struct VigilSidebarView: View {
 
     private func mark(_ symbol: String, _ color: Color, _ help: String) -> some View {
         Image(systemName: symbol)
-            .font(.system(size: 9 * scale, weight: .bold))
+            .font(.system(size: markSize, weight: .semibold))
             .foregroundStyle(color)
             .help(help)
     }
@@ -993,7 +1001,7 @@ struct VigilSidebarView: View {
 
     private func antennaGlyph(_ what: [String]) -> some View {
         Image(systemName: "antenna.radiowaves.left.and.right")
-            .font(.system(size: 8 * scale, weight: .semibold))
+            .font(.system(size: markSize, weight: .semibold))
             .foregroundColor(.yellow)
             .help(what.joined(separator: "\n"))
     }
