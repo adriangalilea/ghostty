@@ -510,8 +510,12 @@ final class VigilSidebarModel: ObservableObject {
     func clicked(_ row: VigilHitRow) {
         switch row.kind {
         case .session(let name):
+            // A press anywhere on a folded row opens it, as well as going
+            // there: its count is a sign, not the only place to press.
+            collapsedSessions.remove(row.id)
             activate(.init(id: row.id, kind: .session(name)))
         case .tab(let session, let anchor):
+            collapsedTabs.remove(row.id)
             tabClicked(id: row.id, session: session, anchor: anchor, isFront: focus?.tab == row.id)
         case .pane(let session, _, let paneId):
             activate(.init(id: row.id, kind: .pane(name: session, paneId: paneId)))
