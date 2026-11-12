@@ -414,6 +414,44 @@ struct VigilSidebarView: View {
         .padding(.trailing, tree.edge + Grid.inset)
     }
 
+    /// "Bring Here…" in a row's menu. When the move would leave something
+    /// behind on that Mac (uncommitted, unpushed, a stash, from what this
+    /// Mac already holds of its directory) its icon is the orange warning
+    /// the dialog's rows wear, so the menu says there is something to settle
+    /// before the dialog says what.
+    private func bringItem(
+        device: String, workspace: String, anchor: String = "", part: Registry.Workspace.Part? = nil
+    ) -> some View {
+        let leaves = VigilWorkspaces.shared.leavesBehind(device: device, workspace: workspace)
+        return Button {
+            VigilWorkspaces.shared.bringWithSheet(device: device, workspace: workspace, anchor: anchor, part: part)
+        } label: {
+            Label {
+                Text(leaves ? "Bring Here… (work only there)" : "Bring Here…")
+            } icon: {
+                Image(nsImage: leaves ? Self.leavesBehindIcon : Self.bringIcon)
+            }
+        }
+    }
+
+    /// A menu draws a symbol as a template, in the menu's own ink; an image
+    /// that is not one keeps its colour.
+    private static let bringIcon = NSImage(systemSymbolName: "arrow.down.to.line", accessibilityDescription: nil)!
+    private static let leavesBehindIcon: NSImage = {
+        let image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Work only there")!
+            .withSymbolConfiguration(.init(paletteColors: [.systemOrange]))!
+        image.isTemplate = false
+        return image
+    }()
+
+    private static func symbol(of priority: Registry.Priority) -> String {
+        switch priority {
+        case .high: "exclamationmark"
+        case .normal: "bell"
+        case .low: "moon"
+        }
+    }
+
     /// A folded row's count, the button that opens it.
     private func unfold(_ id: String, _ count: Int, _ open: @escaping () -> Void) -> some View {
         ThreadFolded(count: count, size: 9 * scale, hovering: foldHover(id), open: open)
@@ -538,22 +576,22 @@ struct VigilSidebarView: View {
             // A workspace of another Mac is that Mac's to rename, merge or
             // kill; from here it can be brought.
             if row.host != nil, let remote = VigilRemote.split(id) {
-                Button("Bring Here…") { VigilWorkspaces.shared.bringWithSheet(device: remote.device, workspace: remote.name) }
+                bringItem(device: remote.device, workspace: remote.name)
             } else {
-            Button("Rename…") { VigilIdentity.editModal(name: id) }
+            Button { VigilIdentity.editModal(name: id) } label: { Label("Rename…", systemImage: "pencil") }
             if model.rows.count > 1 {
-                Menu("Merge Into") {
+                Menu {
                     ForEach(model.rows.filter { $0.id != id }) { other in
                         Button("\(face(other.emoji)) \(other.label)") {
                             VigilWorkspaces.shared.mergeWorkspace(id, into: other.id)
                         }
                     }
-                }
+                } label: { Label("Merge Into", systemImage: "arrow.triangle.merge") }
             }
             Divider()
-            Button("Kill…", role: .destructive) {
+            Button(role: .destructive) {
                 VigilWorkspaces.shared.killWithConfirm(name: id)
-            }
+            } label: { Label("Kill…", systemImage: "xmark.circle") }
             }
         }
         .help("\(row.label) (\(row.id)) · \(row.stateTag)")
@@ -636,7 +674,7 @@ struct VigilSidebarView: View {
         }
         .contextMenu {
             if let anchor = tab.anchor {
-                Button("Rename…") {
+                Button {
                     VigilIdentity.editModal(
                         title: "Tab identity",
                         label: tab.title,
@@ -648,18 +686,16 @@ struct VigilSidebarView: View {
                         VigilWorkspaces.shared.setCustomIdentity(
                             key: "tab:\(anchor)", label: label, emoji: emoji)
                     }
-                }
+                } label: { Label("Rename…", systemImage: "pencil") }
             }
             // A tab of another Mac's workspace can come alone.
             if let remote = VigilRemote.split(session), let pane = tab.anchor.flatMap(VigilRemote.split)?.name {
-                Button("Bring Here…") {
-                    VigilWorkspaces.shared.bringWithSheet(device: remote.device, workspace: remote.name, anchor: pane, part: .tab)
-                }
+                bringItem(device: remote.device, workspace: remote.name, anchor: pane, part: .tab)
             }
-            Button("Close Tab…", role: .destructive) {
+            Button(role: .destructive) {
                 VigilWorkspaces.shared.closeTabFromSidebar(
                     name: session, anchor: tab.anchor, in: model.hostController)
-            }
+            } label: { Label("Close Tab…", systemImage: "xmark") }
         }
         .help(tab.captured
             ? "Cold tab: its processes run in their daemons; click to swap it into this window."
@@ -753,29 +789,29 @@ struct VigilSidebarView: View {
             // The ids we communicate by, each where it exists.
             Section {
                 ForEach(pane.identifiers, id: \.label) { id in
-                    Button("Copy \(id.label)") {
+                    Button {
                         VigilSidebarView.copied.copy(id.value)
                         sidebarLog.info("copied", ["what": id.label, "pane": pane.id])
-                    }
+                    } label: { Label("Copy \(id.label)", systemImage: "doc.on.doc") }
                 }
             }
             // Its conversation was written on two Macs: both copies, and
             // which goes on.
             if let paneId = pane.paneId, pane.conflict != nil {
-                Button("Conflict…") { VigilWorkspaces.shared.conflictSheet(pane: paneId) }
+                Button { VigilWorkspaces.shared.conflictSheet(pane: paneId) } label: {
+                    Label("Conflict…", systemImage: "arrow.triangle.branch")
+                }
             }
             // A pane of another Mac's workspace can come alone.
             if pane.paneId == nil, let remote = VigilRemote.split(session), let there = VigilRemote.split(id)?.name {
-                Button("Bring Here…") {
-                    VigilWorkspaces.shared.bringWithSheet(device: remote.device, workspace: remote.name, anchor: there, part: .pane)
-                }
+                bringItem(device: remote.device, workspace: remote.name, anchor: there, part: .pane)
             }
             if let paneId = pane.paneId {
                 // What its agent edited, its repositories, any other on its Mac.
-                Button("Changes…") {
+                Button {
                     VigilChangesWindow.show(pane: paneId, title: pane.title)
-                }
-                Button("Rename…") {
+                } label: { Label("Changes…", systemImage: "plusminus") }
+                Button {
                     VigilIdentity.editModal(
                         title: "Pane identity",
                         label: pane.title,
@@ -786,29 +822,34 @@ struct VigilSidebarView: View {
                         VigilWorkspaces.shared.setCustomIdentity(
                             key: paneId, label: label, emoji: emoji)
                     }
-                }
+                } label: { Label("Rename…", systemImage: "pencil") }
                 // Any pane, whatever runs in it: an agent's stall or a
                 // command's end rings on the phone, as loud as its priority.
                 // Only with a phone registered here: following and priority
                 // are what the phone shows and how loudly it rings.
                 if VigilWorkspaces.shared.phonesRegistered {
                     let following = VigilWorkspaces.shared.phoneFollows.contains(paneId)
-                    Button(following ? "Stop Following on iPhone" : "Follow on iPhone") {
+                    Button {
                         VigilWorkspaces.shared.followOnPhones(pane: paneId, !following)
+                    } label: {
+                        Label(following ? "Stop Following on iPhone" : "Follow on iPhone",
+                              systemImage: following ? "pin.slash" : "pin")
                     }
-                    Menu("Priority") {
+                    Menu {
                         ForEach(Registry.Priority.allCases, id: \.self) { priority in
-                            Toggle(priority.rawValue.capitalized, isOn: Binding(
+                            Toggle(isOn: Binding(
                                 get: { VigilWorkspaces.shared.priority(ofPane: paneId) == priority },
-                                set: { if $0 { VigilWorkspaces.shared.setPriority(pane: paneId, priority) } }))
+                                set: { if $0 { VigilWorkspaces.shared.setPriority(pane: paneId, priority) } })) {
+                                Label(priority.rawValue.capitalized, systemImage: Self.symbol(of: priority))
+                            }
                         }
-                    }
+                    } label: { Label("Priority", systemImage: "bell") }
                 }
             }
-            Button("Close Pane…", role: .destructive) {
+            Button(role: .destructive) {
                 VigilWorkspaces.shared.closePaneFromSidebar(
                     name: session, paneId: pane.navigationId, in: model.hostController)
-            }
+            } label: { Label("Close Pane…", systemImage: "xmark") }
         }
         .opacity(hintFade(id)
             * (pane.paneId.map { dragSourceFade(.pane(session: session, paneId: $0, isDock: pane.isDock)) } ?? 1))

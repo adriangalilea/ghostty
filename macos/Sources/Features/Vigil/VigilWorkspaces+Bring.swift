@@ -2,59 +2,6 @@ import AppKit
 import SwiftUI
 import VigilWire
 
-/// The sheet of a Bring Here as rows, one per pane: what it is called, its
-/// agent's mark, what opening it does here, and what this Mac lacks for it.
-struct BringSheetRows: View {
-    static let width: CGFloat = 440
-    let lines: [Bring.Line]
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        mark(line).frame(width: 14)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(line.name ?? Directory.folder(line.folder, home: NSHomeDirectory()))
-                                .font(.system(size: 12, weight: .medium)).lineLimit(1)
-                            Text(line.opens).font(.system(size: 11)).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            if let at = line.transcriptAt {
-                                Text("Last written here \(Self.when.localizedString(for: Date(timeIntervalSince1970: at), relativeTo: Date()))")
-                                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-                            }
-                            ForEach(line.lacks, id: \.self) { lack in
-                                Label(lack, systemImage: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 11)).foregroundStyle(.orange)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            if line.work == nil {
-                                Label(Bring.Line.workNotKnown, systemImage: "questionmark.circle")
-                                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 4)
-        }
-        .frame(width: Self.width)
-    }
-
-    @ViewBuilder
-    private func mark(_ line: Bring.Line) -> some View {
-        if let agent = line.agent, AgentMark.knows(agent) {
-            AgentMark(agent: agent, size: 12)
-        } else {
-            Image(systemName: "terminal").font(.system(size: 10)).foregroundStyle(.secondary)
-        }
-    }
-
-    private static let when = RelativeDateTimeFormatter()
-}
-
 /// Bring Here (PORTABILITY.md "The design"): a workspace of another Mac,
 /// here or away, arrives on this one as itself. The registry gains the
 /// workspace with its tabs, splits and pane names; nothing runs. Each pane
@@ -80,7 +27,7 @@ extension VigilWorkspaces {
         let lines: [Bring.Line]
         do {
             lines = try Local.Client(socket: VigilPaths.hub).bring(
-                Bring.Question(panes: directory.bringing(source, as: entry, here: here), commit: true))
+                Bring.Question(panes: directory.bringing(source, as: entry, here: here), commit: true)).lines
         } catch {
             lifecycleLog.error("not brought: vigil-agent did not write its resume pointers", ["workspace": source.name, "from": host.name, "err": error])
             return .failure(request, "agent_unreachable", "vigil-agent did not answer, so nothing was brought (\(error)).")
@@ -197,7 +144,7 @@ extension VigilWorkspaces {
         let here = FileManager.default.homeDirectoryForCurrentUser.path
         let lines: [Bring.Line]
         do {
-            lines = try Local.Client(socket: VigilPaths.hub).bring(Bring.Question(panes: directory.bringing(source, here: here), commit: false))
+            lines = try Local.Client(socket: VigilPaths.hub).bring(Bring.Question(panes: directory.bringing(source, here: here), commit: false)).lines
         } catch {
             lifecycleLog.error("bring sheet not read", ["workspace": name, "from": host.name, "err": error])
             let alert = NSAlert()
@@ -206,28 +153,57 @@ extension VigilWorkspaces {
             alert.runModal()
             return
         }
-        let lacking = lines.filter { !$0.lacks.isEmpty }
-        let alert = NSAlert()
         let what = switch part {
         case .tab: "this tab of \(source.label)"
         case .pane: "this pane of \(source.label)"
         case nil: source.label
         }
-        alert.messageText = "Bring \(what) here from \(host.name)?"
-        var text = "Nothing runs until you open a pane."
-        if host.away, let received = host.received { text += " \(host.name) is away: this is as of \(VigilRemote.awaySince(received).dropFirst("away since ".count))." }
-        alert.informativeText = text
-        let rows = NSHostingView(rootView: BringSheetRows(lines: lines))
-        rows.frame = NSRect(origin: .zero, size: NSSize(width: BringSheetRows.width, height: min(rows.fittingSize.height, 420)))
-        alert.accessoryView = rows
-        alert.addButton(withTitle: lacking.isEmpty ? "Bring Here" : "Bring Without Them")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let reply = applySessionCommand(.bring(name, from: device, anchor: anchor, part: part))
-        guard !reply.ok else { return }
-        let failed = NSAlert()
-        failed.messageText = "\(source.label) was not brought"
-        failed.informativeText = reply.message
-        failed.runModal()
+        let model = BringDialogModel(
+            device: device, workspace: name, anchor: anchor, part: part, mac: host.name, what: what,
+            away: host.away ? host.received.map { String(VigilRemote.awaySince($0).dropFirst("away since ".count)) } : nil,
+            lines: lines)
+        let panel = NSPanel(
+            contentRect: .zero, styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.contentViewController = NSHostingController(rootView: BringDialog(model: model))
+        let parent = NSApp.keyWindow ?? NSApp.mainWindow
+        model.close = { [weak self] outcome in
+            if let parent, panel.sheetParent === parent { parent.endSheet(panel) } else { panel.close() }
+            switch outcome {
+            case .cancel:
+                break
+            case .open(let pane):
+                self?.openRemotePane(device: device, pane: pane)
+            case .bring:
+                guard let self else { return }
+                let reply = self.applySessionCommand(.bring(name, from: device, anchor: anchor, part: part))
+                guard !reply.ok else { return }
+                let failed = NSAlert()
+                failed.messageText = "\(source.label) was not brought"
+                failed.informativeText = reply.message
+                failed.runModal()
+            }
+        }
+        // On the window it was asked from, so the terminal behind it stays
+        // readable; with none (asked from the menu bar), a window of its own.
+        if let parent {
+            parent.beginSheet(panel)
+        } else {
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Whether a workspace of another Mac has something a move would leave
+    /// behind there, from what this Mac already holds of that Mac's
+    /// directory (no question asked of anyone): what marks its Bring Here in
+    /// a row's menu before the dialog says the rest.
+    func leavesBehind(device: String, workspace name: String) -> Bool {
+        guard let directory = VigilRemote.shared.host(device)?.directory,
+              let source = directory.live.first(where: { $0.name == name }) else { return false }
+        return (source.tabs ?? []).flatMap(\.paneIds).contains { pane in
+            directory.panes[pane]?.work?.onlyThere(home: directory.home).isEmpty == false
+        }
     }
 }
