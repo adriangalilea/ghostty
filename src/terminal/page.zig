@@ -2439,7 +2439,8 @@ pub const Cell = packed struct(u64) {
     /// boundary points for content.
     semantic_content: SemanticContent = .output,
 
-    _padding: u16 = 0,
+    /// Experimental ID into the owning terminal border store. Zero is absent.
+    border_id: u16 = 0,
 
     pub const ContentTag = enum(u2) {
         /// A single codepoint, could be zero to be empty cell.
@@ -2533,7 +2534,7 @@ pub const Cell = packed struct(u64) {
         .style_id = .{ .type_name = "GhosttyStyleId" },
         .wide = .{ .type_name = "GhosttyCellWide" },
         .semantic_content = .{ .type_name = "GhosttyCellSemanticContent" },
-        ._padding = .{ .omit = true },
+        .border_id = .{ .omit = true },
     } });
 
     /// The backing integer of this packed struct. Prefer this over
@@ -2608,6 +2609,7 @@ pub const Cell = packed struct(u64) {
 
     /// Returns true if the cell has no text or styling.
     pub fn isEmpty(self: Cell) bool {
+        if (self.border_id != 0) return false;
         return switch (self.content_tag) {
             // Textual cells are empty if they have no text and are narrow.
             // The "narrow" requirement is because wide spacers are meaningful.

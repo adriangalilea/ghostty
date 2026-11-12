@@ -385,7 +385,7 @@ const native_matches_wire = native: {
                 .style_id = 0xBEEF,
                 .wide = .spacer_tail,
                 .protected = true,
-                ._padding = 0x1D2C,
+                .border_id = 0x1D2C,
             },
             .wire = .{
                 .kind = 1,
@@ -393,7 +393,8 @@ const native_matches_wire = native: {
                 .style_id = 0xBEEF,
                 .width = 2,
                 .protected = true,
-                // The native padding position, canonical wire or not.
+                // Borders occupy the former padding; the portable codec
+                // drops them because snapshots do not store border styles.
                 .hyperlink_id = 0x1D2C,
             },
         },

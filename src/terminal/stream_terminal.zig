@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const build_options = @import("terminal_options");
 const testing = std.testing;
+const borders_mod = @import("borders.zig");
 const apc = @import("apc.zig");
 const xt_checksum = @import("xt_checksum.zig");
 const clipboard = @import("clipboard.zig");
@@ -853,6 +854,11 @@ pub const Handler = struct {
 
     fn dcsCommand(self: *Handler, cmd: *dcs.Command) !void {
         switch (cmd.*) {
+            .borders => |request| {
+                if (request == .query) {
+                    self.writePty(@import("borders.zig").reply);
+                } else try self.terminal.cellBorders(request);
+            },
             .decrqss => |request| {
                 var response: [
                     dcs.Command.DECRQSS.max_response_bytes + 1
@@ -7851,4 +7857,169 @@ test "full reset drops kitty clipboard grants" {
     try testing.expectEqual(@as(usize, 1), S.read_count);
     try testing.expect(!S.last_read_granted);
     try s.handler.kitty_clipboard_grants.grant(testing.allocator, "pw", .read, false);
+}
+
+test "borders DCS paints halves on blank cells and clears on overwrite" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[2;3H\x1bP1+bcell-border;set;3;16;80c5b7;0;1;1;2");
+    const pin = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 1 } }).?;
+    try testing.expectEqual(@as(u16, 0), pin.rowAndCell().cell.border_id);
+    s.nextSlice("\x1b\\");
+    var cell = pin.rowAndCell().cell;
+    try testing.expect(cell.border_id != 0);
+    try testing.expect(!cell.isEmpty());
+    try testing.expectEqual(@as(u16, 2), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(u16, 1), t.screens.active.cursor.y);
+    s.nextSlice("\x1bP1+bcell-border;clear;1;1;1\x1b\\");
+    var strokes = t.border_store.get(cell.border_id).strokes;
+    try testing.expectEqual(@as(u7, 0), strokes[0].width);
+    try testing.expectEqual(@as(u7, 16), strokes[1].width);
+    const before = cell.border_id;
+    s.nextSlice("\x1bP1+bcell-border;set;3;16;bad;0;1;1;1\x1b\\");
+    s.nextSlice("\x1bP2+bcell-border;clear;4095;1;1\x1b\\");
+    try testing.expectEqual(before, cell.border_id);
+    s.nextSlice("\x1b[0m");
+    try testing.expectEqual(before, cell.border_id);
+    s.nextSlice(" ");
+    cell = pin.rowAndCell().cell;
+    try testing.expectEqual(@as(u16, 0), cell.border_id);
+    // The neighboring cell still has both halves.
+    const neighbor = t.screens.active.pages.pin(.{ .active = .{ .x = 3, .y = 1 } }).?;
+    strokes = t.border_store.get(neighbor.rowAndCell().cell.border_id).strokes;
+    try testing.expectEqual(@as(u7, 16), strokes[0].width);
+    try testing.expectEqual(@as(u7, 16), strokes[1].width);
+}
+
+test "borders follow scrolling and blank cells survive reflow" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[2;3H\x1bP1+bcell-border;set;255;16;80c5b7;0;1;1;1\x1b\\");
+    s.nextSlice("\x1b[4;1H\n");
+    const moved = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expect(moved.rowAndCell().cell.border_id != 0);
+    try t.resize(testing.allocator, .{ .cols = 10, .rows = 4 });
+    const resized = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expect(resized.rowAndCell().cell.border_id != 0);
+    s.nextSlice("\x1b[?1049h");
+    const alternate = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expectEqual(@as(u16, 0), alternate.rowAndCell().cell.border_id);
+    s.nextSlice("\x1b[?1049l");
+    const restored = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expect(restored.rowAndCell().cell.border_id != 0);
+    s.nextSlice("\x1b[2J");
+    const erased = t.screens.active.pages.pin(.{ .active = .{ .x = 2, .y = 0 } }).?;
+    try testing.expectEqual(@as(u16, 0), erased.rowAndCell().cell.border_id);
+}
+
+test "borders query reply and oversized payload recovery" {
+    const Response = struct {
+        var count: usize = 0;
+        fn write(_: *Handler, data: []const u8) void {
+            if (std.mem.eql(u8, data, @import("borders.zig").reply)) count += 1;
+        }
+    };
+    Response.count = 0;
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.handler.effects.write_pty = Response.write;
+    s.nextSlice("\x1bP1+bcell-border;q\x1b\\");
+    try testing.expectEqual(@as(usize, 1), Response.count);
+    s.nextSlice("\x1bP1+b");
+    s.nextSlice(&@as([257]u8, @splat('a')));
+    s.nextSlice("\x1b\\\x1bP1+bcell-border;q\x1b\\");
+    try testing.expectEqual(@as(usize, 2), Response.count);
+}
+
+test "borders pen applies to printed and erased cells" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    const Probe = struct {
+        fn id(term: *Terminal, x: u16, y: u16) u16 {
+            return term.screens.active.pages.pin(.{ .active = .{ .x = x, .y = y } }).?.rowAndCell().cell.border_id;
+        }
+    };
+
+    // Print with a pen; the cursor moves as usual and the pen sticks.
+    s.nextSlice("\x1bP1+bcell-border;pen;48;16;p2;1;1;style=double\x1b\\ab");
+    const pen = t.screens.active.cursor.border_id;
+    try testing.expect(pen != 0);
+    try testing.expectEqual(pen, Probe.id(&t, 0, 0));
+    try testing.expectEqual(pen, Probe.id(&t, 1, 0));
+    try testing.expectEqual(@as(u16, 0), Probe.id(&t, 2, 0));
+    const strokes = t.border_store.get(pen).strokes;
+    try testing.expectEqual(borders_mod.Stroke.ColorKind.palette, strokes[4].color_kind);
+    try testing.expectEqual(@as(u7, 0), strokes[0].width);
+
+    // Erase applies the pen to erased cells.
+    s.nextSlice("\x1b[2;1H\x1b[3X");
+    try testing.expectEqual(pen, Probe.id(&t, 0, 1));
+    try testing.expectEqual(pen, Probe.id(&t, 2, 1));
+    try testing.expectEqual(@as(u16, 0), Probe.id(&t, 3, 1));
+
+    // DECSC saves the pen; SGR 0 clears it; DECRC restores it.
+    s.nextSlice("\x1b7\x1b[0m");
+    try testing.expectEqual(@as(u16, 0), t.screens.active.cursor.border_id);
+    s.nextSlice("\x1b[3;1Hz");
+    try testing.expectEqual(@as(u16, 0), Probe.id(&t, 0, 2));
+    s.nextSlice("\x1b8");
+    try testing.expectEqual(pen, t.screens.active.cursor.border_id);
+
+    // Other SGRs keep the pen; pen-clear removes segments.
+    s.nextSlice("\x1b[1;31m");
+    try testing.expectEqual(pen, t.screens.active.cursor.border_id);
+    s.nextSlice("\x1bP1+bcell-border;pen-clear;4095\x1b\\");
+    try testing.expectEqual(@as(u16, 0), t.screens.active.cursor.border_id);
+
+    // Erasing with an empty pen clears borders.
+    s.nextSlice("\x1b[1;1H\x1b[K");
+    try testing.expectEqual(@as(u16, 0), Probe.id(&t, 0, 0));
+
+    // Unknown operations are ignored.
+    s.nextSlice("\x1bP1+bcell-border;pen-wobble;15\x1b\\");
+    try testing.expectEqual(@as(u16, 0), t.screens.active.cursor.border_id);
+
+    // Joints ride in the pen and reach printed cells; the style key is kept.
+    s.nextSlice("\x1bP1+bcell-border;pen;3;16;fg;0;1;style=dashed\x1b\\\x1bP1+bcell-border;pen-round;15\x1b\\");
+    const rounded = t.screens.active.cursor.border_id;
+    try testing.expectEqual(@as(u8, 15), t.border_store.get(rounded).joints);
+    try testing.expectEqual(borders_mod.Stroke.Style.dashed, t.border_store.get(rounded).strokes[0].style);
+    s.nextSlice("\x1b[4;1Hx");
+    try testing.expectEqual(rounded, Probe.id(&t, 0, 3));
+    s.nextSlice("\x1bP1+bcell-border;pen-square;5\x1b\\");
+    try testing.expectEqual(@as(u8, 10), t.border_store.get(t.screens.active.cursor.border_id).joints);
+}
+
+test "borders round and square rectangles change only joints" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 8, .rows = 4 });
+    defer t.deinit(testing.allocator);
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("\x1b[2;2H\x1bP1+bcell-border;set;4095;16;fg;0;1;2;3\x1b\\");
+    s.nextSlice("\x1bP1+bcell-border;round;240;2;2\x1b\\");
+    const Probe = struct {
+        fn set(term: *Terminal, x: u16, y: u16) borders_mod.Set {
+            const id = term.screens.active.pages.pin(.{ .active = .{ .x = x, .y = y } }).?.rowAndCell().cell.border_id;
+            return term.border_store.get(id);
+        }
+    };
+    try testing.expectEqual(@as(u8, 240), Probe.set(&t, 1, 1).joints);
+    try testing.expectEqual(@as(u8, 240), Probe.set(&t, 2, 2).joints);
+    try testing.expectEqual(@as(u8, 0), Probe.set(&t, 3, 1).joints);
+    try testing.expectEqual(@as(u7, 16), Probe.set(&t, 1, 1).strokes[11].width);
+    try testing.expectEqual(@as(u16, 1), t.screens.active.cursor.x);
+    try testing.expectEqual(@as(u16, 0), t.screens.active.cursor.border_id);
+    // Joints on otherwise blank cells are kept; squaring them all clears the set.
+    s.nextSlice("\x1b[4;5H\x1bP1+bcell-border;round;1;1;1\x1b\\");
+    try testing.expectEqual(@as(u8, 1), Probe.set(&t, 4, 3).joints);
+    s.nextSlice("\x1bP1+bcell-border;square;255;1;1\x1b\\");
+    try testing.expectEqual(@as(u16, 0), t.screens.active.pages.pin(.{ .active = .{ .x = 4, .y = 3 } }).?.rowAndCell().cell.border_id);
 }

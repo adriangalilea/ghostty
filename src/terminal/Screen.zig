@@ -174,6 +174,10 @@ pub const Cursor = struct {
     /// so code search can find it.).
     hyperlink_id: hyperlink.Id = 0,
 
+    /// The border pen, an ID into the terminal border store (zero is
+    /// empty). Cells the terminal writes or blanks take this ID.
+    border_id: u16 = 0,
+
     /// This is the implicit ID to use for hyperlinks that don't specify
     /// an ID. We do an overflowing add to this so repeats can technically
     /// happen with carefully crafted inputs but for real workloads its
@@ -211,6 +215,7 @@ pub const SavedCursor = struct {
     x: size.CellCountInt,
     y: size.CellCountInt,
     style: style.Style,
+    border_id: u16 = 0,
     protected: bool,
     pending_wrap: bool,
     origin: bool,
@@ -2197,8 +2202,12 @@ pub fn splitCellBoundary(
 /// Returns the blank cell to use when doing terminal operations that
 /// require preserving the bg color.
 pub inline fn blankCell(self: *const Screen) Cell {
-    if (self.cursor.style_id == style.default_id) return .{};
-    return self.cursor.style.bgCell() orelse .{};
+    var cell: Cell = if (self.cursor.style_id == style.default_id)
+        .{}
+    else
+        self.cursor.style.bgCell() orelse .{};
+    cell.border_id = self.cursor.border_id;
+    return cell;
 }
 
 pub const Resize = struct {
@@ -2545,6 +2554,7 @@ pub fn setAttribute(
     attr: sgr.Attribute,
 ) PageList.IncreaseCapacityError!void {
     const old_style = self.cursor.style;
+    if (attr == .unset) self.cursor.border_id = 0; // SGR 0 clears the border pen.
     self.cursor.style = self.cursor.style.withAttribute(attr);
     try self.commitStyle(old_style);
 }
@@ -2562,7 +2572,10 @@ pub fn setAttributes(
 ) PageList.IncreaseCapacityError!void {
     const old_style = self.cursor.style;
     var p = parser;
-    while (p.next()) |attr| self.cursor.style = self.cursor.style.withAttribute(attr);
+    while (p.next()) |attr| {
+        if (attr == .unset) self.cursor.border_id = 0; // SGR 0 clears the border pen.
+        self.cursor.style = self.cursor.style.withAttribute(attr);
+    }
     try self.commitStyle(old_style);
 }
 
@@ -3991,6 +4004,7 @@ pub fn testWriteString(self: *Screen, text: []const u8) !void {
                     .content_tag = .codepoint,
                     .content = .{ .codepoint = @bitCast(@as(u24, @intCast(c))) },
                     .style_id = self.cursor.style_id,
+                    .border_id = self.cursor.border_id,
                     .protected = self.cursor.protected,
                     .semantic_content = self.cursor.semantic_content,
                 };
@@ -4032,6 +4046,7 @@ pub fn testWriteString(self: *Screen, text: []const u8) !void {
                     .content_tag = .codepoint,
                     .content = .{ .codepoint = .{ .data = c } },
                     .style_id = self.cursor.style_id,
+                    .border_id = self.cursor.border_id,
                     .wide = .wide,
                     .protected = self.cursor.protected,
                     .semantic_content = self.cursor.semantic_content,
