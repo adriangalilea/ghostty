@@ -785,7 +785,7 @@ struct VigilSidebarView: View {
                 // in the face's column, its word where a pane's name starts.
                 HStack(spacing: 4 * scale) {
                     Image(systemName: "plusminus").font(.system(size: 9 * scale, weight: .semibold))
-                        .frame(width: VigilNameCell.face * scale)
+                        .frame(width: VigilNameCell<EmptyView>.face * scale)
                     Text("Changes").font(.system(size: 11 * scale)).lineLimit(1)
                     Spacer(minLength: 0)
                     Image(systemName: "sidebar.right").font(.system(size: 9 * scale)).foregroundStyle(.tertiary)
