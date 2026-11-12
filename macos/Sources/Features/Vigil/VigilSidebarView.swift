@@ -963,26 +963,9 @@ struct VigilSidebarView: View {
     /// their own; a process a turn left running in no account of its is the
     /// antenna's. Hovering says each count and what the first one is for.
     /// On a folded tab or workspace: its panes'.
-    @ViewBuilder
+    /// Drawn by `GearsMark`, the one the phone draws too.
     private func backgroundMark(_ backgrounds: [PaneGlance.Background]) -> some View {
-        let count = backgrounds.reduce(0) { $0 + $1.jobs }
-        if count > 0 {
-            HStack(spacing: 1) {
-                Text("\(count)").font(.system(size: markText, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.yellow)
-                // Gears at work, by swift-utils' `InkTurningGears`: each turns
-                // on its own axis in the render server, still when the window
-                // is out of sight (a SwiftUI one re-renders the bar every frame).
-                // The pair fills the box a mark of `markSize` fills: its own
-                // size is that of the `gearshape.2` it stands for.
-                InkTurningGears(size: markSize, color: .yellow, period: 3)
-            }
-            // Its own width, whatever the row has left: squeezed, the count
-            // was the first thing clipped.
-            .fixedSize()
-            .help(backgrounds.filter { $0.jobs > 0 }.flatMap { ["In the background: \($0.words)"] + [$0.title].compactMap { $0 } }
-                .joined(separator: "\n"))
-        }
+        GearsMark(backgrounds: backgrounds, size: markSize, textSize: markText)
     }
 
     private func mark(_ symbol: String, _ color: Color, _ help: String) -> some View {
@@ -1002,10 +985,7 @@ struct VigilSidebarView: View {
     }
 
     private func antennaGlyph(_ what: [String]) -> some View {
-        Image(systemName: "antenna.radiowaves.left.and.right")
-            .font(.system(size: markSize, weight: .semibold))
-            .foregroundColor(.yellow)
-            .help(what.joined(separator: "\n"))
+        AntennaMark(what: what, size: markSize)
     }
 
     /// Collapse must not hide a listener: the antenna rolls up to the

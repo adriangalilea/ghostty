@@ -458,6 +458,11 @@ struct TreeNodeView: View {
     /// default, as the Mac's sidebar marks it: open on another Mac right
     /// now, followed here, its priority.
     @ViewBuilder private var marks: some View {
+        // What runs beside its agent, as the Mac's sidebar draws it: the
+        // gears with their count, the antenna. A folded row: its panes'.
+        let backgrounds = (node.kind == .pane ? [node] : (folded ? node.leaves : [])).compactMap { $0.glance?.background }
+        GearsMark(backgrounds: backgrounds, size: 12, textSize: 11)
+        AntennaMark(what: backgrounds.flatMap(\.commands), size: 12)
         if node.onAnotherMac {
             Image(systemName: "laptopcomputer").font(.caption2.weight(.bold)).foregroundStyle(.cyan)
                 .accessibilityLabel("Open on another Mac right now")
@@ -708,18 +713,15 @@ struct GlanceRow<Marks: View>: View {
             if now == nil && glance.said == nil && glance.prompt == nil {
                 Text(state.words(node.flavor)).font(.footnote).foregroundStyle(.secondary)
             }
-            // What runs in the background, and what the first of it does.
-            if let background = glance.background {
-                Label {
-                    Text(([background.words] + [background.title].compactMap { $0 }).joined(separator: " · "))
-                } icon: {
-                    Image(systemName: "gearshape.2")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .accessibilityLabel("In the background: \(background.words)")
+            // What the first of its background work does, in its words. How
+            // much runs is the row's marks: a dot per agent, the gears, the
+            // antenna, as on the Mac.
+            if let title = glance.background?.title {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
             if hasFooter {
                 HStack(spacing: 10) {
