@@ -305,6 +305,9 @@ struct TreeNodeView: View {
     @EnvironmentObject private var model: VigilPhone
 
     private var folded: Bool { model.collapsed.contains(node.id) }
+    /// The conflict whose two copies are on screen (a tap on its mark: which
+    /// Mac, when each was last written, what each holds past what they share).
+    @State private var showingConflict: PaneConflict?
     private var foldable: Bool { !node.children.isEmpty }
 
     var body: some View {
@@ -359,15 +362,16 @@ struct TreeNodeView: View {
             Spacer(minLength: 4)
             if node.kind == .pane && !node.alive {
                 if let ended = node.ended {
-                    EndedMark(ends: [ended])
+                    EndedMark(ends: [ended], sizes: Self.markSizes)
                 } else {
                     Text("Not running").font(.caption2).foregroundStyle(.tertiary)
                 }
             } else if node.kind != .pane && folded {
-                EndedMark(ends: node.ends)
+                EndedMark(ends: node.ends, sizes: Self.markSizes)
             }
             if node.kind == .pane || folded {
-                ConflictMark(conflicts: node.conflicts)
+                ConflictMark(conflicts: node.conflicts, sizes: Self.markSizes) { showingConflict = $0 }
+                    .sheet(item: $showingConflict) { conflict in ConflictDetail(conflict: conflict) }
             }
             // A glance row wears its state as its glyph.
             if node.glance == nil { cluster }
@@ -522,68 +526,9 @@ struct TreeNodeView: View {
     static let markSizes = PaneMarkSizes(text: 12)
 }
 
-// MARK: - Ended mark
+// MARK: - A conflict's two copies
 
-/// A program that ended badly while nobody looked, as the Mac's sidebar
-/// marks it: red, how it ended for one pane, how many for a folded row (so
-/// folding never hides one). It is opened or closed on its Mac, where its
-/// final screen is.
-struct EndedMark: View {
-    let ends: [PaneEnd]
-
-    var body: some View {
-        if !ends.isEmpty {
-            HStack(spacing: 3) {
-                Image(systemName: "xmark.octagon.fill")
-                Text(ends.count == 1 ? "Ended · \(ends[0].how) · \(Self.time(ends[0].at))" : "\(ends.count) ended")
-                    .lineLimit(1)
-            }
-            .font(.caption2.weight(.medium))
-            .foregroundStyle(.red)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(ends.count == 1
-                ? "Its program ended, \(ends[0].how), at \(Self.time(ends[0].at)): \(ends[0].program)"
-                : "\(ends.count) programs ended")
-        }
-    }
-
-    private static func time(_ at: Double) -> String {
-        Date(timeIntervalSince1970: at).formatted(date: .omitted, time: .shortened)
-    }
-}
-
-// MARK: - Conflict mark
-
-/// A conversation written on two Macs, as the Mac's sidebar marks it: red,
-/// the other Mac's name for one pane, how many for a folded row. A tap
-/// shows both copies (which Mac, when it was last written, what each holds
-/// past what they share); which one goes on is said on the pane's own Mac.
-struct ConflictMark: View {
-    let conflicts: [PaneConflict]
-    @State private var showing: PaneConflict?
-
-    var body: some View {
-        if let first = conflicts.first {
-            Button {
-                if conflicts.count == 1 { showing = first }
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "arrow.triangle.branch")
-                    Text(conflicts.count == 1 ? "Written on \(first.mac) too" : "\(conflicts.count) written twice")
-                        .lineLimit(1)
-                }
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.red)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(conflicts.count == 1
-                ? "This conversation was written on its Mac and on \(first.mac)"
-                : "\(conflicts.count) conversations were written on two Macs")
-            .sheet(item: $showing) { conflict in ConflictDetail(conflict: conflict) }
-        }
-    }
-}
-
+/// A sheet is shown by the conflict it is about.
 extension PaneConflict: @retroactive Identifiable {
     public var id: String { "\(device) \(agent) \(conversation)" }
 }

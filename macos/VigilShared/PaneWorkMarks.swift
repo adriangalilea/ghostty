@@ -106,6 +106,81 @@ struct GearsMark: View {
     }
 }
 
+/// A program that ended badly while nobody looked: red, with how it ended
+/// (one pane) or how many did (a folded row, so a fold never hides one).
+/// What it says in full (how, when, what it ran) is its tooltip and its
+/// spoken label. Opening the pane shows its final screen; closing it clears
+/// the mark. Nothing while there is none.
+struct EndedMark: View {
+    let ends: [PaneEnd]
+    let sizes: PaneMarkSizes
+
+    var body: some View {
+        if !ends.isEmpty {
+            HStack(spacing: 1) {
+                Image(systemName: "xmark.octagon.fill").font(sizes.symbol)
+                Text(ends.count == 1 ? ends[0].how : "\(ends.count) ended")
+                    .font(sizes.word.monospacedDigit())
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.red)
+            .fixedSize()
+            .help(said)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(said)
+        }
+    }
+
+    private var said: String {
+        (ends.map { end in
+            "Its program ended, \(end.how), \(Self.when(end.at)): \(end.program)"
+        } + ["Open it to see its final screen; close it to clear this."]).joined(separator: "\n")
+    }
+
+    static func when(_ at: Double) -> String {
+        Date(timeIntervalSince1970: at).formatted(.dateTime.day().month().hour().minute())
+    }
+}
+
+/// A conversation written on two Macs, nobody having said which copy goes
+/// on: red, with the other Mac's name (one pane) or how many (a folded
+/// row). `press`, when its owner can show both copies, makes one pane's
+/// mark the button that does; which copy goes on is said on the pane's own
+/// Mac. Nothing while there is none.
+struct ConflictMark: View {
+    let conflicts: [PaneConflict]
+    let sizes: PaneMarkSizes
+    var press: ((PaneConflict) -> Void)?
+
+    var body: some View {
+        if let first = conflicts.first {
+            let mark = HStack(spacing: 1) {
+                Image(systemName: "arrow.triangle.branch").font(sizes.symbol)
+                Text(conflicts.count == 1 ? first.mac : "\(conflicts.count) written twice")
+                    .font(sizes.word).lineLimit(1)
+            }
+            .foregroundStyle(.red)
+            .fixedSize()
+            .help(said)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(said)
+            if let press, conflicts.count == 1 {
+                Button { press(first) } label: { mark }.buttonStyle(.plain)
+            } else {
+                mark
+            }
+        }
+    }
+
+    private var said: String {
+        guard conflicts.count == 1, let first = conflicts.first else {
+            return "\(conflicts.count) conversations here were written on two Macs. Unfold to see each."
+        }
+        return "This conversation was written on its pane's Mac and on \(first.mac). Neither copy was touched."
+            + (press == nil ? " It is settled on its own Mac." : " Press to see both.")
+    }
+}
+
 /// Something is alive under the pane that no agent accounts for: what its
 /// turns left running, or a watch that declared itself (`what`, a line each).
 struct AntennaMark: View {

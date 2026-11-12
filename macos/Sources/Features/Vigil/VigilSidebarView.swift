@@ -849,9 +849,15 @@ struct VigilSidebarView: View {
     /// WORLD.
     private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         HStack(spacing: marks.gap) {
-            if let ended = pane.ended { endedMark([ended]) }
+            if let ended = pane.ended { EndedMark(ends: [ended], sizes: marks) }
             if let arrived = pane.arrived { arrivedMark([arrived]) }
-            if let conflict = pane.conflict { conflictMark([conflict], pane: pane.paneId) }
+            // On a pane of this Mac a press opens the sheet that settles it;
+            // another Mac's conflict is that Mac's to settle.
+            if let conflict = pane.conflict {
+                ConflictMark(
+                    conflicts: [conflict], sizes: marks,
+                    press: pane.paneId.map { id in { _ in VigilWorkspaces.shared.conflictSheet(pane: id) } })
+            }
             if let refused = pane.refused {
                 mark("person.2.slash.fill", .orange,
                      "Another agent process reports under this pane and is refused, since \(Self.endTime.string(from: Date(timeIntervalSince1970: refused))): this row is not following its work. It is likely this conversation moved to the background; close that one, or resume it here.")
@@ -872,26 +878,6 @@ struct VigilSidebarView: View {
         }
     }
 
-    /// A program that ended badly while nobody looked: red, with how (one
-    /// pane) or how many (a folded tab or workspace, so collapse never hides
-    /// it). Hovering says how and when each ended and what it ran; opening
-    /// the pane shows its final screen, closing it clears it.
-    @ViewBuilder
-    private func endedMark(_ ends: [PaneEnd]) -> some View {
-        if !ends.isEmpty {
-            HStack(spacing: 1) {
-                Image(systemName: "xmark.octagon.fill").font(marks.symbol)
-                Text(ends.count == 1 ? ends[0].how : "\(ends.count) ended")
-                    .font(marks.word.monospacedDigit())
-                    .lineLimit(1)
-            }
-            .foregroundStyle(.red)
-            .help((ends.map { end in
-                "Its program ended, \(end.how), at \(Self.endTime.string(from: Date(timeIntervalSince1970: end.at))): \(end.program)"
-            } + ["Open it to see its final screen; close it to clear this."]).joined(separator: "\n"))
-        }
-    }
-
     /// Brought from another Mac and not opened here: that Mac's name (one
     /// pane's, or a workspace's panes rolled up). It leaves a pane's row
     /// when the pane is opened, since from then it runs here.
@@ -908,32 +894,6 @@ struct VigilSidebarView: View {
         }
     }
 
-    /// A conversation written on two Macs, nobody having said which copy
-    /// goes on: red, with the other Mac's name (one pane) or how many (a
-    /// folded tab or workspace, so collapse never hides it). On a pane of
-    /// this Mac a press opens the sheet that settles it; another Mac's
-    /// conflict is that Mac's to settle.
-    @ViewBuilder
-    private func conflictMark(_ conflicts: [PaneConflict], pane: String?) -> some View {
-        if let first = conflicts.first {
-            let mark = HStack(spacing: 1) {
-                Image(systemName: "arrow.triangle.branch").font(marks.symbol)
-                Text(conflicts.count == 1 ? first.mac : "\(conflicts.count) written twice")
-                    .font(marks.word).lineLimit(1)
-            }
-            .foregroundStyle(.red)
-            .help(conflicts.count == 1
-                ? "This conversation was written on this pane's Mac and on \(first.mac). Neither copy was touched."
-                    + (pane == nil ? " It is settled on its own Mac." : " Click to see both and say which goes on.")
-                : "\(conflicts.count) conversations here were written on two Macs. Unfold to settle each.")
-            if let pane, conflicts.count == 1 {
-                Button { VigilWorkspaces.shared.conflictSheet(pane: pane) } label: { mark }.buttonStyle(.plain)
-            } else {
-                mark
-            }
-        }
-    }
-
     /// What a folded row wears for the panes it hides, so a fold never hides
     /// a background shell, an ending, a conflict or someone looking: each
     /// mark's own rollup (a count, or the first with the rest in its
@@ -941,8 +901,8 @@ struct VigilSidebarView: View {
     @ViewBuilder
     private func foldedMarks(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
         GearsMark(backgrounds: panes.compactMap(\.background), sizes: marks)
-        endedMark(panes.compactMap(\.ended))
-        conflictMark(panes.compactMap(\.conflict), pane: nil)
+        EndedMark(ends: panes.compactMap(\.ended), sizes: marks)
+        ConflictMark(conflicts: panes.compactMap(\.conflict), sizes: marks)
         lookerGlyphs(panes.flatMap(\.lookers))
     }
 
