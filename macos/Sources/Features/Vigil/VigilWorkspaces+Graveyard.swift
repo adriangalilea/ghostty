@@ -43,15 +43,7 @@ extension VigilWorkspaces {
         recent.removeAll { $0 == name }
         session.attention = .none
         bury(session)
-        if let kept {
-            if let next = successor(excluding: name), let ghostty = ghosttyApp {
-                graveyardLog.info("killed workspace's viewport handed on", ["workspace": name, "target": next])
-                mount(next, into: kept, ghostty: ghostty)
-                touchRecent(next)
-            } else {
-                killController(kept) // nothing left to view: the window closes
-            }
-        }
+        if let kept { handOn(kept, from: name) }
         persist()
         onAttentionChange?()
     }

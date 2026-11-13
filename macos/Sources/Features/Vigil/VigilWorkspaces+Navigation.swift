@@ -165,9 +165,7 @@ extension VigilWorkspaces {
             guard let (_, session) = VigilRemote.shared.session(composite) else {
                 // An unreachable host is not a deletion; keep its view.
                 guard VigilRemote.shared.host(device)?.directory != nil else { continue }
-                endMirrorViewport(controller)
-                swapTree(controller, SplitTree())
-                controller.window?.close()
+                handOn(controller, from: composite)
                 continue
             }
             let ids = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
@@ -193,9 +191,7 @@ extension VigilWorkspaces {
             let ids = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
             guard let tabs = workspaces[name]?.tabs,
                   let tab = tabs.first(where: { !ids.isDisjoint(with: $0.paneIds) }) ?? tabs.first else {
-                endMirrorViewport(controller)
-                swapTree(controller, SplitTree())
-                controller.window?.close()
+                handOn(controller, from: name)
                 continue
             }
             let shape = VigilSessionControl.revision([tab])
@@ -233,9 +229,7 @@ extension VigilWorkspaces {
             if let target = tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? tabs.first {
                 reconcileWorkspaceTree(controller, tab: target, host: nil, session: name)
             } else {
-                endMirrorViewport(controller)
-                swapTree(controller, SplitTree())
-                controller.window?.close()
+                handOn(controller, from: name)
             }
         }
     }

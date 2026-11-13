@@ -408,6 +408,23 @@ extension VigilWorkspaces {
         return true
     }
 
+    /// A viewport whose occupant `gone` is no more (killed here, killed at
+    /// its home while mirrored here, its last tab closed from elsewhere)
+    /// goes to the most recently active workspace that can be mounted. It
+    /// closes only when none is left: a window is closed by the person, or
+    /// by there being nothing to show, never by what it showed ending.
+    func handOn(_ controller: TerminalController, from gone: String) {
+        endMirrorViewport(controller)
+        guard let next = successor(excluding: gone), let ghostty = ghosttyApp else {
+            viewportLog.info("viewport closed: nothing left to show", ["from": gone])
+            return killController(controller)
+        }
+        viewportLog.info("viewport handed on", ["from": gone, "workspace": next])
+        mount(next, into: controller, ghostty: ghostty)
+        touchRecent(next)
+        persist()
+    }
+
     /// The session the panel shows right now, hosted (floating) or
     /// mirrored. Presence, the summon engine and the kill key read this.
     var panelWorkspace: String? { floatingName ?? mirror?.name }
