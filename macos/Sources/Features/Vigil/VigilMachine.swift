@@ -18,6 +18,11 @@ enum VigilMachine {
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys
             for await state in MachineState.changes() {
+                // A Mac whose power hardware answers nonsense: its row says so,
+                // and so does the log, each time the answer changes.
+                if let unread = state.power.unread {
+                    remoteLog.error("this Mac's power not read", ["why": unread])
+                }
                 do {
                     try FileManager.default.createDirectory(
                         at: VigilPaths.machine, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
