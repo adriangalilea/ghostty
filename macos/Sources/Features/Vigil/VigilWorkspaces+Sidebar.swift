@@ -1,6 +1,7 @@
 import AppKit
 import AskKit
 import Listen
+import MachineStates
 import Say
 import SwiftUI
 import GhosttyKit
@@ -121,6 +122,9 @@ extension VigilWorkspaces {
         struct HostHeader: Equatable {
             var name: String
             var standing: String?
+            /// Its power, disk and heat as it last sent them (`Open.machine`);
+            /// nil until it has (a Mac whose app predates it never does).
+            var machine: MachineState?
         }
 
         /// The ONE tab whose row the tree elides: a lone tab that carries

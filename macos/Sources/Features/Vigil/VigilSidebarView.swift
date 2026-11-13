@@ -2,6 +2,8 @@ import AppKit
 import Combine
 import Face
 import Ink
+import MachineStateViews
+import MachineStates
 import SwiftUI
 import UniformTypeIdentifiers
 import VigilWire
@@ -418,18 +420,27 @@ struct VigilSidebarView: View {
             collapse.hosts.remove(device)
         } label: {
             HStack(spacing: Grid.gap) {
-                Image(systemName: "desktopcomputer").frame(width: Self.macIcon)
+                // A laptop is a Mac with a battery, as its own power says.
+                Image(systemName: host.machine?.power.battery == nil ? "desktopcomputer" : "laptopcomputer")
+                    .frame(width: Self.macIcon)
                 Text(title).lineLimit(1)
                 if collapsed { ThreadFoldedCount(count: count, size: 9 * scale) }
+                Spacer(minLength: Grid.gap)
                 // How it stands, apart from its name: at the row's far
                 // end, smaller and plain, where a row's marks sit.
                 if let standing = host.standing {
-                    Spacer(minLength: Grid.gap)
                     Text(standing)
                         .font(.system(size: 9.5 * scale).monospacedDigit())
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .layoutPriority(-1)
+                }
+                // Its power on the rail, in the header's own size; away, what
+                // it last sent, dimmed with the rest of it.
+                if let machine = host.machine {
+                    MachineState.PowerMark(machine.power)
+                        .inkControlMetrics(InkControlMetrics(font: 11 * scale, height: 22 * scale, inset: 0))
+                        .opacity(host.standing == nil ? 1 : 0.55)
                 }
             }
             .font(.system(size: 11 * scale, weight: .semibold))
@@ -443,6 +454,21 @@ struct VigilSidebarView: View {
         }
         .buttonStyle(.plain)
         .onHover { inside in hovered = inside ? hoverId : (hovered == hoverId ? nil : hovered) }
+        // A Mac's menu, as a workspace's offers a tab: a workspace born on
+        // it, then how it stands (the whole reading, `MachineState.facts`).
+        .contextMenu {
+            menu {
+                Button {
+                    VigilWorkspaces.shared.newWorkspace(on: device)
+                } label: { Label("New Workspace", systemImage: "plus.square.on.square") }
+                if let machine = host.machine {
+                    Divider()
+                    ForEach(Array(machine.facts.enumerated()), id: \.offset) { _, fact in
+                        Text("\(fact.label): \(fact.value)")
+                    }
+                }
+            }
+        }
         .padding(.top, 6)
         .padding(.trailing, tree.edge + Grid.inset)
     }

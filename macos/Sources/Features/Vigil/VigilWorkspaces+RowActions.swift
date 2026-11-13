@@ -29,6 +29,12 @@ extension VigilWorkspaces {
             workspace = remote?.name ?? id
         }
 
+        /// A Mac's own, for what names no workspace yet (a `create`).
+        init(device: String?, workspace: String) {
+            self.device = device
+            self.workspace = workspace
+        }
+
         /// The other Mac's name, for a sentence; nil: this Mac.
         @MainActor var mac: String? { device.map { VigilRemote.shared.host($0)?.name ?? "its Mac" } }
 
@@ -151,6 +157,16 @@ extension VigilWorkspaces {
         }
         ask(home, .birth(in: home.workspace, revision: revision, anchor: home.there(anchor), split: nil, command: nil),
             failing: "No tab made on \(remote.name)")
+    }
+
+    // MARK: New workspace
+
+    /// A workspace born on the Mac `device`, a shell in its home folder, as
+    /// a Mac's row offers it: it appears in that Mac's rows from its own word,
+    /// as a remote new tab does.
+    func newWorkspace(on device: String) {
+        ask(RowHome(device: device, workspace: ""), .create(cwd: "~", command: nil, label: nil),
+            failing: "No workspace made on \(VigilRemote.shared.host(device)?.name ?? "its Mac")")
     }
 
     /// A tab (of its pane `anchor`) or a pane of another Mac closed at its
