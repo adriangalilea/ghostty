@@ -1,4 +1,5 @@
 import Foundation
+import MachineStates
 import VigilHarness
 import VigilWire
 
@@ -29,6 +30,9 @@ final class VigilRemote: ObservableObject {
         var received: Date?
         /// Out of reach with a directory still held: drawn as it last was.
         var away: Bool { error != nil && directory != nil }
+        /// Its power, disk and heat as its app last wrote them
+        /// (`Open.machine`), followed beside its directory.
+        var machine: MachineState?
     }
 
     @Published private(set) var hosts: [Host] = []
@@ -40,6 +44,8 @@ final class VigilRemote: ObservableObject {
     /// the hub keeps it alive across the Mac going out of reach, so the
     /// socket ends only with the hub itself.
     private var following: [String: Int32] = [:]
+    /// Each Mac's state, followed the same way (its socket to the hub).
+    private var followingMachine: [String: Int32] = [:]
     private var arrivals: [String: (revision: String, at: Date)] = [:]
     func arrival(device: String, pane: String, revision: String) -> Date {
         let id = Self.compositeId(device, pane)
@@ -150,6 +156,8 @@ final class VigilRemote: ObservableObject {
     private func unfollowAll() {
         for fd in following.values { shutdown(fd, SHUT_RDWR) }
         following.removeAll()
+        for fd in followingMachine.values { shutdown(fd, SHUT_RDWR) }
+        followingMachine.removeAll()
     }
 
     private func followPeers() {
@@ -213,6 +221,10 @@ final class VigilRemote: ObservableObject {
             following[device] = nil
             shutdown(fd, SHUT_RDWR)
         }
+        for (device, fd) in followingMachine where !wanted.contains(device) {
+            followingMachine[device] = nil
+            shutdown(fd, SHUT_RDWR)
+        }
         hosts.removeAll { !wanted.contains($0.device) }
         arrivals = arrivals.filter { Self.split($0.key).map { wanted.contains($0.device) } ?? false }
         for peer in peers {
@@ -222,6 +234,7 @@ final class VigilRemote: ObservableObject {
                 hosts.append(kept(peer))
             }
             follow(peer.id)
+            followMachine(peer.id)
         }
         remoteLog.info("macs", ["macs": peers.map(\.name)])
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
@@ -252,6 +265,41 @@ final class VigilRemote: ObservableObject {
                 self.failed(device, "this Mac's vigil-agent stopped")
             }
         }
+    }
+
+    /// A Mac's state, followed through the hub: each document a line, kept
+    /// alive by the hub across the Mac going out of reach. A document that
+    /// does not read is said and dropped; the last one stays drawn.
+    private func followMachine(_ device: String) {
+        guard !stopped, followingMachine[device] == nil, host(device) != nil else { return }
+        let fd: Int32
+        do { fd = try Self.hub.request(.machine(of: device)) } catch {
+            return remoteLog.warn("machine state not followed", ["host": host(device)?.name ?? device, "err": error])
+        }
+        followingMachine[device] = fd
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let reader = Lines.Reader(fd: fd)
+            while let line = try? reader.next() {
+                do {
+                    let machine = try JSONDecoder().decode(MachineState.self, from: line)
+                    Task { @MainActor [weak self] in self?.machine(device, machine) }
+                } catch {
+                    Task { @MainActor in remoteLog.warn("machine state unreadable", ["device": device, "err": error]) }
+                }
+            }
+            close(fd)
+            Task { @MainActor [weak self] in
+                guard let self, self.followingMachine[device] == fd else { return }
+                self.followingMachine[device] = nil
+            }
+        }
+    }
+
+    private func machine(_ device: String, _ machine: MachineState) {
+        guard let index = hosts.firstIndex(where: { $0.device == device }),
+              hosts[index].machine.map({ !$0.same(as: machine) }) ?? true else { return }
+        hosts[index].machine = machine
+        NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
     private func stepped(_ device: String, _ step: Local.Following) {
@@ -352,7 +400,8 @@ final class VigilRemote: ObservableObject {
             // the row's tooltip would repeat "no path to …" on every row).
             let header = VigilWorkspaces.SidebarWorkspaceRow.HostHeader(
                 name: hostLabel,
-                standing: host.away ? host.received.map(Self.awaySince) ?? host.error : host.error)
+                standing: host.away ? host.received.map(Self.awaySince) ?? host.error : host.error,
+                machine: host.machine)
             guard let dir = host.directory else {
                 rows.append(.init(
                     id: Self.compositeId(host.device, ""), emoji: nil, label: "…",
