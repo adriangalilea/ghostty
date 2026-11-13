@@ -460,21 +460,16 @@ final class VigilSidebarModel: ObservableObject {
     private var hitRows: [String: VigilHitRow] = [:]
 
     func reportHit(_ row: VigilHitRow) {
-        var stamped = row
-        stamped.reportedAt = Date()
-        hitRows[row.id] = stamped
+        hitRows[row.id] = row
     }
 
-    /// SwiftUI does not order a dying twin's onDisappear against the
-    /// incoming same-id view's first geometry report, so an unconditional
-    /// drop could deregister a LIVE row forever: defer one tick and keep
-    /// any row re-reported since.
-    func dropHit(_ id: String) {
-        let at = Date()
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let row = self.hitRows[id], row.reportedAt <= at else { return }
-            self.hitRows[id] = nil
-        }
+    /// A view withdraws only its own report. SwiftUI does not order a dying
+    /// twin's onDisappear against the incoming same-id view's first
+    /// geometry report: the frame in the map is the newcomer's whichever
+    /// came first, and the twin's withdrawal finds another owner there.
+    func dropHit(_ id: String, owner: UUID) {
+        guard hitRows[id]?.owner == owner else { return }
+        hitRows[id] = nil
     }
 
     func row(at point: CGPoint) -> VigilHitRow? {
@@ -820,9 +815,11 @@ struct VigilHitRow: Equatable {
     let id: String
     let kind: Kind
     var frame: CGRect = .zero
-    /// When the row last reported (stamped by reportHit); orders a
-    /// deferred dropHit against a same-id re-report.
-    var reportedAt: Date = .distantPast
+    /// The view instance that reported it. A row keeps its id when it moves
+    /// in the tree (a lone tab's pane gaining a tab row above it), so two
+    /// views report one id for a moment: only the one whose frame stands in
+    /// the map may withdraw it.
+    var owner = UUID()
 
     /// The session this row belongs to, whatever its depth: territory
     /// decides drop targets.

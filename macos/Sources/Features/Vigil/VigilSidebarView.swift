@@ -213,13 +213,27 @@ struct VigilSidebarView: View {
     /// a collapsed or removed row withdraws its frame, so a ghost row can
     /// never swallow a click.
     private func reportHit(id: String, kind: VigilHitRow.Kind) -> some View {
-        Color.clear
-            .onGeometryChange(for: CGRect.self) { proxy in
-                proxy.frame(in: .named("vigilTree"))
-            } action: { frame in
-                model.reportHit(VigilHitRow(id: id, kind: kind, frame: frame))
-            }
-            .onDisappear { model.dropHit(id) }
+        HitReport(model: model, id: id, kind: kind)
+    }
+
+    /// One row's place in the map, owned by this view instance (its `owner`
+    /// lives as long as the view does), so its withdrawal can never take a
+    /// same-id successor's frame with it.
+    private struct HitReport: View {
+        let model: VigilSidebarModel
+        let id: String
+        let kind: VigilHitRow.Kind
+        @State private var owner = UUID()
+
+        var body: some View {
+            Color.clear
+                .onGeometryChange(for: CGRect.self) { proxy in
+                    proxy.frame(in: .named("vigilTree"))
+                } action: { frame in
+                    model.reportHit(VigilHitRow(id: id, kind: kind, frame: frame, owner: owner))
+                }
+                .onDisappear { model.dropHit(id, owner: owner) }
+        }
     }
 
     /// The row standing in for "where keystrokes land": the focused pane,
@@ -632,6 +646,11 @@ struct VigilSidebarView: View {
                             ? VigilWorkspaces.shared.identityContext(name: id)
                             : "a workspace of terminal panes: \(row.tabs.flatMap(\.panes).map(\.title).joined(separator: ", "))")
                 } label: { Label("Rename…", systemImage: "pencil") }
+                if let anchor = row.tabs.last?.anchor {
+                    Button {
+                        VigilWorkspaces.shared.newTab(home, after: anchor, in: model.hostController)
+                    } label: { Label("New Tab", systemImage: "plus.rectangle.on.rectangle") }
+                }
                 if let device = home.device {
                     bringItem(device: device, workspace: home.workspace)
                 }

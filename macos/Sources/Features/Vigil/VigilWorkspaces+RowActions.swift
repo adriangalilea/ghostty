@@ -121,6 +121,38 @@ extension VigilWorkspaces {
         ask(home, .closeWorkspace(home.workspace), failing: "Not killed on \(remote.name)")
     }
 
+    // MARK: New tab
+
+    /// A new tab after the tab of its pane `anchor`, born at the row's home
+    /// in that pane's folder. This Mac's lands in `host`'s viewport; another
+    /// Mac's appears in its rows from that Mac's own word.
+    func newTab(_ home: RowHome, after anchor: String, in host: TerminalController?) {
+        guard let device = home.device else {
+            guard let revision = workspaces[home.workspace]?.layoutRevision else {
+                return sidebarLog.warn("new tab refused: no such workspace", ["workspace": home.workspace])
+            }
+            let request = WorkspaceCommand.Request.birth(
+                in: home.workspace, revision: revision, anchor: anchor, split: nil, command: nil)
+            let reply = applySessionCommand(request)
+            guard reply.ok, let pane = reply.pane else {
+                sidebarLog.error("row action not committed", ["op": "new_tab", "workspace": home.workspace, "why": reply.message])
+                let alert = NSAlert()
+                alert.messageText = "No tab made"
+                alert.informativeText = reply.message
+                alert.runModal()
+                return
+            }
+            sidebarLog.info("row action committed", ["op": "new_tab", "workspace": home.workspace, "pane": pane])
+            return activatePane(name: home.workspace, paneId: pane, in: host)
+        }
+        guard let remote = VigilRemote.shared.host(device),
+              let revision = remote.directory?.live.first(where: { $0.name == home.workspace })?.layoutRevision else {
+            return sidebarLog.warn("new tab refused: not in that Mac's directory", ["workspace": home.workspace])
+        }
+        ask(home, .birth(in: home.workspace, revision: revision, anchor: home.there(anchor), split: nil, command: nil),
+            failing: "No tab made on \(remote.name)")
+    }
+
     /// A tab (of its pane `anchor`) or a pane of another Mac closed at its
     /// home, open here or not; asked first only when something runs in it
     /// (`Facts.busy`), as every close is.
