@@ -384,6 +384,7 @@ final class VigilRemote: ObservableObject {
                             priority: pane.priority ?? .normal,
                             conversation: truth?.meaning?.conversation,
                             conversationName: truth?.meaning?.title,
+                            forkedFrom: truth?.meaning?.forkedFrom,
                             background: truth?.meaning?.background,
                             ended: truth?.ended,
                             refused: truth?.meaning?.refused,

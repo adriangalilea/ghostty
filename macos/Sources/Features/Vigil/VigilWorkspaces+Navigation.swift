@@ -341,24 +341,45 @@ extension VigilWorkspaces {
             let cwd = liveView(attachId: request.anchor)?.pwd
                 ?? tab.panes.first(where: { $0.id == request.anchor })?.cwd ?? session.cwd
             return birthReply(request, apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
-        case "split", "new_tab":
+        case "split", "new_tab", "fork":
             guard let anchor = tab.panes.first(where: { $0.id == request.anchor }) else {
                 return .failure(request, "unsupported_target", "A dock tenant cannot anchor a split or tab.")
             }
-            if request.operation == "split", !["left", "right", "up", "down"].contains(request.direction ?? "") {
+            // A fork with no direction is a tab of its own, as a new tab is.
+            let asTab = request.operation == "new_tab" || (request.operation == "fork" && request.direction == nil)
+            if !asTab, !["left", "right", "up", "down"].contains(request.direction ?? "") {
                 return .failure(request, "invalid_direction", "Expected left, right, up or down.")
             }
-            let id = "vigil-\(request.session)-\(nextPaneIndex(name: request.session))"
             // The home pane supplies cwd. No environment or path is inherited
             // from the sender; its command is the one thing it names.
-            let pane = Registry.Pane(id: id, cwd: liveView(attachId: anchor.id)?.pwd ?? anchor.cwd, command: request.command)
-            guard startDaemon(pane: pane, session: request.session) else {
+            let folder = liveView(attachId: anchor.id)?.pwd ?? anchor.cwd
+            var command = request.command
+            /// What the new pane is born running, when that is not the
+            /// program it is from then on (a fork: `Fork.Birth`).
+            var born = request.command
+            if request.operation == "fork" {
+                // The fork's line is this Mac's own: built from its broker's
+                // record of the anchor's conversation, never from the wire.
+                guard let source = Fork.source(pane: anchor.id, in: VigilPaths.conversations),
+                      let birth = Fork.birth(of: source, folder: folder) else {
+                    return .failure(request, "not_forkable", "That pane holds no conversation its agent can fork.")
+                }
+                command = birth.program
+                born = birth.line
+                sessionLog.info("fork", [
+                    "id": request.id.uuidString, "workspace": request.session, "anchor": anchor.id,
+                    "harness": source.harness, "conversation": source.conversation, "folder": folder,
+                ])
+            }
+            let id = "vigil-\(request.session)-\(nextPaneIndex(name: request.session))"
+            let pane = Registry.Pane(id: id, cwd: folder, command: command)
+            guard startDaemon(pane: Registry.Pane(id: id, cwd: folder, command: born), session: request.session) else {
                 persist() // the allocated identity is never recycled
                 return .failure(request, "spawn_failed", "The terminal could not start on its Mac; its log says why (mise run log).")
             }
             created = pane
             session.paneSeq = workspaces[request.session]!.paneSeq
-            if request.operation == "new_tab" {
+            if asTab {
                 session.tabs.insert(Registry.Tab(panes: [pane], layout: nil), at: index + 1)
             } else {
                 let anchorIndex = tab.panes.firstIndex { $0.id == anchor.id }!

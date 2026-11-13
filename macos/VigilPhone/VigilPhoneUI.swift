@@ -425,6 +425,7 @@ struct TreeNodeView: View {
                 } else {
                     Section {
                         CreateItems(host: host, anchor: node.anchor, splits: node.kind == .pane,
+                                    forks: node.kind == .pane && node.glance?.conversation != nil,
                                     folder: node.anchor.flatMap { model.folder(of: $0, on: host) }) { ref in
                             model.typeInto = ref
                             model.opening = ref
@@ -611,6 +612,13 @@ struct GlanceRow<Marks: View>: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("A conversation with \(glance.agent)")
+                // Its conversation was forked from another (`Fork`).
+                if glance.forkedFrom != nil {
+                    Image(systemName: "arrow.branch")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("A fork of another conversation")
+                }
                 marks()
             }
             card.padding(.leading, 21)
@@ -1431,6 +1439,7 @@ struct PaneScreen: View {
                     // keyboard up; or a workspace in this pane's folder.
                     Section {
                         CreateItems(host: current.host, anchor: node?.anchor, splits: true,
+                                    forks: node?.glance?.conversation != nil,
                                     folder: model.folder(of: current.pane, on: current.host)) { ref in
                             model.typeInto = ref
                             switchTo(ref)

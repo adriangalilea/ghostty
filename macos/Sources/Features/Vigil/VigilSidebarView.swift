@@ -873,6 +873,7 @@ struct VigilSidebarView: View {
                         .foregroundColor(Color.secondary.opacity(0.8))
                 }
             }
+            forkMark(pane)
             paneIdentity(pane)
             Spacer(minLength: 4)
             HStack(spacing: marks.gap) {
@@ -932,6 +933,21 @@ struct VigilSidebarView: View {
                 Button {
                     VigilChangesPanel.show(pane: pane.paneId ?? pane.id, title: pane.title, in: model.hostController)
                 } label: { Label("Changes", systemImage: "plusminus") }
+                // Its agent's conversation, forked: a second pane starts
+                // from the same state under a new id and this one goes on.
+                // Only where an agent holds a conversation (never a shell).
+                if let there, pane.conversation != nil, !pane.isDock {
+                    Menu {
+                        menu {
+                            Button {
+                                VigilWorkspaces.shared.fork(home, pane: there, beside: true, in: model.hostController)
+                            } label: { Label("Beside", systemImage: "rectangle.split.2x1") }
+                            Button {
+                                VigilWorkspaces.shared.fork(home, pane: there, beside: false, in: model.hostController)
+                            } label: { Label("In New Tab", systemImage: "plus.rectangle.on.rectangle") }
+                        }
+                    } label: { Label("Fork", systemImage: "arrow.branch") }
+                }
                 // Its conversation was written on two Macs: both copies, and
                 // which goes on.
                 if let paneId = pane.paneId, pane.conflict != nil {
@@ -997,6 +1013,21 @@ struct VigilSidebarView: View {
     /// Ink's one copy action, for the rows' Copy items (a menu has no
     /// place to show its confirmation; the pasteboard is the receipt).
     static let copied = InkCopyFeedback()
+
+    /// A fork wears a branch beside its name: its conversation was forked
+    /// from another (its glance's `forkedFrom`, `Fork`). Hovering says from
+    /// which, by the name of the pane that holds it now, on any Mac listed.
+    @ViewBuilder
+    private func forkMark(_ pane: VigilWorkspaces.SidebarPane) -> some View {
+        if let parent = pane.forkedFrom {
+            let holder = model.rows.lazy.flatMap(\.tabs).flatMap(\.panes).first { $0.conversation == parent }
+            Image(systemName: "arrow.branch")
+                .font(.system(size: 8 * scale, weight: .semibold))
+                .foregroundStyle(.secondary.opacity(0.8))
+                .help(holder.map { "A fork of \($0.title)" }
+                    ?? "A fork of a conversation no pane holds now (\(parent.prefix(8)))")
+        }
+    }
 
     /// The ids we speak by, dim beside the name and never louder than it:
     /// the conversation's name when the row's title is not it (you named

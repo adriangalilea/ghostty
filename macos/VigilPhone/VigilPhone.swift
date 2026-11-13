@@ -690,10 +690,15 @@ final class VigilPhone: ObservableObject {
         case workspace(cwd: String, command: String?, label: String?)
         case tab(beside: String, command: String?)
         case split(beside: String, direction: String, command: String?)
+        /// A fork of the conversation the pane `of` holds (VigilWire's
+        /// `Fork`): a split beside it (`direction`), or a tab of its own.
+        /// Its Mac starts it from its own record; nothing is named here.
+        case fork(of: String, direction: String?)
 
         var command: String? {
             switch self {
             case .workspace(_, let command, _), .tab(_, let command), .split(_, _, let command): command
+            case .fork: nil
             }
         }
 
@@ -703,6 +708,7 @@ final class VigilPhone: ObservableObject {
             case .workspace: "workspace"
             case .tab: "tab"
             case .split: "pane"
+            case .fork: "fork"
             }
         }
     }
@@ -743,21 +749,27 @@ final class VigilPhone: ObservableObject {
         switch birth {
         case .workspace(let cwd, let command, let label):
             request = .create(cwd: cwd, command: command, label: label)
-        case .tab(let anchor, let command), .split(let anchor, _, let command):
+        case .tab(let anchor, _), .split(let anchor, _, _), .fork(let anchor, _):
             guard let place = directories[host.id]?.place(of: anchor) else {
                 throw CreateError.unplaced("That pane is no longer in a workspace on \(host.name).")
             }
             guard let revision = place.workspace.layoutRevision else {
                 throw CreateError.unplaced("vigil on \(host.name) is too old to add tabs or panes from here. Update it there.")
             }
-            let direction: String? = if case .split(_, let d, _) = birth { d } else { nil }
-            request = .birth(in: place.workspace.name, revision: revision, anchor: anchor, split: direction, command: command)
+            switch birth {
+            case .fork(_, let direction):
+                request = .fork(in: place.workspace.name, revision: revision, anchor: anchor, split: direction)
+            case .split(_, let direction, let command):
+                request = .birth(in: place.workspace.name, revision: revision, anchor: anchor, split: direction, command: command)
+            default:
+                request = .birth(in: place.workspace.name, revision: revision, anchor: anchor, split: nil, command: birth.command)
+            }
         }
         if let why = request.refusal { throw CreateError.refused(why) }
         creating = birth
         defer { creating = nil }
         let fields: LogFields = ["id": request.id.uuidString, "what": birth.noun, "mac": host.name,
-                              "command": birth.command ?? "shell", "anchor": request.anchor]
+                              "command": birth.command ?? (request.operation == "fork" ? "fork" : "shell"), "anchor": request.anchor]
         receipts.info("create", "sent", fields)
         // Not connected is nothing sent: said as a refusal, never "may have".
         let node: TetherNode

@@ -46,12 +46,27 @@ struct CreateItems: View {
     /// Offer splitting the anchor (a pane's own row or screen; a workspace
     /// or tab row offers a new tab only).
     let splits: Bool
+    /// The anchor's agent holds a conversation (its glance names one): a
+    /// fork of it is offered, on the pane's own row or screen.
+    var forks = false
     /// The folder a new workspace starts in.
     let folder: String?
     let landed: @MainActor (PaneRef) -> Void
     @EnvironmentObject private var model: VigilPhone
 
     var body: some View {
+        if let anchor, forks {
+            // The same state under a new id, in a pane of its own; this
+            // one goes on.
+            Button { model.begin(.fork(of: anchor, direction: nil), on: host, landed: landed) } label: {
+                Label("Fork in new tab", systemImage: "arrow.branch")
+            }
+            if splits {
+                Button { model.begin(.fork(of: anchor, direction: "right"), on: host, landed: landed) } label: {
+                    Label("Fork beside", systemImage: "arrow.branch")
+                }
+            }
+        }
         if let anchor {
             Button { model.begin(.tab(beside: anchor, command: nil), on: host, landed: landed) } label: {
                 Label("New tab", systemImage: "plus.rectangle.on.rectangle")

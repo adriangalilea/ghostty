@@ -52,6 +52,8 @@ extension VigilWorkspaces {
         /// name (what the agent's own UI calls it).
         var conversation: String?
         var conversationName: String?
+        /// The conversation its own was forked from, by id (its glance).
+        var forkedFrom: String?
         /// What its agent runs in the background now (its glance): counted,
         /// with the first running task's title.
         var background: PaneGlance.Background?
@@ -220,6 +222,7 @@ extension VigilWorkspaces {
                 priority: pane.priority ?? .normal,
                 conversation: meaning?.conversation,
                 conversationName: meaning?.title,
+                forkedFrom: meaning?.forkedFrom,
                 background: meaning?.background,
                 ended: facts.ended,
                 arrived: pane.dormant == true ? pane.from : nil,
