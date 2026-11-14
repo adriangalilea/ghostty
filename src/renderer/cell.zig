@@ -16,6 +16,9 @@ pub const Key = enum {
     underline,
     strikethrough,
     overline,
+    border_fill,
+    border_below,
+    border_above,
 
     /// Returns the GPU vertex type for this key.
     pub fn CellType(self: Key) type {
@@ -26,6 +29,9 @@ pub const Key = enum {
             .underline,
             .strikethrough,
             .overline,
+            .border_fill,
+            .border_below,
+            .border_above,
             => shaderpkg.CellText,
         };
     }
@@ -65,9 +71,10 @@ pub const Contents = struct {
     /// struck through characters, at least one of which is a multi-glyph
     /// composite.
     ///
-    /// Rows are indexed as Contents.fg_rows[y + 1], because the first list in
-    /// the collection is reserved for the cursor, which must be the first item
-    /// in the buffer.
+    /// Lists are ordered as rounded-corner fills, below-text borders, block
+    /// cursor, text rows, above-text borders, and non-block cursor. Each
+    /// border layer has one list per row so dirty-row rebuilding works
+    /// across all of them.
     ///
     /// Must be initialized by calling resize on the Contents struct before
     /// calling any operations.
@@ -88,9 +95,10 @@ pub const Contents = struct {
     ) Allocator.Error!void {
         const row_count: usize = size.rows;
 
-        // The two extra lists hold cursor cells: index 0 is drawn before the
-        // row contents, and index row_count + 1 is drawn after them.
-        const fg_rows = try alloc.alloc(CellTextRow, row_count + 2);
+        // Global ordering: corner fills, below-text borders, block cursor, text rows,
+        // above-text borders, then the remaining cursor shapes. Border lists
+        // stay unallocated until used.
+        const fg_rows = try alloc.alloc(CellTextRow, row_count * 4 + 2);
         @memset(fg_rows, .empty);
         errdefer {
             for (fg_rows) |*row| row.deinit(alloc);
@@ -104,10 +112,10 @@ pub const Contents = struct {
         // can produce arbitrarily many glyphs in one column.
         const fg_row_capacity = @as(usize, size.columns) * 3;
 
-        // The cursor lists need just one cell. The rest get the full capacity.
-        fg_rows[0] = try .initCapacity(alloc, 1);
-        fg_rows[row_count + 1] = try .initCapacity(alloc, 1);
-        for (fg_rows[1 .. row_count + 1]) |*row| {
+        // Cursor lists need one cell. Text rows reserve capacity; border rows grow on demand.
+        fg_rows[row_count * 2] = try .initCapacity(alloc, 1);
+        fg_rows[row_count * 4 + 1] = try .initCapacity(alloc, 1);
+        for (fg_rows[row_count * 2 + 1 .. row_count * 3 + 1]) |*row| {
             row.* = try .initCapacity(alloc, fg_row_capacity);
         }
 
@@ -139,28 +147,28 @@ pub const Contents = struct {
         cursor_style: ?renderer.CursorStyle,
     ) void {
         if (self.size.rows == 0) return;
-        self.fg_rows[0].clearRetainingCapacity();
-        self.fg_rows[self.size.rows + 1].clearRetainingCapacity();
+        self.fg_rows[@as(usize, self.size.rows) * 2].clearRetainingCapacity();
+        self.fg_rows[@as(usize, self.size.rows) * 4 + 1].clearRetainingCapacity();
 
         const cell = v orelse return;
         const style = cursor_style orelse return;
 
         switch (style) {
             // Block cursors should be drawn first
-            .block => self.fg_rows[0].appendAssumeCapacity(cell),
+            .block => self.fg_rows[@as(usize, self.size.rows) * 2].appendAssumeCapacity(cell),
             // Other cursor styles should be drawn last
-            .block_hollow, .bar, .underline, .lock => self.fg_rows[self.size.rows + 1].appendAssumeCapacity(cell),
+            .block_hollow, .bar, .underline, .lock => self.fg_rows[@as(usize, self.size.rows) * 4 + 1].appendAssumeCapacity(cell),
         }
     }
 
     /// Returns the current cursor glyph if present, checking both cursor lists.
     pub fn getCursorGlyph(self: *Contents) ?shaderpkg.CellText {
         if (self.size.rows == 0) return null;
-        if (self.fg_rows[0].items.len > 0) {
-            return self.fg_rows[0].items[0];
+        if (self.fg_rows[@as(usize, self.size.rows) * 2].items.len > 0) {
+            return self.fg_rows[@as(usize, self.size.rows) * 2].items[0];
         }
-        if (self.fg_rows[self.size.rows + 1].items.len > 0) {
-            return self.fg_rows[self.size.rows + 1].items[0];
+        if (self.fg_rows[@as(usize, self.size.rows) * 4 + 1].items.len > 0) {
+            return self.fg_rows[@as(usize, self.size.rows) * 4 + 1].items[0];
         }
         return null;
     }
@@ -190,15 +198,16 @@ pub const Contents = struct {
 
         switch (key) {
             .bg => comptime unreachable,
+            .border_fill => try self.fg_rows[y].append(alloc, cell),
+            .border_below => try self.fg_rows[@as(usize, self.size.rows) + y].append(alloc, cell),
+            .border_above => try self.fg_rows[@as(usize, self.size.rows) * 3 + 1 + y].append(alloc, cell),
 
             .text,
             .underline,
             .strikethrough,
             .overline,
-            // We have a special list containing the cursor cell at the start
-            // of our fg row collection, so we need to add 1 to the y to get
-            // the correct index.
-            => try self.fg_rows[y + 1].append(alloc, cell),
+            // Text follows the below-text border rows and block cursor.
+            => try self.fg_rows[@as(usize, self.size.rows) * 2 + y + 1].append(alloc, cell),
         }
     }
 
@@ -208,10 +217,11 @@ pub const Contents = struct {
 
         @memset(self.bg_cells[@as(usize, y) * self.size.columns ..][0..self.size.columns], .{ 0, 0, 0, 0 });
 
-        // We have a special list containing the cursor cell at the start
-        // of our fg row collection, so we need to add 1 to the y to get
-        // the correct index.
-        self.fg_rows[y + 1].clearRetainingCapacity();
+        // Clear this row in every layer.
+        self.fg_rows[@as(usize, self.size.rows) * 2 + y + 1].clearRetainingCapacity();
+        self.fg_rows[y].clearRetainingCapacity();
+        self.fg_rows[@as(usize, self.size.rows) + y].clearRetainingCapacity();
+        self.fg_rows[@as(usize, self.size.rows) * 3 + 1 + y].clearRetainingCapacity();
     }
 };
 
@@ -359,14 +369,14 @@ test Contents {
 
     // We should start off empty after resizing.
     for (0..rows) |y| {
-        try testing.expect(c.fg_rows[y + 1].items.len == 0);
+        try testing.expect(c.fg_rows[rows * 2 + y + 1].items.len == 0);
         for (0..cols) |x| {
             try testing.expectEqual(.{ 0, 0, 0, 0 }, c.bgCell(y, x).*);
         }
     }
     // And the cursor row should have a capacity of 1 and also be empty.
-    try testing.expect(c.fg_rows[0].capacity == 1);
-    try testing.expect(c.fg_rows[0].items.len == 0);
+    try testing.expect(c.fg_rows[rows * 2].capacity == 1);
+    try testing.expect(c.fg_rows[rows * 2].items.len == 0);
 
     // Add some contents.
     const bg_cell: shaderpkg.CellBg = .{ 0, 0, 0, 1 };
@@ -378,13 +388,13 @@ test Contents {
     c.bgCell(1, 4).* = bg_cell;
     try c.add(alloc, .text, fg_cell);
     try testing.expectEqual(bg_cell, c.bgCell(1, 4).*);
-    // The fg row index is offset by 1 because of the cursor list.
-    try testing.expectEqual(fg_cell, c.fg_rows[2].items[0]);
+    // Text follows the below-text border rows and block cursor.
+    try testing.expectEqual(fg_cell, c.fg_rows[@as(usize, c.size.rows) * 2 + 2].items[0]);
 
     // And we should be able to clear it.
     c.clear(1);
     for (0..rows) |y| {
-        try testing.expect(c.fg_rows[y + 1].items.len == 0);
+        try testing.expect(c.fg_rows[rows * 2 + y + 1].items.len == 0);
         for (0..cols) |x| {
             try testing.expectEqual(.{ 0, 0, 0, 0 }, c.bgCell(y, x).*);
         }
@@ -398,17 +408,17 @@ test Contents {
         .color = .{ 0, 0, 0, 1 },
     };
     c.setCursor(cursor_cell, .block);
-    try testing.expectEqual(cursor_cell, c.fg_rows[0].items[0]);
+    try testing.expectEqual(cursor_cell, c.fg_rows[rows * 2].items[0]);
     try testing.expectEqual(cursor_cell, c.getCursorGlyph().?);
 
     // And remove it.
     c.setCursor(null, null);
-    try testing.expectEqual(0, c.fg_rows[0].items.len);
+    try testing.expectEqual(0, c.fg_rows[rows * 2].items.len);
     try testing.expect(c.getCursorGlyph() == null);
 
     // Add a hollow cursor.
     c.setCursor(cursor_cell, .block_hollow);
-    try testing.expectEqual(cursor_cell, c.fg_rows[rows + 1].items[0]);
+    try testing.expectEqual(cursor_cell, c.fg_rows[rows * 4 + 1].items[0]);
     try testing.expectEqual(cursor_cell, c.getCursorGlyph().?);
 }
 
@@ -431,7 +441,7 @@ test "Contents resize grows and shrinks" {
 
     try c.resize(alloc, .{ .rows = 3, .columns = 4 });
     try testing.expectEqual(.{ 0, 0, 0, 0 }, c.bgCell(1, 1).*);
-    try testing.expectEqual(@as(usize, 0), c.fg_rows[2].items.len);
+    try testing.expectEqual(@as(usize, 0), c.fg_rows[@as(usize, c.size.rows) * 2 + 2].items.len);
     try testing.expectEqual(@as(?shaderpkg.CellText, null), c.getCursorGlyph());
     cell.grid_pos = .{ 3, 2 };
     try c.add(alloc, .text, cell);
@@ -477,8 +487,8 @@ test "Contents clear retains other content" {
 
     // Row 2 should still contain its cells.
     try testing.expectEqual(bg_cell_2, c.bgCell(2, 4).*);
-    // Fg row index is +1 because of cursor list at start
-    try testing.expectEqual(fg_cell_2, c.fg_rows[3].items[0]);
+    // Text follows the below-text border rows and block cursor.
+    try testing.expectEqual(fg_cell_2, c.fg_rows[rows * 2 + 3].items[0]);
 }
 
 test "Contents clear last added content" {
@@ -517,8 +527,8 @@ test "Contents clear last added content" {
 
     // Row 1 should still contain its cells.
     try testing.expectEqual(bg_cell_1, c.bgCell(1, 4).*);
-    // Fg row index is +1 because of cursor list at start
-    try testing.expectEqual(fg_cell_1, c.fg_rows[2].items[0]);
+    // Text follows the below-text border rows and block cursor.
+    try testing.expectEqual(fg_cell_1, c.fg_rows[@as(usize, c.size.rows) * 2 + 2].items[0]);
 }
 
 test "Contents with zero-sized screen" {
@@ -703,4 +713,26 @@ test "Cell constraint widths" {
             state.cols,
         ));
     }
+}
+
+test "Contents borders layer across rows and clear with their owner" {
+    const testing = std.testing;
+    var c: Contents = .{};
+    defer c.deinit(testing.allocator);
+    try c.resize(testing.allocator, .{ .rows = 2, .columns = 2 });
+    const under: shaderpkg.CellText = .{ .atlas = .solid, .grid_pos = .{ 0, 1 }, .color = .{ 1, 2, 3, 255 } };
+    const over: shaderpkg.CellText = .{ .atlas = .solid, .grid_pos = .{ 0, 0 }, .color = .{ 4, 5, 6, 255 } };
+    const text: shaderpkg.CellText = .{ .atlas = .grayscale, .grid_pos = .{ 0, 1 }, .color = .{ 7, 8, 9, 255 } };
+    try c.add(testing.allocator, .border_below, under);
+    try c.add(testing.allocator, .border_above, over);
+    try c.add(testing.allocator, .text, text);
+    var ordered: std.ArrayList(shaderpkg.CellText) = .empty;
+    defer ordered.deinit(testing.allocator);
+    for (c.fg_rows) |row| try ordered.appendSlice(testing.allocator, row.items);
+    try testing.expectEqualSlices(shaderpkg.CellText, &.{ under, text, over }, ordered.items);
+    c.clear(0);
+    try testing.expectEqual(@as(usize, 0), c.fg_rows[7].items.len);
+    try testing.expectEqual(@as(usize, 1), c.fg_rows[3].items.len);
+    c.clear(1);
+    for (c.fg_rows) |row| try testing.expectEqual(@as(usize, 0), row.items.len);
 }

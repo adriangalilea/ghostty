@@ -4,6 +4,7 @@ const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const terminal = @import("main.zig");
 const DCS = terminal.DCS;
+const borders = @import("borders.zig");
 
 const log = std.log.scoped(.terminal_dcs);
 
@@ -79,6 +80,11 @@ pub const Handler = struct {
 
             1 => switch (dcs.intermediates[0]) {
                 '+' => switch (dcs.final) {
+                    // Provisional DCS 1 + b, gated by a payload namespace too.
+                    'b' => if (dcs.params.len == 1 and dcs.params[0] == 1)
+                        .{ .state = .{ .borders = .{} } }
+                    else
+                        null,
                     // XTGETTCAP
                     // https://github.com/mitchellh/ghostty/issues/517
                     'q' => .{
@@ -141,6 +147,8 @@ pub const Handler = struct {
                 try list.writer.writeByte(byte);
             },
 
+            .borders => |*buffer| try buffer.append(byte),
+
             .decrqss => |*buffer| {
                 if (buffer.len >= buffer.data.len) {
                     return error.OutOfMemory;
@@ -178,6 +186,8 @@ pub const Handler = struct {
                 break :xtgettcap .{ .xtgettcap = .{ .data = list.* } };
             },
 
+            .borders => |buffer| if (borders.parse(buffer.data[0..buffer.len])) |req| .{ .borders = req } else null,
+
             .decrqss => |buffer| .{ .decrqss = switch (buffer.len) {
                 0 => .none,
                 1 => switch (buffer.data[0]) {
@@ -205,6 +215,7 @@ pub const Handler = struct {
 };
 
 pub const Command = union(enum) {
+    borders: borders.Request,
     /// XTGETTCAP
     xtgettcap: XTGETTCAP,
 
@@ -220,7 +231,7 @@ pub const Command = union(enum) {
     pub fn deinit(self: *Command) void {
         switch (self.*) {
             .xtgettcap => |*v| v.data.deinit(),
-            .decrqss => {},
+            .decrqss, .borders => {},
             .tmux => {},
         }
     }
@@ -315,6 +326,7 @@ pub const Command = union(enum) {
 };
 
 const State = union(enum) {
+    borders: borders.Buffer,
     /// We're not in a DCS state at the moment.
     inactive,
 
@@ -344,7 +356,7 @@ const State = union(enum) {
             => {},
 
             .xtgettcap => |*v| v.deinit(),
-            .decrqss => {},
+            .decrqss, .borders => {},
             .tmux => |*v| if (comptime build_options.tmux_control_mode) {
                 v.deinit();
             } else unreachable,

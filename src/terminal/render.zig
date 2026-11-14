@@ -368,6 +368,7 @@ pub const RenderState = struct {
     /// data so their style is undefined by contract anyway. See
     /// beginUpdate.
     pending_styles: std.ArrayList(StyleRun) = .empty,
+    border_sets: std.ArrayList(@import("borders.zig").Set) = .empty,
 
     /// Internal state for Kitty graphics placeholders. Read the results
     /// with `imagePlacementIterator` instead.
@@ -896,6 +897,7 @@ pub const RenderState = struct {
         self.row_data.deinit(alloc);
         self.pending_styles.deinit(alloc);
         self.kitty.deinit(alloc);
+        self.border_sets.deinit(alloc);
     }
 
     /// Update the render state to the latest terminal state.
@@ -943,6 +945,11 @@ pub const RenderState = struct {
         alloc: Allocator,
         t: *Terminal,
     ) Allocator.Error!void {
+        // Border IDs are append-only for the terminal lifetime. Copy new sets
+        // while holding the terminal lock; renderers never borrow terminal memory.
+        const sets = t.border_store.sets.items;
+        if (self.border_sets.items.len > sets.len) self.border_sets.clearRetainingCapacity();
+        try self.border_sets.appendSlice(alloc, sets[self.border_sets.items.len..]);
         const s: *Screen = t.screens.active;
         const viewport_pin = s.pages.getTopLeft(.viewport);
 

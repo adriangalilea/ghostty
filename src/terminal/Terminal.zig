@@ -21,6 +21,7 @@ const xt_checksum = @import("xt_checksum.zig");
 const csi = @import("csi.zig");
 const hyperlink = @import("hyperlink.zig");
 const glyph = @import("apc/glyph.zig");
+const borders = @import("borders.zig");
 const kitty = @import("kitty.zig");
 const osc = @import("osc.zig");
 const point = @import("point.zig");
@@ -95,6 +96,7 @@ mouse_shape: mouse.Shape = .text,
 
 /// Per-session Glyph Protocol registrations.
 glyph_glossary: glyph.Glossary = .empty,
+border_store: borders.Store = .{},
 
 /// Kitty drag and drop protocol (OSC 72) state. Allocated when a client
 /// registers to accept drops (t=a) and freed when it unregisters (t=A),
@@ -399,6 +401,7 @@ pub fn deinit(self: *Terminal, alloc: Allocator) void {
     self.pwd.deinit(alloc);
     self.title.deinit(alloc);
     self.glyph_glossary.deinit(alloc);
+    self.border_store.deinit(alloc);
     if (self.kitty_dnd) |dnd| dnd.destroy(alloc);
     self.* = undefined;
 }
@@ -1122,6 +1125,7 @@ fn printSliceFill(
             .content_tag = .codepoint,
             .content = .{ .codepoint = .{ .data = 0 } },
             .style_id = style_id,
+            .border_id = cursor.border_id,
             .wide = .narrow,
             .protected = cursor.protected,
             .hyperlink = linked,
@@ -1486,6 +1490,7 @@ fn printSliceMixed(
             .content_tag = .codepoint,
             .content = .{ .codepoint = .{ .data = 0 } },
             .style_id = style_id,
+            .border_id = cursor.border_id,
             .wide = .narrow,
             .protected = cursor.protected,
             .semantic_content = cursor.semantic_content,
@@ -2403,6 +2408,7 @@ fn writeCell(
         .content_tag = .codepoint,
         .content = .{ .codepoint = .{ .data = c } },
         .style_id = self.screens.active.cursor.style_id,
+        .border_id = self.screens.active.cursor.border_id,
         .wide = wide,
         .protected = self.screens.active.cursor.protected,
         .semantic_content = self.screens.active.cursor.semantic_content,
@@ -2705,6 +2711,7 @@ pub fn saveCursor(self: *Terminal) void {
         .x = self.screens.active.cursor.x,
         .y = self.screens.active.cursor.y,
         .style = self.screens.active.cursor.style,
+        .border_id = self.screens.active.cursor.border_id,
         .protected = self.screens.active.cursor.protected,
         .pending_wrap = self.screens.active.cursor.pending_wrap,
         .origin = self.modes.get(.origin),
@@ -2740,6 +2747,7 @@ pub fn restoreCursor(self: *Terminal) void {
         self.screens.active.manualStyleUpdate() catch unreachable;
     };
 
+    self.screens.active.cursor.border_id = saved.border_id;
     self.screens.active.charset = saved.charset;
     self.modes.set(.origin, saved.origin);
     self.screens.active.cursor.pending_wrap = saved.pending_wrap;
@@ -4627,6 +4635,7 @@ pub fn decaln(self: *Terminal) !void {
             .content_tag = .codepoint,
             .content = .{ .codepoint = .{ .data = 'E' } },
             .style_id = self.screens.active.cursor.style_id,
+            .border_id = self.screens.active.cursor.border_id,
 
             // DECALN does not respect protected state. Verified with xterm.
             .protected = false,
@@ -5941,6 +5950,7 @@ pub fn softReset(self: *Terminal) void {
     const screen: *Screen = self.screens.active;
     screen.cursor.style = .{};
     screen.manualStyleUpdate() catch unreachable;
+    screen.cursor.border_id = 0;
     screen.cursor.protected = false;
     // xterm also forgets which protection mode was used last, so erasing
     // after a soft reset no longer skips ISO (SPA) protected cells.
@@ -19700,4 +19710,38 @@ test "Terminal: eraseDisplay complete at input prompt copied from alt screen scr
     t.eraseDisplay(.complete, false);
 
     try testing.expect(t.screens.active.pages.total_rows > t.screens.active.pages.rows);
+}
+
+/// Apply a cell border command. Rectangle commands change cells without moving
+/// the cursor; pen commands change the border every later write or blank uses.
+pub fn cellBorders(self: *Terminal, request: borders.Request) !void {
+    if (self.status_display != .main) return;
+    const screen = self.screens.active;
+    switch (request) {
+        .query => {},
+        .pen => |change| screen.cursor.border_id = try self.border_store.apply(
+            self.gpa(),
+            screen.cursor.border_id,
+            change,
+        ),
+        .paint => |paint| {
+            const x0: usize = screen.cursor.x;
+            const y0: usize = screen.cursor.y;
+            const x1 = @min(@as(usize, self.cols), x0 + paint.cols);
+            const y1 = @min(@as(usize, self.rows), y0 + paint.rows);
+            for (y0..y1) |y| {
+                for (x0..x1) |x| {
+                    const pin = screen.pages.pin(.{ .active = .{ .x = @intCast(x), .y = @intCast(y) } }).?;
+                    const rac = pin.rowAndCell();
+                    rac.cell.border_id = try self.border_store.apply(
+                        self.gpa(),
+                        rac.cell.border_id,
+                        paint.change,
+                    );
+                    rac.row.dirty = true;
+                    pin.node.page().dirty = true;
+                }
+            }
+        },
+    }
 }

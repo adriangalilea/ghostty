@@ -247,6 +247,7 @@ pub const CellText = extern struct {
     pub const Atlas = enum(u8) {
         grayscale = 0,
         color = 1,
+        solid = 2,
     };
 
     // test {

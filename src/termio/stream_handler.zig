@@ -416,6 +416,11 @@ pub const StreamHandler = struct {
     fn dcsCommand(self: *StreamHandler, cmd: *terminal.dcs.Command) !void {
         // log.warn("DCS command: {}", .{cmd});
         switch (cmd.*) {
+            .borders => |request| {
+                if (request == .query) {
+                    self.messageWriter(.{ .write_stable = @import("../terminal/borders.zig").reply });
+                } else try self.terminal.cellBorders(request);
+            },
             .tmux => |tmux| tmux: {
                 // If tmux control mode is disabled at the build level,
                 // then this whole block shouldn't be analyzed.

@@ -24,6 +24,7 @@ layout(location = 6) in uint glyph_bools;
 // Values `atlas` can take.
 const uint ATLAS_GRAYSCALE = 0u;
 const uint ATLAS_COLOR = 1u;
+const uint ATLAS_SOLID = 2u;
 
 // Masks for the `glyph_bools` attribute
 const uint NO_MIN_CONTRAST = 1u;
@@ -140,7 +141,7 @@ void main() {
 
     // If this cell is the cursor cell, but we're not processing
     // the cursor glyph itself, then we need to change the color.
-    if ((glyph_bools & IS_CURSOR_GLYPH) == 0 && is_cursor_pos) {
+    if (atlas != ATLAS_SOLID && (glyph_bools & IS_CURSOR_GLYPH) == 0 && is_cursor_pos) {
         out_data.color = load_color(unpack4u8(cursor_color_packed_4u8), use_linear_blending);
     }
 }
