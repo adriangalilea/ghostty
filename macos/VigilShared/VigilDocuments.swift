@@ -408,8 +408,11 @@ struct VigilDocuments: View {
                 if !wide { contentsButton }
                 if model.tell != nil, let document = model.document, document.changedSinceLoaded || model.wasTold {
                     Button { Task { await model.tellAgent() } } label: {
-                        Label(model.wasTold ? "Told" : "Tell \(Self.agent(list))", systemImage: model.wasTold ? "checkmark" : "paperplane")
+                        // Narrow, the caption under the bar names who is told.
+                        Label(model.wasTold ? "Told" : wide ? "Tell \(Self.agent(list))" : "Tell", systemImage: model.wasTold ? "checkmark" : "paperplane")
                             .labelStyle(.titleAndIcon)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
