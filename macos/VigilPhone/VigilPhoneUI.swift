@@ -543,13 +543,16 @@ struct ConflictDetail: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Neither copy was touched. Say which one goes on from its pane on the Mac: its mark there opens both, with the ways to go on.")
+                    Text(conflict.headline(here: "its Mac")).font(.callout.weight(.semibold))
+                    Text(conflict.meaning(here: "its Mac")).font(.footnote).foregroundStyle(.secondary)
+                    Text("Which one goes on is said from its pane on the Mac: its mark there opens both.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
+                Section { LabeledContent("The same on both", value: PaneConflict.size(conflict.shared)) }
                 side("Its Mac", conflict.here, whole: true)
                 side(conflict.mac, conflict.there, whole: conflict.whole)
             }
-            .navigationTitle("Written on two Macs")
+            .navigationTitle(conflict.writers == .both ? "Two conversations" : "Two copies")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
@@ -557,7 +560,7 @@ struct ConflictDetail: View {
 
     private func side(_ name: String, _ side: PaneConflict.Side, whole: Bool) -> some View {
         Section(name) {
-            LabeledContent("Since they parted", value: side.turns == 1 ? "1 prompt" : "\(side.turns) prompts")
+            Text(conflict.tail(side)).font(.callout)
             if let written = side.written {
                 LabeledContent("Last written", value: Date(timeIntervalSince1970: written).formatted(.relative(presentation: .named)))
             }

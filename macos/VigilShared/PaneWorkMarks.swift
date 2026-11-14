@@ -142,24 +142,29 @@ struct EndedMark: View {
     }
 }
 
-/// A conversation written on two Macs, nobody having said which copy goes
-/// on: red, with the other Mac's name (one pane) or how many (a folded
-/// row). `press`, when its owner can show both copies, makes one pane's
-/// mark the button that does; which copy goes on is said on the pane's own
-/// Mac. Nothing while there is none.
+/// A conversation whose copy on another Mac differs, nobody having said
+/// which goes on: the other Mac's name (one pane) or how many (a folded
+/// row). Red when both copies went on, which is a choice only a person can
+/// make; quiet when only one did and the other ends with its agent's own
+/// records, which is a fact to know and nothing to decide in a hurry.
+/// `press`, when its owner can show both copies, makes one pane's mark the
+/// button that does; which copy goes on is said on the pane's own Mac.
+/// Nothing while there is none.
 struct ConflictMark: View {
     let conflicts: [PaneConflict]
     let sizes: PaneMarkSizes
     var press: ((PaneConflict) -> Void)?
 
+    private var forked: Bool { conflicts.contains { $0.writers == .both } }
+
     var body: some View {
         if let first = conflicts.first {
             let mark = HStack(spacing: 1) {
-                Image(systemName: "arrow.triangle.branch").font(sizes.symbol)
-                Text(conflicts.count == 1 ? first.mac : "\(conflicts.count) written twice")
+                Image(systemName: forked ? "arrow.triangle.branch" : "equal.circle").font(sizes.symbol)
+                Text(conflicts.count == 1 ? first.mac : forked ? "\(conflicts.count) written twice" : "\(conflicts.count) differ")
                     .font(sizes.word).lineLimit(1)
             }
-            .foregroundStyle(.red)
+            .foregroundStyle(forked ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
             .fixedSize()
             .help(said)
             .accessibilityElement(children: .ignore)
@@ -174,10 +179,15 @@ struct ConflictMark: View {
 
     private var said: String {
         guard conflicts.count == 1, let first = conflicts.first else {
-            return "\(conflicts.count) conversations here were written on two Macs. Unfold to see each."
+            return "\(conflicts.count) conversations here differ from their copy on another Mac. Unfold to see each."
         }
-        return "This conversation was written on its pane's Mac and on \(first.mac). Neither copy was touched."
-            + (press == nil ? " It is settled on its own Mac." : " Press to see both.")
+        return [
+            first.headline(here: "its pane's Mac") + ".",
+            "The same on both: \(PaneConflict.size(first.shared)).",
+            "Its pane's Mac: \(first.tail(first.here)).",
+            "\(first.mac): \(first.tail(first.there)).",
+            "Neither copy was touched." + (press == nil ? " It is settled on its own Mac." : " Press to see both."),
+        ].joined(separator: "\n")
     }
 }
 
