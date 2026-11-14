@@ -533,11 +533,13 @@ struct VigilSidebarToggle: View {
             .popover(isPresented: $sizing, arrowEdge: .bottom) {
                 VStack(alignment: .leading, spacing: 12) {
                     // The size said beside its name, as a share of the compact one.
-                    InkSlider(
-                        "Sidebar size", value: $fontSize, in: VigilSidebarSize.range, step: 1,
-                        format: { "\(Int(VigilSidebarSize.bounded($0) / VigilSidebarSize.compact * 100))%" },
-                        minimum: .symbol("textformat.size.smaller"), maximum: .symbol("textformat.size.larger"),
-                        readout: .always)
+                    InkValue(
+                        "Sidebar size", $fontSize, in: VigilSidebarSize.range, step: 1,
+                        format: { "\(Int(VigilSidebarSize.bounded($0) / VigilSidebarSize.compact * 100))%" })
+                    .inkValueFace(
+                        .track(
+                            minimum: .symbol("textformat.size.smaller"),
+                            maximum: .symbol("textformat.size.larger"), readout: .always))
                     HStack {
                         Button("Reset") { VigilSidebarSize.reset() }
                             .disabled(fontSize == VigilSidebarSize.compact)
