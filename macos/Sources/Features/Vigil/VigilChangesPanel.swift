@@ -54,7 +54,7 @@ enum VigilChangesPanel {
         }
         VigilBars.shared.showAside(
             VigilBars.Aside(
-                pane: pane, title: title, symbol: "plusminus",
+                pane: pane, kind: .changes, title: title,
                 view: AnyView(view(pane: pane).inkEmbedded()),
                 popOut: { window(pane: pane, title: title) }))
         sidebarLog.info("changes opened", ["pane": pane, "where": "right bar"])

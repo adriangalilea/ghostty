@@ -1139,6 +1139,28 @@ final class VigilPhone: ObservableObject {
         }
     }
 
+    /// One ask about a pane's documents, answered by its Mac
+    /// (harness/DOCUMENTS.md).
+    func documents(_ call: DocumentCall, in ref: PaneRef) async throws -> Data {
+        let data = try await VigilLink.call(linked(), device: ref.host.id, .documents(ref.pane, call))
+        receipts.info("documents", "answered", ["mac": ref.host.name, "pane": ref.pane, "kind": call.kind.rawValue, "bytes": data.count])
+        return data
+    }
+
+    /// The pane's documents watched on its Mac while a viewer reads them.
+    nonisolated func documentChanges(in ref: PaneRef) -> AsyncStream<DocumentChange> {
+        AsyncStream { continuation in
+            let task = Task {
+                guard let node = await self.node else { return continuation.finish() }
+                for await change in VigilLink.documentChanges(node, device: ref.host.id, pane: ref.pane) {
+                    continuation.yield(change)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     /// Presses one of the agent's keys in its pane; the Mac's account of
     /// what it did (it checks each step against the transcript).
     func press(_ key: PaneKey, in ref: PaneRef) async throws -> String {

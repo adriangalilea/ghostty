@@ -249,17 +249,30 @@ final class VigilBars {
 
     // MARK: The right bar's aside
 
-    /// What the right bar shows that is no terminal: a pane's changes. It
-    /// is about one pane and is shown only beside that pane: in the bar of
-    /// the window whose tab holds it, as one more chip of the dock's strip,
-    /// gone from the bar when another tab takes the window and back when
-    /// its tab returns. It lives in memory alone and owns nothing a close
-    /// could kill.
+    /// What the right bar shows that is no terminal: a pane's changes, its
+    /// documents. It is about one pane and is shown only beside that pane:
+    /// in the bar of the window whose tab holds it, as one more chip of the
+    /// dock's strip, gone from the bar when another tab takes the window and
+    /// back when its tab returns. A pane has one of each kind at most. It
+    /// lives in memory alone and owns nothing a close could kill.
     final class Aside {
+        /// What it shows of its pane: its word on the pane's row.
+        enum Kind: String {
+            case changes = "Changes"
+            case documents = "Documents"
+
+            var symbol: String {
+                switch self {
+                case .changes: "plusminus"
+                case .documents: "doc.text"
+                }
+            }
+        }
+
         /// The pane it is about (its daemon id).
         let pane: String
+        let kind: Kind
         let title: String
-        let symbol: String
         let view: AnyView
         /// To a window of its own, where it has one.
         let popOut: (() -> Void)?
@@ -269,23 +282,32 @@ final class VigilBars {
         /// When it was last asked for: of a tab's several, the latest shows.
         fileprivate var asked = Date()
 
-        init(pane: String, title: String, symbol: String, view: AnyView, popOut: (() -> Void)? = nil) {
+        var symbol: String { kind.symbol }
+        var id: String { Self.id(pane: pane, kind) }
+        static func id(pane: String, _ kind: Kind) -> String { "\(pane)#\(kind.rawValue)" }
+
+        init(pane: String, kind: Kind, title: String, view: AnyView, popOut: (() -> Void)? = nil) {
             self.pane = pane
+            self.kind = kind
             self.title = title
-            self.symbol = symbol
             self.view = view
             self.popOut = popOut
         }
     }
 
-    /// The panes with an aside, for whoever draws them (the sidebar's rows).
+    /// Each pane's asides, for whoever draws them (the sidebar's rows).
     final class AsideMarks: ObservableObject {
-        @Published fileprivate(set) var panes: Set<String> = []
+        @Published fileprivate(set) var kinds: [String: [Aside.Kind]] = [:]
     }
     let asideMarks = AsideMarks()
 
+    /// By `Aside.id`.
     private var asides: [String: Aside] = [:] {
-        didSet { if Set(asides.keys) != asideMarks.panes { asideMarks.panes = Set(asides.keys) } }
+        didSet {
+            var kinds: [String: [Aside.Kind]] = [:]
+            for aside in asides.values.sorted(by: { $0.kind.rawValue < $1.kind.rawValue }) { kinds[aside.pane, default: []].append(aside.kind) }
+            if kinds != asideMarks.kinds { asideMarks.kinds = kinds }
+        }
     }
 
     /// The panes a window shows now: its tab's splits and its dock's.
@@ -301,36 +323,36 @@ final class VigilBars {
         return asides.values.filter { here.contains($0.pane) }.max { $0.asked < $1.asked }
     }
 
-    /// Asked again for a pane that has one brings it in front as it is (its
-    /// scroll and its choices kept).
+    /// Asked again for a pane that has one of its kind brings it in front as
+    /// it is (its scroll and its choices kept).
     func showAside(_ aside: Aside) {
         // One whose pane has ended is forgotten here, where the next is asked.
         let living = Set(VigilWorkspaces.shared.workspaces.values.flatMap { $0.tabs.flatMap(\.paneIds) })
-        asides = asides.filter { living.contains($0.key) }
-        if let standing = asides[aside.pane] {
+        asides = asides.filter { living.contains($0.value.pane) }
+        if let standing = asides[aside.id] {
             standing.front = true
             standing.asked = Date()
         } else {
-            asides[aside.pane] = aside
+            asides[aside.id] = aside
         }
         // The marks' sync is the bars' too: the titlebar's right-bar
         // button follows the aside.
         VigilWorkspaces.shared.syncWindowMarks()
     }
 
-    func closeAside(pane: String) {
-        asides[pane] = nil
+    func closeAside(pane: String, _ kind: Aside.Kind) {
+        asides[Aside.id(pane: pane, kind)] = nil
         VigilWorkspaces.shared.syncWindowMarks()
     }
 
     func closeAside(in controller: TerminalController) {
-        guard let pane = aside(in: controller)?.pane else { return }
-        closeAside(pane: pane)
+        guard let aside = aside(in: controller) else { return }
+        closeAside(pane: aside.pane, aside.kind)
     }
 
     /// A pane's aside in front again, in whichever window shows the pane.
-    func frontAside(pane: String) {
-        guard let aside = asides[pane] else { return }
+    func frontAside(pane: String, _ kind: Aside.Kind) {
+        guard let aside = asides[Aside.id(pane: pane, kind)] else { return }
         aside.front = true
         aside.asked = Date()
         VigilWorkspaces.shared.syncWindowMarks()

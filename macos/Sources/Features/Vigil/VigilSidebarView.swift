@@ -811,51 +811,64 @@ struct VigilSidebarView: View {
         .overlay(alignment: .leading) { hintChip(tab.id, depth: 1) }
     }
 
-    /// A pane's changes standing in a right bar, as a row under the pane:
-    /// what the bar holds is in the tree as a dock pane is. It sits at its
-    /// pane's own level, its mark under the pane's face: one step further
-    /// in with no thread line of its own, it read as a row out of place. A press goes to
-    /// the pane and brings its changes in front; its menu moves them to a
-    /// window or closes them (which ends nothing).
+    /// What stands in a right bar about a pane (its changes, its documents),
+    /// each as a row under the pane: what the bar holds is in the tree as a
+    /// dock pane is. It sits at its pane's own level, its mark under the
+    /// pane's face: one step further in with no thread line of its own, it
+    /// read as a row out of place. A press goes to the pane and brings it
+    /// in front; its menu moves it to a window or closes it (which ends
+    /// nothing).
     @ViewBuilder private func asideRow(
         _ pane: VigilWorkspaces.SidebarPane, session: String, tab: VigilWorkspaces.SidebarTab, level: Int
     ) -> some View {
-        if let paneId = pane.paneId, asides.panes.contains(paneId) {
-            let hoverId = Self.hostHover + "aside:" + paneId
-            Button {
-                model.activate(.init(id: "\(tab.id)#\(pane.id)", kind: .pane(name: session, paneId: pane.paneId)))
-                VigilBars.shared.frontAside(pane: paneId)
-            } label: {
-                // The name cell's own columns (`VigilNameCell`): its mark sits
-                // in the face's column, its word where a pane's name starts.
-                HStack(spacing: 4 * scale) {
-                    Image(systemName: "plusminus").font(.system(size: 9 * scale, weight: .semibold))
-                        .frame(width: VigilNameCell<EmptyView>.face * scale)
-                    Text("Changes").font(.system(size: 11 * scale)).lineLimit(1)
-                    Spacer(minLength: 0)
-                    Image(systemName: "sidebar.right").font(.system(size: 9 * scale)).foregroundStyle(.tertiary)
-                }
-                .foregroundStyle(.secondary)
-                .frame(height: 20 * scale)
-                .padding(rowInsets(level: level))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(rowBackground(id: hoverId, hovered: hovered == hoverId))
-                .contentShape(Rectangle())
+        if let paneId = pane.paneId {
+            ForEach(asides.kinds[paneId] ?? [], id: \.self) { kind in
+                asideRow(kind, paneId: paneId, pane, session: session, tab: tab, level: level)
             }
-            .buttonStyle(.plain)
-            .onHover { inside in hovered = inside ? hoverId : (hovered == hoverId ? nil : hovered) }
-            .contextMenu {
-                menu {
-                    Button {
-                        VigilBars.shared.closeAside(pane: paneId)
-                        VigilChangesPanel.window(pane: paneId, title: pane.title)
-                    } label: { Label("Move to Window", systemImage: "macwindow") }
-                    Divider()
-                    Button { VigilBars.shared.closeAside(pane: paneId) } label: { Label("Close Changes", systemImage: "xmark") }
-                }
-            }
-            .help("\(pane.title)'s changes, in the right bar")
         }
+    }
+
+    private func asideRow(
+        _ kind: VigilBars.Aside.Kind, paneId: String, _ pane: VigilWorkspaces.SidebarPane, session: String,
+        tab: VigilWorkspaces.SidebarTab, level: Int
+    ) -> some View {
+        let hoverId = Self.hostHover + "aside:" + VigilBars.Aside.id(pane: paneId, kind)
+        return Button {
+            model.activate(.init(id: "\(tab.id)#\(pane.id)", kind: .pane(name: session, paneId: pane.paneId)))
+            VigilBars.shared.frontAside(pane: paneId, kind)
+        } label: {
+            // The name cell's own columns (`VigilNameCell`): its mark sits
+            // in the face's column, its word where a pane's name starts.
+            HStack(spacing: 4 * scale) {
+                Image(systemName: kind.symbol).font(.system(size: 9 * scale, weight: .semibold))
+                    .frame(width: VigilNameCell<EmptyView>.face * scale)
+                Text(kind.rawValue).font(.system(size: 11 * scale)).lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "sidebar.right").font(.system(size: 9 * scale)).foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(.secondary)
+            .frame(height: 20 * scale)
+            .padding(rowInsets(level: level))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(rowBackground(id: hoverId, hovered: hovered == hoverId))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in hovered = inside ? hoverId : (hovered == hoverId ? nil : hovered) }
+        .contextMenu {
+            menu {
+                Button {
+                    VigilBars.shared.closeAside(pane: paneId, kind)
+                    switch kind {
+                    case .changes: VigilChangesPanel.window(pane: paneId, title: pane.title)
+                    case .documents: VigilDocumentsPanel.window(pane: paneId, title: pane.title)
+                    }
+                } label: { Label("Move to Window", systemImage: "macwindow") }
+                Divider()
+                Button { VigilBars.shared.closeAside(pane: paneId, kind) } label: { Label("Close \(kind.rawValue)", systemImage: "xmark") }
+            }
+        }
+        .help("\(pane.title)'s \(kind.rawValue.lowercased()), in the right bar")
     }
 
     private func paneRow(
@@ -959,6 +972,14 @@ struct VigilSidebarView: View {
                 Button {
                     VigilChangesPanel.show(pane: pane.paneId ?? pane.id, title: pane.title, in: model.hostController)
                 } label: { Label("Changes", systemImage: "plusminus") }
+                // The files its agent works from (its instructions, plan and
+                // skills), read and edited as pages: another Mac's pane too.
+                // Only where an agent holds a conversation.
+                if pane.conversation != nil {
+                    Button {
+                        VigilDocumentsPanel.show(pane: pane.paneId ?? pane.id, title: pane.title, in: model.hostController)
+                    } label: { Label("Documents", systemImage: "doc.text") }
+                }
                 // Its agent's conversation, forked: a second pane starts
                 // from the same state under a new id and this one goes on.
                 // Only where an agent holds a conversation (never a shell).

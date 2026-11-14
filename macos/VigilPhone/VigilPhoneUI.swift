@@ -1242,12 +1242,13 @@ struct PaneScreen: View {
     @State private var conversation: Conversation?
 
     enum Mode: CaseIterable {
-        case conversation, changes, terminal
+        case conversation, changes, documents, terminal
 
         var symbol: String {
             switch self {
             case .conversation: "text.bubble"
             case .changes: "plus.forwardslash.minus"
+            case .documents: "doc.text"
             case .terminal: "terminal"
             }
         }
@@ -1256,6 +1257,7 @@ struct PaneScreen: View {
             switch self {
             case .conversation: "Show the conversation"
             case .changes: "Show the changes"
+            case .documents: "Show the documents"
             case .terminal: "Show the terminal"
             }
         }
@@ -1303,6 +1305,18 @@ struct PaneScreen: View {
                     conversation?.show(entry)
                 })
                 // Another pane is another Mac's question: read again.
+                .id(current)
+            case .documents:
+                // The files its agent works from, edited on the pane's Mac.
+                VigilDocuments(call: { [current] ask in
+                    do { return try await VigilPhone.shared.documents(ask, in: current) } catch {
+                        throw PaneGitCallFailed(description: VigilLink.reason(error))
+                    }
+                }, watch: { [phone = VigilPhone.shared, current] in phone.documentChanges(in: current) }, tell: { [current] line in
+                    do { try await VigilPhone.shared.send(line, to: current) } catch {
+                        throw PaneGitCallFailed(description: VigilLink.reason(error))
+                    }
+                }, local: false)
                 .id(current)
             case .terminal:
                 terminal
@@ -1498,7 +1512,7 @@ struct PaneScreen: View {
         case .conversation:
             leave()
             Task { await show(current) }
-        case .changes:
+        case .changes, .documents:
             // The conversation stays followed underneath: a quote goes to its box.
             leave()
             if conversation == nil { Task { await show(current) } }

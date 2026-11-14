@@ -39,7 +39,7 @@ final class VigilDockHost: NSView {
     private var handle: VigilDragHandle!
     private weak var mounted: Ghostty.SurfaceView?
     private var mountedHost: NSHostingView<AnyView>?
-    /// The aside in front, by its pane; nil while a tenant is.
+    /// The aside in front, by its id; nil while a tenant is.
     private var mountedAside: String?
 
     init(controller: TerminalController) {
@@ -147,7 +147,7 @@ final class VigilDockHost: NSView {
         }
 
         if asideFront, let aside {
-            guard mountedAside != aside.pane else { return }
+            guard mountedAside != aside.id else { return }
             unmountContent()
             // The bar's width is the bar's to say: a hosted view that brings
             // a minimum of its own would be laid out past the bar's edge,
@@ -157,7 +157,7 @@ final class VigilDockHost: NSView {
             hosting.sizingOptions = []
             hosting.clipsToBounds = true
             mount(hosting)
-            mountedAside = aside.pane
+            mountedAside = aside.id
             return
         }
         guard let runtime else { return }
