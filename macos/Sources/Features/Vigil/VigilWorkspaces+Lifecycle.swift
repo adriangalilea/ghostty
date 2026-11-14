@@ -73,10 +73,17 @@ extension VigilWorkspaces {
     /// the workspace appears in every sidebar and the viewport under
     /// Adrian's hands is never touched.
     @discardableResult
-    func apiNewWorkspace(label: String?, cwd: String?, command: String?, openWindow: Bool) -> Birth {
+    func apiNewWorkspace(label: String?, emoji: String? = nil, cwd: String?, command: String?, openWindow: Bool) -> Birth {
         let cwd = cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
         let name = createWorkspace(cwd: cwd, command: command)
-        if let label, !label.isEmpty { rename(name: name, label: label, emoji: nil) }
+        // A face given is the face; else one written in front of the label
+        // is taken from it (`faced`), so no row wears its emoji as text.
+        let written = label.map(Self.faced)
+        let face = emoji.flatMap { $0.isEmpty ? nil : String($0.prefix(1)) } ?? written?.emoji
+        let called = emoji == nil ? written?.label : label
+        if face != nil || called?.isEmpty == false {
+            rename(name: name, label: called.flatMap { $0.isEmpty ? nil : $0 } ?? name, emoji: face)
+        }
         let panes = workspaces[name]!.tabs.flatMap(\.panes)
         assert(panes.count == 1, "a workspace is born with one pane")
         let running = startDaemon(pane: panes[0], session: name)

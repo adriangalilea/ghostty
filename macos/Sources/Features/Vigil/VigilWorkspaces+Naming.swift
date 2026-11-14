@@ -42,6 +42,18 @@ extension VigilWorkspaces {
         persist()
     }
 
+    /// A label written with its face in front ("🎚️ Ink values", as a
+    /// script or an agent writes a name): the face and the name apart. The
+    /// face is the label's first character when that is an emoji; a label
+    /// that is only an emoji, or leads with none, is a name alone.
+    static func faced(_ label: String) -> (emoji: String?, label: String) {
+        guard let first = label.first, let scalar = first.unicodeScalars.first,
+              scalar.properties.isEmojiPresentation || (scalar.properties.isEmoji && first.unicodeScalars.count > 1)
+        else { return (nil, label) }
+        let rest = label.dropFirst().trimmingCharacters(in: .whitespaces)
+        return rest.isEmpty ? (nil, label) : (String(first), rest)
+    }
+
     func rename(name: String, label: String, emoji: String?) {
         guard workspaces[name] != nil else { return }
         workspaces[name]!.label = label

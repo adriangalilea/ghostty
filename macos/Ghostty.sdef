@@ -191,6 +191,9 @@
       <parameter name="label" code="GSlb" type="text" optional="yes" description="Human label (the id stays the identity).">
         <cocoa key="label"/>
       </parameter>
+      <parameter name="emoji" code="GSem" type="text" optional="yes" description="Its face, one emoji. Unsaid, an emoji leading the label is taken as it.">
+        <cocoa key="emoji"/>
+      </parameter>
       <parameter name="initial working directory" code="GSwd" type="text" optional="yes" description="Working directory of the pane; defaults to home.">
         <cocoa key="workingDirectory"/>
       </parameter>

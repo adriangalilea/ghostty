@@ -230,11 +230,12 @@ extension NSApplication {
         }
         do {
             let label = try text("label", "label")
+            let emoji = try text("emoji", "emoji")
             let cwd = try text("workingDirectory", "initial working directory")
             let program = try text("command", "command")
             let openWindow = (args["openWindow"] as? NSNumber)?.boolValue ?? false
             let name = VigilWorkspaces.shared.apiNewWorkspace(
-                label: label, cwd: cwd, command: program, openWindow: openWindow).name
+                label: label, emoji: emoji, cwd: cwd, command: program, openWindow: openWindow).name
             return ["name": name, "label": label ?? name] as NSDictionary
         } catch {
             command.scriptErrorNumber = errAECoercionFail
