@@ -157,8 +157,8 @@ final class PaneDocumentsModel {
             guard path == shown else { return }
             if let hash = written.hash {
                 self.base = DocumentText(path: path, text: sent, hash: hash, modified: written.modified ?? base.modified)
+                // The watch says the file changed, and the list is read then.
                 settle()
-                await relist()
             } else if let theirs = written.theirs {
                 meet(theirs)
             }
@@ -207,6 +207,8 @@ final class PaneDocumentsModel {
     private func took(_ change: DocumentChange) async {
         await relist()
         guard let path = shown, change.touches(path), standing != .reading else { return }
+        // This side's own write, as the list now dates the file: nothing to read.
+        if let base, sending == nil, document?.modified == base.modified { return }
         guard let read = try? JSONDecoder().decode(DocumentText.self, from: await call(.read(path))), path == shown else { return }
         if case .conflict = standing {
             standing = .conflict(read)
