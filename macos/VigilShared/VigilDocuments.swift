@@ -1,4 +1,5 @@
 import Foundation
+import GitKit
 import GitViews
 import MarkdownEditing
 import SwiftUI
@@ -127,6 +128,7 @@ final class PaneDocumentsModel {
             base = read
             text = read.text
             standing = .saved
+            if heard[path] == nil { heard[path] = read.text }
         } catch {
             guard path == shown else { return }
             standing = .failed("\(error)")
@@ -194,7 +196,10 @@ final class PaneDocumentsModel {
                 standing = .saved
             }
         } else if text == base.text {
-            // Nothing unsaved here: the file's change comes in place.
+            // Nothing unsaved here: the file's change comes in place. With
+            // no edit of this side's waiting to be told, it is nothing to
+            // tell either: someone else's change (the agent's own, mostly).
+            if heard[theirs.path] == base.text { heard[theirs.path] = theirs.text }
             self.base = theirs
             text = theirs.text
             standing = .saved
@@ -251,12 +256,82 @@ final class PaneDocumentsModel {
         defer { telling = false }
         if standing == .edited { await save() }
         let name = Self.tilde(document.named ?? document.path, home: list.home)
+        let now = text
         do {
-            try await tell("I edited \(name). Read it again before you go on.")
+            try await tell(Self.telling(name, from: heard[document.path], to: now))
             told[document.path] = self.document?.modified ?? document.modified ?? 0
+            heard[document.path] = now
         } catch {
             standing = .failed("The agent was not told: \(error)")
         }
+    }
+
+    /// Each document's text as the agent is taken to have it: as it was
+    /// when first read here, then as it was last told. What Tell sends is
+    /// what changed since.
+    private var heard: [String: String] = [:]
+
+    /// What Tell types into the pane: the lines that changed, by the
+    /// file's line numbers now, so the agent has the edit itself and reads
+    /// nothing again. A long line is cut to where it changed (an
+    /// instruction file's paragraphs are single lines of thousands of
+    /// characters); past `tellLimit` the rest is left to the file.
+    static func telling(_ name: String, from old: String?, to new: String) -> String {
+        let reread = "I edited \(name). Read it again before you go on."
+        guard let old, old != new else { return reread }
+        let hunks = Git.FileDiff(old: old, new: new, path: name, context: 0).hunks
+        guard !hunks.isEmpty else { return reread }
+        var out = ["I edited \(name). What changed, by its line numbers now:"]
+        var cut = false
+        var shortened = false
+        for hunk in hunks {
+            // A long line with none it replaced is told by its beginning alone.
+            shortened = shortened || hunk.lines.contains { $0.kind != .context && $0.text.utf16.count > lineLimit }
+                && hunk.lines.filter { $0.kind == .removed }.count != hunk.lines.filter { $0.kind == .added }.count
+            let removed = hunk.lines.filter { $0.kind == .removed }
+            let added = hunk.lines.filter { $0.kind == .added }
+            var lines = [hunk.newCount == 0 ? "@@ removed before line \(hunk.newStart + 1)" : "@@ line \(hunk.newStart)"]
+            for (index, line) in removed.enumerated() {
+                lines.append("-" + clip(line.text, against: index < added.count ? added[index].text : nil))
+            }
+            for (index, line) in added.enumerated() {
+                lines.append("+" + clip(line.text, against: index < removed.count ? removed[index].text : nil))
+            }
+            guard (out + lines).joined(separator: "\n").utf8.count <= tellLimit else {
+                cut = true
+                break
+            }
+            out += lines
+        }
+        guard out.count > 1 else { return reread }
+        out.append(
+            cut ? "There is more than fits here: read the file again for the rest."
+                : shortened ? "A line cut short here (…) is whole in the file; nothing else in it changed."
+                : "That is the whole edit: nothing else in the file changed.")
+        return out.joined(separator: "\n")
+    }
+
+    static let tellLimit = 6000
+    private static let lineLimit = 400
+    private static let around = 120
+
+    /// A line as it is told: whole when short; else the stretch where it
+    /// differs from the line it replaced (or replaces), with some of what
+    /// stands around it, or its beginning when it stands alone.
+    static func clip(_ line: String, against other: String?) -> String {
+        let units = Array(line.utf16)
+        guard units.count > lineLimit else { return line }
+        func text(_ range: Range<Int>) -> String { String(utf16CodeUnits: Array(units[range]), count: range.count) }
+        guard let other else { return text(0..<lineLimit) + "… (\(units.count) characters)" }
+        let theirs = Array(other.utf16)
+        var head = 0
+        while head < units.count, head < theirs.count, units[head] == theirs[head] { head += 1 }
+        var tail = 0
+        while tail < units.count - head, tail < theirs.count - head, units[units.count - 1 - tail] == theirs[theirs.count - 1 - tail] { tail += 1 }
+        let from = max(0, head - around)
+        let to = min(units.count, max(from, units.count - tail) + around)
+        guard to - from <= tellLimit / 2 else { return text(from..<from + lineLimit) + "… (\(units.count) characters)" }
+        return (from > 0 ? "…" : "") + text(from..<to) + (to < units.count ? "…" : "")
     }
 
     /// The agent already heard of the file as it is now.
