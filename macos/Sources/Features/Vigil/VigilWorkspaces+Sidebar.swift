@@ -67,6 +67,9 @@ extension VigilWorkspaces {
         /// refused, since then (its glance): what the row says is not
         /// following that process's work.
         var refused: Double?
+        /// Its Claude was started before vigil was last updated, since
+        /// then (its glance): its own state no longer reaches vigil.
+        var outdated: Double?
         /// Its conversation was written on its Mac and on another, and
         /// nobody has said which copy goes on (`PaneConflict`).
         var conflict: PaneConflict?
@@ -231,6 +234,7 @@ extension VigilWorkspaces {
                 ended: facts.ended,
                 arrived: pane.dormant == true ? pane.from : nil,
                 refused: meaning?.refused,
+                outdated: meaning?.outdated,
                 conflict: facts.conflict)
         }
 

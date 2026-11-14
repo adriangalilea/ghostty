@@ -1002,6 +1002,16 @@ struct VigilSidebarView: View {
                         Label("Conflict…", systemImage: "arrow.triangle.branch")
                     }
                 }
+                // Its Claude predates the last update: what that costs and
+                // what ends it, for who does not hover its mark.
+                if pane.outdated != nil {
+                    Button {
+                        let alert = NSAlert()
+                        alert.messageText = "Started before vigil was last updated"
+                        alert.informativeText = PaneGlance.outdatedMeaning
+                        alert.runModal()
+                    } label: { Label("Started Before the Last Update…", systemImage: "exclamationmark.arrow.circlepath") }
+                }
                 // Any pane, whatever runs in it: an agent's stall or a
                 // command's end rings on the phone, as loud as its priority.
                 // Only with a phone registered here: following and priority
@@ -1149,6 +1159,9 @@ struct VigilSidebarView: View {
                 ConflictMark(
                     conflicts: [conflict], sizes: marks,
                     press: pane.paneId.map { id in { _ in VigilWorkspaces.shared.conflictSheet(pane: id) } })
+            }
+            if pane.outdated != nil {
+                mark("exclamationmark.arrow.circlepath", .secondary, PaneGlance.outdatedMeaning)
             }
             if let refused = pane.refused {
                 mark("person.2.slash.fill", .orange,

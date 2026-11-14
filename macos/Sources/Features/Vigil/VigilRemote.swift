@@ -437,6 +437,7 @@ final class VigilRemote: ObservableObject {
                             background: truth?.meaning?.background,
                             ended: truth?.ended,
                             refused: truth?.meaning?.refused,
+                            outdated: truth?.meaning?.outdated,
                             conflict: truth?.conflict)
                     }
                     let anchor = all.first.map { Self.compositeId(host.device, $0.id) }
