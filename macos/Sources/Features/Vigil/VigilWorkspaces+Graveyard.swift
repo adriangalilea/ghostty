@@ -428,6 +428,28 @@ extension VigilWorkspaces {
         Self.respawning.async { Self.restoreFromSpecs(why: why) }
     }
 
+    /// Every close of a surface, said with its author before anything
+    /// acts on it (2026-11-16: two panes were buried and the log could not
+    /// say what had asked). The core tells one thing, whether the pane's
+    /// program lives: alive, a person asked (a key, the pane's menu);
+    /// not, the program ended and the surface closes itself. A program
+    /// said to have ended while the pane's spec stands did not end (a
+    /// deliberate end removes the spec first): that close is refused,
+    /// true returned, and the daemon asked for again.
+    nonisolated static func closeAsked(_ view: Ghostty.SurfaceView, programAlive: Bool) -> Bool {
+        MainActor.assumeIsolated {
+            guard let pane = view.vigilAttachId else { return false }
+            let foreign = view.vigilMirror || view.vigilHost != nil
+            if !programAlive, !foreign, specExists(pane) {
+                graveyardLog.error("pane close refused: its program is said to have ended and its spec stands", ["pane": pane])
+                shared.respawnMachineKilled(why: "a close of a pane whose spec stands")
+                return true
+            }
+            graveyardLog.info("pane close asked", ["pane": pane, "by": programAlive ? "person" : "program ended", "mirror": foreign])
+            return false
+        }
+    }
+
     /// One restore at a time, off the main thread: it waits for vigild.
     private nonisolated static let respawning = DispatchQueue(label: "vigil.respawn", qos: .userInitiated)
 

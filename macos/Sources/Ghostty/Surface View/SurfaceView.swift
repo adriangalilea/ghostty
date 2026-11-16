@@ -191,6 +191,20 @@ extension Ghostty {
                     surfaceView: surfaceView,
                     dragHandle: ghostty.config.dragHandle,
                 )
+                if surfaceView.vigilReviving {
+                    VStack {
+                        HStack {
+                            Label("Its terminal stopped · bringing it back…", systemImage: "arrow.clockwise")
+                            Spacer()
+                        }
+                        .font(.caption)
+                        .padding(7)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        Spacer()
+                    }
+                    .padding(6)
+                    .help("This pane's daemon was ended from outside vigil. It is started again from its record; what ran in it does not come back.")
+                }
                 if surfaceView.vigilHost != nil,
                    surfaceView.vigilTransportState != 1 || surfaceView.vigilInputPending {
                     VStack {
