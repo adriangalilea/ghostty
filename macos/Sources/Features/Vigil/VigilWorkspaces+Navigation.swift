@@ -208,6 +208,23 @@ extension VigilWorkspaces {
     /// command from another Mac, an undo).
     func reconcileViews(of name: String) {
         let tabs = workspaces[name]?.tabs ?? []
+        // A tab kept warm while another is on screen: its tree was built
+        // for the panes it had. Mounted as it is after the registry gave
+        // the tab a pane or took one (an undo into it, a move, a command
+        // from another Mac), the window showed fewer panes than the
+        // sidebar listed (2026-11-16). Released to its capture instead:
+        // the next mount builds the whole tab and adopts the same views.
+        if let held = workspaces[name]?.held, !held.isEmpty {
+            workspaces[name]!.held = held.filter { runtime in
+                let live = Set(runtime.tree.compactMap(\.vigilAttachId))
+                // The tree's panes, never the dock's: a dock is no part of it.
+                guard let tab = tabs.first(where: { !live.isDisjoint(with: $0.panes.map(\.id)) }),
+                      Set(tab.panes.map(\.id)) != live else { return true }
+                registryLog.info("warm tab released to its capture: its panes changed", ["workspace": name, "panes": tab.panes.map(\.id).sorted(), "warm": live.sorted()])
+                runtime.dock?.unmount()
+                return false
+            }
+        }
         for controller in members(of: name) {
             let oldIds = Set(controller.surfaceTree.compactMap(\.vigilAttachId))
             if let target = tabs.first(where: { !oldIds.isDisjoint(with: $0.paneIds) }) ?? tabs.first {
