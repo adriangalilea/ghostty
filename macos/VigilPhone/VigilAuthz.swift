@@ -136,6 +136,7 @@ import VigilWire
     /// APNs gave this app its push address.
     func pushToken(_ token: Data) {
         let hex = token.map { String(format: "%02x", $0) }.joined()
+        VigilAgents.alert(hex)
         do {
             try runtime.setPush(token: hex, environment: Self.apns, activityStart: nil)
         } catch {
@@ -150,7 +151,8 @@ import VigilWire
 final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().setNotificationCategories(RequestNotification.categories)
+        UNUserNotificationCenter.current().setNotificationCategories(
+            RequestNotification.categories.union(TurnNotification.categories))
         // A Live Activity's Allow/Deny runs here, in the app's process.
         AnswerIntent.answer = { device, request, action, shown in
             await VigilAuthz.shared.answer(device: device, request: request, action: action, shown: shown)
@@ -195,6 +197,19 @@ final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
         withCompletionHandler completion: @escaping @Sendable () -> Void
     ) {
+        // A turn that ended: a line under it is typed into its pane on its
+        // Mac, a tap opens the pane.
+        if let turn = TurnNotification.read(response) {
+            Task { @MainActor in
+                if let line = turn.line {
+                    await VigilTurnReply.send(line, to: turn)
+                } else {
+                    VigilPhone.shared.openPane(turn.pane)
+                }
+                completion()
+            }
+            return
+        }
         let chosen = RequestNotification.read(response)
         Task { @MainActor in
             if let target = chosen.target {

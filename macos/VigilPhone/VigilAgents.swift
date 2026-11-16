@@ -2,6 +2,7 @@ import ActivityKit
 import Foundation
 import TetherKit
 import UIKit
+import UserNotifications
 import VigilActivity
 import VigilLink
 import VigilWire
@@ -37,6 +38,33 @@ enum VigilAgents {
     /// key id by its tether root), as kept beside the activity key, where
     /// the widget reads it.
     private static var senders = NoteSenders()
+    /// The app's own APNs token (hex), where a Mac sends a notification (a
+    /// followed pane's turn ended); nil until iOS gives it.
+    private static var alertToken: String?
+
+    /// iOS gave the app its notification token: each Mac is told.
+    static func alert(_ token: String) {
+        guard alertToken != token else { return }
+        alertToken = token
+        for mac in macs.keys { Task { await tell(mac) } }
+    }
+
+    /// Which moments sound on this phone (`Rings`), the person's choice in
+    /// Settings: kept here, and each Mac told when it changes, since the
+    /// Mac sets how loudly its card and its notifications arrive.
+    static var rings: Rings {
+        get {
+            UserDefaults.standard.data(forKey: "vigil.rings").flatMap { try? JSONDecoder().decode(Rings.self, from: $0) } ?? .standard
+        }
+        set {
+            UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: "vigil.rings")
+            VigilPhone.shared.receipts.info("agents", "sounds chosen", [
+                "stall": newValue.stall.rawValue, "asked": newValue.asked.rawValue, "ended": newValue.ended.rawValue,
+                "command": newValue.command.rawValue,
+            ])
+            for mac in macs.keys { Task { await tell(mac) } }
+        }
+    }
 
     /// At launch: who notes are taken from as kept, the push-to-start token
     /// as iOS gives it, every activity running (and every one the Mac
@@ -53,7 +81,16 @@ enum VigilAgents {
             }
         }
         Task {
-            for activity in Activity<AgentsActivity>.activities { await adopt(activity) }
+            for activity in Activity<AgentsActivity>.activities {
+                await adopt(activity)
+                // iOS keeps a card's last drawing until something changes
+                // it, across installs: a card of a pane that never changes
+                // stayed as an older build drew it, off the card's edges
+                // (2026-11-16). Given its own content again, it is drawn by
+                // the build that is installed now.
+                await activity.update(activity.content)
+                VigilPhone.shared.receipts.info("agents", "activity drawn again at launch", ["mac": String(activity.attributes.mac.prefix(10))])
+            }
             for await activity in Activity<AgentsActivity>.activityUpdates { await adopt(activity) }
         }
     }
@@ -109,10 +146,34 @@ enum VigilAgents {
     static func follow(pane: String, on mac: String, _ on: Bool) {
         if on {
             macs[mac, default: []].append(pane)
+            allowNotifications()
         } else {
             macs[mac]?.removeAll { $0 == pane }
         }
         Task { await send(mac, on ? .follow(Follow(pane: pane)) : .unfollow(Follow(pane: pane))) }
+    }
+
+    /// iOS's one prompt for notifications, at the first follow while it has
+    /// never been shown: a followed pane's turn that ended is a
+    /// notification, and following is the moment the person asks for it.
+    /// After that the choice is theirs, in iOS's Settings.
+    static func allowNotifications() {
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let status = await center.notificationSettings().authorizationStatus
+            guard status == .notDetermined else {
+                if status == .denied {
+                    VigilPhone.shared.receipts.warn("agents", "notifications are off for vigil in iOS's Settings: a turn's end shows on the activity alone")
+                }
+                return
+            }
+            do {
+                let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+                VigilPhone.shared.receipts.info("agents", "notifications asked", ["granted": granted])
+            } catch {
+                VigilPhone.shared.receipts.error("agents", "notifications not asked", ["err": error])
+            }
+        }
     }
 
     private static func activity(of mac: String) -> Activity<AgentsActivity>? {
@@ -186,7 +247,7 @@ enum VigilAgents {
         do {
             route = AgentsRoute(start: startToken, token: tokens[mac]?.token, born: tokens[mac]?.born,
                                 at: Date().timeIntervalSince1970, environment: VigilAuthz.apns.rawValue,
-                                key: try AgentsActivity.routeKey())
+                                key: try AgentsActivity.routeKey(), alert: alertToken, rings: rings)
         } catch {
             return VigilPhone.shared.receipts.error("agents", "no key to give", ["mac": String(mac.prefix(10)), "err": error])
         }

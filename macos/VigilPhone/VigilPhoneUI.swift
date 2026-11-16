@@ -1660,6 +1660,7 @@ struct SettingsView: View {
                 } header: { Text("Macs") } footer: {
                     Text("Pairing is approved on the Mac with Touch ID. A paired Mac running vigil shows its workspaces here.")
                 }
+                SoundsSection()
                 ReceiptsSection(receipts: model.receipts)
             }
             .navigationTitle("Settings")
@@ -1680,6 +1681,39 @@ struct SettingsView: View {
         case .answering: "Requests: answered here"
         case .refused: "Requests: refused on the Mac"
         case .unreachable(let why): "Unreachable: \(why)"
+        }
+    }
+}
+
+/// Which moments of a pane you follow sound on this phone (`Rings`). Each
+/// Mac is told the choice and sets how loudly its card and its
+/// notifications arrive; silent, they are still shown.
+struct SoundsSection: View {
+    @State private var rings = VigilAgents.rings
+
+    var body: some View {
+        Section {
+            ForEach(Rings.Moment.allCases, id: \.self) { moment in
+                Picker(Self.name(moment), selection: Binding(
+                    get: { rings[moment] },
+                    set: { rings[moment] = $0; VigilAgents.rings = rings }
+                )) {
+                    Text("Off").tag(Rings.Loud.off)
+                    Text("Sound").tag(Rings.Loud.sound)
+                    Text("Through Focus").tag(Rings.Loud.through)
+                }
+            }
+        } header: { Text("Sounds, for what you follow") } footer: {
+            Text("Sound follows this iPhone: the silent switch, Do Not Disturb and a Focus hold it back. Through Focus passes them. A low-priority pane never sounds. Off still shows it.")
+        }
+    }
+
+    private static func name(_ moment: Rings.Moment) -> String {
+        switch moment {
+        case .stall: "An agent waits for an answer"
+        case .asked: "A turn ends on a question"
+        case .ended: "A turn ends"
+        case .command: "A command finishes"
         }
     }
 }

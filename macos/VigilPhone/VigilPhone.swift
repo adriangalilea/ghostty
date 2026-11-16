@@ -1171,6 +1171,14 @@ final class VigilPhone: ObservableObject {
         return said
     }
 
+    /// A line typed into a pane named by its Mac and its id alone (a reply
+    /// under a notification: the app may hold no directory yet).
+    func send(_ text: String, pane: String, mac: String) async throws {
+        guard Open.validPane(pane), Open.validText(text) else { throw WireError.refused("not a line a pane takes") }
+        _ = try await VigilLink.call(linked(), device: mac, .send(pane, text: text))
+        receipts.info("feed", "reply sent", ["mac": String(mac.prefix(10)), "pane": pane, "bytes": text.utf8.count, "from": "notification"])
+    }
+
     func send(_ text: String, to ref: PaneRef) async throws {
         _ = try await VigilLink.call(linked(), device: ref.host.id, .send(ref.pane, text: text))
         receipts.info("feed", "reply sent", ["mac": ref.host.name, "pane": ref.pane, "bytes": text.utf8.count])
