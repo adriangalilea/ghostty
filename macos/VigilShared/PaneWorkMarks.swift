@@ -145,15 +145,25 @@ struct EndedMark: View {
 /// A conversation whose copy on another Mac differs, nobody having said
 /// which goes on: the other Mac's name (one pane) or how many (a folded
 /// row). Red when both copies went on, which is a choice only a person can
-/// make; quiet when only one did and the other ends with its agent's own
-/// records, which is a fact to know and nothing to decide in a hurry.
+/// make; quiet when only the other Mac's did, so this pane is behind it,
+/// which is a fact to know and nothing to decide in a hurry.
 /// `press`, when its owner can show both copies, makes one pane's mark the
 /// button that does; which copy goes on is said on the pane's own Mac.
 /// Nothing while there is none.
 struct ConflictMark: View {
+    /// The ones a row wears (`PaneConflict.worn`): a copy on another Mac
+    /// that only ends with its agent's own records is no mark (Adrian
+    /// 2026-11-16: a grey Mac name on a workspace he had closed there, for
+    /// two bookkeeping lines); a pane's menu and a Mac's sheet still open it.
     let conflicts: [PaneConflict]
     let sizes: PaneMarkSizes
     var press: ((PaneConflict) -> Void)?
+
+    init(conflicts: [PaneConflict], sizes: PaneMarkSizes, press: ((PaneConflict) -> Void)? = nil) {
+        self.conflicts = conflicts.filter(\.worn)
+        self.sizes = sizes
+        self.press = press
+    }
 
     private var forked: Bool { conflicts.contains { $0.writers == .both } }
 
