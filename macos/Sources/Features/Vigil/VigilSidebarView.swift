@@ -408,16 +408,16 @@ struct VigilSidebarView: View {
     // MARK: Remote host header (one per other Mac)
 
     /// Another Mac's header. It folds as every row that holds others does:
-    /// by the thread line under its icon while open, and a press anywhere on
-    /// it opens it when folded (a press on an open header does nothing: it
-    /// leads nowhere).
+    /// a press anywhere on it folds it when open and opens it when folded
+    /// (`VigilSidebarModel.holderClicked`'s rule), as the thread line under
+    /// its icon does.
     private func hostHeader(
         _ host: VigilWorkspaces.SidebarWorkspaceRow.HostHeader, device: String, count: Int, folded collapsed: Bool
     ) -> some View {
         let title = host.name
         let hoverId = Self.hostHover + device
         return Button {
-            collapse.hosts.remove(device)
+            if collapse.hosts.contains(device) { collapse.hosts.remove(device) } else { collapse.hosts.insert(device) }
         } label: {
             HStack(spacing: Grid.gap) {
                 // A laptop is a Mac with a battery, as its own power says.

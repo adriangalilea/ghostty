@@ -505,12 +505,10 @@ final class VigilSidebarModel: ObservableObject {
     func clicked(_ row: VigilHitRow) {
         switch row.kind {
         case .session(let name):
-            holderClicked(
-                .init(id: row.id, kind: .session(name)), isFront: focus?.session == row.id, folded: \.collapsedSessions)
+            holderClicked(.init(id: row.id, kind: .session(name)), folded: \.collapsedSessions)
         case .tab(let session, let anchor):
             holderClicked(
-                .init(id: row.id, kind: .tab(name: session, anchor: anchor, id: row.id)),
-                isFront: focus?.tab == row.id, folded: \.collapsedTabs)
+                .init(id: row.id, kind: .tab(name: session, anchor: anchor, id: row.id)), folded: \.collapsedTabs)
         case .pane(let session, _, let paneId):
             activate(.init(id: row.id, kind: .pane(name: session, paneId: paneId)))
         }
@@ -769,18 +767,20 @@ final class VigilSidebarModel: ObservableObject {
         onLeaveControl?() // landing hands the keyboard back
     }
 
-    /// A press on a row that holds others, a workspace or a tab, one rule:
-    /// it opens the row when folded and goes there. A press never folds:
-    /// folding is its thread line's (a press that folded the row you were
-    /// in read as the row vanishing under the pointer). `folded` is the set
-    /// the row's kind folds in.
-    func holderClicked(_ item: NavItem, isFront: Bool, folded: ReferenceWritableKeyPath<VigilSidebarModel, Set<String>>) {
-        self[keyPath: folded].remove(item.id)
-        if isFront {
-            selection = item.id
+    /// A press on a row that holds others, a workspace or a tab, one rule
+    /// (Adrian 2026-11-16): it folds the row when open and opens it when
+    /// folded, and goes nowhere. A folded row has no other way to open, so
+    /// the same press closes it: one gesture, both ways. Going somewhere is
+    /// a press on what is gone to, a pane; a row that holds panes is not a
+    /// place the keyboard can be. Its thread line folds it too. `folded` is
+    /// the set the row's kind folds in.
+    func holderClicked(_ item: NavItem, folded: ReferenceWritableKeyPath<VigilSidebarModel, Set<String>>) {
+        if self[keyPath: folded].contains(item.id) {
+            self[keyPath: folded].remove(item.id)
         } else {
-            activate(item)
+            self[keyPath: folded].insert(item.id)
         }
+        selection = item.id
     }
 
     func collapseSelection() {
