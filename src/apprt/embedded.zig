@@ -585,7 +585,6 @@ pub const Surface = struct {
             if (cmd.len > 0) {
                 config.command = .{ .shell = cmd };
                 config.@"wait-after-command" = true;
-                config.@"vigil-command" = try config.arenaAlloc().dupeSentinel(u8, cmd, 0);
             }
         }
 
@@ -2053,6 +2052,12 @@ pub const CAPI = struct {
     /// now send it and claim on focus.
     export fn ghostty_surface_vigil_viewport(surface: *Surface) void {
         surface.core_surface.vigilViewport();
+    }
+
+    /// Vigil: the surface's stream is lost and its daemon may be back
+    /// (the app saw it start, or the person asked): dial again.
+    export fn ghostty_surface_vigil_redial(surface: *Surface) void {
+        surface.core_surface.vigilRedial();
     }
 
     export fn ghostty_surface_vigil_client_id(surface: *Surface) u64 {

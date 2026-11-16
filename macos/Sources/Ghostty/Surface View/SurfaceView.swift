@@ -191,10 +191,12 @@ extension Ghostty {
                     surfaceView: surfaceView,
                     dragHandle: ghostty.config.dragHandle,
                 )
-                if surfaceView.vigilReviving {
+                if let note = surfaceView.vigilNote {
                     VStack {
                         HStack {
-                            Label("Not connected to its terminal", systemImage: "arrow.clockwise")
+                            Button { VigilWorkspaces.shared.noteAsked(surfaceView) } label: {
+                                Label("\(note.says) · \(note.offers)", systemImage: note.symbol)
+                            }
                             Spacer()
                         }
                         .font(.caption)
@@ -202,10 +204,12 @@ extension Ghostty {
                         .background(.ultraThinMaterial, in: Capsule())
                         Spacer()
                     }
+                    .buttonStyle(.borderless)
+                    .focusable(false)
                     .padding(6)
-                    .help("The connection to this pane's daemon was lost and is being made again. Whether the daemon ended, and why, is in the pane's log.")
+                    .help(note.explains)
                 }
-                if surfaceView.vigilHost != nil,
+                if surfaceView.vigilHost != nil, surfaceView.vigilNote == nil,
                    surfaceView.vigilTransportState != 1 || surfaceView.vigilInputPending {
                     VStack {
                         HStack {

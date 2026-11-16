@@ -168,9 +168,18 @@ final class VigilRemote: ObservableObject {
                 let fd = try Self.hub.request(.peers)
                 defer { close(fd) }
                 let reader = Lines.Reader(fd: fd)
+                var answered = false
                 while let line = try reader.next() {
                     let peers = try JSONDecoder().decode([Local.Peer].self, from: line)
-                    Task { @MainActor [weak self] in self?.peers(peers) }
+                    // The hub's first line is the hub answering (a change in
+                    // its folder is not): a restore refused while it was
+                    // down, for want of its seal, is asked again now.
+                    let first = !answered
+                    answered = true
+                    Task { @MainActor [weak self] in
+                        self?.peers(peers)
+                        if first { VigilWorkspaces.shared.restoreDied(why: "the hub answers") }
+                    }
                 }
                 failure = nil
             } catch {
@@ -208,9 +217,6 @@ final class VigilRemote: ObservableObject {
                 self.hubWatch?.cancel()
                 self.hubWatch = nil
                 self.followPeers()
-                // A restore needs the hub's seal: one refused while it was
-                // down is asked again now.
-                VigilWorkspaces.shared.respawnMachineKilled(why: "hub back")
             }
         }
         watch.setCancelHandler { close(fd) }

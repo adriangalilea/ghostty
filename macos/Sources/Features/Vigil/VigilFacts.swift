@@ -30,6 +30,17 @@ final class VigilFacts: @unchecked Sendable {
         var sidebarRevision: UInt64 = 0
         var files: [String: File] = [:]
         var leases: [Lease] = []
+        /// Panes whose pidfile names a daemon that no longer runs: one
+        /// killed outright writes nothing and removes nothing, so its exit
+        /// is watched for (as `vigild dir --watch` does) and said here. A
+        /// trigger to look, never the verdict: whether a daemon holds a
+        /// pane is its lock's to say.
+        var gone: Set<String> = []
+        /// How many watched daemons have exited so far. A daemon ended by a
+        /// signal removes its pidfile before it exits and holds its lock
+        /// until it does: the pidfile's leaving comes too early to act on,
+        /// and this is the word that it is over.
+        var exits: UInt64 = 0
     }
     /// What the worker reports; the host decides where it is written.
     enum Event: Sendable {
@@ -53,6 +64,8 @@ final class VigilFacts: @unchecked Sendable {
     /// whose events FSEvents could not deliver one by one.
     private var rescan: Set<String> = Set(VigilFacts.folders)
     private var processes: [Int32: DispatchSourceProcess] = [:]
+    /// The pane daemons among them, watched until they exit.
+    private var watchedDaemons: Set<Int32> = []
     private var pending = false
     private var stopped = false
     /// Under vigil's one folder (VigilPaths): each pane's daemon files, its
@@ -182,7 +195,7 @@ final class VigilFacts: @unchecked Sendable {
         guard parts.count == 2 else { return false }
         let ext = parts[1].split(separator: ".").last.map(String.init) ?? ""
         switch parts[0] {
-        case "panes": return ["pid", "tree", "died", "size", "screen", "viewers", "command", "title", "ended"].contains(ext)
+        case "panes": return ["pid", "up", "tree", "died", "size", "screen", "viewers", "command", "title", "ended"].contains(ext)
         case "state": return ["state", "seen", "glance", "conflict"].contains(ext)
         case "leases": return ext == "json"
         default: return false
@@ -216,9 +229,26 @@ final class VigilFacts: @unchecked Sendable {
             }
         }
         leases.sort { ($0.pane, $0.pid, $0.note) < ($1.pane, $1.pid, $1.note) }
-        watchProcesses(Set(leases.map(\.pid)))
+        // Each pane's daemon, by its pidfile's first word: watched while it
+        // runs, said gone once it does not.
+        var daemons: Set<Int32> = []
+        var gone: Set<String> = []
+        for (key, file) in files where key.hasPrefix("panes/") && key.hasSuffix(".pid") {
+            guard let pid = file.text.split(whereSeparator: { $0 == " " || $0 == "\n" }).first.flatMap({ Int32($0) }), pid > 1 else { continue }
+            if kill(pid, 0) == 0 || errno == EPERM { daemons.insert(pid) } else {
+                gone.insert(String(key.dropFirst("panes/".count).dropLast(".pid".count)))
+            }
+        }
+        // A daemon stays watched until it exits, pidfile or not: one ended
+        // by a signal removes its pidfile first and holds its pane a moment
+        // longer, and its exit is the event that says the pane is free.
+        let still = watchedDaemons.filter { kill($0, 0) == 0 || errno == EPERM }
+        let exits = current.exits + UInt64(watchedDaemons.count - still.count)
+        watchedDaemons = daemons.union(still)
+        watchProcesses(Set(leases.map(\.pid)).union(watchedDaemons))
         let moved = touched.filter { files[$0] != current.files[$0] }
-        guard !moved.isEmpty || leases != current.leases || current.revision == 0 else { return }
+        guard !moved.isEmpty || leases != current.leases || gone != current.gone || exits != current.exits
+            || current.revision == 0 else { return }
         // Renderer receipts can change on every output beat. They update the
         // cache, but never invalidate a sidebar whose inputs stayed identical.
         // Identical means the BYTES: a tree rewritten with the same lines (a
@@ -226,7 +256,7 @@ final class VigilFacts: @unchecked Sendable {
         // mtime and no new fact; each such rewrite was a sidebar revision.
         // A glance is rewritten with every tool call its agent makes; the
         // sidebar draws only its conversation (agent, id, name).
-        let sidebarChanged = current.revision == 0 || leases != current.leases ||
+        let sidebarChanged = current.revision == 0 || leases != current.leases || gone != current.gone ||
             moved.contains { key in
                 guard Self.sidebarKey(key) else { return false }
                 guard let file = files[key], let before = current.files[key] else { return true }
@@ -235,7 +265,8 @@ final class VigilFacts: @unchecked Sendable {
                 return true
             }
         current = Snapshot(revision: current.revision + 1,
-            sidebarRevision: current.sidebarRevision + (sidebarChanged ? 1 : 0), files: files, leases: leases)
+            sidebarRevision: current.sidebarRevision + (sidebarChanged ? 1 : 0), files: files, leases: leases, gone: gone,
+            exits: exits)
         deliver(current)
         let elapsed = began.duration(to: .now)
         if elapsed > .milliseconds(100) { report(.slowRead(revision: current.revision, elapsed: elapsed)) }
@@ -247,6 +278,9 @@ final class VigilFacts: @unchecked Sendable {
             let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: queue)
             source.setEventHandler { [weak self] in self?.invalidate() }
             processes[pid] = source
+            // Gone between being found alive and being watched: no exit
+            // event will come for it.
+            if kill(pid, 0) != 0, errno == ESRCH { invalidate() }
             source.resume()
         }
     }

@@ -29,20 +29,11 @@ const compat_fd = @import("../lib/compat/fd.zig");
 const internal_os = @import("../os/main.zig");
 const apprt = @import("../apprt.zig");
 const renderer = @import("../renderer.zig");
-const configpkg = @import("../config.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.io_attach);
-
-/// How long a `vigild new`/`restore` this app answers may run: past it,
-/// that vigild is killed and the wait ends.
-const daemon_wait_ms: i64 = 30_000;
-
-/// vigild's authorizeBirth waits 5 s for the birth authority's answer and
-/// then refuses itself: a vouch slower than that answers nobody.
-const vouch_wait_ms: i64 = 5_000;
 
 /// The hub answers a dial within tether's 10 s verdict on a Mac out of
 /// reach (CLAUDE.md, remote viewports); a hub silent past this is stuck.
@@ -51,17 +42,9 @@ const hub_answer_ms: i64 = 15_000;
 /// Session daemon id (e.g. "vigil-myproject-0").
 id: []const u8,
 
-/// Working directory for the daemon's command when we create it.
+/// The folder the terminal starts out naming as its pwd, until the pane's
+/// program reports its own.
 cwd: ?[]const u8,
-
-/// VIGIL_WORKSPACE value for the daemon's environment on create.
-session: ?[]const u8,
-
-/// The program the daemon runs as its child on create (a session API
-/// birth: `vigil new -- claude`). null = the daemon's login shell. Never
-/// typed into a shell: it IS the child, recorded in the daemon's spec, so
-/// it survives detach, quit and reboot like the shell does.
-command: ?configpkg.Command,
 
 /// The Mac that owns the daemon, by its tether root; null = local. Remote =
 /// this Mac's vigil hub (vigil-agent's local socket) opening `proxy` on
@@ -97,6 +80,10 @@ fd_mutex: std.Io.Mutex = .init,
 /// A hub dial waiting for its answer (a remote pane being dialed again):
 /// teardown shuts it down so the read thread it blocks returns at once.
 dialing_fd: posix.fd_t = -1,
+/// The embedder's "dial again" (`vigilRedial` writes it, the read thread
+/// sleeps on it while its stream is lost). Both ends non-blocking: asks
+/// made while the stream is open pile up as one dial at the next loss.
+redial_pipe: [2]posix.fd_t = .{ -1, -1 },
 
 /// Cached tty name of the daemon's pty (from its pidfile).
 cached_tty: ?[:0]const u8 = null,
@@ -117,11 +104,6 @@ viewport: bool = false,
 
 /// Focus arrived before the viewport: the passive claim waits for it.
 focus_pending: bool = false,
-
-/// This attach created the pane's daemon (its first contact found none):
-/// the configured input is the new program's, typed once. Joining a live
-/// pane types nothing (backend.takesConfiguredInput).
-created_daemon: bool = false,
 
 /// Outbound frame queue: enqueueFrame appends (io thread, never blocks),
 /// the writer thread alone writes the socket. Order is total — resize and
@@ -181,8 +163,6 @@ fn reportTransport(self: *Attach) void {
 pub const Config = struct {
     id: []const u8,
     cwd: ?[]const u8 = null,
-    session: ?[]const u8 = null,
-    command: ?configpkg.Command = null,
     host: ?[]const u8 = null,
     /// A pre-connected stream (the embedder's transport); overrides both
     /// the local socket and the hub.
@@ -198,8 +178,6 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
         .alloc = alloc,
         .id = try alloc.dupe(u8, cfg.id),
         .cwd = if (cfg.cwd) |v| try alloc.dupe(u8, v) else null,
-        .session = if (cfg.session) |v| try alloc.dupe(u8, v) else null,
-        .command = if (cfg.command) |v| try v.clone(alloc) else null,
         .host = if (cfg.host) |v| if (v.len > 0) try alloc.dupe(u8, v) else null else null,
         .given_fd = cfg.fd,
         .explicit_claim = explicit_claim,
@@ -210,8 +188,6 @@ pub fn init(alloc: Allocator, cfg: Config) !Attach {
 pub fn deinit(self: *Attach) void {
     self.alloc.free(self.id);
     if (self.cwd) |v| self.alloc.free(v);
-    if (self.session) |v| self.alloc.free(v);
-    if (self.command) |v| v.deinit(self.alloc);
     if (self.host) |v| self.alloc.free(v);
     if (self.cached_tty) |v| self.alloc.free(v);
     self.write_buf.deinit(self.alloc);
@@ -236,12 +212,6 @@ fn stateRoot(buf: []u8) ![]const u8 {
 fn panePath(self: *Attach, buf: []u8, ext: []const u8) ![]const u8 {
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     return std.mem.print(buf, "{s}/panes/{s}.{s}", .{ try stateRoot(&root_buf), self.id, ext });
-}
-
-/// The installed vigild (VigilWire's `VigilPaths.vigild`), owned by the
-/// caller.
-fn vigildPath(alloc: Allocator) ![]const u8 {
-    return alloc.print("{s}/.local/bin/vigild", .{sys.env("HOME") orelse return error.NoHome});
 }
 
 fn sockPath(self: *Attach, buf: []u8) ![]const u8 {
@@ -339,46 +309,6 @@ fn sendHello(self: *Attach, kind: []const u8) void {
     self.enqueueFrame('h', hello);
 }
 
-/// Spawn `vigild new <id> [-c cmd | -- argv]` to bring the daemon up, this
-/// app its birth authority (`birth`). No
-/// command = the daemon's login shell; a command is the daemon's CHILD
-/// (`<login shell> -lc` for a shell string, verbatim for `direct:` argv),
-/// so the spec records it and `vigild restore` respawns it after a reboot.
-/// Env carries VIGIL_WORKSPACE so claude hooks feed the attention queue
-/// from birth.
-fn spawnDaemon(self: *Attach) !void {
-    var env = try global.environMap();
-    defer env.deinit();
-    // The surface config's env does NOT flow here by itself (this is the
-    // APP's environment): anything the daemon must inherit is plumbed
-    // explicitly. Program-state resurrection is NOT plumbed: the daemon
-    // reads its own `<id>.resume`, so it works on every spawn path.
-    if (self.session) |s| try env.put("VIGIL_WORKSPACE", s);
-
-    const bin = try vigildPath(self.alloc);
-    defer self.alloc.free(bin);
-
-    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer argv.deinit(self.alloc);
-    try argv.appendSlice(self.alloc, &.{ bin, "new", self.id });
-    // The folder is vigild's to resolve (a missing one falls back to its
-    // nearest existing parent): a spawn in a folder that is gone fails.
-    if (self.cwd) |cwd| try argv.appendSlice(self.alloc, &.{ "--cwd", cwd });
-    if (self.command) |cmd| switch (cmd) {
-        // The daemon picks the login shell for a shell string (it owns
-        // shell identity; /bin/sh -l never sees a fish login's PATH).
-        .shell => |v| try argv.appendSlice(self.alloc, &.{ "-c", v }),
-        .direct => |v| {
-            try argv.append(self.alloc, "--");
-            for (v) |arg| try argv.append(self.alloc, arg);
-        },
-    };
-
-    // The app is the birth's authority (`birth`): vigild alone may create
-    // no pane.
-    if (try birth(self.alloc, argv.items, &env) != 0) return error.DaemonSpawnFailed;
-}
-
 pub fn threadEnter(
     self: *Attach,
     alloc: Allocator,
@@ -390,8 +320,10 @@ pub fn threadEnter(
     self.mailbox = io.surface_mailbox;
     errdefer self.setTransport(2);
 
-    // Attach: locally, creating the daemon on first contact; remotely,
-    // through this Mac's hub (never creating anything).
+    // Attach: to the pane's daemon here, or through this Mac's hub to
+    // another Mac's. A view creates nothing: a pane's daemon is its home's
+    // to start (the app's `PaneLife`), and a view that finds none says so
+    // (transport 2) and dials when told to (`vigilRedial`).
     if (self.given_fd) |given| {
         self.sock_fd = given;
         self.write_fd = given;
@@ -407,11 +339,9 @@ pub fn threadEnter(
         self.sock_fd = fd;
         self.write_fd = fd;
     } else {
-        const fd = self.connectSock() catch fd: {
-            try self.spawnDaemon();
-            self.created_daemon = true;
-            break :fd try self.connectSock();
-        };
+        // No daemon yet (a pane just made, or one whose daemon is gone):
+        // the read thread stands not connected and waits to be told.
+        const fd = self.connectSock() catch -1;
         self.sock_fd = fd;
         self.write_fd = fd;
     }
@@ -453,6 +383,15 @@ pub fn threadEnter(
     errdefer sys.close(pipe[0]);
     errdefer sys.close(pipe[1]);
 
+    self.redial_pipe = try internal_os.pipe();
+    errdefer {
+        sys.close(self.redial_pipe[0]);
+        sys.close(self.redial_pipe[1]);
+        self.redial_pipe = .{ -1, -1 };
+    }
+    try sys.nonblocking(self.redial_pipe[0]);
+    try sys.nonblocking(self.redial_pipe[1]);
+
     const closing = try alloc_state: {
         break :alloc_state self.alloc.create(std.atomic.Value(bool));
     };
@@ -462,7 +401,7 @@ pub fn threadEnter(
     const read_thread = try std.Thread.spawn(
         .{},
         readThreadMain,
-        .{ self, fd, io, pipe[0], closing, std.Io.Timestamp.now(global.io(), .awake) },
+        .{ self, fd, io, pipe[0], closing },
     );
     read_thread.setName(global.io(), "io-reader") catch {};
     if (fd >= 0 and self.transport_state.cmpxchgStrong(0, 1, .release, .monotonic) == null) self.reportTransport();
@@ -504,6 +443,11 @@ pub fn threadExit(self: *Attach, td: *termio.Termio.ThreadData) void {
     if (self.sock_fd >= 0) sys.close(self.sock_fd);
     self.sock_fd = -1;
     self.write_fd = -1;
+    // After the join: the read thread is the pipe's only reader.
+    const redial = self.redial_pipe;
+    self.redial_pipe = .{ -1, -1 };
+    if (redial[0] >= 0) sys.close(redial[0]);
+    if (redial[1] >= 0) sys.close(redial[1]);
 }
 
 /// The ownership chokepoint: the focused surface is the one being looked
@@ -901,248 +845,49 @@ fn readPidfile(self: *Attach) ?[]u8 {
     return std.Io.Dir.cwd().readFileAlloc(global.io(), path, self.alloc, .limited(256)) catch null;
 }
 
-/// The read thread body: Exec's loop over the socket fd, plus a death
-/// notice. Reaching EOF WITHOUT a deliberate teardown means the daemon
-/// ended under us (shell `exit`, external `vigild kill`, crash): tell the
-/// surface so it closes instead of freezing mute. runtime_ms carries the
-/// attach's TRUE age: the surface treats a sub-threshold exit as a failed
-/// launch (correct for a spawn that dies on contact) and anything older as
-/// a normal process exit, so a shell `exit` closes the pane exactly like
-/// vanilla ghostty instead of wearing the failed-to-launch screen.
+/// The read thread body: Exec's loop over the socket fd, for as long as
+/// the view lives. A stream that ends WITHOUT a deliberate teardown is
+/// reported as a transport fact and made again (`reconnect`); it is never
+/// told to the surface as a child's exit. This thread sees a socket, not
+/// a program: `.child_exited` from here set the surface's exited flag for
+/// good, its next key closed it, the close buried the pane and the
+/// burial's reap killed a daemon nobody had asked to end (2026-11-16,
+/// twice). How a program ended is its daemon's record (`<pane>.ended`),
+/// and closing the pane on it is the app's.
 fn readThreadMain(
     self: *Attach,
     fd: posix.fd_t,
     io: *termio.Termio,
     quit: posix.fd_t,
     closing: *std.atomic.Value(bool),
-    attached: std.Io.Timestamp,
 ) void {
     // Exec's loop closes the quit descriptor it is given on return; each
     // stream gets a dup, and the pipe itself (its bytes shared by every
     // dup, so a quit written mid-reconnect is still readable) lives as
     // long as this thread.
     defer sys.close(quit);
-    // -1: a remote pane not reached at mount, dialed from the start.
+    // -1: nothing reached at mount (a remote Mac out of reach, a pane with
+    // no daemon yet), dialed from the start.
     var current_fd = fd;
     while (true) {
         if (current_fd >= 0) {
-            const quit_dup = sys.dup(quit) catch |err| {
+            // No dup, no reader: the stream is lost to this view, said so
+            // and dialed again below, never passed off as open.
+            if (sys.dup(quit)) |quit_dup| {
+                termio.Exec.ReadThread.threadMainPosix(current_fd, io, quit_dup);
+            } else |err| {
                 log.err("attach: {s} cannot dup the quit pipe err={}", .{ self.id, err });
-                return;
-            };
-            termio.Exec.ReadThread.threadMainPosix(current_fd, io, quit_dup);
+            }
             if (closing.load(.acquire)) return;
             self.setTransport(2);
-            // The phone's stream is the embedder's; it reconnects on its own.
-            if (self.given_fd != null) break;
+            // The phone's stream is the embedder's: it is told the stream
+            // is lost and makes another view on a new one.
+            if (self.given_fd != null) return;
         }
-        // A local daemon ended under a live surface. Its spec decides what
-        // that meant: a deliberate end (shell exit, `vigild kill`) unlinks
-        // the spec before the socket goes, a machine-death class end (a
-        // logout's SIGTERM, a crash, a kill by hand) leaves it, and then the
-        // daemon comes back under the same id: reattach in place, never
-        // paint the exit overlay over a live program. The quit pipe stays
-        // armed throughout, so a teardown
-        // mid-reconnect returns at the next check.
-        current_fd = self.reconnect(closing) orelse {
-            // A view torn down mid-redial is no ended program: told one,
-            // the surface closes on the next key, and a released view that
-            // kept first responder closed whatever tab was in front.
-            if (closing.load(.acquire)) return;
-            break;
-        };
+        // The quit pipe stays armed throughout, so a teardown mid-redial
+        // returns at once.
+        current_fd = self.reconnect(closing, quit) orelse return;
     }
-    // NEVER a blocking push: a surface mid-release drains no mailbox, and
-    // a .forever push parks this thread exactly when threadExit is about
-    // to join it — reader waits on the mailbox futex, the io thread waits
-    // on the reader, the main thread waits on the io thread: the whole
-    // app wedges. A dropped child_exited on a
-    // dying surface costs nothing; a live surface's mailbox has room.
-    const pushed = io.surface_mailbox.push(.{
-        .child_exited = .{
-            .exit_code = 1,
-            .runtime_ms = @intCast(@max(0, sys.since(attached))),
-        },
-    }, .{ .instant = {} });
-    if (pushed == 0) log.warn("attach child_exited dropped (mailbox full or dying)", .{});
-}
-
-fn specExists(self: *Attach) bool {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = self.panePath(&buf, "spec") catch return false;
-    std.Io.Dir.cwd().access(global.io(), path, .{}) catch return false;
-    return true;
-}
-
-/// `vigild restore <id>`: THIS pane respawns if its spec stands and no
-/// daemon holds its lock. Under a running app nobody else respawns a
-/// daemon that died, so the surface that lost it does, and only its own:
-/// vigild serializes restores and a pane's lock admits one daemon, however
-/// many surfaces ask at once.
-fn restoreDaemons(self: *Attach) void {
-    const bin = vigildPath(self.alloc) catch return;
-    defer self.alloc.free(bin);
-    _ = birth(self.alloc, &.{ bin, "restore", self.id }, null) catch |err| log.warn("attach: {s} vigild restore failed err={}", .{ self.id, err });
-}
-
-extern "c" fn posix_spawn_file_actions_init(actions: *?*anyopaque) c_int;
-extern "c" fn posix_spawn_file_actions_destroy(actions: *?*anyopaque) c_int;
-extern "c" fn posix_spawn_file_actions_adddup2(actions: *?*anyopaque, fd: c_int, target: c_int) c_int;
-extern "c" fn posix_spawn_file_actions_addopen(actions: *?*anyopaque, fd: c_int, path: [*:0]const u8, flags: c_int, mode: std.c.mode_t) c_int;
-extern "c" fn posix_spawn(pid: *posix.pid_t, path: [*:0]const u8, actions: *const ?*anyopaque, attr: ?*const anyopaque, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
-extern "c" fn socketpair(domain: c_int, kind: c_int, protocol: c_int, fds: *[2]c_int) c_int;
-
-/// A daemon's birth question (`birth <id> <nonce> <spec> <old|-> <old
-/// seal|-> <resume|-> <resume seal|->`, vigild's authorizeBirth) answered
-/// through vigil-agent, the one holder of the pane key (VigilWire's
-/// `Local.Request.vouch`; this app has no keychain group): `born <id>
-/// <nonce> <seal>`, or `refused <id> <nonce> <why>` when it says no or does
-/// not answer. Null for a line that is no question (the daemon then
-/// refuses itself). Every word is checked to its alphabet first, so none
-/// needs quoting in the request.
-fn vouchBirth(alloc: Allocator, question: []const u8, out: []u8) ?[]const u8 {
-    // The daemon's own clock started when it asked; ours starts now.
-    const asked = std.Io.Timestamp.now(global.io(), .awake);
-    var words: [8][]const u8 = undefined;
-    var it = std.mem.splitScalar(u8, question, ' ');
-    var count: usize = 0;
-    while (it.next()) |word| : (count += 1) {
-        if (count == words.len) return null;
-        words[count] = word;
-    }
-    if (count != words.len or !std.mem.eql(u8, words[0], "birth")) return null;
-    const id = words[1];
-    const nonce = words[2];
-    if (id.len == 0 or nonce.len != 16) return null;
-    for (id) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_')) return null;
-    for (nonce) |ch| if (!std.ascii.isHex(ch)) return null;
-    // Digests are 64 lowercase hex, seals 44 base64; "-" is none.
-    for ([_]usize{ 3, 4, 6 }) |i| {
-        if (i != 3 and std.mem.eql(u8, words[i], "-")) continue;
-        if (words[i].len != 64) return null;
-        for (words[i]) |ch| if (!(std.ascii.isDigit(ch) or (ch >= 'a' and ch <= 'f'))) return null;
-    }
-    for ([_]usize{ 5, 7 }) |i| {
-        if (std.mem.eql(u8, words[i], "-")) continue;
-        if (words[i].len != 44) return null;
-        for (words[i]) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '+' or ch == '/' or ch == '=')) return null;
-    }
-
-    const why: []const u8 = why: {
-        var request: std.ArrayList(u8) = .empty;
-        request.print(alloc, "{{\"kind\":\"vouch\",\"birth\":{{\"pane\":\"{s}\",\"spec\":\"{s}\"", .{ id, words[3] }) catch break :why "out of memory";
-        const fields = [_]struct { name: []const u8, at: usize }{
-            .{ .name = "old", .at = 4 },    .{ .name = "oldSeal", .at = 5 },
-            .{ .name = "resume", .at = 6 }, .{ .name = "resumeSeal", .at = 7 },
-        };
-        for (fields) |field| {
-            if (std.mem.eql(u8, words[field.at], "-")) continue;
-            request.print(alloc, ",\"{s}\":\"{s}\"", .{ field.name, words[field.at] }) catch break :why "out of memory";
-        }
-        request.appendSlice(alloc, "}}\n") catch break :why "out of memory";
-
-        var path_buf: [512]u8 = undefined;
-        const path = hubPath(&path_buf) catch break :why "vigil-agent's hub has no path here";
-        const fd = sys.unixSocket() catch break :why "no socket for vigil-agent's hub";
-        defer sys.close(fd);
-        sys.connect(fd, path) catch break :why "vigil-agent's hub does not answer (is vigil-agent running?)";
-        var written: usize = 0;
-        while (written < request.items.len) written += sys.write(fd, request.items[written..]) catch break :why "vigil-agent's hub did not take the question";
-
-        var reply: [2048]u8 = undefined;
-        const got = sys.readLine(fd, &reply, asked, vouch_wait_ms) catch |err| break :why switch (err) {
-            error.LineTooLong => "vigil-agent's hub answered too much",
-            error.Timeout => "vigil-agent's hub did not answer in time",
-            else => "vigil-agent's hub left",
-        };
-        // CallResult: `output` is the seal's bytes, base64 again (JSON Data).
-        const Reply = struct { ok: bool, output: ?[]const u8 = null, @"error": ?[]const u8 = null };
-        const parsed = std.json.parseFromSlice(Reply, alloc, reply[0..got], .{ .ignore_unknown_fields = true }) catch break :why "vigil-agent's hub answered something else";
-        if (!parsed.value.ok) break :why (alloc.dupe(u8, parsed.value.@"error" orelse "vigil-agent refused it") catch "vigil-agent refused it");
-        const encoded = parsed.value.output orelse break :why "vigil-agent answered with no seal";
-        var seal: [64]u8 = undefined;
-        const size = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch break :why "vigil-agent answered with no seal";
-        if (size != 44) break :why "vigil-agent answered with no seal";
-        std.base64.standard.Decoder.decode(seal[0..size], encoded) catch break :why "vigil-agent answered with no seal";
-        return std.mem.print(out, "born {s} {s} {s}\n", .{ id, nonce, seal[0..size] }) catch null;
-    };
-    // One line, within what the daemon reads.
-    var said: [300]u8 = undefined;
-    const why_len = @min(why.len, said.len);
-    @memcpy(said[0..why_len], why[0..why_len]);
-    for (said[0..why_len]) |*ch| if (ch.* == '\n' or ch.* == '\r') {
-        ch.* = ' ';
-    };
-    return std.mem.print(out, "refused {s} {s} {s}\n", .{ id, nonce, said[0..why_len] }) catch null;
-}
-
-/// vigild `new`/`restore` with this app as their birth authority: a daemon
-/// is born only for the Vigil app or vigil-agent (vigild's authorizeBirth,
-/// judged by code signature). vigild's stdin is one end of a socketpair;
-/// this process answers `born <id> <nonce>` on the other for every daemon
-/// vigild spawns, until vigild and every daemon have let go of it, then
-/// reaps vigild. Its exit code. posix_spawn, never fork: this is a
-/// threaded process.
-fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.Environ.Map) !u8 {
-    // Daemons live on a Mac; a phone's panes are always another device's.
-    if (comptime builtin.target.os.tag != .macos) return error.Unsupported;
-    var arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const argv_z = try arena.allocSentinel(?[*:0]const u8, argv.len, null);
-    for (argv, 0..) |arg, i| argv_z[i] = (try arena.dupeSentinel(u8, arg, 0)).ptr;
-    const envp: [*:null]const ?[*:0]const u8 = if (env) |map|
-        (try map.createPosixBlock(arena, .{})).slice.ptr
-    else
-        @ptrCast(std.c.environ);
-
-    var pair: [2]c_int = undefined;
-    if (socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
-    defer sys.close(pair[0]);
-    // vigild's end is closed right after the spawn; until then, on any
-    // failure here.
-    var theirs_open = true;
-    defer if (theirs_open) sys.close(pair[1]);
-    // Both ends close-on-exec: dup2 onto stdin clears it for vigild's copy
-    // alone, and no other child of this app ever holds either end.
-    try sys.cloexec(pair[0]);
-    try sys.cloexec(pair[1]);
-    var actions: ?*anyopaque = null;
-    if (posix_spawn_file_actions_init(&actions) != 0) return error.SpawnActions;
-    defer _ = posix_spawn_file_actions_destroy(&actions);
-    _ = posix_spawn_file_actions_adddup2(&actions, pair[1], 0);
-    const write_only: c_int = @bitCast(posix.O{ .ACCMODE = .WRONLY });
-    _ = posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", write_only, 0);
-    _ = posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", write_only, 0);
-    var pid: posix.pid_t = 0;
-    const rc = posix_spawn(&pid, argv_z[0].?, &actions, null, argv_z.ptr, envp);
-    sys.close(pair[1]);
-    theirs_open = false;
-    if (rc != 0) return error.SpawnFailed;
-
-    // Questions until vigild and every daemon let go of the pair, within
-    // the window a daemon has to come back: this runs on threads a
-    // teardown joins (the io thread at a pane's first contact, the read
-    // thread restoring one), so a vigild stuck past it is killed rather
-    // than waited on.
-    const began = std.Io.Timestamp.now(global.io(), .awake);
-    var line: [1024]u8 = undefined;
-    while (true) {
-        const len = sys.readLine(pair[0], &line, began, daemon_wait_ms) catch |err| {
-            if (err == error.Timeout) {
-                log.warn("attach: vigild {s} still running after {d}ms; killed", .{ argv[1], daemon_wait_ms });
-                _ = std.c.kill(pid, std.c.SIG.KILL);
-            }
-            break;
-        };
-        var answer: [1024]u8 = undefined;
-        const said = vouchBirth(arena, line[0..len], &answer) orelse continue;
-        var written: usize = 0;
-        while (written < said.len) written += sys.write(pair[0], said[written..]) catch break;
-    }
-    // vigild unwaited, or killed by a signal: no exit code, a failure.
-    const status = sys.waitpid(pid) orelse return 255;
-    return if (std.c.W.IFEXITED(status)) std.c.W.EXITSTATUS(status) else 255;
 }
 
 /// Runs on the read thread after EOF. Returns the new socket, wired into
@@ -1151,20 +896,23 @@ fn birth(alloc: Allocator, argv: []const []const u8, env: ?*const std.process.En
 /// when the end was deliberate, the teardown began, or the daemon never
 /// came back within the window.
 ///
-/// A local pane's deliberate end is its spec gone. A remote pane's truth
-/// is its home Mac's directory, which this side does not read: when the
-/// pane really ends it leaves the directory and the app closes this view
-/// (teardown sets `closing`). Until then the stream is dialed again
-/// through the hub, whatever ended it (the Mac asleep, its hub restarted,
-/// this Mac's network), so a lost remote pane comes back by itself and
-/// never waits on a button.
-fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
-    if (self.given_fd != null) return null; // the embedder owns that transport
-    if (self.host == null and !self.specExists()) return null;
+/// A stream that ended is a stream that ended: whether the pane's program
+/// did is its daemon's to state (`<pane>.ended`, vigild) and its home's to
+/// act on, never this thread's to infer. So this only makes the stream
+/// again, and returns the new socket, or null when the view is being torn
+/// down. A remote pane is dialed through the hub with a pause that grows
+/// to 2 s, whatever ended it (the Mac asleep, its hub restarted, this
+/// Mac's network): no event on this Mac says the other is back. A local
+/// pane is dialed once, at once (a stream dropped under a live daemon
+/// comes back here), and when that finds no daemon the view stands "not
+/// connected" and this thread waits, asleep, for the embedder to say dial
+/// again (`vigilRedial`: the app saw the pane's daemon start, or the
+/// person asked). It starts no daemon: a view owns no pane's life.
+fn reconnect(self: *Attach, closing: *std.atomic.Value(bool), quit: posix.fd_t) ?posix.fd_t {
     if (self.host) |host| {
         log.warn("attach: remote {s} on {s} stream ended; dialing it again through the hub", .{ self.id, host });
     } else {
-        log.warn("attach: {s} stream ended with its spec on disk; reconnecting", .{self.id});
+        log.warn("attach: {s} has no stream; dialing its daemon once", .{self.id});
     }
     // Retire the writer (it may have severed itself on the dead socket
     // already) before the descriptor closes; a new one is born per socket.
@@ -1182,26 +930,14 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
         self.sock_fd = -1;
         self.write_fd = -1;
     }
-    self.setTransport(0);
 
     const began = std.Io.Timestamp.now(global.io(), .awake);
-    // Local: when the next `vigild restore` is asked, and the wait after it.
-    // One beat first for a respawn already in flight (the login agent, the
-    // app's own), then again with a wait that grows to 10 s: a restore is
-    // refused while vigil-agent is down, and what killed the daemon may
-    // have killed it too (2026-11-16, a SIGTERM from the Dock to both:
-    // one refused restore left a dead terminal that the next key closed,
-    // and the close buried a pane with a spec).
-    var restore_at: i64 = 1_000;
-    var restore_wait: i64 = 1_000;
     // Remote: a pause that grows to 2 s between dials (a dial to a Mac out
     // of reach itself takes up to tether's 10 s to say so).
     var pause_ms: u64 = 200;
-    // Both run until the pane is back, its view is torn down, or (local)
-    // its spec is gone: a spec with no daemon under a running app is
-    // machine death, and respawning from it is never wrong.
     while (true) {
         if (closing.load(.acquire)) return null;
+        self.setTransport(0);
         const dialed = if (self.host) |host| self.connectHub(host) else self.connectSock();
         if (dialed) |nfd| {
             self.write_mutex.lockUncancelable(global.io());
@@ -1210,9 +946,13 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
             self.pending_bytes.store(0, .monotonic);
             self.write_mutex.unlock(global.io());
             const t = std.Thread.spawn(.{}, writeThreadMain, .{self}) catch |err| {
+                // No writer, no stream: not connected, and dialed again
+                // when asked (never read as the pane's end).
                 log.warn("attach: {s} reconnect writer failed err={}", .{ self.id, err });
                 sys.close(nfd);
-                return null;
+                self.setTransport(2);
+                if (!self.awaitRedial(quit, null)) return null;
+                continue;
             };
             t.setName(global.io(), "io-writer") catch {};
             self.write_thread = t;
@@ -1226,23 +966,47 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
             return nfd;
         } else |err| if (self.host != null) {
             log.info("attach: remote {s} not reached yet ({}); again in {d}ms", .{ self.id, err, pause_ms });
-            // In slices: teardown joins this thread and must not wait on it.
-            var slept: u64 = 0;
-            while (slept < pause_ms and !closing.load(.acquire)) : (slept += 50) sys.sleep(50);
+            // Woken at once by teardown or by an asked redial.
+            if (!self.awaitRedial(quit, pause_ms)) return null;
             pause_ms = @min(pause_ms * 2, 2_000);
-            continue;
+        } else {
+            log.warn("attach: {s} has no daemon to dial ({}); not connected until asked to dial again", .{ self.id, err });
+            self.setTransport(2);
+            if (!self.awaitRedial(quit, null)) return null;
         }
-        if (!self.specExists()) {
-            log.info("attach: {s} spec gone while reconnecting; a deliberate end", .{self.id});
-            return null;
-        }
-        if (sys.since(began) >= restore_at) {
-            self.restoreDaemons();
-            restore_wait = @min(restore_wait * 2, 10_000);
-            restore_at = sys.since(began) + restore_wait;
-        }
-        sys.sleep(200);
     }
+}
+
+/// Sleeps until the embedder asks for a dial (`vigilRedial`), teardown
+/// writes the quit pipe, or `within_ms` passes (null: no clock, an event
+/// only). False when it is teardown: the caller returns without a word.
+fn awaitRedial(self: *Attach, quit: posix.fd_t, within_ms: ?u64) bool {
+    var pfds = [2]posix.pollfd{
+        .{ .fd = quit, .events = posix.POLL.IN, .revents = 0 },
+        .{ .fd = self.redial_pipe[0], .events = posix.POLL.IN, .revents = 0 },
+    };
+    _ = posix.poll(&pfds, if (within_ms) |ms| @intCast(ms) else -1) catch |err| {
+        // A wait that cannot be made must not become a spin: say so and
+        // stand not connected until teardown.
+        log.err("attach: {s} cannot wait for a redial err={}", .{ self.id, err });
+        return false;
+    };
+    if (pfds[0].revents != 0) return false;
+    // Every ask so far is this one dial (the pipe does not block).
+    var drain: [64]u8 = undefined;
+    while (true) {
+        const n = posix.read(self.redial_pipe[0], &drain) catch break;
+        if (n < drain.len) break;
+    }
+    return true;
+}
+
+/// The embedder asks for the stream to be dialed again now (its pane's
+/// daemon started, or the person pressed Reconnect). Nothing while the
+/// stream is open. Any thread; never blocks.
+pub fn vigilRedial(self: *Attach) void {
+    if (self.redial_pipe[1] < 0) return;
+    _ = sys.write(self.redial_pipe[1], "r") catch {};
 }
 
 /// Thread-local state: the socket and the reader.
@@ -1289,6 +1053,13 @@ const sys = struct {
 
     fn cloexec(fd: posix.fd_t) !void {
         if (posix.errno(c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC))) != .SUCCESS) return unexpected("fcntl");
+    }
+
+    fn nonblocking(fd: posix.fd_t) !void {
+        const flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+        if (flags < 0) return unexpected("fcntl F_GETFL");
+        const nonblock: c_int = @bitCast(@as(u32, @bitCast(c.O{ .NONBLOCK = true })));
+        if (c.fcntl(fd, c.F.SETFL, flags | nonblock) < 0) return unexpected("fcntl F_SETFL");
     }
 
     fn connect(fd: posix.fd_t, path: []const u8) !void {
@@ -1345,20 +1116,6 @@ const sys = struct {
 
     fn shutdown(fd: posix.fd_t) void {
         _ = c.shutdown(fd, c.SHUT.RDWR);
-    }
-
-    /// A child's wait status once it has exited; null when it cannot be
-    /// waited for (said in the log).
-    fn waitpid(pid: posix.pid_t) ?u32 {
-        var status: c_int = 0;
-        while (true) switch (posix.errno(c.waitpid(pid, &status, 0))) {
-            .SUCCESS => return @bitCast(status),
-            .INTR => continue,
-            else => |err| {
-                log.warn("waitpid failed errno={}", .{err});
-                return null;
-            },
-        };
     }
 
     /// Milliseconds since `began` on the monotonic clock.

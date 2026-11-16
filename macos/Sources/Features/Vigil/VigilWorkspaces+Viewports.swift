@@ -209,6 +209,9 @@ extension VigilWorkspaces {
             stashedQuickTree = nil
         }
         persist()
+        // Out of the floating terminal its tabs and splits can be edited
+        // again: panes whose program finished while it floated close now.
+        if !finishedWaiting.isEmpty { closeFinished(finishedWaiting) }
     }
 
     // MARK: Mirroring (the quick terminal shows a pane that lives in a window)

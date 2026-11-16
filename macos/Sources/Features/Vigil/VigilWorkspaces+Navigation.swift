@@ -208,19 +208,24 @@ extension VigilWorkspaces {
     /// command from another Mac, an undo).
     func reconcileViews(of name: String) {
         let tabs = workspaces[name]?.tabs ?? []
-        // A tab kept warm while another is on screen: its tree was built
-        // for the panes it had. Mounted as it is after the registry gave
-        // the tab a pane or took one (an undo into it, a move, a command
-        // from another Mac), the window showed fewer panes than the
-        // sidebar listed (2026-11-16). Released to its capture instead:
-        // the next mount builds the whole tab and adopts the same views.
+        // A tab kept warm while another is on screen: its tree and dock were
+        // built for the panes it had. Mounted as it is after the registry
+        // gave the tab a pane or took one (an undo into it, a move, a
+        // command from another Mac), the window showed fewer panes than the
+        // sidebar listed (2026-11-16). It is kept only while a tab of the
+        // registry has exactly its panes and exactly its dock's; any other
+        // (changed, or matching no tab at all) is released to its capture:
+        // the next mount builds the whole tab, adopting the views that
+        // still exist. A split's ratio is not compared: only an edit in
+        // the tab's own window moves one, and that tab is then not held.
         if let held = workspaces[name]?.held, !held.isEmpty {
             workspaces[name]!.held = held.filter { runtime in
                 let live = Set(runtime.tree.compactMap(\.vigilAttachId))
-                // The tree's panes, never the dock's: a dock is no part of it.
-                guard let tab = tabs.first(where: { !live.isDisjoint(with: $0.panes.map(\.id)) }),
-                      Set(tab.panes.map(\.id)) != live else { return true }
-                registryLog.info("warm tab released to its capture: its panes changed", ["workspace": name, "panes": tab.panes.map(\.id).sorted(), "warm": live.sorted()])
+                let docked = Set(runtime.dock?.views.compactMap(\.vigilAttachId) ?? [])
+                if tabs.contains(where: { Set($0.panes.map(\.id)) == live && Set($0.dock?.panes.map(\.id) ?? []) == docked }) { return true }
+                registryLog.info("warm tab released to its capture: no tab has its panes and dock", [
+                    "workspace": name, "warm": live.sorted(), "dock": docked.sorted(),
+                ])
                 runtime.dock?.unmount()
                 return false
             }
@@ -323,6 +328,18 @@ extension VigilWorkspaces {
             }
             setPriority(pane: request.anchor, priority)
             return done("Priority set.")
+        case "open_pane":
+            // A pane that is not running, opened by a person at another
+            // device: what opening it here would do (`tend`).
+            guard holds(request.anchor) else {
+                return .failure(request, "not_found", "That pane is no longer in this workspace on its Mac.")
+            }
+            switch tend(request.anchor, asked: true, why: "opened from another device") {
+            case .accepted: return done("Opening on its Mac.")
+            case .waiting: return done("It is being started on its Mac; it opens when that is over.")
+            case .noted, .unknown:
+                return .failure(request, "not_opened", "Its Mac did not open it; the pane says why there.")
+            }
         case "close_workspace":
             kill(name: request.session)
             sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": request.operation, "workspace": request.session])

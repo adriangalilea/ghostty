@@ -158,6 +158,12 @@ extension VigilWorkspaces {
     func syncOwnerGrids() {
         for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects {
             guard let id = view.vigilAttachId, view.surface != nil else { continue }
+            // Another Mac's pane that does not run there: said on the view,
+            // which would otherwise dial it for good.
+            if let device = view.vigilHost {
+                let note = remoteNote(id, on: device)
+                if view.vigilNote != note { view.vigilNote = note }
+            }
             if view.vigilHost != nil, view.vigilTransportState == 2 { continue }
             // A remote pane's size fact rides the host's directory (the file
             // is on the other Mac); a mirror that never claims would otherwise

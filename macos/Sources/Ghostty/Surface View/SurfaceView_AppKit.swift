@@ -246,6 +246,10 @@ extension Ghostty {
         /// session API birth); nil = the login shell. Captured with the
         /// pane so a cold remount after the daemon died spawns it again.
         private(set) var vigilCommand: String?
+        /// The folder this view was made for (a split inherits its
+        /// neighbour's): where the pane's daemon is born when the view comes
+        /// first, and the pane's folder until its program reports one.
+        let vigilBirthFolder: String?
 
         /// Vigil: a mirror is a second client on a pane whose HOME view
         /// sits in a session window (the summon panel). Never the pane's
@@ -270,9 +274,26 @@ extension Ghostty {
         @Published private(set) var vigilSizeLost = false
         @Published private(set) var vigilTransportState: UInt8 = 0
         @Published private(set) var vigilInputPending = false
-        /// This Mac's pane, its stream lost and being dialed again.
-        @Published private(set) var vigilReviving = false
-        private var vigilWasOpen = false
+        /// How this Mac's pane stands while this view has no stream to it,
+        /// said by the pane's one owner (`VigilWorkspaces.tend`): what the
+        /// view shows in place of a live terminal's silence, and what its
+        /// button does. Nil while the stream is open or being made.
+        @Published var vigilNote: VigilPaneNote?
+        /// The stream was open at least once: losing it is a loss, where a
+        /// view that never had one is a pane being opened.
+        private(set) var vigilWasOpen = false
+
+        /// Dial this view's stream (its pane's daemon listens now). Asked
+        /// whether or not the view knows its stream is lost yet: the ask
+        /// waits in the attach until its reader is ready for it.
+        func vigilRedial() {
+            guard let surface, vigilHost == nil else { return }
+            ghostty_surface_vigil_redial(surface)
+        }
+
+        /// The pane is a shell from here on: its program is not run again
+        /// (it ended, and the person opened the pane anew).
+        func vigilForgetCommand() { vigilCommand = nil }
         private var vigilKeyEvents: UInt64 = 0
         private var vigilKeyActions: UInt64 = 0
         private var vigilLastKeyAt: TimeInterval?
@@ -300,18 +321,19 @@ extension Ghostty {
             guard let surface else { return }
             let status = ghostty_surface_vigil_transport_status(surface)
             if vigilTransportState != status.state {
-                // This Mac's pane whose stream was open and is not now: the
-                // view says so until it is open again, never drawn as a
-                // live terminal meanwhile. Why the stream ended is not
-                // known here.
-                if vigilHost == nil {
-                    // The attach says closed, then connecting, on its way
-                    // back: both are "not open after having been".
-                    if status.state == 1 { vigilWasOpen = true }
-                    let reviving = vigilWasOpen && status.state != 1
-                    if reviving != vigilReviving {
-                        vigilReviving = reviving
-                        daemonLog.warn(reviving ? "pane's stream lost; dialing again" : "pane's stream open again", ["pane": vigilAttachId])
+                // This Mac's pane. A view makes no daemon and judges no
+                // program: with no stream to dial (2: its reader waits to be
+                // told) it tells the pane's owner, which starts, restores or
+                // reopens the pane, or says on this view why it does not.
+                if vigilHost == nil, let pane = vigilAttachId {
+                    if status.state == 1 {
+                        if vigilNote != nil || !vigilWasOpen { daemonLog.info("pane's stream open", ["pane": pane, "again": vigilWasOpen]) }
+                        vigilWasOpen = true
+                        vigilNote = nil
+                    } else if status.state == 2 {
+                        daemonLog.warn("pane has no stream", ["pane": pane, "lost": vigilWasOpen])
+                        VigilWorkspaces.shared.tend(pane, dialFailed: true,
+                                                    why: vigilWasOpen ? "a view lost its stream" : "a view found no stream")
                     }
                 }
                 vigilTransportState = status.state
@@ -549,6 +571,7 @@ extension Ghostty {
             self.vigilAttachId = baseConfig?.vigilAttach
             self.vigilHost = (baseConfig?.vigilHost).flatMap { $0.isEmpty ? nil : $0 }
             self.vigilCommand = baseConfig?.vigilAttach != nil ? baseConfig?.command : nil
+            self.vigilBirthFolder = baseConfig?.vigilAttach != nil ? baseConfig?.workingDirectory : nil
             self.vigilMirror = baseConfig?.vigilMirror ?? false
             self.markedText = NSMutableAttributedString()
 

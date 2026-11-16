@@ -292,6 +292,7 @@ extension VigilWorkspaces {
             home.layoutShape = "" // a new revision, even for a shape seen before
             workspaces[origin.workspace] = home
             reconcileViews(of: origin.workspace)
+            revive(burial.tabs.flatMap(\.paneIds))
             persist()
             graveyardLog.info("exhumed into its workspace", ["burial": name, "workspace": origin.workspace, "tab": origin.tab, "beside": origin.beside])
             return origin.workspace
@@ -299,6 +300,7 @@ extension VigilWorkspaces {
         burial.buriedFrom = nil
         burial.layoutShape = ""
         workspaces[name] = burial
+        revive(burial.tabs.flatMap(\.paneIds))
         persist()
         open(name: name)
         graveyardLog.info("exhumed as itself", ["workspace": name])
@@ -370,7 +372,9 @@ extension VigilWorkspaces {
         let bin = Self.vigildBin
         let sorted = ids.sorted()
         let agentDir = agentStateDir
-        DispatchQueue.global(qos: .userInitiated).async {
+        // Behind any birth in flight (`lifeQueue`): a pane closed while its
+        // daemon is still being approved is killed once that is over.
+        Self.lifeQueue.async {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: bin)
             p.arguments = ["kill"] + sorted
@@ -411,26 +415,28 @@ extension VigilWorkspaces {
         Self.restoreFromSpecs(why: "launch")
     }
 
-    /// The same respawn while the app runs. A daemon can die under a
-    /// running app with its spec on disk (2026-11-16: the Dock sent
-    /// SIGTERM to the broker and four pane daemons; why those is not
-    /// known). It is asked for when a pidfile leaves with its spec
-    /// standing and again when the hub is back, since a restore needs the
-    /// hub's seal and the hub may have died in the same blow. A pane on
-    /// screen is also brought back by its own stream (`Attach.reconnect`);
-    /// this is for the panes no view holds.
-    func respawnMachineKilled(why: String) {
-        let dead = (workspaces.values.flatMap(ownedPaneIds) + graveyard.values.flatMap(ownedPaneIds))
-            .filter { Self.specExists($0) && !Self.daemonAlive($0) }
-        guard !dead.isEmpty else { return }
-        daemonLog.warn("daemons gone with their specs on disk; respawning", ["panes": dead.sorted(), "why": why])
-        Self.respawning.async { Self.restoreFromSpecs(why: why) }
+    /// The views of these panes that have no stream dial: their daemons
+    /// listen now (`<pane>.up`, or a birth this app just made). Mirrors
+    /// too; a remote pane's stream is its hub's to redial. Asked of every
+    /// view of the pane, whatever this thread last heard of its stream: a
+    /// reader that lost it may be waiting already while the word of that is
+    /// still on its way here, and an ask it does not need waits in its pipe
+    /// and costs one dial at its next loss.
+    func redial(_ panes: [String]) {
+        guard !panes.isEmpty else { return }
+        let ids = Set(panes)
+        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
+        where view.vigilHost == nil && view.vigilAttachId.map(ids.contains) == true {
+            view.vigilRedial()
+        }
     }
 
-    /// One restore at a time, off the main thread: it waits for vigild.
-    private nonisolated static let respawning = DispatchQueue(label: "vigil.respawn", qos: .userInitiated)
-
-    private nonisolated static func restoreFromSpecs(why: String) {
+    /// `vigild restore` of `panes` and no others; every spec when none is
+    /// named (launch, before anything is read). What vigild said of each
+    /// pane it did not bring up ("refused…", "ended", "unreadable…"), by
+    /// pane.
+    @discardableResult
+    nonisolated static func restoreFromSpecs(why: String, panes: [String] = []) -> [String: String] {
         // The app is the births' authority (`PaneBirth`), which waits for
         // the restore before anything is read: its report goes to a file (a
         // pipe nobody drains would stall a long report).
@@ -439,21 +445,30 @@ extension VigilWorkspaces {
             FileManager.default.createFile(atPath: report.path, contents: nil, attributes: [.posixPermissions: 0o600])
             let handle = try FileHandle(forWritingTo: report)
             defer { try? FileManager.default.removeItem(at: report) }
-            let status = try PaneBirth.run(["restore"], vouch: Self.vouch, output: handle, errors: handle)
+            let status = try PaneBirth.run(["restore"] + panes, vouch: Self.vouch, output: handle, errors: handle)
             try? handle.close()
             let data = (try? Data(contentsOf: report)) ?? Data()
             // Lossy on purpose: a bad byte reads as U+FFFD, the rest still reads.
             // swiftlint:disable:next optional_data_string_conversion
             let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
             let respawned = lines.filter { $0.hasSuffix(" up") }.count
-            if respawned > 0 || status != 0 {
+            let others = lines.filter { !$0.hasSuffix(" up") }
+            if respawned > 0 || status != 0 || !others.isEmpty {
                 daemonLog.info("machine-killed daemons respawned from their specs", [
-                    "respawned": respawned, "status": status, "why": why,
-                    "output": lines.filter { !$0.hasSuffix(" up") },
+                    "respawned": respawned, "status": status, "why": why, "output": others,
                 ])
             }
+            // `vigild: '<pane>' <what it says>`, one line per pane.
+            var said: [String: String] = [:]
+            for line in others {
+                let parts = line.split(separator: "'", maxSplits: 2, omittingEmptySubsequences: false)
+                guard parts.count == 3 else { continue }
+                said[String(parts[1])] = parts[2].trimmingCharacters(in: .whitespaces)
+            }
+            return said
         } catch {
             daemonLog.error("vigild restore could not run", ["err": error])
+            return Dictionary(uniqueKeysWithValues: panes.map { ($0, "vigild restore could not run: \(error)") })
         }
     }
 
@@ -509,44 +524,6 @@ extension VigilWorkspaces {
             guard !owned.contains(id), !Self.daemonAlive(id) else { continue }
             try? fm.removeItem(at: agentStateDir.appendingPathComponent(entry))
         }
-    }
-
-    /// A program that FINISHED cleanly closes its pane, whether or not a
-    /// window shows it. Its daemon ended and took its spec along (`exit`, a
-    /// one-shot command done: the spec is the first file vigild removes),
-    /// so the ids given are panes whose daemon is not starting: at launch,
-    /// one whose pidfile just left, or a birth no snapshot saw running
-    /// (`bornUnseen`). A spec still on disk is machine death, restore's to
-    /// answer. A placed pane learns the end from its stream and ghostty's
-    /// exit path buries it; this is the same close for a pane no window
-    /// shows, whose command would otherwise run again at its next mount. A
-    /// program that ended badly left its record (`<pane>.ended`): that pane
-    /// stays, marked, for the person to open or close (Adrian 2026-10-30:
-    /// an end nobody saw is lost visibility). A workspace whose every pane
-    /// finished is killed whole.
-    func closeFinished(_ ids: some Sequence<String>) {
-        var finished: [String: [String]] = [:]
-        // A pane brought from another Mac and not opened yet has no daemon
-        // by design: it never started, so it did not finish.
-        let dormant = dormantPanes
-        for id in ids where !Self.specExists(id) && !Self.endRecorded(id) && !dormant.contains(id) {
-            if let view = liveView(attachId: id), placed(view) { continue }
-            guard let at = locate(id), !at.buried else { continue }
-            finished[at.owner, default: []].append(id)
-        }
-        guard !finished.isEmpty else { return }
-        for (name, ids) in finished {
-            graveyardLog.info("finished panes closed", ["workspace": name, "panes": ids])
-            if Set(ownedPaneIds(workspaces[name]!)).isSubset(of: ids), !windowed(name) {
-                kill(name: name)
-                continue
-            }
-            for id in ids {
-                guard let taken = takePane(id) else { continue }
-                buryPane(taken.pane, from: name, origin: taken.origin)
-            }
-        }
-        persist()
     }
 
 }

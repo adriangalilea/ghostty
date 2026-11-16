@@ -695,8 +695,6 @@ pub fn init(
                 break :backend .{ .attach = try termio.Attach.init(alloc, .{
                     .id = attach_id,
                     .cwd = if (config.@"working-directory") |wd| wd.value() else null,
-                    .session = config.env.map.get("VIGIL_WORKSPACE"),
-                    .command = if (config.@"vigil-command") |c| .{ .shell = c } else null,
                     .host = config.@"vigil-host",
                     .fd = if (config.@"vigil-fd" >= 0) @intCast(config.@"vigil-fd") else null,
                     .explicit_claim = config.@"vigil-explicit-claim",
@@ -921,6 +919,12 @@ pub fn vigilClaim(self: *Surface, claim: bool) void {
 /// `termio.Attach.viewport`.
 pub fn vigilViewport(self: *Surface) void {
     self.queueIo(.{ .vigil_viewport = {} }, .unlocked);
+}
+
+/// Vigil: dial this surface's lost stream again. See
+/// `termio.Attach.vigilRedial`.
+pub fn vigilRedial(self: *Surface) void {
+    self.queueIo(.{ .vigil_redial = {} }, .unlocked);
 }
 
 /// Immutable identity of this attach client, shared with its hello receipt.

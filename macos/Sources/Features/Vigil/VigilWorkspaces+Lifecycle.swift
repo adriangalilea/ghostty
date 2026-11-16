@@ -29,6 +29,7 @@ extension VigilWorkspaces {
         config.workingDirectory = cwd
         config.environmentVariables["VIGIL_WORKSPACE"] = name
         config.vigilAttach = "vigil-\(name)-0"
+        fresh.insert("vigil-\(name)-0")
         return (config, name, cwd)
     }
 
@@ -37,6 +38,7 @@ extension VigilWorkspaces {
     func registerWorkspace(controller: TerminalController, name: String, cwd: String) {
         var session = Workspace(name: name, label: name, cwd: cwd)
         session.paneSeq = 1 // index 0 consumed at birth
+        fresh.insert("vigil-\(name)-0")
         workspaces[name] = session
         registerMember(controller, name: name)
         lifecycleLog.info("born from a window", ["workspace": name, "cwd": cwd])
@@ -52,6 +54,7 @@ extension VigilWorkspaces {
         var session = Workspace(name: name, label: name, cwd: cwd)
         session.tabs = [Registry.Tab(panes: [Registry.Pane(id: "vigil-\(name)-0", cwd: cwd, command: command)], layout: nil)]
         session.paneSeq = 1 // index 0 consumed at birth
+        fresh.insert("vigil-\(name)-0")
         workspaces[name] = session
         lifecycleLog.info("born", ["workspace": name, "cwd": cwd, "command": command])
         return name
@@ -114,33 +117,8 @@ extension VigilWorkspaces {
     /// this call exists to kill.
     @discardableResult
     func startDaemon(pane: Registry.Pane, session: String) -> Bool {
-        // The folder is vigild's to resolve (a missing one falls back to its
-        // nearest existing parent), never this process's working directory.
-        var args = ["new", pane.id, "--cwd", pane.cwd]
-        if let cmd = pane.command {
-            if cmd.hasPrefix("direct:") {
-                // ghostty's command syntax: `direct:` argv, space-separated.
-                args.append("--")
-                args += cmd.dropFirst("direct:".count)
-                    .split(separator: " ").map(String.init)
-            } else {
-                args += ["-c", cmd]
-            }
-        }
-        var env = ProcessInfo.processInfo.environment
-        env["VIGIL_WORKSPACE"] = session
-        do {
-            let status = try PaneBirth.run(args, environment: env, vouch: Self.vouch)
-            if status == 0 {
-                daemonLog.info("daemon up", ["pane": pane.id])
-                return true
-            } else {
-                daemonLog.error("daemon spawn failed", ["pane": pane.id, "status": status])
-            }
-        } catch {
-            daemonLog.error("daemon spawn failed", ["pane": pane.id, "err": error])
-        }
-        return false
+        fresh.remove(pane.id)
+        return Self.birth(pane, session: session)
     }
 
     /// New Workspace (⌘N, menu-bar New Workspace, overview `n`): the fresh
@@ -225,6 +203,9 @@ extension VigilWorkspaces {
         }
         let minted = max(session.paneSeq, maxIndex + 1)
         workspaces[name]!.paneSeq = minted + 1
+        // An id made now names a pane that has not run: the one fact that
+        // lets its daemon be started unasked (`PaneLife.tend`).
+        fresh.insert("vigil-\(name)-\(minted)")
         return minted
     }
 
@@ -559,20 +540,8 @@ extension VigilWorkspaces {
         config.workingDirectory = pane.cwd
         config.environmentVariables["VIGIL_WORKSPACE"] = name
         config.vigilAttach = pane.id
-        config.command = openEnded(pane) ? nil : pane.command
+        config.command = pane.command
         return config
-    }
-
-    /// A pane whose program ended badly opens as a shell in its folder,
-    /// never its command again (a launcher would launch twice); vigild shows
-    /// the final screen and how it ended above the prompt and spends the
-    /// record. The command leaves the registry here, so no later mount or
-    /// restore runs it either. True when the pane is such a pane.
-    private func openEnded(_ pane: Registry.Pane) -> Bool {
-        guard !Self.daemonAlive(pane.id), Self.endRecorded(pane.id) else { return false }
-        if pane.command != nil { editPane(pane.id) { $0.command = nil } }
-        lifecycleLog.info("ended pane opened as a shell", ["pane": pane.id, "was": pane.command])
-        return true
     }
 
     /// A captured dock comes back as live tenant surfaces: their daemons

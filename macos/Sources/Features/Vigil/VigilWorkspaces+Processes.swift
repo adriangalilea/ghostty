@@ -104,15 +104,28 @@ extension VigilWorkspaces {
         FileManager.default.fileExists(atPath: VigilPaths.panes.appendingPathComponent("\(pane).spec").path)
     }
 
-    /// Its program ended badly and the record is still unopened.
+    /// Its daemon recorded how its last run ended (`<pane>.ended`), and no
+    /// run since has spent the record: opened again it is a shell, never
+    /// its old command run a second time.
     nonisolated static func endRecorded(_ pane: String) -> Bool {
         FileManager.default.fileExists(atPath: VigilPaths.panes.appendingPathComponent("\(pane).ended").path)
     }
 
+    /// The record itself, read from disk; nil when there is none or it
+    /// does not read (said by `paneEnd` when the facts carry it).
+    nonisolated static func endOnDisk(_ pane: String) -> PaneEnd? {
+        guard let data = try? Data(contentsOf: VigilPaths.panes.appendingPathComponent("\(pane).ended")) else { return nil }
+        return try? JSONDecoder().decode(PaneEnd.self, from: data)
+    }
+
     func paneFacts(_ pane: String) -> Directory.Facts {
-        Directory.Facts(alive: true, tree: paneFileLines(pane, "tree"),
+        // Not alive: its daemon was found gone with its pidfile left.
+        Directory.Facts(alive: !facts.gone.contains(pane), tree: paneFileLines(pane, "tree"),
                         pid: paneFileLines(pane, "pid").joined(separator: "\n"),
-                        title: paneFileLines(pane, "title").first, glance: paneGlance(pane), ended: paneEnd(pane),
+                        title: paneFileLines(pane, "title").first, glance: paneGlance(pane),
+                        // A row is marked by an end that keeps its pane; a
+                        // clean one's pane is closing.
+                        ended: paneEnd(pane).flatMap { $0.clean ? nil : $0 },
                         conflict: paneConflict(pane))
     }
 
@@ -127,8 +140,8 @@ extension VigilWorkspaces {
         }
     }
 
-    /// `panes/<pane>.ended`: its program ended badly and nobody has opened
-    /// it yet (`PaneEnd`). A record that does not read is said once per
+    /// `panes/<pane>.ended`: how its last run ended (`PaneEnd`), until a
+    /// new run or a close spends it. A record that does not read is said once per
     /// change of the file, and the pane is drawn unmarked.
     func paneEnd(_ pane: String) -> PaneEnd? {
         guard let file = facts.files["panes/\(pane).ended"] else { return nil }

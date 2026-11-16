@@ -97,6 +97,10 @@ pub const Message = union(enum) {
     /// placeholder frame's. Until then no size reaches the daemon.
     vigil_viewport: void,
 
+    /// Vigil: dial the pane's stream again now (the embedder saw its
+    /// daemon start, or the person asked). Nothing while it is open.
+    vigil_redial: void,
+
     /// Vigil: ask the daemon for a fresh dump of the screen (a viewport
     /// that was suspended and missed the stream).
     vigil_dump: void,

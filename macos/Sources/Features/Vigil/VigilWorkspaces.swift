@@ -67,6 +67,25 @@ class VigilWorkspaces {
     /// the dead rows of 2026-10-30. Until a snapshot shows the pidfile, its
     /// absence is the end.
     var bornUnseen: Set<String> = []
+    /// Panes whose daemon is being started or restored now (`PaneLife`):
+    /// nothing else is decided about one until that is over.
+    var births: Set<String> = []
+    /// Panes whose program finished and which could not be closed yet (in
+    /// the floating terminal, a refused edit): looked at again with every
+    /// change of the facts.
+    var finishedWaiting: Set<String> = []
+    /// Panes a view reported as having no stream before any registry listed
+    /// them (a pane just made: its view exists before its tree's change).
+    var awaitingRegistry: Set<String> = []
+    /// Panes made in this run of the app that have not run yet (filled where
+    /// an id is made, `nextPaneIndex` and a workspace's first pane): the one
+    /// thing that lets a pane with nothing on disk be started unasked. Any
+    /// other pane with nothing on disk ran once and lost its files, and is
+    /// started by a person's press alone.
+    var fresh: Set<String> = []
+    /// Panes the person asked to open while that could not be done yet (a
+    /// birth in flight, a daemon on its way out): opened when it can.
+    var openAsked: Set<String> = []
     lazy var factsLoader = VigilFacts(root: VigilPaths.root.path, report: { event in
         switch event {
         case .seenUnwritable(let pane, let error): factsLog.error("seen mark not written", ["pane": pane, "err": error])
@@ -90,14 +109,37 @@ class VigilWorkspaces {
                                                 "state": file.text.trimmingCharacters(in: .whitespacesAndNewlines),
                                                 "revision": snapshot.revision])
             }
+            // A daemon's word on how its program ended, new or changed.
+            let ends = snapshot.files.compactMap { key, file -> String? in
+                guard key.hasPrefix("panes/"), key.hasSuffix(".ended"), self.facts.files[key]?.revision != file.revision else { return nil }
+                return String(key.dropFirst("panes/".count).dropLast(".ended".count))
+            }
+            // A daemon that listens now: its `.up` file is new or replaced
+            // (written after its socket; a pidfile comes long before).
+            let listening = snapshot.files.compactMap { key, file -> String? in
+                guard key.hasPrefix("panes/"), key.hasSuffix(".up"), self.facts.files[key]?.revision != file.revision else { return nil }
+                return String(key.dropFirst("panes/".count).dropLast(".up".count))
+            }
+            // A daemon found gone with its pidfile still there (killed
+            // outright: it wrote and removed nothing), or one that was
+            // watched has exited (its pidfile may have left before it did).
+            let gone = snapshot.gone.subtracting(self.facts.gone)
+            let exited = snapshot.exits != self.facts.exits
+            let first = self.facts.revision == 0
             self.facts = snapshot
             // A brought pane whose daemon now exists was opened.
             self.wake(self.dormantPanes.filter { snapshot.files["panes/\($0).pid"] != nil })
-            self.closeFinished(Set(left).union(self.bornUnseen))
-            // Gone with its spec standing: machine death, respawned.
-            if left.contains(where: Self.specExists) { self.respawnMachineKilled(why: "pidfile left") }
-            // Answered: a birth whose spec is gone was closed or marked ended.
-            self.bornUnseen = self.bornUnseen.filter { Self.specExists($0) }
+            self.closeFinished(Set(left).union(self.bornUnseen).union(ends).union(self.finishedWaiting))
+            // A view with no stream dials its pane's daemon.
+            if !first { self.redial(listening) }
+            // Gone with its spec standing: its daemon died and its program's
+            // end was never stated. Restored, those panes alone, whether or
+            // not a view holds them.
+            if exited || !gone.isEmpty || left.contains(where: Self.specExists) {
+                self.daemonsLeft(why: exited ? "a daemon exited" : gone.isEmpty ? "pidfile left" : "daemon found gone")
+            }
+            // Answered: a birth with its end recorded, or with no spec left.
+            self.bornUnseen = self.bornUnseen.filter { Self.specExists($0) && !Self.endRecorded($0) }
             // Owner grids and the content receipt read these facts.
             self.syncOwnerGrids()
             // A long command that just ended is news, the same as an
@@ -972,7 +1014,7 @@ class VigilWorkspaces {
     private func capturedPane(_ view: Ghostty.SurfaceView, id: String, previous: Registry.Pane?) -> Registry.Pane {
         Registry.Pane(
             id: id,
-            cwd: view.pwd ?? previous?.cwd ?? FileManager.default.homeDirectoryForCurrentUser.path,
+            cwd: view.pwd ?? previous?.cwd ?? view.vigilBirthFolder ?? FileManager.default.homeDirectoryForCurrentUser.path,
             title: capturedTitle(of: view) ?? previous?.title,
             label: previous?.label,
             emoji: previous?.emoji,
@@ -1048,7 +1090,18 @@ class VigilWorkspaces {
         var carried: [Registry.Pane] = []
         var inheritedLabel: String?
         var inheritedEmoji: String?
-        for id in after.subtracting(before) where !listedHere.contains(id) {
+        /// Panes this tree took back from a burial: an undo.
+        var unburied: [String] = []
+        let joined = after.subtracting(before)
+        // Once the registry holds them (below): a pane taken back may have
+        // ended and is reopened; a view that reported no stream before its
+        // pane was registered (a pane just made) is answered now.
+        defer {
+            revive(unburied)
+            for id in joined where awaitingRegistry.remove(id) != nil { tend(id, why: "it joined the registry") }
+        }
+        for id in joined where !listedHere.contains(id) {
+            if locate(id)?.buried == true { unburied.append(id) }
             guard let taken = takePane(id) else {
                 registryLog.info("fresh pane joins", ["pane": id, "workspace": name])
                 continue

@@ -58,11 +58,12 @@ pub const Backend = union(Kind) {
     /// input) belongs in this stream. Exec's child is born with every
     /// thread; an attach often joins a pane long alive (a mount, a remount,
     /// a mirror), and typing it there would type into a running program at
-    /// every click: only the attach that created the pane's daemon takes it.
+    /// every click. An attach starts no program (its pane's home does), so
+    /// it never takes it.
     pub fn takesConfiguredInput(self: *const Backend) bool {
         return switch (self.*) {
             .exec => true,
-            .attach => |*attach| attach.created_daemon,
+            .attach => false,
         };
     }
 
@@ -97,6 +98,13 @@ pub const Backend = union(Kind) {
         switch (self.*) {
             .exec => {},
             .attach => |*attach| attach.vigilViewport(),
+        }
+    }
+
+    pub fn vigilRedial(self: *Backend) void {
+        switch (self.*) {
+            .exec => {},
+            .attach => |*attach| attach.vigilRedial(),
         }
     }
 

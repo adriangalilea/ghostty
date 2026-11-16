@@ -354,6 +354,7 @@ fn drainMailbox(
                 try self.flushCoalescedResize(io, data);
                 try io.backend.vigilViewport();
             },
+            .vigil_redial => io.backend.vigilRedial(),
             .vigil_dump => try io.backend.vigilDump(),
             .write_small => |v| try io.queueWrite(
                 data,

@@ -1183,13 +1183,6 @@ command: ?Command = null,
 /// mode). Set per-surface through the embedding API only.
 @"vigil-explicit-claim": bool = false,
 
-/// Vigil: the command the embedder asked this pane's daemon to run, or
-/// null for a shell pane. Kept apart from `command` because finalize fills
-/// that with the login shell, and a daemon handed the shell as a command
-/// runs a program pane (its resume line becomes the program, and quitting
-/// the agent ends the pane). Set per-surface through the embedding API only.
-@"vigil-command": ?[:0]const u8 = null,
-
 /// Vigil: the letters whose held repeats belong to macOS's press-and-hold
 /// accent popup, not the terminal (case-insensitive). Holding one shows the
 /// popup and types nothing more; the choice replaces the letter. Any other
