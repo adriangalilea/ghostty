@@ -408,6 +408,30 @@ extension VigilWorkspaces {
     /// and before collectOrphans, so a restored daemon is never read as
     /// an orphan of a session the registry still lists.
     func respawnMachineKilledDaemons() {
+        Self.restoreFromSpecs(why: "launch")
+    }
+
+    /// The same respawn while the app runs. A daemon can die under a
+    /// running app with its spec on disk (the Dock force-quitting an app
+    /// run from a pane signals every process of that pane's coalition,
+    /// the broker and other panes' daemons among them: four panes on
+    /// 2026-11-16). It is asked for when a pidfile leaves with its spec
+    /// standing and again when the hub is back, since a restore needs the
+    /// hub's seal and the hub may have died in the same blow. A pane on
+    /// screen is also brought back by its own stream (`Attach.reconnect`);
+    /// this is for the panes no view holds.
+    func respawnMachineKilled(why: String) {
+        let dead = (workspaces.values.flatMap(ownedPaneIds) + graveyard.values.flatMap(ownedPaneIds))
+            .filter { Self.specExists($0) && !Self.daemonAlive($0) }
+        guard !dead.isEmpty else { return }
+        daemonLog.warn("daemons gone with their specs on disk; respawning", ["panes": dead.sorted(), "why": why])
+        Self.respawning.async { Self.restoreFromSpecs(why: why) }
+    }
+
+    /// One restore at a time, off the main thread: it waits for vigild.
+    private nonisolated static let respawning = DispatchQueue(label: "vigil.respawn", qos: .userInitiated)
+
+    private nonisolated static func restoreFromSpecs(why: String) {
         // The app is the births' authority (`PaneBirth`), which waits for
         // the restore before anything is read: its report goes to a file (a
         // pipe nobody drains would stall a long report).
@@ -425,7 +449,7 @@ extension VigilWorkspaces {
             let respawned = lines.filter { $0.hasSuffix(" up") }.count
             if respawned > 0 || status != 0 {
                 daemonLog.info("machine-killed daemons respawned from their specs", [
-                    "respawned": respawned, "status": status,
+                    "respawned": respawned, "status": status, "why": why,
                     "output": lines.filter { !$0.hasSuffix(" up") },
                 ])
             }

@@ -208,6 +208,9 @@ final class VigilRemote: ObservableObject {
                 self.hubWatch?.cancel()
                 self.hubWatch = nil
                 self.followPeers()
+                // A restore needs the hub's seal: one refused while it was
+                // down is asked again now.
+                VigilWorkspaces.shared.respawnMachineKilled(why: "hub back")
             }
         }
         watch.setCancelHandler { close(fd) }

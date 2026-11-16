@@ -36,9 +36,8 @@ const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.io_attach);
 
-/// How long a local pane's daemon may take to come back (a reconnect's
-/// window), and so how long a `vigild new`/`restore` this app answers may
-/// run: past it, that vigild is killed and the wait ends.
+/// How long a `vigild new`/`restore` this app answers may run: past it,
+/// that vigild is killed and the wait ends.
 const daemon_wait_ms: i64 = 30_000;
 
 /// vigild's authorizeBirth waits 5 s for the birth authority's answer and
@@ -1186,11 +1185,22 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
     self.setTransport(0);
 
     const began = std.Io.Timestamp.now(global.io(), .awake);
-    var restored = false;
+    // Local: when the next `vigild restore` is asked, and the wait after it.
+    // One beat first for a respawn already in flight (the login agent, the
+    // app's own), then again with a wait that grows to 10 s: a restore is
+    // refused while vigil-agent is down, and what killed the daemon may
+    // have killed it too (the Dock force-quitting an app of the pane's
+    // coalition, 2026-11-16: one refused restore left a dead terminal
+    // that the next key closed, and the close buried a pane with a spec).
+    var restore_at: i64 = 1_000;
+    var restore_wait: i64 = 1_000;
     // Remote: a pause that grows to 2 s between dials (a dial to a Mac out
     // of reach itself takes up to tether's 10 s to say so).
     var pause_ms: u64 = 200;
-    while (self.host != null or sys.since(began) < daemon_wait_ms) {
+    // Both run until the pane is back, its view is torn down, or (local)
+    // its spec is gone: a spec with no daemon under a running app is
+    // machine death, and respawning from it is never wrong.
+    while (true) {
         if (closing.load(.acquire)) return null;
         const dialed = if (self.host) |host| self.connectHub(host) else self.connectSock();
         if (dialed) |nfd| {
@@ -1226,16 +1236,13 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
             log.info("attach: {s} spec gone while reconnecting; a deliberate end", .{self.id});
             return null;
         }
-        // One beat for a respawn already in flight (the login agent, the
-        // app's launch restore); then respawn it from here.
-        if (!restored and sys.since(began) >= 1_000) {
-            restored = true;
+        if (sys.since(began) >= restore_at) {
             self.restoreDaemons();
+            restore_wait = @min(restore_wait * 2, 10_000);
+            restore_at = sys.since(began) + restore_wait;
         }
         sys.sleep(200);
     }
-    log.warn("attach: {s} daemon did not come back in {d}ms", .{ self.id, daemon_wait_ms });
-    return null;
 }
 
 /// Thread-local state: the socket and the reader.
