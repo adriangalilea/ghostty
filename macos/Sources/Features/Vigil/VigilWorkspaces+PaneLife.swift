@@ -1,5 +1,6 @@
 import AppKit
 import GhosttyKit
+import os
 import VigilWire
 
 /// What a view of this Mac's pane shows while it has no stream to it: how
@@ -65,10 +66,38 @@ extension VigilWorkspaces {
     }
 
     private func note(_ pane: String, _ note: VigilPaneNote?) {
-        for view in views(of: pane) where view.vigilNote != note { view.vigilNote = note }
+        var said = note
+        // An ended pane whose agent left word of how to resume: opening it
+        // resumes that conversation, and the button says so.
+        if let note, note.offers == Self.opens, Self.resumes(pane) {
+            said = VigilPaneNote(says: note.says, offers: "Open and resume", explains: note.explains, symbol: note.symbol)
+        }
+        for view in views(of: pane) where view.vigilNote != said { view.vigilNote = said }
     }
 
+    private static let opens = "Open a shell"
+
+    /// Its agent left a resume pointer: a shell born for this pane types it.
+    nonisolated static func resumes(_ pane: String) -> Bool {
+        FileManager.default.fileExists(atPath: VigilPaths.panes.appendingPathComponent("\(pane).resume").path)
+    }
+
+    /// `said`: why the last try to start or open it did nothing (the birth
+    /// authority's refusal, vigild's word on a restore). Shown whatever the
+    /// pane's standing: a pane that stays ended because opening it was
+    /// refused says that, never only that it ended.
     private static func note(for standing: PaneStanding, said: String?) -> VigilPaneNote? {
+        guard let note = plainNote(for: standing, said: said) else { return nil }
+        switch standing {
+        case .ended, .lost:
+            guard let said else { return note }
+            return VigilPaneNote(says: "Not opened", offers: "Try again", explains: "Opening it did nothing: \(said). \(note.explains)", symbol: "exclamationmark.triangle")
+        case .running, .died, .unborn:
+            return note
+        }
+    }
+
+    private static func plainNote(for standing: PaneStanding, said: String?) -> VigilPaneNote? {
         switch standing {
         case .running:
             return VigilPaneNote(says: "Not connected", offers: "Reconnect", explains: "This pane's daemon runs and this view has no connection to it. What you type does not reach it.", symbol: "wifi.slash")
@@ -144,7 +173,7 @@ extension VigilWorkspaces {
             }
             bear(entry, in: at.owner, why: why)
             return .accepted
-        case .ended(let end) where end.clean && !asked:
+        case .ended(let end) where end.clean && !asked && registered(pane)?.reopened != end.run:
             closeFinished([pane])
             return .accepted
         case .ended, .lost:
@@ -178,7 +207,7 @@ extension VigilWorkspaces {
     func remoteNote(_ pane: String, on device: String) -> VigilPaneNote? {
         guard let remote = VigilRemote.shared.host(device), let facts = remote.directory?.panes[pane], !facts.alive else { return nil }
         if let end = facts.ended {
-            return VigilPaneNote(says: "Ended: \(end.how)", offers: "Open on \(remote.name)", explains: "\(end.program.isEmpty ? "Its program" : end.program) ended on \(remote.name) (\(end.how)). Opening it starts a shell in its folder there; the program is not run again.", symbol: "stop.circle")
+            return VigilPaneNote(says: "Ended: \(end.how)", offers: "Open on \(remote.name)", explains: "\(end.program.isEmpty ? "Its program" : end.program) ended on \(remote.name) (\(end.how)). Opening it starts a shell in its folder there; the program is not run again, and an agent that left word of how to resume its conversation does so.", symbol: "stop.circle")
         }
         return VigilPaneNote(says: "Not running on \(remote.name)", offers: "Start it there", explains: "This pane has no daemon on \(remote.name). Starting it restores it from its record there, or opens a shell in its folder.", symbol: "bolt.slash")
     }
@@ -186,6 +215,13 @@ extension VigilWorkspaces {
     /// `vigild new` for one pane, this app its birth authority. Off the
     /// main thread.
     nonisolated static func birth(_ pane: Registry.Pane, session: String) -> Bool {
+        birthSaying(pane, session: session) == nil
+    }
+
+    /// The same, saying why it did not come up (nil: it is up): the birth
+    /// authority's own words when it refused (a seal that does not verify, a
+    /// hub that does not answer), else where to read more.
+    nonisolated static func birthSaying(_ pane: Registry.Pane, session: String) -> String? {
         // The folder is vigild's to resolve (a missing one falls back to its
         // nearest existing parent), never this process's working directory.
         var args = ["new", pane.id, "--cwd", pane.cwd]
@@ -200,17 +236,24 @@ extension VigilWorkspaces {
         }
         var env = ProcessInfo.processInfo.environment
         env["VIGIL_WORKSPACE"] = session
+        let refused = OSAllocatedUnfairLock<String?>(initialState: nil)
         do {
-            let status = try PaneBirth.run(args, environment: env, vouch: Self.vouch)
+            let status = try PaneBirth.run(args, environment: env, vouch: { question in
+                let answer = Self.vouch(question)
+                if case .failure(let refusal) = answer { refused.withLock { $0 = refusal.description } }
+                return answer
+            })
             if status == 0 {
                 daemonLog.info("daemon up", ["pane": pane.id])
-                return true
+                return nil
             }
-            daemonLog.error("daemon spawn failed", ["pane": pane.id, "status": status])
+            let said = refused.withLock { $0 }
+            daemonLog.error("daemon spawn failed", ["pane": pane.id, "status": status, "refused": said])
+            return said.map { "refused: \($0)" } ?? "vigild exited \(status); the pane's log says why"
         } catch {
             daemonLog.error("daemon spawn failed", ["pane": pane.id, "err": error])
+            return "vigild could not be run: \(error)"
         }
-        return false
     }
 
     private func bear(_ pane: Registry.Pane, in workspace: String, why: String) {
@@ -218,9 +261,9 @@ extension VigilWorkspaces {
         fresh.remove(pane.id)
         daemonLog.info("pane's daemon asked for", ["pane": pane.id, "workspace": workspace, "command": pane.command, "cwd": pane.cwd, "why": why])
         Self.lifeQueue.async {
-            let up = Self.birth(pane, session: workspace)
+            let failed = Self.birthSaying(pane, session: workspace)
             Task { @MainActor in
-                VigilWorkspaces.shared.settled([pane.id], said: up ? [:] : [pane.id: "its log says why (mise run log daemon)"])
+                VigilWorkspaces.shared.settled([pane.id], said: failed.map { [pane.id: $0] } ?? [:])
             }
         }
     }
@@ -237,8 +280,10 @@ extension VigilWorkspaces {
                 openAsked.remove(pane)
                 note(pane, nil)
                 redial([pane])
-            case .ended(let end) where end.clean && !openAsked.contains(pane):
-                // Born and over already (a one-shot command).
+            case .ended(let end) where end.clean && !openAsked.contains(pane) && said[pane] == nil && registered(pane)?.reopened != end.run:
+                // Born and over already (a one-shot command). Never the end
+                // of the run before, standing because this birth was
+                // refused: that one says why below.
                 closeFinished([pane])
             default:
                 if openAsked.remove(pane) != nil {
@@ -302,14 +347,84 @@ extension VigilWorkspaces {
             openAsked.insert(pane)
             return .waiting
         }
-        let was = registered(pane)?.command
-        editPane(pane) { $0.command = nil }
-        for view in views(of: pane) { view.vigilForgetCommand() }
-        persist()
-        guard let entry = registered(pane) else { return .unknown }
-        daemonLog.info("ended pane opened as a shell", ["pane": pane, "was": was, "why": why])
+        guard let entry = madeShell(pane, why: why) else { return .noted }
         bear(entry, in: at.owner, why: why)
         return .accepted
+    }
+
+    /// The pane's registry entry as a shell's, saved: its program out of the
+    /// registry and its views, and the registry on disk read back to hold
+    /// it so, in a live workspace. Nil, with a note on its views, when that
+    /// could not be saved: nothing is then started, since a registry on
+    /// disk that still named the old program, or still held the pane in a
+    /// burial, would undo the opening at the next launch.
+    private func madeShell(_ pane: String, why: String) -> Registry.Pane? {
+        let was = registered(pane)?.command
+        // The end being answered, by its run: it closes this pane no more
+        // (`closeFinishedNow`), also when the shell asked for here is
+        // refused and the record therefore stays on disk.
+        let answered = Self.endOnDisk(pane)?.run
+        editPane(pane) {
+            $0.command = nil
+            if let answered { $0.reopened = answered }
+        }
+        for view in views(of: pane) { view.vigilForgetCommand() }
+        persist()
+        guard let entry = registered(pane), Self.savedCommand(of: pane, in: persistURL) == .some(nil) else {
+            daemonLog.error("ended pane not opened: the registry could not be saved without its program", ["pane": pane, "was": was])
+            note(pane, VigilPaneNote(says: "Not opened", offers: "Try again", explains: "This pane's registry entry could not be saved as a shell's, so nothing was started. The app's log says why.", symbol: "exclamationmark.triangle"))
+            return nil
+        }
+        daemonLog.info("ended pane opened as a shell", ["pane": pane, "was": was, "why": why])
+        return entry
+    }
+
+    /// Open a pane and say what happened, on this thread and done when it
+    /// returns: for a command whose reply is kept and answers a retry
+    /// (`open_pane`), which may say "done" only of what is done. Nil: its
+    /// daemon runs. Else why it does not.
+    func openNow(_ pane: String, why: String) -> String? {
+        guard let at = locate(pane), !at.buried else { return "no workspace of this Mac lists it" }
+        guard !births.contains(pane) else { return "it is being started" }
+        let entry: Registry.Pane
+        switch Self.standing(pane) {
+        case .running:
+            redial([pane])
+            return nil
+        case .died:
+            births.insert(pane)
+            let said = Self.restoreFromSpecs(why: why, panes: [pane])
+            settled([pane], said: said)
+            return Self.daemonAlive(pane) ? nil : (said[pane] ?? "it was not restored")
+        case .ended, .lost:
+            guard !Self.daemonAlive(pane) else { return "its last daemon is still closing" }
+            guard let shell = madeShell(pane, why: why) else { return "its registry entry could not be saved as a shell's" }
+            entry = shell
+        case .unborn:
+            guard let listed = registered(pane) else { return "no workspace of this Mac lists it" }
+            entry = listed
+        }
+        births.insert(pane)
+        fresh.remove(pane)
+        let failed = Self.birthSaying(entry, session: at.owner)
+        settled([pane], said: failed.map { [pane: $0] } ?? [:])
+        return failed
+    }
+
+    /// The command the registry ON DISK holds for a pane: `.some(nil)` a
+    /// pane listed with none, `.some(command)` one listed with it, nil when
+    /// the file does not read or does not list the pane.
+    nonisolated static func savedCommand(of pane: String, in file: URL) -> String?? {
+        guard let data = try? Data(contentsOf: file),
+              let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data) else { return nil }
+        // Where it lives, never where it rests: a burial listing it is the
+        // close being undone, and says nothing of the undo having been saved.
+        for workspace in saved where workspace.buriedUntil == nil {
+            for tab in workspace.tabs ?? [] {
+                if let found = (tab.panes + (tab.dock?.panes ?? [])).first(where: { $0.id == pane }) { return .some(found.command) }
+            }
+        }
+        return nil
     }
 
     /// Panes taken back from a burial (an undo, from the tray or a split's
@@ -339,14 +454,35 @@ extension VigilWorkspaces {
     /// window goes to the next workspace). A program that ended any other
     /// way keeps its pane, marked, for the person to open or close (Adrian
     /// 2026-10-30: an end nobody saw is lost visibility).
+    ///
+    /// Asked from anywhere, it runs in a turn of the main thread of its own
+    /// and reads the registry as it stands then: a close is a structural
+    /// edit, and made inside another one (a kill reclaiming the floating
+    /// terminal, a command, a tree's change) it would edit a workspace the
+    /// outer operation still holds, and turn one asked close into two.
     func closeFinished(_ ids: some Sequence<String>) {
+        finishedAsked.formUnion(ids)
+        guard !finishedPassDue, !finishedAsked.isEmpty else { return }
+        finishedPassDue = true
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                let owner = VigilWorkspaces.shared
+                owner.finishedPassDue = false
+                let asked = owner.finishedAsked
+                owner.finishedAsked = []
+                owner.closeFinishedNow(asked)
+            }
+        }
+    }
+
+    private func closeFinishedNow(_ ids: Set<String>) {
         // The ids say which workspaces to look at; what is closed is read
         // from each workspace as it stands now, every pane of it: a pane
         // kept beside its dock is closable once the dock's pane has gone,
         // and a workspace is finished when all of it is, however many
         // deliveries its ends came in.
         var touched: Set<String> = []
-        for id in Set(ids) {
+        for id in ids {
             guard let at = locate(id), !at.buried else {
                 finishedWaiting.remove(id)
                 continue
@@ -362,7 +498,10 @@ extension VigilWorkspaces {
                 closed = false
                 let owned = ownedPaneIds(session)
                 let ends = owned.sorted().compactMap { id -> (id: String, end: PaneEnd)? in
-                    guard !births.contains(id), !openAsked.contains(id), let end = Self.endOnDisk(id), end.clean else { return nil }
+                    guard !births.contains(id), !openAsked.contains(id), let end = Self.endOnDisk(id), end.clean,
+                          // An end the person already answered by opening
+                          // the pane again closes it no more.
+                          registered(id)?.reopened != end.run else { return nil }
                     return (id, end)
                 }
                 guard !ends.isEmpty else { break }

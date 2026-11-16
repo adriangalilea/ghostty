@@ -74,6 +74,11 @@ class VigilWorkspaces {
     /// the floating terminal, a refused edit): looked at again with every
     /// change of the facts.
     var finishedWaiting: Set<String> = []
+    /// Panes to look at in the next pass of `closeFinished`, and whether a
+    /// pass is already due: it runs in a turn of its own, never inside the
+    /// operation that asked (a kill, a reclaim, a command).
+    var finishedAsked: Set<String> = []
+    var finishedPassDue = false
     /// Panes a view reported as having no stream before any registry listed
     /// them (a pane just made: its view exists before its tree's change).
     var awaitingRegistry: Set<String> = []
@@ -1019,7 +1024,8 @@ class VigilWorkspaces {
             label: previous?.label,
             emoji: previous?.emoji,
             command: view.vigilCommand ?? previous?.command,
-            priority: previous?.priority)
+            priority: previous?.priority,
+            reopened: previous?.reopened)
     }
 
     /// A live tree as registry panes (DFS leaf order) + split shape.

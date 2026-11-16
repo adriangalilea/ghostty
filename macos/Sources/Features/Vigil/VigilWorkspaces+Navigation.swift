@@ -334,12 +334,13 @@ extension VigilWorkspaces {
             guard holds(request.anchor) else {
                 return .failure(request, "not_found", "That pane is no longer in this workspace on its Mac.")
             }
-            switch tend(request.anchor, asked: true, why: "opened from another device") {
-            case .accepted: return done("Opening on its Mac.")
-            case .waiting: return done("It is being started on its Mac; it opens when that is over.")
-            case .noted, .unknown:
-                return .failure(request, "not_opened", "Its Mac did not open it; the pane says why there.")
+            // Done before it is answered, as a split or a new tab is: this
+            // reply is kept on disk and answers a retry, so "committed" is
+            // said only of a daemon that runs.
+            if let why = openNow(request.anchor, why: "opened from another device") {
+                return .failure(request, "not_opened", "Not opened on its Mac: \(why).")
             }
+            return done("Open on its Mac.")
         case "close_workspace":
             kill(name: request.session)
             sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": request.operation, "workspace": request.session])
