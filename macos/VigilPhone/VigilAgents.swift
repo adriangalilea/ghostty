@@ -73,6 +73,12 @@ enum VigilAgents {
         do { senders = try AgentsActivity.key.senders() } catch {
             VigilPhone.shared.receipts.error("agents", "note senders unreadable: every Mac's notes stay generic until it is met", ["err": error])
         }
+        // The same Macs sign a turn's note, which the notification
+        // extensions open from the keychain: kept there at every launch (a
+        // phone that knew its Macs before that key existed has it written).
+        do { try TurnNotification.key.keep(senders) } catch {
+            VigilPhone.shared.receipts.error("agents", "turn note senders not kept: a turn's notification stays generic", ["err": error])
+        }
         Task {
             for await data in Activity<AgentsActivity>.pushToStartTokenUpdates {
                 startToken = data.map { String(format: "%02x", $0) }.joined()
@@ -133,6 +139,7 @@ enum VigilAgents {
         guard next != senders else { return }
         do {
             try AgentsActivity.key.keep(next)
+            try TurnNotification.key.keep(next)
             senders = next
             VigilPhone.shared.receipts.info("agents", "note senders kept", ["macs": next.homes.count])
         } catch {
@@ -247,7 +254,8 @@ enum VigilAgents {
         do {
             route = AgentsRoute(start: startToken, token: tokens[mac]?.token, born: tokens[mac]?.born,
                                 at: Date().timeIntervalSince1970, environment: VigilAuthz.apns.rawValue,
-                                key: try AgentsActivity.routeKey(), alert: alertToken, rings: rings)
+                                key: try AgentsActivity.routeKey(), alert: alertToken,
+                                alertKey: alertToken == nil ? nil : try TurnNotification.routeKey(), rings: rings)
         } catch {
             return VigilPhone.shared.receipts.error("agents", "no key to give", ["mac": String(mac.prefix(10)), "err": error])
         }

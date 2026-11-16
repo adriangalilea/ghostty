@@ -12,7 +12,7 @@ import VigilWire
 /// are hidden (Info.plist): this is the whole of what shows above the
 /// replies, which stay the system's buttons (`TurnNotification.categories`).
 ///
-/// It opens the note itself, with the activity key in vigil's App Group,
+/// It opens the note itself, with the turn key in its keychain group,
 /// as the notification extension did: a note it cannot open is drawn from
 /// the words that extension already wrote. A reply chosen under it is
 /// said here ("Sending …") and handed to the app, which types it into the

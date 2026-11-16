@@ -6,7 +6,7 @@ import VigilActivity
 /// Opens what a Mac sealed to this phone, where its keys are: a followed
 /// pane's turn that ended (`TurnNotification.open`: the pane, its Mac, what
 /// it said, a reply under it), signed by that Mac's note key and opened
-/// with the activity key in vigil's App Group; else a followed pane's
+/// with the turn key in its keychain group (`TurnNotification.key`); else a followed pane's
 /// question through authz (`RequestNotification.open`, shared with Authz
 /// for iPhone: who asks, on which Mac, Allow / Deny when it can be answered
 /// right there). A note is one kind or the other: its signature names its
