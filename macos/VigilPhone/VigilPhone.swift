@@ -1079,7 +1079,18 @@ final class VigilPhone: ObservableObject {
 
     /// A live stream to one pane (`proxy`), as an fd for the Attach backend:
     /// one end of a socketpair, the other bridged to the tether stream.
+    ///
+    /// Opened only while a scene is active: a pane's stream says someone is
+    /// looking at it (its Mac marks it viewed from the phone), and a wake
+    /// in the background (a push, a notification's reply) has nobody
+    /// looking. Every caller comes through here, so the rule is here alone.
     func attach(_ host: Host, pane: String, preview: Bool = false) async throws -> Int32 {
+        guard active else {
+            receipts.info("stream", "not opened: no scene is active", [
+                "mac": host.name, "pane": pane, "for": preview ? "preview" : "screen",
+            ])
+            throw WireError.refused("vigil is not on screen")
+        }
         let stream = try await VigilLink.stream(linked(), device: host.id, .proxy(pane))
         var fds: [Int32] = [-1, -1]
         guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
@@ -1234,6 +1245,10 @@ final class VigilPhone: ObservableObject {
     }
 
     private func allocatePreviews() {
+        // Slots are handed out only while a scene is active (`attach` opens
+        // nothing otherwise): rows that report frames during a wake in the
+        // background get none, and ask when the app is back in front.
+        guard active else { return }
         let viewport = CGRect(origin: .zero, size: treeViewport)
         let wanted = rowFrames
             .filter { $0.value.intersects(viewport) }
@@ -1344,13 +1359,24 @@ final class VigilPhone: ObservableObject {
     }
 
     /// The app is in front (its scene active): what it presents is in front
-    /// of you.
+    /// of you, and only then does a pane's stream open (`attach`).
     private var active = false
-    func scene(active: Bool) {
+
+    /// `background`: the app left the screen (not merely covered: the app
+    /// switcher, a system sheet). Its connections close (`VigilAuthz.leave`)
+    /// and every preview slot is taken back, so no row dials again when its
+    /// stream ends or a directory arrives during a wake; active again, the
+    /// rows in view get their slots and dial.
+    func scene(active: Bool, background: Bool) {
+        if background, !previewed.isEmpty {
+            previewed = []
+            receipts.info("tree", "previews", ["panes": [String](), "why": "the app left the screen"])
+        }
         guard self.active != active else { return }
         self.active = active
         receipts.info("scene", active ? "active" : "not active")
         reportShown()
+        if active { allocatePreviews() }
     }
 
     /// What its Mac's authz was last told this phone shows: (home, pane).

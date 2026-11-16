@@ -52,7 +52,7 @@ struct VigilPhoneApp: App {
                         VigilAuthz.shared.leave()
                     default: break
                     }
-                    VigilPhone.shared.scene(active: phase == .active)
+                    VigilPhone.shared.scene(active: phase == .active, background: phase == .background)
                 }
     }
 }
