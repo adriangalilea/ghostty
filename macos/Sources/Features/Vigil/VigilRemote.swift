@@ -160,8 +160,23 @@ final class VigilRemote: ObservableObject {
         followingMachine.removeAll()
     }
 
+    /// One dial of the hub's Macs stream at a time, and none while one is
+    /// open. `hubChanged`: its folder changed while a dial was in flight,
+    /// so a dial that fails is made again at once.
+    private var peersDialing = false
+    private var peersOpen = false
+    private var hubChanged = false
+
     private func followPeers() {
-        guard !stopped else { return }
+        guard !stopped, !peersDialing, !peersOpen else { return }
+        peersDialing = true
+        hubChanged = false
+        // Watched before it is dialed, never after a dial failed: a hub that
+        // comes up between a refused dial and the watch being set changes
+        // its folder once, unseen, and nothing dials it again (2026-11-17, a
+        // drill: the broker back within a second, its Mac's dead pane
+        // restored a minute later, by an unrelated event).
+        awaitHub()
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let failure: (any Error)?
             do {
@@ -177,7 +192,16 @@ final class VigilRemote: ObservableObject {
                     let first = !answered
                     answered = true
                     Task { @MainActor [weak self] in
-                        self?.peers(peers)
+                        guard let self else { return }
+                        if first {
+                            // Open: its folder is no longer watched (the
+                            // broker replaces files there all day).
+                            self.peersDialing = false
+                            self.peersOpen = true
+                            self.hubWatch?.cancel()
+                            self.hubWatch = nil
+                        }
+                        self.peers(peers)
                         if first { VigilWorkspaces.shared.restoreDied(why: "the hub answers") }
                     }
                 }
@@ -193,7 +217,11 @@ final class VigilRemote: ObservableObject {
                     remoteLog.info("macs stream closed by the hub; waiting for the hub")
                 }
                 self.unfollowAll()
-                self.awaitHub()
+                self.peersDialing = false
+                self.peersOpen = false
+                // Its folder changed while this dial was out: the hub may be
+                // up by now. Otherwise the watch set before the dial stands.
+                if self.hubChanged { self.followPeers() } else { self.awaitHub() }
             }
         }
     }
@@ -214,6 +242,12 @@ final class VigilRemote: ObservableObject {
         watch.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                // During a dial the change is kept for its end; the watch
+                // stays set, so nothing between the two is lost.
+                if self.peersDialing {
+                    self.hubChanged = true
+                    return
+                }
                 self.hubWatch?.cancel()
                 self.hubWatch = nil
                 self.followPeers()
