@@ -300,9 +300,10 @@ extension Ghostty {
             guard let surface else { return }
             let status = ghostty_surface_vigil_transport_status(surface)
             if vigilTransportState != status.state {
-                // This Mac's pane whose daemon went away under it (a kill
-                // that left its spec): the view says so until the daemon
-                // is back, never drawn as a live terminal meanwhile.
+                // This Mac's pane whose stream was open and is not now: the
+                // view says so until it is open again, never drawn as a
+                // live terminal meanwhile. Why the stream ended is not
+                // known here.
                 if vigilHost == nil {
                     // The attach says closed, then connecting, on its way
                     // back: both are "not open after having been".
@@ -310,7 +311,7 @@ extension Ghostty {
                     let reviving = vigilWasOpen && status.state != 1
                     if reviving != vigilReviving {
                         vigilReviving = reviving
-                        daemonLog.warn(reviving ? "pane's daemon gone; its view waits for it" : "pane's daemon back; its view is live", ["pane": vigilAttachId])
+                        daemonLog.warn(reviving ? "pane's stream lost; dialing again" : "pane's stream open again", ["pane": vigilAttachId])
                     }
                 }
                 vigilTransportState = status.state

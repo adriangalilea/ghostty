@@ -412,10 +412,9 @@ extension VigilWorkspaces {
     }
 
     /// The same respawn while the app runs. A daemon can die under a
-    /// running app with its spec on disk (the Dock force-quitting an app
-    /// run from a pane signals every process of that pane's coalition,
-    /// the broker and other panes' daemons among them: four panes on
-    /// 2026-11-16). It is asked for when a pidfile leaves with its spec
+    /// running app with its spec on disk (2026-11-16: the Dock sent
+    /// SIGTERM to the broker and four pane daemons; why those is not
+    /// known). It is asked for when a pidfile leaves with its spec
     /// standing and again when the hub is back, since a restore needs the
     /// hub's seal and the hub may have died in the same blow. A pane on
     /// screen is also brought back by its own stream (`Attach.reconnect`);
@@ -426,28 +425,6 @@ extension VigilWorkspaces {
         guard !dead.isEmpty else { return }
         daemonLog.warn("daemons gone with their specs on disk; respawning", ["panes": dead.sorted(), "why": why])
         Self.respawning.async { Self.restoreFromSpecs(why: why) }
-    }
-
-    /// Every close of a surface, said with its author before anything
-    /// acts on it (2026-11-16: two panes were buried and the log could not
-    /// say what had asked). The core tells one thing, whether the pane's
-    /// program lives: alive, a person asked (a key, the pane's menu);
-    /// not, the program ended and the surface closes itself. A program
-    /// said to have ended while the pane's spec stands did not end (a
-    /// deliberate end removes the spec first): that close is refused,
-    /// true returned, and the daemon asked for again.
-    nonisolated static func closeAsked(_ view: Ghostty.SurfaceView, programAlive: Bool) -> Bool {
-        MainActor.assumeIsolated {
-            guard let pane = view.vigilAttachId else { return false }
-            let foreign = view.vigilMirror || view.vigilHost != nil
-            if !programAlive, !foreign, specExists(pane) {
-                graveyardLog.error("pane close refused: its program is said to have ended and its spec stands", ["pane": pane])
-                shared.respawnMachineKilled(why: "a close of a pane whose spec stands")
-                return true
-            }
-            graveyardLog.info("pane close asked", ["pane": pane, "by": programAlive ? "person" : "program ended", "mirror": foreign])
-            return false
-        }
     }
 
     /// One restore at a time, off the main thread: it waits for vigild.

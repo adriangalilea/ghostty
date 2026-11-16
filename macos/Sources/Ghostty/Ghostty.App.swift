@@ -290,10 +290,6 @@ extension Ghostty {
 
         static func closeSurface(_ userdata: UnsafeMutableRawPointer?, processAlive: Bool) {
             let surface = self.surfaceUserdata(from: userdata)
-            // vigil: every surface close passes here once, with whether its
-            // program lives: the one place its author is known and said,
-            // and where a close that is no end is refused.
-            if VigilWorkspaces.closeAsked(surface, programAlive: processAlive) { return }
             NotificationCenter.default.post(name: Notification.ghosttyCloseSurface, object: surface, userInfo: [
                 "process_alive": processAlive,
             ])

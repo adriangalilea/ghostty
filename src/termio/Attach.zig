@@ -1189,9 +1189,9 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool)) ?posix.fd_t {
     // One beat first for a respawn already in flight (the login agent, the
     // app's own), then again with a wait that grows to 10 s: a restore is
     // refused while vigil-agent is down, and what killed the daemon may
-    // have killed it too (the Dock force-quitting an app of the pane's
-    // coalition, 2026-11-16: one refused restore left a dead terminal
-    // that the next key closed, and the close buried a pane with a spec).
+    // have killed it too (2026-11-16, a SIGTERM from the Dock to both:
+    // one refused restore left a dead terminal that the next key closed,
+    // and the close buried a pane with a spec).
     var restore_at: i64 = 1_000;
     var restore_wait: i64 = 1_000;
     // Remote: a pause that grows to 2 s between dials (a dial to a Mac out

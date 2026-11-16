@@ -194,7 +194,7 @@ extension Ghostty {
                 if surfaceView.vigilReviving {
                     VStack {
                         HStack {
-                            Label("Its terminal stopped · bringing it back…", systemImage: "arrow.clockwise")
+                            Label("Not connected to its terminal", systemImage: "arrow.clockwise")
                             Spacer()
                         }
                         .font(.caption)
@@ -203,7 +203,7 @@ extension Ghostty {
                         Spacer()
                     }
                     .padding(6)
-                    .help("This pane's daemon was ended from outside vigil. It is started again from its record; what ran in it does not come back.")
+                    .help("The connection to this pane's daemon was lost and is being made again. Whether the daemon ended, and why, is in the pane's log.")
                 }
                 if surfaceView.vigilHost != nil,
                    surfaceView.vigilTransportState != 1 || surfaceView.vigilInputPending {
