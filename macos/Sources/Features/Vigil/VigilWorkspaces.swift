@@ -634,6 +634,7 @@ class VigilWorkspaces {
         respawnMachineKilledDaemons()
         closeFinished(workspaces.values.flatMap(ownedPaneIds))
         collectOrphans()
+        finishPendingCloses()
         // Publish revisions for older registries without changing their
         // saved login-restoration intent before any windows are restored.
         shutdownForeground = Dictionary(uniqueKeysWithValues: workspaces.values.map { ($0.name, $0.foreground) })
@@ -1241,7 +1242,7 @@ class VigilWorkspaces {
 
     /// THE vigild path: every spawn (chown, sendraw, restore) derives it
     /// here (`VigilDictation` reads the same `VigilPaths.vigild`).
-    static let vigildBin = VigilPaths.vigild.path
+    nonisolated static let vigildBin = VigilPaths.vigild.path
 
     // MARK: Persistence (identity + cwd + captured tabs; trees are runtime)
 

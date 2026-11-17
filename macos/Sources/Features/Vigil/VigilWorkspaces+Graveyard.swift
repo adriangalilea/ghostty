@@ -371,37 +371,86 @@ extension VigilWorkspaces {
     /// works with the service down too: then this app runs that same
     /// `vigild kill` itself, which races nothing (what a restore runs from
     /// is gone before the signal).
-    private func killDaemons(_ ids: Set<String>) {
+    func killDaemons(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }
-        let bin = Self.vigildBin
+        // The intent on disk now, in this turn, before the registry without
+        // these panes is saved (a tick later): a quit or a crash from here
+        // on leaves the close to finish at the next launch, never a pane no
+        // registry lists and nothing will close.
+        do { try PendingCloses().add(ids) } catch {
+            graveyardLog.error("!! close intent not saved; closing all the same", ["panes": ids.sorted(), "err": error])
+        }
+        // Never behind a birth or a restore (`lifeQueue`): vigild's closed
+        // mark makes a close final whichever runs first, so a stuck birth
+        // holds no close back.
+        Self.closeQueue.async { Self.closePanes(ids, why: "closed") }
+    }
+
+    /// The closes asked and not yet seen done (`PendingCloses`), finished:
+    /// at launch, after the restore and the orphans.
+    func finishPendingCloses() {
+        let pending = PendingCloses().read()
+        guard !pending.isEmpty else { return }
+        graveyardLog.warn("closes left unfinished by an earlier run; finishing them", ["panes": pending.sorted()])
+        Self.closeQueue.async { Self.closePanes(pending, why: "unfinished") }
+    }
+
+    /// Every close, one at a time, off the main thread and apart from
+    /// births (`lifeQueue`).
+    nonisolated static let closeQueue = DispatchQueue(label: "vigil.pane-close", qos: .userInitiated)
+
+    /// A close, on `closeQueue`. Durable before it is asked (`PendingCloses`,
+    /// CODEX L2): the panes are written there first, and leave only when
+    /// vigild's files say each is closed (`PaneLifeClient.closed`: its closed
+    /// mark, no spec, no daemon; a dead daemon beside a spec is a pane to
+    /// restore, never a close done). Asked of the lifecycle service; when
+    /// nothing reached it, it did not answer in time or it left a pane
+    /// unclosed, this app runs the same `vigild kill` itself, fenced the
+    /// same (the closed mark is vigild's, written before anything else a
+    /// kill does, and no birth of the pane runs after it). What still does
+    /// not read closed stays pending for the next launch and the next close.
+    nonisolated static func closePanes(_ ids: Set<String>, why: String) {
         let sorted = ids.sorted()
-        let agentDir = agentStateDir
-        // Behind any birth in flight (`lifeQueue`): a pane closed while its
-        // daemon is still being approved is killed once that is over.
-        Self.lifeQueue.async {
+        let pending = PendingCloses()
+        do { try pending.add(sorted) } catch {
+            graveyardLog.error("!! close intent not saved; asking all the same", ["panes": sorted, "err": error])
+        }
+        let ask = PaneLifeClient.settle(PaneLife.Request(.close, panes: sorted))
+        let isClosed: (String) -> Bool = { PaneLifeClient.closed($0, daemonAlive: VigilWorkspaces.daemonAlive) }
+        if case .answered(let reply) = ask, !reply.ok {
+            graveyardLog.error("close refused by the lifecycle service", ["panes": sorted, "err": reply.error])
+        }
+        var open = sorted.filter { !isClosed($0) }
+        if !open.isEmpty {
+            graveyardLog.warn("closing here with vigild kill", ["panes": open, "service": "\(ask)"])
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: vigildBin)
+            p.arguments = ["kill"] + open
+            p.standardInput = FileHandle.nullDevice
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            // vigild kill bounds its own wait (it escalates to SIGKILL).
             do {
-                let reply = try PaneLife.call(PaneLife.Request(.close, panes: sorted))
-                if !reply.ok { graveyardLog.error("close refused by the lifecycle service", ["panes": sorted, "err": reply.error]) }
-            } catch {
-                graveyardLog.warn("the lifecycle service did not answer; closing with vigild kill here", ["panes": sorted, "err": error])
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: bin)
-                p.arguments = ["kill"] + sorted
-                p.standardOutput = FileHandle.nullDevice
-                p.standardError = FileHandle.nullDevice
-                try? p.run()
+                try p.run()
                 p.waitUntilExit()
+            } catch {
+                graveyardLog.error("!! vigild kill could not run", ["panes": open, "err": error])
             }
-            let survivors = sorted.filter { VigilWorkspaces.daemonAlive($0) }
-            for id in sorted where !survivors.contains(id) {
-                try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).state"))
-                try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).seen"))
-            }
-            if survivors.isEmpty {
-                graveyardLog.success("daemons dead, verified", ["panes": sorted])
-            } else {
-                graveyardLog.error("daemons still alive after their close", ["panes": survivors])
-            }
+            open = open.filter { !isClosed($0) }
+        }
+        let done = sorted.filter { !open.contains($0) }
+        let agentDir = VigilPaths.state
+        for id in done {
+            try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).state"))
+            try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).seen"))
+        }
+        do { try pending.remove(done) } catch {
+            graveyardLog.error("!! closes done but not taken off the pending list; finished again at the next launch", ["panes": done, "err": error])
+        }
+        if open.isEmpty {
+            graveyardLog.success("panes closed, verified", ["panes": sorted, "why": why])
+        } else {
+            graveyardLog.error("panes not closed; kept pending", ["panes": open, "why": why])
         }
     }
 
@@ -418,11 +467,13 @@ extension VigilWorkspaces {
     /// kill unlinks the spec BEFORE signaling, so respawning from a spec is
     /// never wrong. The login agent alone is not enough: an interrupted
     /// logout SIGTERMs every daemon and leaves launchd's restore spawn
-    /// "pending" with no login to follow. Synchronous
-    /// and before collectOrphans, so a restored daemon is never read as
-    /// an orphan of a session the registry still lists.
+    /// "pending" with no login to follow. Of the panes the registry lists
+    /// (a workspace's or a burial's) and no other, so nothing restored is
+    /// ever an orphan; awaited off the main thread like every restore
+    /// (CODEX L2: a stuck service never holds the launch). A spec no
+    /// registry lists is closed by `collectOrphans`.
     func respawnMachineKilledDaemons() {
-        Self.restoreFromSpecs(why: "launch")
+        restoreDied(why: "launch")
     }
 
     /// The views of these panes that have no stream dial: their daemons
@@ -443,16 +494,17 @@ extension VigilWorkspaces {
 
     /// The pane lifecycle service's restore of `panes` and no others; every
     /// spec when none is named (launch, before anything is read). What it
-    /// said of each pane it did not bring up ("refused: …", "ended",
-    /// "unavailable: …"), by pane; the service not answering is said of
-    /// every pane named, and nothing is restored in its place (it restores
-    /// at its own start).
-    /// `person`: a person's act asked for it (it brings back a pane the
-    /// service held for dying too often).
+    /// said of each pane it did not bring up ("refused: …", "held: …",
+    /// "ended"), by pane. Nothing reaching the service, or no answer in its
+    /// deadline, is said of every pane named: the first restores nothing
+    /// (the service restores at its own start), the second may have (each
+    /// pane's files say).
+    /// `person`: a person's act asked for these panes (it brings them back
+    /// even when the service held them).
     @discardableResult
-    nonisolated static func restoreFromSpecs(why: String, panes: [String] = [], person: Bool = false) -> [String: String] {
-        do {
-            let reply = try PaneLife.call(PaneLife.Request(.restore, panes: panes, person: person))
+    nonisolated static func restoreFromSpecs(why: String, panes: [String] = [], person: Bool = false, deadline: Duration? = nil) -> [String: String] {
+        switch PaneLifeClient.settle(PaneLife.Request(.restore, panes: panes, person: person), deadline: deadline) {
+        case .answered(let reply):
             guard reply.ok else {
                 daemonLog.error("restore refused by the lifecycle service", ["why": why, "err": reply.error])
                 return Dictionary(uniqueKeysWithValues: panes.map { ($0, reply.error ?? "the lifecycle service refused the restore") })
@@ -465,9 +517,12 @@ extension VigilWorkspaces {
                 ])
             }
             return Dictionary(notUp.map { ($0.pane, "\($0.outcome)\($0.said.map { ": \($0)" } ?? "")") }, uniquingKeysWith: { $1 })
-        } catch {
-            daemonLog.error("restore not asked: the lifecycle service did not answer", ["why": why, "err": error])
-            return Dictionary(uniqueKeysWithValues: panes.map { ($0, "\(error)") })
+        case .unanswered(let why):
+            daemonLog.error("restore not asked: nothing reached the lifecycle service", ["why": why])
+            return Dictionary(uniqueKeysWithValues: panes.map { ($0, why) })
+        case .indeterminate(let said):
+            daemonLog.error("restore asked, outcome not known", ["why": why, "said": said])
+            return Dictionary(uniqueKeysWithValues: panes.map { ($0, "not known whether it was restored: \(said)") })
         }
     }
 
@@ -497,8 +552,14 @@ extension VigilWorkspaces {
             let id = String(entry.dropLast(".lock".count))
             if !owned.contains(id), Self.daemonAlive(id) { orphans.insert(id) }
         }
+        // A spec no registry lists, its daemon dead: the lifecycle service
+        // would restore it (it restores every spec), as an orphan. Closed.
+        for entry in entries where entry.hasSuffix(".spec") && entry.hasPrefix("vigil-") {
+            let id = String(entry.dropLast(".spec".count))
+            if !owned.contains(id) { orphans.insert(id) }
+        }
         if !orphans.isEmpty {
-            daemonLog.warn("orphan daemons killed", ["panes": orphans.sorted()])
+            daemonLog.warn("orphan daemons and specs closed", ["panes": orphans.sorted()])
             killDaemons(orphans)
         }
         for entry in entries where entry.hasSuffix(".resume") && entry.hasPrefix("vigil-") {
