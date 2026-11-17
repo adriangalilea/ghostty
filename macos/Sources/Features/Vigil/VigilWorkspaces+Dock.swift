@@ -45,7 +45,7 @@ extension VigilWorkspaces {
         let cwd = controller.focusedSurface?.pwd
             ?? workspaces[name]?.cwd
             ?? FileManager.default.homeDirectoryForCurrentUser.path
-        let id = "vigil-\(name)-\(nextPaneIndex(name: name))"
+        guard let id = try? mintPane(in: name) else { return nil }
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = cwd
         config.environmentVariables["VIGIL_WORKSPACE"] = name

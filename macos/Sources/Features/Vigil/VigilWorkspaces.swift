@@ -54,7 +54,24 @@ import VigilWire
 /// instrumentation); every stored property lives here.
 @MainActor
 class VigilWorkspaces {
-    static let shared = VigilWorkspaces()
+    static let shared: VigilWorkspaces = {
+        let manager = VigilWorkspaces()
+        manager.start()
+        return manager
+    }()
+    let memberMark: (String) -> PaneFence.State
+    let nameCandidate: () -> String
+    let deliverClose: (Set<String>) -> Void
+
+    init(nameCandidate: @escaping () -> String = VigilWorkspaces.randomName,
+         memberMark: @escaping (String) -> PaneFence.State = { PaneFence.state($0, in: VigilPaths.panes) },
+         deliverClose: @escaping (Set<String>) -> Void = { ids in
+             VigilWorkspaces.closeQueue.async { VigilWorkspaces.closePanes(ids, why: "closed") }
+         }) {
+        self.nameCandidate = nameCandidate
+        self.memberMark = memberMark
+        self.deliverClose = deliverClose
+    }
     var facts = VigilFacts.Snapshot()
     /// Each pane whose glance file did not read, by the file revision last
     /// said (`paneGlance`): one warning per broken file, never per render.
@@ -640,7 +657,7 @@ class VigilWorkspaces {
     /// Panes whose leaked surface was already reported this run.
     var reportedLeaks = Set<String>()
 
-    private init() {
+    private func start() {
         Record.keep(service: "vigil")
         _ = Self.launchedAt // a static is lazy: stamp it at launch, not at the first status read
         acquireInstanceLock()

@@ -261,10 +261,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ ghostty: Ghostty.App,
         withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
         withParent explicitParent: NSWindow? = nil
-    ) -> TerminalController {
+    ) -> TerminalController? {
         // vigil: every window is a session, daemon-backed from birth. Skips
         // configs that already carry an attach id (create/resurrection/tab).
-        let vigil = VigilWorkspaces.shared.newWindowConfig(base: baseConfig)
+        let vigil: (config: Ghostty.SurfaceConfiguration, name: String, cwd: String)?
+        do { vigil = try VigilWorkspaces.shared.newWindowConfig(base: baseConfig) } catch { return nil }
         let c = TerminalController.init(ghostty, withBaseConfig: vigil?.config ?? baseConfig)
         if let vigil {
             VigilWorkspaces.shared.registerWorkspace(
@@ -464,8 +465,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // vigil: a new tab JOINS its window's session (session scope = the
         // window): daemon-backed from birth under the session's identity.
-        let vigilTab = VigilWorkspaces.shared.newTabConfig(
-            parent: parentController, base: baseConfig)
+        let vigilTab: (config: Ghostty.SurfaceConfiguration, name: String)?
+        do { vigilTab = try VigilWorkspaces.shared.newTabConfig(parent: parentController, base: baseConfig) } catch { return nil }
 
         // Create a new window and add it to the parent
         let controller = TerminalController.init(

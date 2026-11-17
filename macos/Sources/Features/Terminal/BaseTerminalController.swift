@@ -303,11 +303,10 @@ class BaseTerminalController: NSWindowController,
         // daemon-backed like every other pane of it: the whole workspace
         // survives, not just the first pane.
         guard let ghostty_app = ghostty.app else { return nil }
-        let config = VigilWorkspaces.shared.configForNewSplit(
-            in: self,
-            from: oldView,
-            base: config)
-        let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
+        let splitConfig: Ghostty.SurfaceConfiguration?
+        do { splitConfig = try VigilWorkspaces.shared.configForNewSplit(in: self, from: oldView, base: config) } catch { return nil }
+        let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: splitConfig)
+
 
         // Do the split
         let newTree: SplitTree<Ghostty.SurfaceView>

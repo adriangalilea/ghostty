@@ -347,20 +347,15 @@ extension VigilWorkspaces {
         // next launch counts it, uncertain, and keeps it (its edit may have
         // committed, CODEX5 V1). Only its mark, written when its edit is
         // refused, closes it.
-        if let failed = await startDaemonSaying(pane: planned.born, session: request.session, provisional: true) {
-            // The id was another pane's, or whether it was free could not be
-            // read: nothing ran, and nothing is this birth's to clean up; the
-            // other pane is never touched (CODEX6 W1).
-            if failed.hasPrefix("collision") || failed.hasPrefix("unknown") {
-                sessionLog.error("!! a split's pane id is not free; nothing started, nothing closed", ["pane": planned.pane.id, "said": failed])
-                persist()
-                return .failure(request, "id_in_use", "The new pane's id is in use on its Mac; nothing was started. Try again.")
-            }
-            // Its outcome may be unknown (it may run, or start late): closed,
-            // since no registry will list it, and the closed mark keeps any
-            // late birth of it from running.
-            killDaemons([planned.pane.id])
-            return .failure(request, "spawn_failed", "The terminal could not start on its Mac; its log says why (mise run log).")
+        let birth = Self.birthRequest(planned.born, session: request.session, provisional: true)
+        fresh.remove(planned.pane.id)
+        births.insert(planned.pane.id)
+        let attempt = await Self.attemptBirth(birth)
+        let failed = attempt.failure
+        settled([planned.pane.id], said: failed.map { [planned.pane.id: $0] } ?? [:])
+        if let failed {
+            if attempt.mayHaveReserved { await Self.abortBirth(birth) }
+            return .failure(request, "spawn_failed", failed)
         }
         refreshWorkspaceRevisions()
         let reply = applySessionEdit(request, preborn: planned.pane)
@@ -377,7 +372,7 @@ extension VigilWorkspaces {
             sessionLog.warn("pane born for an edit that no longer applies; closing it", [
                 "id": request.id.uuidString, "pane": planned.pane.id, "code": reply.code,
             ])
-            killDaemons([planned.pane.id])
+            await Self.abortBirth(birth)
             return reply
         }
         // Committed: the registry on disk lists it, so it is the app's.
@@ -436,7 +431,7 @@ extension VigilWorkspaces {
                 "harness": source.harness, "conversation": source.conversation, "folder": folder,
             ])
         }
-        let id = "vigil-\(request.session)-\(nextPaneIndex(name: request.session))"
+        guard let id = try? mintPane(in: request.session) else { return refused("allocation_failed", "A fresh pane identity could not be reserved.") }
         return .success((Registry.Pane(id: id, cwd: folder, command: command), Registry.Pane(id: id, cwd: folder, command: born)))
     }
 
@@ -775,7 +770,8 @@ extension VigilWorkspaces {
 
     /// A workspace born for a command, as its reply: committed only once
     /// its pane runs and vigil.json lists it.
-    private func birthReply(_ request: VigilSessionControl.Request, _ birth: Birth) -> VigilSessionControl.Reply {
+    private func birthReply(_ request: VigilSessionControl.Request, _ birth: Birth?) -> VigilSessionControl.Reply {
+        guard let birth else { return .failure(request, "allocation_failed", "A fresh pane identity could not be reserved.") }
         guard birth.running else {
             return .failure(request, "spawn_failed", "No workspace was created on its Mac: its terminal did not start, and its log says why (mise run log).")
         }

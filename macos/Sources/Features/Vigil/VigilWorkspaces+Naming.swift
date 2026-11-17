@@ -72,14 +72,14 @@ extension VigilWorkspaces {
 
     // MARK: Naming
 
-    private static let idAdjectives = [
+    private nonisolated static let idAdjectives = [
         "amber", "bold", "brave", "bright", "calm", "clever", "cosmic", "crisp",
         "daring", "eager", "gentle", "jolly", "keen", "lively", "lucid", "merry",
         "mighty", "nimble", "noble", "proud", "quiet", "rapid", "royal", "sage",
         "sleek", "snowy", "solar", "spry", "stark", "sunny", "swift", "tidal",
         "vivid", "witty", "zesty",
     ]
-    private static let idNouns = [
+    private nonisolated static let idNouns = [
         "otter", "panda", "falcon", "heron", "lynx", "badger", "cedar", "maple",
         "willow", "river", "harbor", "comet", "ember", "quartz", "canyon",
         "meadow", "glacier", "summit", "delta", "fjord", "grove", "dune", "reef",
@@ -87,15 +87,10 @@ extension VigilWorkspaces {
         "onyx", "topaz", "raven", "sparrow", "marten",
     ]
 
-    /// A fresh session id — the identity, the source of truth. A pronounceable
-    /// adjective-noun (e.g. `brave-panda`) so we can refer to a session out
-    /// loud; NOT derived from the cwd (that named everything in $HOME "adrian-N"
-    /// and made real workspaces look like cruft). The human label is a separate
-    /// device. The daemon id is `vigil-<id>-<index>`, split on the LAST dash, so
-    /// the dash in the id is safe. An id is fresh only if no workspace, burial
-    /// or pane has ever used it (`Registry.idsInUse`): a pane keeps the id it
-    /// was born under when it moves, so a workspace name alone does not say
-    /// whether `vigil-<id>-0` is free.
+    nonisolated static func randomName() -> String {
+        "\(idAdjectives.randomElement()!)-\(idNouns.randomElement()!)"
+    }
+
     func newWorkspaceId() -> String {
         let fm = FileManager.default
         let all = Array(workspaces.values) + Array(graveyard.values)
@@ -108,14 +103,11 @@ extension VigilWorkspaces {
         func taken(_ s: String) -> Bool {
             inUse.contains(s) || fm.fileExists(atPath: dumpsDir(s).path)
         }
-        func gen() -> String {
-            "\(Self.idAdjectives.randomElement()!)-\(Self.idNouns.randomElement()!)"
-        }
-        var id = gen()
+        var id = nameCandidate()
         var tries = 0
         while taken(id) {
             tries += 1
-            id = tries < 40 ? gen() : "\(gen())-\(Int.random(in: 2...999))"
+            id = tries < 40 ? nameCandidate() : "\(nameCandidate())-\(Int.random(in: 2...999))"
         }
         return id
     }

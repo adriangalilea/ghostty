@@ -199,10 +199,11 @@ extension NSApplication {
             baseConfig = nil
         }
 
-        let controller = TerminalController.newWindow(
-            appDelegate.ghostty,
-            withBaseConfig: baseConfig
-        )
+        guard let controller = TerminalController.newWindow(appDelegate.ghostty, withBaseConfig: baseConfig) else {
+            command.scriptErrorNumber = errAEEventFailed
+            command.scriptErrorString = "A pane identity could not be reserved."
+            return nil
+        }
         let createdWindowID = ScriptWindow.stableID(primaryController: controller)
 
         if let scriptWindow = scriptWindows.first(where: { $0.stableID == createdWindowID }) {
@@ -237,7 +238,7 @@ extension NSApplication {
             // The workspace now, its daemon awaited off the main thread: a
             // pane that does not start says so on its views.
             let vigil = VigilWorkspaces.shared
-            let made = vigil.apiCreate(label: label, emoji: emoji, cwd: cwd, command: program)
+            let made = try vigil.apiCreate(label: label, emoji: emoji, cwd: cwd, command: program)
             Task { @MainActor in
                 let running = await vigil.startDaemon(pane: made.pane, session: made.name)
                 _ = vigil.apiStarted(made, label: label, running: running, openWindow: openWindow)

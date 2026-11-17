@@ -61,14 +61,53 @@ extension VigilWorkspaces {
     /// final whether it lands before a birth of the pane or after.
     nonisolated static let lifeQueue = DispatchQueue(label: "vigil.pane-life", qos: .userInitiated)
 
-    /// `birthSaying` on `lifeQueue`, awaited: the main thread is free while
-    /// the service works.
-    /// `provisional`: a pane no registry lists yet (`PaneLife.Birth`).
-    nonisolated static func born(_ pane: Registry.Pane, session: String, provisional: Bool = false) async -> String? {
-        await withCheckedContinuation { done in
-            lifeQueue.async { done.resume(returning: birthSaying(pane, session: session, provisional: provisional)) }
+
+    nonisolated static func born(_ pane: Registry.Pane, session: String) async -> String? {
+        await attemptBirth(birthRequest(pane, session: session)).failure
+    }
+
+    struct BirthAttempt {
+        let result: PaneLifeClient.Called
+
+        var failure: String? {
+            switch result {
+            case .answered(let reply):
+                guard reply.ok, let outcome = reply.outcomes.first else { return reply.error ?? "No birth outcome" }
+                return outcome.outcome == "up" ? nil : [outcome.outcome, outcome.said].compactMap { $0 }.joined(separator: ": ")
+            case .unanswered(let why): return why
+            case .indeterminate(let why): return "Birth outcome unknown: " + why
+            }
+        }
+
+        var mayHaveReserved: Bool {
+            switch result {
+            case .unanswered: return false
+            case .indeterminate: return true
+            case .answered(let reply):
+                guard let outcome = reply.outcomes.first else { return reply.inFlight == true }
+                return outcome.outcome != "collision" && outcome.outcome != "closed"
+            }
         }
     }
+
+    nonisolated static func attemptBirth(_ request: PaneLife.Request) async -> BirthAttempt {
+        await withCheckedContinuation { done in
+            lifeQueue.async { done.resume(returning: BirthAttempt(result: PaneLifeClient.settle(request))) }
+        }
+    }
+
+    nonisolated static func abortBirth(_ request: PaneLife.Request) async {
+        guard let pane = request.birth?.pane else { return }
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            closeQueue.async {
+                let result = PaneLifeClient.settle(.abort(pane, birth: request.id))
+                if case .answered(let reply) = result, reply.ok { done.resume(); return }
+                daemonLog.error("provisional birth cancellation unconfirmed", ["pane": pane, "birth": request.id])
+                done.resume()
+            }
+        }
+    }
+
 
     /// `restoreFromSpecs` on `lifeQueue`, awaited.
     nonisolated static func restored(why: String, panes: [String], person: Bool) async -> [String: String] {
@@ -232,18 +271,8 @@ extension VigilWorkspaces {
         return VigilPaneNote(says: "Not running on \(remote.name)", offers: "Start it there", explains: "This pane has no daemon on \(remote.name). Starting it restores it from its record there, or opens a shell in its folder.", symbol: "bolt.slash")
     }
 
-    /// One pane's daemon started by the pane lifecycle service (`PaneLife`
-    /// birth: `vigild new`, the service its birth authority with the pane
-    /// key in hand, so no broker or hub is asked), saying why it did not
-    /// come up (nil: it is up): the service's own words (a seal that does
-    /// not verify, launchd that did not take the job, a pane already
-    /// closed), that nothing reached the service (nothing was started), or
-    /// that it was asked and did not say how it went (it may have started:
-    /// `settled` reads the pane's files). Bounded: at most the birth's
-    /// deadline plus a `result`'s. On `lifeQueue` only, never main (`born`
-    /// awaits it from there).
-    nonisolated static func birthSaying(_ pane: Registry.Pane, session: String, provisional: Bool = false) -> String? {
-        dispatchPrecondition(condition: .onQueue(lifeQueue))
+
+    nonisolated static func birthRequest(_ pane: Registry.Pane, session: String, provisional: Bool = false) -> PaneLife.Request {
         // The folder is vigild's to resolve (a missing one falls back to its
         // nearest existing parent), never this process's working directory.
         var shell: String?
@@ -258,37 +287,16 @@ extension VigilWorkspaces {
         }
         let asked = PaneLife.Birth(pane: pane.id, cwd: pane.cwd, workspace: session, shellCommand: shell, argv: argv,
                                    environment: ProcessInfo.processInfo.environment, provisional: provisional)
-        // Proved to be vigil-agent before the environment is sent, and
-        // bounded (`PaneLifeClient`); an answer lost is asked for by id,
-        // never sent again.
-        switch PaneLifeClient.settle(.birth(asked)) {
-        case .answered(let reply):
-            guard reply.ok, let outcome = reply.outcomes.first else {
-                daemonLog.error("daemon not asked for: the lifecycle service refused the request", ["pane": pane.id, "err": reply.error])
-                return reply.error ?? "the lifecycle service answered nothing"
-            }
-            if outcome.outcome == "up" {
-                daemonLog.info("daemon up", ["pane": pane.id])
-                return nil
-            }
-            daemonLog.error("daemon not born", ["pane": pane.id, "outcome": outcome.outcome, "said": outcome.said])
-            return "\(outcome.outcome)\(outcome.said.map { ": \($0)" } ?? "")"
-        case .unanswered(let why):
-            daemonLog.error("daemon not asked for: nothing reached the lifecycle service", ["pane": pane.id, "why": why])
-            return why
-        case .indeterminate(let why):
-            // It may run: the pane's files say, and its views dial it if so.
-            daemonLog.error("daemon birth asked, outcome not known", ["pane": pane.id, "why": why])
-            return "not known whether it started: \(why)"
-        }
+        return .birth(asked)
     }
+
 
     private func bear(_ pane: Registry.Pane, in workspace: String, why: String) {
         births.insert(pane.id)
         fresh.remove(pane.id)
         daemonLog.info("pane's daemon asked for", ["pane": pane.id, "workspace": workspace, "command": pane.command, "cwd": pane.cwd, "why": why])
         Self.lifeQueue.async {
-            let failed = Self.birthSaying(pane, session: workspace)
+            let failed = BirthAttempt(result: PaneLifeClient.settle(Self.birthRequest(pane, session: workspace))).failure
             Task { @MainActor in
                 VigilWorkspaces.shared.settled([pane.id], said: failed.map { [pane.id: $0] } ?? [:])
             }

@@ -18,7 +18,7 @@ extension VigilWorkspaces {
     /// registerWorkspace once the controller exists.
     func newWindowConfig(
         base: Ghostty.SurfaceConfiguration?
-    ) -> (config: Ghostty.SurfaceConfiguration, name: String, cwd: String)? {
+    ) throws -> (config: Ghostty.SurfaceConfiguration, name: String, cwd: String)? {
         if base?.vigilAttach != nil { return nil }
         if base?.environmentVariables["VIGIL_WORKSPACE"] != nil { return nil }
         let cwd = base?.workingDirectory
@@ -28,8 +28,7 @@ extension VigilWorkspaces {
         var config = base ?? Ghostty.SurfaceConfiguration()
         config.workingDirectory = cwd
         config.environmentVariables["VIGIL_WORKSPACE"] = name
-        config.vigilAttach = "vigil-\(name)-0"
-        fresh.insert("vigil-\(name)-0")
+        config.vigilAttach = try mintPane(in: name)
         return (config, name, cwd)
     }
 
@@ -37,8 +36,7 @@ extension VigilWorkspaces {
     /// dock reopen) as a session: the window's tree is its first tab.
     func registerWorkspace(controller: TerminalController, name: String, cwd: String) {
         var session = Workspace(name: name, label: name, cwd: cwd)
-        session.paneSeq = 1 // index 0 consumed at birth
-        fresh.insert("vigil-\(name)-0")
+        session.paneSeq = 1
         workspaces[name] = session
         registerMember(controller, name: name)
         lifecycleLog.info("born from a window", ["workspace": name, "cwd": cwd])
@@ -49,12 +47,12 @@ extension VigilWorkspaces {
     /// the identity plus one daemon-backed pane. Display is the
     /// viewport's business, entirely orthogonal; the shell/claude lives
     /// in the pane's daemon (not any window's pty).
-    func createWorkspace(cwd: String, command: String? = nil) -> String {
+    func createWorkspace(cwd: String, command: String? = nil) throws -> String {
         let name = newWorkspaceId()
         var session = Workspace(name: name, label: name, cwd: cwd)
-        session.tabs = [Registry.Tab(panes: [Registry.Pane(id: "vigil-\(name)-0", cwd: cwd, command: command)], layout: nil)]
-        session.paneSeq = 1 // index 0 consumed at birth
-        fresh.insert("vigil-\(name)-0")
+        let id = try mintPane(in: name)
+        session.tabs = [Registry.Tab(panes: [Registry.Pane(id: id, cwd: cwd, command: command)], layout: nil)]
+        session.paneSeq = 1
         workspaces[name] = session
         lifecycleLog.info("born", ["workspace": name, "cwd": cwd, "command": command])
         return name
@@ -76,17 +74,17 @@ extension VigilWorkspaces {
     /// the workspace appears in every sidebar and the viewport under
     /// Adrian's hands is never touched.
     @discardableResult
-    func apiNewWorkspace(label: String?, emoji: String? = nil, cwd: String?, command: String?, openWindow: Bool) async -> Birth {
-        let made = apiCreate(label: label, emoji: emoji, cwd: cwd, command: command)
+    func apiNewWorkspace(label: String?, emoji: String? = nil, cwd: String?, command: String?, openWindow: Bool) async -> Birth? {
+        guard let made = try? apiCreate(label: label, emoji: emoji, cwd: cwd, command: command) else { return nil }
         let running = await startDaemon(pane: made.pane, session: made.name)
         return apiStarted(made, label: label, running: running, openWindow: openWindow)
     }
 
     /// The registry half of `apiNewWorkspace`: the workspace, named and
     /// saved with its one pane, its daemon not asked for yet.
-    func apiCreate(label: String?, emoji: String?, cwd: String?, command: String?) -> (name: String, pane: Registry.Pane) {
+    func apiCreate(label: String?, emoji: String?, cwd: String?, command: String?) throws -> (name: String, pane: Registry.Pane) {
         let cwd = cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-        let name = createWorkspace(cwd: cwd, command: command)
+        let name = try createWorkspace(cwd: cwd, command: command)
         // A face given is the face; else one written in front of the label
         // is taken from it (`faced`), so no row wears its emoji as text.
         let written = label.map(Self.faced)
@@ -127,19 +125,14 @@ extension VigilWorkspaces {
     /// Failure screams — a created session that is not running is the lie
     /// this call exists to kill.
     @discardableResult
-    func startDaemon(pane: Registry.Pane, session: String, provisional: Bool = false) async -> Bool {
-        await startDaemonSaying(pane: pane, session: session, provisional: provisional) == nil
-    }
-
-    /// The same, saying why it is not up (nil: up): the service's outcome
-    /// word first (`collision: …` for an id that is another pane's).
-    func startDaemonSaying(pane: Registry.Pane, session: String, provisional: Bool = false) async -> String? {
+    func startDaemon(pane: Registry.Pane, session: String) async -> Bool {
         fresh.remove(pane.id)
         births.insert(pane.id)
-        let failed = await Self.born(pane, session: session, provisional: provisional)
+        let failed = await Self.born(pane, session: session)
         settled([pane.id], said: failed.map { [pane.id: $0] } ?? [:])
-        return failed
+        return failed == nil
     }
+
 
     /// New Workspace (⌘N, menu-bar New Workspace, overview `n`): the fresh
     /// session takes the CURRENT viewport (shapeshift; the occupant stays
@@ -156,7 +149,7 @@ extension VigilWorkspaces {
             ?? viewport?.focusedSurface?.pwd
             ?? FileManager.default.homeDirectoryForCurrentUser.path
         if explicitCwd == nil, let viewport, remoteSessionCommand(in: viewport, operation: "new_session") { return }
-        let name = createWorkspace(cwd: cwd)
+        guard let name = try? createWorkspace(cwd: cwd) else { return }
         if let viewport {
             shapeshift(in: viewport, to: name)
         } else {
@@ -171,7 +164,7 @@ extension VigilWorkspaces {
     func newTabConfig(
         parent: TerminalController,
         base: Ghostty.SurfaceConfiguration?
-    ) -> (config: Ghostty.SurfaceConfiguration, name: String)? {
+    ) throws -> (config: Ghostty.SurfaceConfiguration, name: String)? {
         if base?.vigilAttach != nil { return nil }
         if base?.environmentVariables["VIGIL_WORKSPACE"] != nil { return nil }
         guard let name = workspaceName(of: parent) else { return nil }
@@ -181,7 +174,7 @@ extension VigilWorkspaces {
                 ?? FileManager.default.homeDirectoryForCurrentUser.path
         }
         config.environmentVariables["VIGIL_WORKSPACE"] = name
-        config.vigilAttach = "vigil-\(name)-\(nextPaneIndex(name: name))"
+        config.vigilAttach = try mintPane(in: name)
         return (config, name)
     }
 
@@ -193,13 +186,13 @@ extension VigilWorkspaces {
         in controller: BaseTerminalController,
         from oldView: Ghostty.SurfaceView,
         base: Ghostty.SurfaceConfiguration?
-    ) -> Ghostty.SurfaceConfiguration? {
+    ) throws -> Ghostty.SurfaceConfiguration? {
         guard let terminal = controller as? TerminalController,
               let name = workspaceName(of: terminal) else { return base }
         var config = base ?? Ghostty.SurfaceConfiguration()
         guard config.vigilAttach == nil else { return config }
 
-        config.vigilAttach = "vigil-\(name)-\(nextPaneIndex(name: name))"
+        config.vigilAttach = try mintPane(in: name)
         config.environmentVariables["VIGIL_WORKSPACE"] = name
         if config.workingDirectory == nil {
             config.workingDirectory = oldView.pwd
@@ -207,48 +200,22 @@ extension VigilWorkspaces {
         return config
     }
 
-    /// Mint the next daemon pane index for a session: the persisted
-    /// monotonic counter, floored by the owned-id max. NEVER derived from
-    /// owned ids alone: an id whose tab left the session (bury, drag-out)
-    /// is still a live daemon elsewhere, and re-minting it attaches the
-    /// new surface to that daemon's socket - the departed tab replays into
-    /// the new pane.
-    func nextPaneIndex(name: String) -> Int {
-        guard let session = workspaces[name] else { return 0 }
-        var maxIndex = 0
-        for id in ownedPaneIds(session) {
-            if let n = id.split(separator: "-").last.flatMap({ Int($0) }) {
-                maxIndex = max(maxIndex, n)
-            }
+    func mintPane(in name: String) throws -> String {
+        let owners = Array(workspaces.values) + Array(graveyard.values)
+        let owned = owners.reduce(into: Set<String>()) { $0.formUnion(ownedPaneIds($1)) }
+        do {
+            let index = try PaneLife.reserve(workspace: name, startingAt: workspaces[name]?.paneSeq ?? 0,
+                                             owned: owned, panes: VigilPaths.panes, agent: VigilPaths.agent)
+            let pane = "vigil-\(name)-\(index)"
+            workspaces[name]?.paneSeq = index + 1
+            fresh.insert(pane)
+            return pane
+        } catch {
+            registryLog.error("pane identity could not be reserved", ["workspace": name, "err": String(describing: error)])
+            throw error
         }
-        var minted = max(session.paneSeq, maxIndex + 1)
-        // The counter is a floor, never the proof: an id is minted only when
-        // nothing of it exists on disk (CODEX6 W1: a counter from an older
-        // registry, after a scan that failed, once named a pane that ran).
-        // Taken ids are passed over; one whose traces cannot be looked up
-        // is never minted on the counter's word: the clock (seconds since
-        // 1970, above any index minted one by one) floors the next instead,
-        // and it is said.
-        probing: while true {
-            switch PaneLife.freshness("vigil-\(name)-\(minted)", panes: VigilPaths.panes, agent: VigilPaths.agent) {
-            case .fresh:
-                break probing
-            case .taken(let trace):
-                registryLog.warn("pane id already in use on disk; passed over", ["pane": "vigil-\(name)-\(minted)", "trace": trace])
-                minted += 1
-            case .unknown(let why):
-                let floor = Int(Date().timeIntervalSince1970)
-                guard minted < floor else { break probing }
-                registryLog.error("!! a pane id's traces cannot be looked up; minting above the clock", ["pane": "vigil-\(name)-\(minted)", "why": why])
-                minted = floor
-            }
-        }
-        workspaces[name]!.paneSeq = minted + 1
-        // An id made now names a pane that has not run: the one fact that
-        // lets its daemon be started unasked (`PaneLife.tend`).
-        fresh.insert("vigil-\(name)-\(minted)")
-        return minted
     }
+
 
     /// Detach: every live tab (ptys running) moves from its window to this
     /// manager as a held runtime; the windows close. Our strong reference
@@ -502,7 +469,8 @@ extension VigilWorkspaces {
         var tabs = workspaces[name]!.tabs
         if tabs.isEmpty { tabs = [Registry.Tab(panes: [], layout: nil)] }
         for index in tabs.indices where tabs[index].panes.isEmpty {
-            tabs[index].panes = [Registry.Pane(id: "vigil-\(name)-\(nextPaneIndex(name: name))", cwd: workspaces[name]!.cwd)]
+            guard let id = try? mintPane(in: name) else { return }
+            tabs[index].panes = [Registry.Pane(id: id, cwd: workspaces[name]!.cwd)]
             tabs[index].layout = nil
         }
         workspaces[name]!.tabs = tabs

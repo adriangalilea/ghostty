@@ -105,7 +105,7 @@ struct NewTerminalIntent: AppIntent {
                 ghostty,
                 withBaseConfig: config,
                 withParent: parent?.window)
-            if let view = newController.surfaceTree.root?.leftmostLeaf() {
+            if let view = newController?.surfaceTree.root?.leftmostLeaf() {
                 return .result(value: await TerminalEntity(view: view))
             }
 
