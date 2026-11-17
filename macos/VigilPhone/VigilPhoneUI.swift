@@ -180,6 +180,11 @@ struct HomeView: View {
             // A new workspace, said in full in the sheet: which Mac (chosen
             // there unless only one can take it), which folder, what runs.
             // A Mac's own row and every row's long press create in context.
+            // Every thread with agents, of every Mac.
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink { PhoneMessagesScreen() } label: { MessagesButtonLabel() }
+                    .accessibilityLabel("Messages")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { model.composing = .init(host: model.onlyReachable, folder: nil) } label: {
                     Image(systemName: "plus")
@@ -460,6 +465,8 @@ struct TreeNodeView: View {
         let backgrounds = (node.kind == .pane ? [node] : (folded ? node.leaves : [])).compactMap { $0.glance?.background }
         GearsMark(backgrounds: backgrounds, sizes: Self.markSizes)
         AntennaMark(what: backgrounds.flatMap(\.commands), sizes: Self.markSizes)
+        // Its messages you have not read, or yours not handed yet.
+        PhoneMessagesMark(refs: (node.kind == .pane ? [node] : (folded ? node.leaves : [])).compactMap(\.pane), sizes: Self.markSizes)
         if node.onAnotherMac {
             Image(systemName: "laptopcomputer").font(.caption2.weight(.bold)).foregroundStyle(.cyan)
                 .accessibilityLabel("Open on another Mac right now")
@@ -1245,13 +1252,14 @@ struct PaneScreen: View {
     @State private var conversation: Conversation?
 
     enum Mode: CaseIterable {
-        case conversation, changes, documents, terminal
+        case conversation, changes, documents, messages, terminal
 
         var symbol: String {
             switch self {
             case .conversation: "text.bubble"
             case .changes: "plus.forwardslash.minus"
             case .documents: "doc.text"
+            case .messages: "envelope"
             case .terminal: "terminal"
             }
         }
@@ -1261,6 +1269,7 @@ struct PaneScreen: View {
             case .conversation: "Show the conversation"
             case .changes: "Show the changes"
             case .documents: "Show the documents"
+            case .messages: "Show the messages"
             case .terminal: "Show the terminal"
             }
         }
@@ -1321,6 +1330,11 @@ struct PaneScreen: View {
                     }
                 }, local: false)
                 .id(current)
+            case .messages:
+                // Its thread with the person and other agents, on the
+                // pane's Mac; the conversation it holds now keys it.
+                PaneMessages(key: .init(root: current.host.id, pane: current.pane, conversation: node?.glance?.conversation))
+                    .id(current)
             case .terminal:
                 terminal
             }
@@ -1428,8 +1442,9 @@ struct PaneScreen: View {
                           tint: node?.alive == false ? .secondary : (node?.state ?? .idle).tint)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                // Conversation, changes, terminal: the other two, for a pane
-                // with an agent (its repositories come from its conversation).
+                // Conversation, changes, documents, messages, terminal: the
+                // others, for a pane with an agent (its repositories come
+                // from its conversation).
                 if node?.agent == true || mode != .terminal {
                     ForEach(Mode.allCases.filter { $0 != mode }, id: \.self) { other in
                         Button { setMode(other) } label: { Image(systemName: other.symbol) }
@@ -1515,7 +1530,7 @@ struct PaneScreen: View {
         case .conversation:
             leave()
             Task { await show(current) }
-        case .changes, .documents:
+        case .changes, .documents, .messages:
             // The conversation stays followed underneath: a quote goes to its box.
             leave()
             if conversation == nil { Task { await show(current) } }
