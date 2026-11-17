@@ -116,65 +116,100 @@ struct VigilThreadColumn: View {
     }
 }
 
-/// Who speaks in threads, as Ink names people: the person, each pane's
-/// agent or command, each watch and feed.
+/// A sender as a thread draws it, in the shape of the identity model's member
+/// (`/tmp/identity/MODEL.md`: one kind for a person, an agent, a subagent, a
+/// device, a watch and the system, each with a name, a face, a handle and a
+/// kind). Every sender is drawn through it; today it is filled from what the
+/// mailbox and the pane's rows know (`VigilChatPane.of`), and the identity
+/// build changes only what fills it.
+struct VigilChatMember: Equatable {
+    enum Kind: Equatable { case person, agent, subagent, device, watch, system, tool }
+
+    /// The key a message names it by among the thread's people.
+    var key: String
+    var name: String
+    /// What its name is shortened to where room is short.
+    var short: String?
+    /// Its face, an emoji, where it wears one; else its kind's mark.
+    var face: String?
+    /// What a mention types ("@notice-design-1281"); none known yet.
+    var handle: String?
+    var kind: Kind
+    /// The program behind an agent ("claude", "codex"): its mark where it wears no face.
+    var program: String?
+    /// How it stands to another member, said after its name ("subagent of @x").
+    var relation: String?
+
+    /// The pane's agent or command, named by the pane's rows.
+    static func pane(_ key: String, _ pane: VigilChatPane, kind: Kind, program: String?) -> VigilChatMember {
+        VigilChatMember(key: key, name: pane.said, short: pane.title, face: pane.face, kind: kind, program: program)
+    }
+
+    /// The member as Ink draws a sender.
+    var person: InkChat.Person {
+        InkChat.Person(key, name: name, short: short, handle: handle, symbol: symbol, relation: relation)
+    }
+
+    /// Its mark where it wears no face: a person has none (their initial), an
+    /// agent its program's, else the terminal it runs in (never a generic sparkle).
+    private var symbol: String? {
+        switch kind {
+        case .person: nil
+        case .watch: "binoculars"
+        case .system: "gearshape"
+        case .device: "laptopcomputer"
+        case .tool: "terminal"
+        case .agent, .subagent:
+            switch program {
+            case "claude": "asterisk"
+            case "codex": "chevron.left.forwardslash.chevron.right"
+            default: "terminal"
+            }
+        }
+    }
+}
+
+/// Who speaks in threads: the person, each pane's agent or command, each
+/// watch and feed, as members.
 struct VigilChatPeople {
     let all: [InkChat.Person]
     let host: VigilChatHost
-    private let names: [String: String]
-    /// Each pane's workspace face, by the person's key: what their face draws.
-    private let faces: [String: String]
+    private let members: [String: VigilChatMember]
 
     @MainActor init(threads: [MessageThread], host: VigilChatHost) {
         self.host = host
-        var people: [String: InkChat.Person] = [Message.you: InkChat.Person(Message.you, name: "You")]
-        var faces: [String: String] = [:]
-        func pane(_ key: String, _ pane: VigilChatPane, kind: Message.Sender.Kind, agent: String?) {
-            people[key] = Self.paneAgent(key, pane, kind: kind, agent: agent)
-            faces[key] = pane.face
-        }
+        var members: [String: VigilChatMember] = [
+            Message.you: VigilChatMember(key: Message.you, name: "You", kind: .person)
+        ]
         for thread in threads {
             let own = Self.key(root: thread.key.root, pane: thread.key.pane)
             for item in thread.items {
                 let from = item.record.message.from
                 let key = Self.key(of: item)
-                guard people[key] == nil else { continue }
+                guard members[key] == nil else { continue }
                 switch from.kind {
                 case .person: break
                 case .agent, .tool:
-                    if let at = from.pane {
-                        pane(key, host.name(item.senderRoot, at), kind: from.kind, agent: from.agent)
-                    } else {
-                        pane(key, VigilChatPane(title: from.agent ?? "a command"), kind: from.kind, agent: from.agent)
-                    }
-                case .watch: people[key] = InkChat.Person(key, name: "watch \(from.watch ?? "")", symbol: "binoculars")
-                case .feed: people[key] = InkChat.Person(key, name: "feed \(from.watch ?? "")", symbol: "dot.radiowaves.up.forward")
+                    let kind: VigilChatMember.Kind = from.kind == .agent ? .agent : .tool
+                    members[key] = .pane(
+                        key, from.pane.map { host.name(item.senderRoot, $0) } ?? VigilChatPane(title: from.agent ?? "a command"),
+                        kind: kind, program: from.agent)
+                case .watch: members[key] = VigilChatMember(key: key, name: "watch \(from.watch ?? "")", kind: .watch)
+                case .feed: members[key] = VigilChatMember(key: key, name: "feed \(from.watch ?? "")", kind: .watch)
                 }
             }
-            if people[own] == nil { pane(own, host.name(thread.key.root, thread.key.pane), kind: .agent, agent: nil) }
+            if members[own] == nil {
+                members[own] = .pane(own, host.name(thread.key.root, thread.key.pane), kind: .agent, program: nil)
+            }
         }
-        all = people.values.sorted { $0.id < $1.id }
-        names = people.mapValues(\.name)
-        self.faces = faces
+        all = members.values.map(\.person).sorted { $0.id < $1.id }
+        self.members = members
     }
 
-    private static func paneAgent(_ key: String, _ pane: VigilChatPane, kind: Message.Sender.Kind, agent: String?) -> InkChat.Person {
-        InkChat.Person(key, name: pane.said, short: pane.title, symbol: kind == .agent ? symbol(agent) : "terminal")
-    }
-
-    /// An agent's mark where its workspace wears no face.
-    private static func symbol(_ agent: String?) -> String {
-        switch agent {
-        case "claude": "asterisk"
-        case "codex": "chevron.left.forwardslash.chevron.right"
-        default: "sparkles"
-        }
-    }
-
-    /// A person's face: their pane's workspace emoji where it wears one, else
+    /// A sender's face: their pane's workspace emoji where it wears one, else
     /// Ink's own (the agent's mark, the person's initial).
     @ViewBuilder func picture(_ person: InkChat.Person) -> some View {
-        if let face = faces[person.id] {
+        if let face = members[person.id]?.face {
             GeometryReader { g in
                 Text(face)
                     .font(.system(size: (min(g.size.width, g.size.height) * 0.62).rounded()))
@@ -204,10 +239,10 @@ struct VigilChatPeople {
         // not read), never every message after the first of them.
         return InkChat.Summary(
             read.id, title: read.title, people: read.people, from: read.from, line: read.line, at: read.at,
-            unread: thread.unread, waits: read.waits)
+            unread: thread.unread, waits: read.waits, delivery: read.delivery)
     }
 
-    func name(_ key: String) -> String { names[key] ?? key }
+    func name(_ key: String) -> String { members[key]?.name ?? key }
 }
 
 /// A record as Ink's message, in vigil's words.
