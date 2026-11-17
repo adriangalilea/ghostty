@@ -591,11 +591,19 @@ class BaseTerminalController: NSWindowController,
             undoManager.setActionName(undoAction)
         }
 
+        let workspace = VigilWorkspaces.shared.undoWorkspace(of: self)
+        func accepts(_ controller: BaseTerminalController, replacing expected: SplitTree<Ghostty.SurfaceView>,
+                     with next: SplitTree<Ghostty.SurfaceView>) -> Bool {
+            let owner = VigilWorkspaces.shared
+            return owner.undoWorkspace(of: controller) == workspace &&
+                controller.surfaceTree.map(ObjectIdentifier.init) == expected.map(ObjectIdentifier.init) &&
+                owner.permitsNativeUndo(in: controller, to: next)
+        }
         undoManager.registerUndo(
             withTarget: self,
             expiresAfter: undoExpiration
         ) { target in
-            guard VigilWorkspaces.shared.permitsNativeUndo(in: target, to: oldTree) else { return }
+            guard accepts(target, replacing: newTree, with: oldTree) else { return }
             target.surfaceTree = oldTree
             if let oldView {
                 DispatchQueue.main.async {
@@ -607,6 +615,7 @@ class BaseTerminalController: NSWindowController,
                 withTarget: target,
                 expiresAfter: target.undoExpiration
             ) { target in
+                guard accepts(target, replacing: oldTree, with: newTree) else { return }
                 target.replaceSurfaceTree(
                     newTree,
                     moveFocusTo: newView,

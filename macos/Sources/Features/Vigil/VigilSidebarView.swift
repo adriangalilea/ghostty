@@ -416,7 +416,7 @@ struct VigilSidebarView: View {
             }
             Spacer(minLength: 4)
             // A close begun has no grace left to count: it is closing.
-            Text(burial.closing ? "closing" : "\(burial.remaining)s")
+            Text(burial.closing ? "closing" : burial.waiting ? "recovered" : "\(burial.remaining)s")
                 .font(.system(size: 9 * scale))
                 .monospacedDigit()
                 .foregroundColor(.secondary)
@@ -441,7 +441,7 @@ struct VigilSidebarView: View {
         .onTapGesture { VigilWorkspaces.shared.undoBurial(burial) }
         .help(burial.closing
             ? "Its close began and is not finished\(burial.mac.map { " on \($0)" } ?? ""): it cannot be brought back. The ✕ tries to finish it now."
-            : "Closed; dies for real in \(burial.remaining)s. Click to bring it back where it was\(burial.mac.map { " on \($0)" } ?? " (⌘⇧T too)").")
+            : burial.waiting ? "Recovered from a backup. Bring it back or end it now." : "Closed; dies for real in \(burial.remaining)s. Click to bring it back where it was\(burial.mac.map { " on \($0)" } ?? " (⌘⇧T too)").")
     }
 
     // MARK: Remote host header (one per other Mac)

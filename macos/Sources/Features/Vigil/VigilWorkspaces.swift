@@ -478,6 +478,7 @@ class VigilWorkspaces {
     /// EVERY close rests here - a session, a tab, a split pane, a dock
     /// tenant - one death path, one undo.
     var graveyard: [String: Workspace] = [:] { didSet { savePending() } }
+    var withheldReaps = Set<String>()
     var graveyardDeadlines: [String: Date] = [:] { didSet { savePending() } }
     static let killGrace: TimeInterval = 120
     /// While panes that another Mac brought are being closed here
@@ -1136,31 +1137,34 @@ class VigilWorkspaces {
             collapsed: runtime.collapsed)
     }
 
+    func undoWorkspace(of controller: BaseTerminalController) -> String? {
+        if controller is QuickTerminalController { return floatingName }
+        return (controller as? TerminalController).flatMap { workspaceName(of: $0) }
+    }
+
     func permitsNativeUndo(in controller: BaseTerminalController, to tree: SplitTree<Ghostty.SurfaceView>) -> Bool {
-        let name: String?
-        if controller is QuickTerminalController { name = floatingName }
-        else if let terminal = controller as? TerminalController { name = workspaceName(of: terminal) }
-        else { return true }
-        guard let name else { return true }
+        guard let name = undoWorkspace(of: controller) else { return true }
         let joined = Set(tree.compactMap(\.vigilAttachId)).subtracting(controller.surfaceTree.compactMap(\.vigilAttachId))
         return joined.allSatisfy { permitsJoin($0, undoIn: name) }
     }
 
 
 
+    @discardableResult
     func treeDidChange(
         _ controller: TerminalController,
         from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>
-    ) {
-        guard treeSwaps == 0, let name = workspaceName(of: controller), workspaces[name] != nil else { return }
-        applyTreeDiff(session: name, from: from, to: to) { swapTree(controller, from) }
+    ) -> Bool {
+        guard treeSwaps == 0, let name = workspaceName(of: controller), workspaces[name] != nil else { return true }
+        return applyTreeDiff(session: name, from: from, to: to) { withTreeSwap { controller.surfaceTree = from } }
     }
 
     /// The quick terminal's tree changed while a session floats in it:
     /// same chokepoint, the floated tab.
-    func quickTreeDidChange(_ controller: QuickTerminalController, from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
-        guard !quickTreeSwap, let name = floatingName, workspaces[name] != nil else { return }
-        applyTreeDiff(session: name, from: from, to: to) {
+    @discardableResult
+    func quickTreeDidChange(_ controller: QuickTerminalController, from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) -> Bool {
+        guard !quickTreeSwap, let name = floatingName, workspaces[name] != nil else { return true }
+        return applyTreeDiff(session: name, from: from, to: to) {
             quickTreeSwap = true
             controller.surfaceTree = from
             quickTreeSwap = false
@@ -1176,11 +1180,11 @@ class VigilWorkspaces {
     private func applyTreeDiff(
         session name: String,
         from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>, rollback: () -> Void
-    ) {
+    ) -> Bool {
         let before = Set(from.compactMap(\.vigilAttachId))
         let after = Set(to.compactMap(\.vigilAttachId))
         let touched = before.union(after)
-        guard !touched.isEmpty else { return }
+        guard !touched.isEmpty else { return true }
 
         func tabIndex() -> Int? {
             workspaces[name]!.tabs.firstIndex { !Set($0.paneIds).isDisjoint(with: touched) }
@@ -1196,7 +1200,7 @@ class VigilWorkspaces {
         if !refused.isEmpty {
             registryLog.error("!! an undo of a close that began refused; the tree is put back", ["panes": refused.sorted(), "workspace": name])
             rollback()
-            return
+            return false
         }
         // Once the registry holds them (below): a pane taken back may have
         // ended and is reopened; a view that reported no stream before its
@@ -1253,6 +1257,7 @@ class VigilWorkspaces {
         let origin = index.map { Registry.Origin(workspace: name, tab: $0, beside: panes.first?.id) }
         for pane in closed { buryPane(pane, from: name, origin: origin) }
         persist()
+        return true
     }
 
     /// A closed pane (split ⌘W, process exit, dock tenant close, captured
@@ -1456,6 +1461,13 @@ class VigilWorkspaces {
             return false
         }
         lastSaved = data
+        for name in withheldReaps {
+            guard let burial = graveyard[name] else { withheldReaps.remove(name); continue }
+            if !conflictingOwnership(ownedPaneIds(burial)) {
+                withheldReaps.remove(name)
+                DispatchQueue.main.async { [weak self] in self?.reapIfExpired(name) }
+            }
+        }
         if publish {
             syncWindowMarks()
             NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
@@ -1722,11 +1734,17 @@ class VigilWorkspaces {
         // An incomplete read on record from an earlier launch outlives the
         // registry that launch saved (CODEX3 T1); this launch's own is put
         // on record before anything is saved.
+        let fromBackup = registryRead == .recovered
         do { registryRead = try PaneLife.RegistryProvenance(file: provenanceURL).settle(registryRead) } catch {
             registryLog.error("!! the registry's provenance cannot be recorded; acting as unreadable", ["err": error])
             registryRead = .unreadable
         }
         guard let entries = decoded else { return }
+        var workspaceKeys = Set<String>()
+        for entry in entries where !workspaceKeys.insert(entry.name).inserted {
+            registryLog.error("duplicate workspace key; registry preserved, startup stopped", ["name": entry.name])
+            exit(EXIT_FAILURE)
+        }
         // One daemon = ONE pane: a registry claiming an id twice would
         // attach two surfaces to one socket (frames interleave into
         // garbage), and the kill of either workspace kills the other's
@@ -1772,6 +1790,15 @@ class VigilWorkspaces {
                 // saved (CODEX5 V3).
                 session.closing = entry.reconciled(mark: memberMark).closing
                 graveyard[entry.name] = session
+                if fromBackup || deadline == .distantFuture {
+                    graveyardDeadlines[entry.name] = .distantFuture
+                    if fromBackup {
+                        session.closing = entry.paneIds.contains { PaneFence.provesClose(memberMark($0)) } ? session.closing : nil
+                        graveyard[entry.name] = session
+                        registryLog.warn("burial recovered from backup; waiting for a fresh decision", ["workspace": entry.name])
+                    }
+                    continue
+                }
                 graveyardDeadlines[entry.name] = deadline
                 let wait = max(deadline.timeIntervalSinceNow, 0) + 1
                 DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in

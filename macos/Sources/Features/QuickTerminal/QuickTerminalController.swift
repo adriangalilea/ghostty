@@ -269,7 +269,7 @@ class QuickTerminalController: BaseTerminalController {
 
         // vigil: a change while a session floats (a split born or closed,
         // the last pane exiting) edits its registry.
-        VigilWorkspaces.shared.quickTreeDidChange(self, from: from, to: to)
+        guard VigilWorkspaces.shared.quickTreeDidChange(self, from: from, to: to) else { return }
 
         // If our surface tree is nil then we animate the window out. We
         // defer reinitializing the tree to save some memory here.

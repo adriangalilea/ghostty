@@ -36,7 +36,7 @@ extension VigilWorkspaces {
     /// dock reopen) as a session: the window's tree is its first tab.
     func registerWorkspace(controller: TerminalController, name: String, cwd: String) {
         var session = Workspace(name: name, label: name, cwd: cwd)
-        session.paneSeq = 1
+        session.paneSeq = controller.surfaceTree.compactMap { $0.vigilAttachId?.split(separator: "-").last.flatMap { Int($0) } }.max().map { $0 + 1 } ?? 0
         workspaces[name] = session
         registerMember(controller, name: name)
         lifecycleLog.info("born from a window", ["workspace": name, "cwd": cwd])
@@ -52,7 +52,7 @@ extension VigilWorkspaces {
         var session = Workspace(name: name, label: name, cwd: cwd)
         let id = try mintPane(in: name)
         session.tabs = [Registry.Tab(panes: [Registry.Pane(id: id, cwd: cwd, command: command)], layout: nil)]
-        session.paneSeq = 1
+        session.paneSeq = (id.split(separator: "-").last.flatMap { Int($0) } ?? 0) + 1
         workspaces[name] = session
         lifecycleLog.info("born", ["workspace": name, "cwd": cwd, "command": command])
         return name
@@ -90,12 +90,15 @@ extension VigilWorkspaces {
         let written = label.map(Self.faced)
         let face = emoji.flatMap { $0.isEmpty ? nil : String($0.prefix(1)) } ?? written?.emoji
         let called = emoji == nil ? written?.label : label
-        if face != nil || called?.isEmpty == false {
-            rename(name: name, label: called.flatMap { $0.isEmpty ? nil : $0 } ?? name, emoji: face)
-        }
+        if let called, !called.isEmpty { workspaces[name]?.label = called }
+        if let face { workspaces[name]?.emoji = face }
         let panes = workspaces[name]!.tabs.flatMap(\.panes)
         assert(panes.count == 1, "a workspace is born with one pane")
-        persist()
+        guard persist(durable: true) else {
+            fresh.remove(panes[0].id)
+            workspaces[name] = nil
+            throw Durable.Failure("workspace could not be committed", persistURL.path, EIO)
+        }
         return (name, panes[0])
     }
 

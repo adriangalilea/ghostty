@@ -14,6 +14,7 @@ struct VigilPaneNote: Equatable {
     /// The same at length, for the tooltip.
     let explains: String
     let symbol: String
+    var shellOnly = false
 }
 
 /// A pane's life has one owner on its Mac: this. A view dials a daemon and
@@ -127,7 +128,7 @@ extension VigilWorkspaces {
         // An ended pane whose agent left word of how to resume: opening it
         // resumes that conversation, and the button says so.
         if let note, note.offers == Self.opens, Self.resumes(pane) {
-            said = VigilPaneNote(says: note.says, offers: "Open and resume", explains: note.explains, symbol: note.symbol)
+            said = VigilPaneNote(says: note.says, offers: "Open and resume", explains: note.explains, symbol: note.symbol, shellOnly: note.shellOnly)
         }
         for view in views(of: pane) where view.vigilNote != said { view.vigilNote = said }
     }
@@ -148,7 +149,7 @@ extension VigilWorkspaces {
         switch standing {
         case .ended, .lost:
             guard let said else { return note }
-            return VigilPaneNote(says: "Not opened", offers: "Try again", explains: "Opening it did nothing: \(said). \(note.explains)", symbol: "exclamationmark.triangle")
+            return VigilPaneNote(says: "Not opened", offers: "Try again", explains: "Opening it did nothing: \(said). \(note.explains)", symbol: "exclamationmark.triangle", shellOnly: true)
         case .running, .died, .unborn:
             return note
         }
@@ -164,9 +165,9 @@ extension VigilWorkspaces {
         case .unborn:
             return VigilPaneNote(says: "Not started", offers: "Start it", explains: "This pane has no daemon: \(said ?? "no reason was given"). Starting it runs what the pane was made for, in its folder.", symbol: "bolt.slash")
         case .ended(let end):
-            return VigilPaneNote(says: end.clean ? "Finished" : "Ended: \(end.how)", offers: "Open a shell", explains: "\(end.program.isEmpty ? "Its program" : end.program) ended (\(end.how)). Opening it starts a shell in its folder; the program is not run again, and an agent that left word of how to resume its conversation does so.", symbol: "stop.circle")
+            return VigilPaneNote(says: end.clean ? "Finished" : "Ended: \(end.how)", offers: "Open a shell", explains: "\(end.program.isEmpty ? "Its program" : end.program) ended (\(end.how)). Opening it starts a shell in its folder; the program is not run again, and an agent that left word of how to resume its conversation does so.", symbol: "stop.circle", shellOnly: true)
         case .lost:
-            return VigilPaneNote(says: "Ended, how is not known", offers: "Open a shell", explains: "This pane ran, and nothing says how it ended. Opening it starts a shell in its folder; what it ran is not run again, and an agent that left word of how to resume its conversation does so.", symbol: "questionmark.circle")
+            return VigilPaneNote(says: "Ended, how is not known", offers: "Open a shell", explains: "This pane ran, and nothing says how it ended. Opening it starts a shell in its folder; what it ran is not run again, and an agent that left word of how to resume its conversation does so.", symbol: "questionmark.circle", shellOnly: true)
         }
     }
 
@@ -250,7 +251,15 @@ extension VigilWorkspaces {
         guard let pane = view.vigilAttachId else { return }
         daemonLog.info("pane's note pressed", ["pane": pane, "offered": view.vigilNote?.offers, "host": view.vigilHost])
         guard let device = view.vigilHost else {
-            tend(pane, asked: true, why: "the person asked")
+            if view.vigilNote?.shellOnly == true {
+                guard !births.contains(pane), !Self.daemonAlive(pane) else { return }
+                switch Self.standing(pane) {
+                case .unborn, .ended, .lost: _ = reopen(pane, why: "the person asked for a shell")
+                case .died, .running: note(pane, Self.note(for: Self.standing(pane), said: nil))
+                }
+            } else {
+                tend(pane, asked: true, why: "the person asked")
+            }
             return
         }
         guard let remote = VigilRemote.shared.host(device),
@@ -266,7 +275,7 @@ extension VigilWorkspaces {
     func remoteNote(_ pane: String, on device: String) -> VigilPaneNote? {
         guard let remote = VigilRemote.shared.host(device), let facts = remote.directory?.panes[pane], !facts.alive else { return nil }
         if let end = facts.ended {
-            return VigilPaneNote(says: "Ended: \(end.how)", offers: "Open on \(remote.name)", explains: "\(end.program.isEmpty ? "Its program" : end.program) ended on \(remote.name) (\(end.how)). Opening it starts a shell in its folder there; the program is not run again, and an agent that left word of how to resume its conversation does so.", symbol: "stop.circle")
+            return VigilPaneNote(says: "Ended: \(end.how)", offers: "Open on \(remote.name)", explains: "\(end.program.isEmpty ? "Its program" : end.program) ended on \(remote.name) (\(end.how)). Opening it starts a shell in its folder there; the program is not run again, and an agent that left word of how to resume its conversation does so.", symbol: "stop.circle", shellOnly: true)
         }
         return VigilPaneNote(says: "Not running on \(remote.name)", offers: "Start it there", explains: "This pane has no daemon on \(remote.name). Starting it restores it from its record there, or opens a shell in its folder.", symbol: "bolt.slash")
     }
@@ -417,10 +426,9 @@ extension VigilWorkspaces {
             if let answered { $0.reopened = answered }
         }
         for view in views(of: pane) { view.vigilForgetCommand() }
-        persist()
-        guard let entry = registered(pane), Self.savedCommand(of: pane, in: persistURL) == .some(nil) else {
+        guard persist(durable: true), let entry = registered(pane), Self.savedCommand(of: pane, in: persistURL) == .some(nil) else {
             daemonLog.error("ended pane not opened: the registry could not be saved without its program", ["pane": pane, "was": was])
-            note(pane, VigilPaneNote(says: "Not opened", offers: "Try again", explains: "This pane's registry entry could not be saved as a shell's, so nothing was started. The app's log says why.", symbol: "exclamationmark.triangle"))
+            note(pane, VigilPaneNote(says: "Not opened", offers: "Try again", explains: "This pane's registry entry could not be saved as a shell's, so nothing was started. The app's log says why.", symbol: "exclamationmark.triangle", shellOnly: true))
             return nil
         }
         daemonLog.info("ended pane opened as a shell", ["pane": pane, "was": was, "why": why])
@@ -451,7 +459,12 @@ extension VigilWorkspaces {
             entry = shell
         case .unborn:
             guard let listed = registered(pane) else { return "no workspace of this Mac lists it" }
-            entry = listed
+            if fresh.contains(pane) || dormantPanes.contains(pane) {
+                entry = listed
+            } else {
+                guard let shell = madeShell(pane, why: why) else { return "the shell could not be saved" }
+                entry = shell
+            }
         }
         births.insert(pane)
         fresh.remove(pane)

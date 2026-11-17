@@ -109,6 +109,7 @@ extension VigilWorkspaces {
         let emoji: String?
         let label: String
         let remaining: Int
+        let waiting: Bool
         /// Where it stood ("finances › tab 3"); nil for a killed workspace.
         let from: String?
         /// The other Mac holding it (its tether root and name); nil here.
@@ -128,7 +129,7 @@ extension VigilWorkspaces {
             guard let deadline = graveyardDeadlines[burial.name] else { return nil }
             return SidebarBurial(
                 id: burial.name, name: burial.name, emoji: burial.emoji, label: burial.label,
-                remaining: max(0, Int(deadline.timeIntervalSinceNow)),
+                remaining: max(0, Int(deadline.timeIntervalSinceNow)), waiting: deadline == .distantFuture,
                 from: from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }, device: nil, mac: nil,
                 closing: burial.closing != nil)
         }
@@ -138,7 +139,7 @@ extension VigilWorkspaces {
                 guard let until = burial.buriedUntil, until > Date() || burial.closing != nil else { return nil }
                 return SidebarBurial(
                     id: VigilRemote.compositeId(host.device, burial.name), name: burial.name, emoji: burial.emoji,
-                    label: burial.label, remaining: max(0, Int(until.timeIntervalSinceNow)),
+                    label: burial.label, remaining: max(0, Int(until.timeIntervalSinceNow)), waiting: until == .distantFuture,
                     from: from(burial.buriedFrom, moved: burial.movedTo) { name in listed.first { $0.name == name }?.label },
                     device: host.device, mac: host.name, closing: burial.closing != nil)
             }
@@ -347,7 +348,7 @@ extension VigilWorkspaces {
     @discardableResult
     func reapNow(_ name: String) -> Bool {
         graveyardDeadlines[name] = Date.distantPast
-        reapIfExpired(name)
+        reapIfExpired(name, repairInvalid: true)
         return graveyard[name] == nil
     }
 
@@ -356,11 +357,15 @@ extension VigilWorkspaces {
     /// synchronously, a leaked view elsewhere changes nothing); then the
     /// daemons are killed AND VERIFIED dead. No deferral, no sweep, no
     /// dependence on what ARC happens to hold.
-    func reapIfExpired(_ name: String) {
+    func reapIfExpired(_ name: String, repairInvalid: Bool = false) {
         guard let deadline = graveyardDeadlines[name], Date() >= deadline,
               let session = graveyard[name] else { return }
         let ids = ownedPaneIds(session)
-        guard !conflictingOwnership(ids) else { return }
+        guard !conflictingOwnership(ids) else {
+            withheldReaps.insert(name)
+            return
+        }
+        withheldReaps.remove(name)
         // The close begins: from here the burial is no undo (CODEX4 U2: a
         // pane fenced is closed for good, and the service finishes a mark
         // the moment it is written), saved as such before the first fence.
@@ -389,7 +394,7 @@ extension VigilWorkspaces {
         // with no stop decision accepted in its place. It stays, said as a
         // close not finished, tried again in a while.
         // Every member, each time (a fence already there is synced again).
-        let unfenced = fence(ids)
+        let unfenced = fence(ids, repairInvalid: repairInvalid)
         graveyard[name]?.closing = unfenced.sorted()
         guard unfenced.isEmpty else {
             graveyardLog.error("!! reap not finished: its close could not be fenced; the burial is kept, closing", ["workspace": name, "panes": unfenced.sorted()])
@@ -442,10 +447,10 @@ extension VigilWorkspaces {
     /// and the lifecycle service finishes the close (it watches the marks)
     /// after a crash or a reboot as well; it waits on no lock. The panes
     /// whose fence was not accepted.
-    func fence(_ ids: Set<String>) -> Set<String> {
+    func fence(_ ids: Set<String>, repairInvalid: Bool = false) -> Set<String> {
         var failed = Set<String>()
         for id in ids.sorted() {
-            do { try PaneFence.fence(id, in: VigilPaths.panes) } catch {
+            do { try PaneFence.fence(id, in: VigilPaths.panes, repairInvalid: repairInvalid) } catch {
                 graveyardLog.error("!! close not fenced", ["pane": id, "err": error])
                 failed.insert(id)
             }

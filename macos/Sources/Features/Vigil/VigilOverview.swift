@@ -696,7 +696,7 @@ struct OverviewView: View {
                             .frame(maxWidth: 130, alignment: .leading)
                         TimelineView(.periodic(from: .now, by: 1)) { context in
                             let left = max(0, Int(burial.deadline.timeIntervalSince(context.date).rounded()))
-                            Text("\(left)s")
+                            Text(burial.deadline == .distantFuture ? "recovered" : "\(left)s")
                                 .font(.system(size: 12, weight: .bold, design: .rounded))
                                 .foregroundColor(.orange)
                                 .monospacedDigit()

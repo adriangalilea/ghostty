@@ -304,7 +304,10 @@ struct BurialTray: View {
                             .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
                     }
                     Spacer(minLength: 4)
-                    Text(timerInterval: Date()...burial.until, countsDown: true)
+                    Group {
+                        if burial.until == .distantFuture { Text("Recovered") }
+                        else { Text(timerInterval: Date()...burial.until, countsDown: true) }
+                    }
                         .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                         .frame(width: 44, alignment: .trailing)
                 }

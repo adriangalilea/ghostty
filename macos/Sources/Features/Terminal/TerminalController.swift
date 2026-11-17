@@ -177,7 +177,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // vigil: THE chokepoint for structure changes in a session window
         // (a split born or closed, an undo, a surface dragged in): the
         // session registry edits itself here, synchronously.
-        VigilWorkspaces.shared.treeDidChange(self, from: from, to: to)
+        guard VigilWorkspaces.shared.treeDidChange(self, from: from, to: to) else { return }
 
         // Whenever our surface tree changes in any way (new split, close split, etc.)
         // we want to invalidate our state.

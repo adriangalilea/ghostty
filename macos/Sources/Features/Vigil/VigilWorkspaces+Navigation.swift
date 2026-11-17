@@ -341,21 +341,23 @@ extension VigilWorkspaces {
         }
         // The identity is never recycled, born or not.
         persist()
-        // Provisional (CODEX4 U3): the service records the pane as its own
-        // before it runs, so a pane whose edit is refused and whose close
-        // never lands (a fence that fails, the app gone) is never lost: the
-        // next launch counts it, uncertain, and keeps it (its edit may have
-        // committed, CODEX5 V1). Only its mark, written when its edit is
-        // refused, closes it.
+        // The service records the birth request that owns this provisional pane.
         let birth = Self.birthRequest(planned.born, session: request.session, provisional: true)
         fresh.remove(planned.pane.id)
         births.insert(planned.pane.id)
         let attempt = await Self.attemptBirth(birth)
         let failed = attempt.failure
         settled([planned.pane.id], said: failed.map { [planned.pane.id: $0] } ?? [:])
-        if let failed {
+        if failed != nil {
             if attempt.mayHaveReserved { await Self.abortBirth(birth) }
-            return .failure(request, "spawn_failed", failed)
+            switch attempt.result {
+            case .answered(let reply) where reply.outcomes.first?.outcome == "collision":
+                return .failure(request, "id_in_use", "The reserved pane identity is already in use.")
+            case .indeterminate:
+                return .failure(request, "spawn_unknown", "The home Mac could not confirm the birth. Its cancellation was requested.")
+            default:
+                return .failure(request, "spawn_failed", "The home Mac could not start this pane.")
+            }
         }
         refreshWorkspaceRevisions()
         let reply = applySessionEdit(request, preborn: planned.pane)
@@ -431,7 +433,7 @@ extension VigilWorkspaces {
                 "harness": source.harness, "conversation": source.conversation, "folder": folder,
             ])
         }
-        guard let id = try? mintPane(in: request.session) else { return refused("allocation_failed", "A fresh pane identity could not be reserved.") }
+        guard let id = try? mintPane(in: request.session) else { return refused("create_failed", "The home Mac could not reserve and save this workspace before starting its program.") }
         return .success((Registry.Pane(id: id, cwd: folder, command: command), Registry.Pane(id: id, cwd: folder, command: born)))
     }
 
@@ -452,6 +454,9 @@ extension VigilWorkspaces {
             if request.operation == "reap" {
                 // Ended, or closing (a fence not accepted): never said ended
                 // of a burial that stays (CODEX4 U2).
+                if let burial = graveyard[request.session], conflictingOwnership(ownedPaneIds(burial)) {
+                    return .failure(request, "ownership_conflict", "More than one registry entry owns a pane in this burial.")
+                }
                 guard reapNow(request.session) else {
                     sessionLog.warn("session command not finished", ["id": request.id.uuidString, "operation": "reap", "workspace": request.session])
                     return .failure(request, "closing", "Its close began on its Mac and is not finished; it cannot be undone, and its Mac goes on with it.")
@@ -775,7 +780,7 @@ extension VigilWorkspaces {
     /// A workspace born for a command, as its reply: committed only once
     /// its pane runs and vigil.json lists it.
     private func birthReply(_ request: VigilSessionControl.Request, _ birth: Birth?) -> VigilSessionControl.Reply {
-        guard let birth else { return .failure(request, "allocation_failed", "A fresh pane identity could not be reserved.") }
+        guard let birth else { return .failure(request, "create_failed", "The home Mac could not reserve and save this workspace before starting its program.") }
         guard birth.running else {
             return .failure(request, "spawn_failed", "No workspace was created on its Mac: its terminal did not start, and its log says why (mise run log).")
         }
