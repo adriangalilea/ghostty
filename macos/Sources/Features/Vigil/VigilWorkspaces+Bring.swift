@@ -20,9 +20,24 @@ extension VigilWorkspaces {
         }
         let here = FileManager.default.homeDirectoryForCurrentUser.path
         let names = directory.conversationNames(of: source)
-        let entry = source.brought(
-            as: newWorkspaceId(), from: device, mac: host.name, at: Date().timeIntervalSince1970, home: directory.home,
-            here: here, order: (workspaces.values.map(\.order).max() ?? 0) + 1, names: names)
+        let name = newWorkspaceId()
+        let owned = (Array(workspaces.values) + Array(graveyard.values)).reduce(into: Set<String>()) {
+            $0.formUnion(ownedPaneIds($1))
+        }
+        let entry: Registry.Workspace
+        do {
+            var floor = 0
+            entry = try source.brought(as: name, from: device, mac: host.name, at: Date().timeIntervalSince1970,
+                                       home: directory.home, here: here, order: (workspaces.values.map(\.order).max() ?? 0) + 1,
+                                       names: names) {
+                let index = try PaneLife.reserve(workspace: name, startingAt: floor, owned: owned,
+                                                 panes: VigilPaths.panes, agent: VigilPaths.agent)
+                floor = index + 1
+                return index
+            }
+        } catch {
+            return .failure(request, "allocation_failed", "This Mac could not reserve the arriving panes: \(error)")
+        }
         // The pointers first: a pane is in the registry only once its first
         // start can find what it resumes.
         let lines: [Bring.Line]
@@ -41,18 +56,19 @@ extension VigilWorkspaces {
         guard admit(session, "brought") else {
             return .failure(request, "commit_failed", "This Mac's registry already lists that workspace's name or one of its panes; nothing was brought.")
         }
-        persist()
-        guard let data = try? Data(contentsOf: persistURL),
+        guard persist(durable: true), let data = try? Data(contentsOf: persistURL),
               let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
-              let kept = saved.first(where: { $0.name == entry.name }) else {
+              let kept = saved.first(where: { $0.name == entry.name && $0.buriedUntil == nil }), kept.tabs == entry.tabs else {
             return .failure(request, "commit_failed", "The brought workspace could not be confirmed in this Mac's registry.")
         }
         // The proof is the two registries compared, never an eye.
-        let difference = source.differs(fromBrought: kept, names: names)
+        if let difference = source.differs(fromBrought: kept, names: names) {
+            return .failure(request, "commit_failed", "The destination differs: " + difference)
+        }
         lifecycleLog.info("brought", [
             "workspace": entry.name, "from": host.name, "was": source.name, "tabs": session.tabs.count,
             "panes": session.tabs.flatMap(\.members).count, "resuming": lines.filter { $0.transcriptHere == true && $0.folderHere }.count,
-            "lacking": lines.filter { !$0.lacks.isEmpty }.count, "differs": difference ?? "nothing",
+            "lacking": lines.filter { !$0.lacks.isEmpty }.count,
         ])
         // Its Mac is told: those panes close there, so the conversation is
         // written on one Mac. Kept by the hub while that Mac is away.
