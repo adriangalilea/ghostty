@@ -185,7 +185,7 @@ final class VigilPhoneMessages: ObservableObject {
     }
 }
 
-/// Every thread of every Mac, from the home's envelope.
+/// Every thread of every Mac: the Messages tab.
 struct PhoneMessagesScreen: View {
     @ObservedObject private var store = VigilPhoneMessages.shared
     @State private var chosen: String?
@@ -210,15 +210,6 @@ struct PaneMessages: View {
         InkChat.Column {
             VigilThreadConversation(key: key, thread: thread, people: people, host: store.host)
         }
-    }
-}
-
-/// The home's envelope, badged while something waits to be read.
-struct MessagesButtonLabel: View {
-    @ObservedObject private var marks = VigilPhoneMessages.shared.marks
-
-    var body: some View {
-        Image(systemName: marks.unread > 0 ? "envelope.badge" : "envelope")
     }
 }
 

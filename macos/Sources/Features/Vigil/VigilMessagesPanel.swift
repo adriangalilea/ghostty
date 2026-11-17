@@ -1,6 +1,7 @@
 import AppKit
 import AuthzProtocol
 import Combine
+import Ink
 import SwiftUI
 import UserNotifications
 import VigilHarness
@@ -243,7 +244,7 @@ final class VigilMessageStore: ObservableObject {
             },
             post: { message, root in try await Self.post(message, root: root, here: here) },
             act: { act, root in try await Self.act(act, root: root, here: here) },
-            open: { root, pane in VigilMessageStore.shared.open(root: root, pane: pane) },
+            open: { root, pane in VigilMessageStore.shared.open(root: root, pane: pane, in: VigilMessageStore.viewport) },
             // The app's own seen rule: a hand on this Mac after it arrived.
             handAfter: { VigilWorkspaces.personActed(after: Date(timeIntervalSince1970: $0)) },
             mention: { call, root in try await Self.mention(call, root: root, here: here) },
@@ -296,11 +297,16 @@ final class VigilMessageStore: ObservableObject {
         return acted
     }
 
+    /// The window a message's act lands in: the key one, else the last main
+    /// one, else any shown.
+    static var viewport: TerminalController? {
+        (NSApp.keyWindow?.windowController as? TerminalController) ?? TerminalController.lastMain
+            ?? TerminalController.all.first { $0.window?.isVisible == true }
+    }
+
     /// Go to a pane from a message: this Mac's by its workspace, another
     /// Mac's as its sidebar row would (a mirror of its tab).
-    func open(root: String, pane: String) {
-        let controller = (NSApp.keyWindow?.windowController as? TerminalController) ?? TerminalController.lastMain
-            ?? TerminalController.all.first { $0.window?.isVisible == true }
+    func open(root: String, pane: String, in controller: TerminalController?) {
         if root == here {
             guard let workspace = VigilWorkspaces.shared.owner(ofPane: pane) else {
                 return messagesLog.warn("go to: no workspace holds that pane now", ["pane": pane])
@@ -317,8 +323,10 @@ final class VigilMessageStore: ObservableObject {
     }
 }
 
-/// The Messages window (every thread) and a pane's thread in the right bar,
-/// shown where Documents and Changes are (`VigilDocumentsPanel.show`'s rule).
+/// Messages is a section of the main window: the left bar's Messages lists
+/// every thread (`VigilSidebarThreads`), and a thread chosen there opens in
+/// the window's right bar beside its pane, which takes the viewport. The
+/// Messages window is a thread popped out of the right bar, nothing more.
 @MainActor
 enum VigilMessagesPanel {
     private static var shown: NSWindow?
@@ -329,7 +337,52 @@ enum VigilMessagesPanel {
         @Published var id: String?
     }
 
-    /// The window, on `thread` when one is named.
+    /// Messages in the window in front, on `thread` when one is named: the
+    /// menu bar's Messages…, a message's notification. With no terminal
+    /// window to hold it, the thread pops out.
+    static func section(thread: String?) {
+        NSApp.activate()
+        guard let controller = VigilMessageStore.viewport else {
+            messagesLog.info("messages: no terminal window; popped out", ["thread": thread ?? ""])
+            return window(thread: thread)
+        }
+        VigilBars.shared.showMessages(thread: thread, in: controller)
+    }
+
+    /// A thread chosen in `controller`'s bar: its pane goes in the window
+    /// (as a press on its row does), its thread in the right bar beside it.
+    static func open(thread id: String, in controller: TerminalController) {
+        let store = VigilMessageStore.shared
+        guard let thread = store.threads.first(where: { $0.id == id }) else {
+            return messagesLog.warn("messages: that thread is gone", ["thread": id])
+        }
+        let key = thread.key
+        store.open(root: key.root, pane: key.pane, in: controller)
+        // A mount builds its tree in this turn; a mirror of another Mac's tab
+        // may take the next: the aside is asked once the pane is there.
+        DispatchQueue.main.async { aside(key: key, in: controller) }
+    }
+
+    /// The pane's thread in `controller`'s right bar, when the pane is on
+    /// screen there; nil when it is not.
+    @discardableResult
+    private static func aside(key: MessageThread.Key, in controller: TerminalController) -> Bool {
+        let store = VigilMessageStore.shared
+        let pane = key.root == store.here ? key.pane : VigilRemote.compositeId(key.root, key.pane)
+        guard VigilBars.shared.panesOnScreen(in: controller).contains(pane) else {
+            messagesLog.warn("messages: its pane is not on screen here; the thread stays in the list", ["pane": pane])
+            return false
+        }
+        VigilBars.shared.showAside(
+            VigilBars.Aside(
+                pane: pane, kind: .messages, title: store.host.name(key.root, key.pane).title,
+                view: AnyView(VigilMessagesAside(key: key, sidebar: VigilBars.shared.sidebarModel(of: controller))),
+                popOut: { window(thread: thread(of: key)?.id) }))
+        messagesLog.info("messages opened", ["pane": pane, "where": "right bar"])
+        return true
+    }
+
+    /// The thread popped out into a window of its own, on `thread`.
     static func window(thread: String?) {
         if let thread { chosen.id = thread }
         if let shown {
@@ -350,25 +403,22 @@ enum VigilMessagesPanel {
         messagesLog.info("messages opened", ["where": "window"])
     }
 
-    /// A pane's thread beside it when it is on screen in `controller`'s
-    /// window, else the window on that thread. `pane`: a local pane id, or
-    /// `<tether root>/id` for another Mac's (the sidebar's row id).
-    static func show(paneId: String?, id: String, title: String, conversation: String?, in controller: TerminalController?) {
+    /// A pane row's envelope or its menu's Messages: the bar's Messages on
+    /// the pane's thread (which opens it), or, for a pane nothing was said
+    /// to yet, its empty thread beside it. `id`: the row's pane id, a local
+    /// daemon id or `<tether root>/id` for another Mac's.
+    static func show(paneId: String?, id: String, conversation: String?, in controller: TerminalController?) {
         let store = VigilMessageStore.shared
         guard let key = store.key(paneId: paneId, id: id, conversation: conversation) else {
             return messagesLog.warn("messages: this Mac's mailbox has not answered yet", ["pane": id])
         }
-        let pane = paneId ?? id
-        guard let controller, VigilBars.shared.panesOnScreen(in: controller).contains(pane) else {
-            window(thread: thread(of: key)?.id)
-            return
+        guard let controller else { return messagesLog.warn("messages: no window to show them in", ["pane": id]) }
+        if let thread = thread(of: key) {
+            VigilBars.shared.showMessages(thread: thread.id, in: controller)
+        } else {
+            store.open(root: key.root, pane: key.pane, in: controller)
+            DispatchQueue.main.async { aside(key: key, in: controller) }
         }
-        VigilBars.shared.showAside(
-            VigilBars.Aside(
-                pane: pane, kind: .messages, title: title,
-                view: AnyView(VigilMessagesAside(key: key)),
-                popOut: { window(thread: thread(of: key)?.id) }))
-        messagesLog.info("messages opened", ["pane": pane, "where": "right bar"])
     }
 
     /// The pane's thread: the conversation it holds, else the pane's newest.
@@ -435,14 +485,14 @@ final class VigilMessageAlerts {
         }
     }
 
-    /// A press on one of ours: its thread, in the Messages window, in front.
+    /// A press on one of ours: its thread, in the window in front's Messages.
     /// False for any other notification.
     nonisolated static func open(_ response: UNNotificationResponse) -> Bool {
         guard let thread = response.notification.request.content.userInfo[threadKey] as? String else { return false }
         if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
             Task { @MainActor in
                 NSApp.activate()
-                VigilMessagesPanel.window(thread: thread)
+                VigilMessagesPanel.section(thread: thread)
             }
         }
         return true
@@ -464,11 +514,93 @@ private struct VigilMessagesWindow: View {
 
 private struct VigilMessagesAside: View {
     let key: MessageThread.Key
+    /// The bar of the window it stands in: its head goes there.
+    let sidebar: VigilSidebarModel?
     @ObservedObject private var store = VigilMessageStore.shared
 
     var body: some View {
-        // The pane's every thread: what its row mark counts, so opening it
-        // is what clears the mark.
-        VigilThreadColumn(key: key, thread: store.paneThread(key), host: store.host)
+        VStack(spacing: 0) {
+            if let sidebar { VigilThreadPlace(key: key, sidebar: sidebar, here: store.here) }
+            // The pane's every thread: what its row mark counts, so opening
+            // it is what clears the mark.
+            VigilThreadColumn(key: key, thread: store.paneThread(key), host: store.host)
+        }
+    }
+}
+
+/// A thread's head: where its pane is, each step a press away (its Mac when
+/// it is another, its workspace, its tab where the tree shows one, the pane).
+/// A press shows that row in the window's bar and goes there as a press on
+/// the row does.
+private struct VigilThreadPlace: View {
+    let key: MessageThread.Key
+    @ObservedObject var sidebar: VigilSidebarModel
+    let here: String?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let place = sidebar.place(of: key, here: here) {
+                if let host = place.row.host {
+                    step(host.name, symbol: "laptopcomputer", tip: "Show \(host.name) in the bar") { sidebar.go(to: .mac, of: place) }
+                    Image(systemName: "chevron.compact.right").inkForeground(.faint)
+                }
+                step(place.row.label, face: place.row.emoji, symbol: "square.grid.2x2", tip: "Go to the workspace \(place.row.label)") {
+                    sidebar.go(to: .workspace, of: place)
+                }
+                if place.tabShown {
+                    Image(systemName: "chevron.compact.right").inkForeground(.faint)
+                    step(place.tab.title, face: place.tab.emoji, symbol: "rectangle.on.rectangle", tip: "Go to the tab \(place.tab.title)") {
+                        sidebar.go(to: .tab, of: place)
+                    }
+                }
+                Image(systemName: "chevron.compact.right").inkForeground(.faint)
+                step(place.pane.title, face: place.pane.emoji, symbol: "terminal", tip: "Go to the pane \(place.pane.title)") {
+                    sidebar.go(to: .pane, of: place)
+                }
+            } else {
+                Text("Its pane is in no workspace now").inkText(.caption)
+            }
+            Spacer(minLength: 0)
+        }
+        .lineLimit(1)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.10)).frame(height: 1) }
+    }
+
+    private func step(_ title: String, face: String? = nil, symbol: String, tip: String, _ go: @escaping () -> Void) -> some View {
+        Button(action: go) {
+            HStack(spacing: 3) {
+                if let face, !face.isEmpty { Text(face) } else { Image(systemName: symbol).inkForeground(.muted) }
+                Text(title).inkText(.caption, trim: []).truncationMode(.middle)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .inkTip(tip)
+    }
+}
+
+/// The left bar's Messages: every thread of every Mac, as the chat list
+/// draws it. Choosing one opens it in this window (`VigilSidebarModel.choose`).
+struct VigilSidebarThreads: View {
+    @ObservedObject var model: VigilSidebarModel
+    @ObservedObject private var store = VigilMessageStore.shared
+
+    var body: some View {
+        let threads = store.threads
+        let host = store.host
+        let people = VigilChatPeople(threads: threads, host: host)
+        InkConversations(
+            threads.map { people.summary($0) },
+            selection: Binding(get: { model.thread }, set: { model.choose(thread: $0) }),
+            people: people.all, me: Message.you,
+            picture: { people.picture($0) },
+            empty: {
+                Text("No messages yet. An agent's message to another, or to you (`vigil send you`), starts a thread here.")
+                    .inkText(.detail)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            })
     }
 }

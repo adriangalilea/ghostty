@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import VigilWire
 
 /// The left bar: the session tree. Every session, wherever displayed,
 /// → its tabs → their panes (splits AND dock tenants), each pane wearing
@@ -205,6 +206,76 @@ final class VigilSidebarModel: ObservableObject {
 
     init() {
         refresh()
+    }
+
+    // MARK: Sections (the switch at the bar's top)
+
+    /// What the bar lists: the workspace tree, or every chat. Per window:
+    /// switching one window's bar never moves another's.
+    enum Section: String { case workspaces, messages }
+    @Published var section: Section = .workspaces
+    /// The thread chosen in Messages (`MessageThread.id`): open in this
+    /// window's right bar, its pane in the viewport.
+    @Published private(set) var thread: String?
+
+    /// Choosing a thread opens it: its pane in this window, its thread
+    /// beside it (`VigilMessagesPanel.open`).
+    func choose(thread: String?) {
+        self.thread = thread
+        guard let thread else { return }
+        guard let controller = hostController else {
+            return messagesLog.warn("thread chosen in a bar with no window", ["thread": thread])
+        }
+        VigilMessagesPanel.open(thread: thread, in: controller)
+    }
+
+    /// Where a thread's pane sits in this bar's tree.
+    struct Place {
+        let row: VigilWorkspaces.SidebarWorkspaceRow
+        let tab: VigilWorkspaces.SidebarTab
+        let pane: VigilWorkspaces.SidebarPane
+        /// The Mac it is on, when it is not this one: its tether root.
+        var device: String? { row.host == nil ? nil : VigilRemote.split(row.id)?.device }
+        /// Its tab is a row of its own (a workspace of one unnamed tab has none).
+        var tabShown: Bool { row.soleTab == nil }
+        var paneRow: String { "\(tab.id)#\(pane.id)" }
+    }
+
+    /// `key`'s pane among the rows: this Mac's by its daemon id, another's
+    /// by its row id (`<tether root>/<pane>`).
+    func place(of key: MessageThread.Key, here: String?) -> Place? {
+        let remote = key.root == here ? nil : VigilRemote.compositeId(key.root, key.pane)
+        for row in rows {
+            for tab in row.tabs {
+                if let pane = tab.panes.first(where: { remote == nil ? $0.paneId == key.pane : $0.id == remote }) {
+                    return Place(row: row, tab: tab, pane: pane)
+                }
+            }
+        }
+        return nil
+    }
+
+    enum Level { case mac, workspace, tab, pane }
+
+    /// A thread's header pressed: the bar shows the workspaces with the
+    /// place unfolded, and the window goes there as a press on that row does
+    /// (a Mac is shown, never entered).
+    func go(to level: Level, of place: Place) {
+        section = .workspaces
+        if let device = place.device { VigilSidebarCollapse.shared.hosts.remove(device) }
+        if level != .mac { collapsedSessions.remove(place.row.id) }
+        if level == .pane { collapsedTabs.remove(place.tab.id) }
+        switch level {
+        case .mac:
+            selection = place.row.id
+        case .workspace:
+            activate(.init(id: place.row.id, kind: .session(place.row.id)))
+        case .tab:
+            activate(.init(id: place.tab.id, kind: .tab(name: place.row.id, anchor: place.tab.anchor, id: place.tab.id)))
+        case .pane:
+            activate(.init(id: place.paneRow, kind: .pane(name: place.row.id, paneId: place.pane.navigationId)))
+        }
+        messagesLog.info("thread head pressed", ["to": "\(level)", "pane": place.pane.id])
     }
 
     /// Where you are: its own instant channel (see ActiveChain).

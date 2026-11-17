@@ -206,7 +206,8 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
     }
 
     @objc private func openMessages(_ sender: NSMenuItem) {
-        VigilMessagesPanel.window(thread: nil)
+        // The window in front's bar, on its Messages: never a window of its own.
+        VigilMessagesPanel.section(thread: nil)
     }
 
     @objc private func openWatches(_ sender: NSMenuItem) {

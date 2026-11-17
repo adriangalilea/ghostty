@@ -338,10 +338,34 @@ final class VigilBars {
         }
     }
 
-    /// The panes a window shows now: its tab's splits and its dock's.
+    /// The panes a window shows now: its tab's splits and its dock's, as
+    /// their rows name them (another Mac's mirrored pane by its row id,
+    /// `<tether root>/<pane>`, which every aside of it is keyed by).
     func panesOnScreen(in controller: TerminalController) -> Set<String> {
-        Set(controller.surfaceTree.compactMap(\.vigilAttachId))
-            .union(VigilWorkspaces.shared.dock(for: controller)?.views.compactMap(\.vigilAttachId) ?? [])
+        let row: (Ghostty.SurfaceView) -> String? = { view in
+            view.vigilAttachId.map { id in view.vigilHost.map { VigilRemote.compositeId($0, id) } ?? id }
+        }
+        return Set(controller.surfaceTree.compactMap(row))
+            .union(VigilWorkspaces.shared.dock(for: controller)?.views.compactMap(row) ?? [])
+    }
+
+    /// A window's left bar, installed when the window has a tree.
+    func sidebarModel(of controller: TerminalController) -> VigilSidebarModel? {
+        sync(controller)
+        return controller.terminalViewContainer?.subviews.compactMap { $0 as? VigilSidebarHost }.first?.model
+    }
+
+    /// A window's bar shown on its Messages section, on `thread` when one
+    /// is named (choosing it opens it: its pane here, its thread beside).
+    func showMessages(thread: String?, in controller: TerminalController) {
+        if !sidebarVisible(for: controller) { setSidebarVisible(true, for: controller) }
+        guard let model = sidebarModel(of: controller) else {
+            return messagesLog.warn("messages: this window has no bar to show them in")
+        }
+        model.section = .messages
+        if let thread { model.choose(thread: thread) }
+        controller.window?.makeKeyAndOrderFront(nil)
+        messagesLog.info("messages opened", ["where": "sidebar", "thread": thread ?? ""])
     }
 
     /// The aside this window's bar shows: the latest asked for among the
@@ -356,6 +380,7 @@ final class VigilBars {
     func showAside(_ aside: Aside) {
         // One whose pane has ended is forgotten here, where the next is asked.
         let living = Set(VigilWorkspaces.shared.workspaces.values.flatMap { $0.tabs.flatMap(\.paneIds) })
+            .union(VigilRemote.shared.sidebarRows().flatMap(\.tabs).flatMap(\.panes).map(\.id))
         asides = asides.filter { living.contains($0.value.pane) }
         if let standing = asides[aside.id] {
             standing.front = true

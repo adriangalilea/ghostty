@@ -109,8 +109,49 @@ struct VigilSidebarView: View {
         EdgeInsets(top: 0, leading: tree.leading(level), bottom: 0, trailing: tree.edge)
     }
 
+    /// Messages for you that you have not read, over every Mac: the count
+    /// the switch's Messages wears.
+    private var unread: Int { messages.pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread } }
+
+    /// The bar's two sections, one switch at its top.
+    private var sections: some View {
+        InkTabs(
+            Binding(get: { model.section.rawValue }, set: { model.section = VigilSidebarModel.Section(rawValue: $0) ?? .workspaces }),
+            [
+                InkTab("Workspaces", VigilSidebarModel.Section.workspaces.rawValue, symbol: "square.grid.2x2"),
+                InkTab("Messages", VigilSidebarModel.Section.messages.rawValue, symbol: "envelope", count: unread > 0 ? unread : nil),
+            ]
+        )
+        .controlSize(.small)
+        .accessibilityLabel("Sidebar section")
+        .padding(.horizontal, 8)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            sections
+            if model.section == .messages {
+                VigilSidebarThreads(model: model)
+                    .frame(maxHeight: .infinity, alignment: .top)
+            } else {
+                workspaces
+            }
+            footer
+        }
+        .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.titleDidChange)
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "titles") }
+        .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.stateDidChange)
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "facts") }
+        .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.focusDidChange)
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "focus") }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
+            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "key window") }
+    }
+
+    /// The Workspaces section: the tree, and the burial tray under it.
+    @ViewBuilder private var workspaces: some View {
             ScrollViewReader { proxy in
                 GeometryReader { geo in
                     ScrollView {
@@ -200,16 +241,6 @@ struct VigilSidebarView: View {
             if !model.burials.isEmpty {
                 burialTray
             }
-            footer
-        }
-        .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.titleDidChange)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "titles") }
-        .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.stateDidChange)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "facts") }
-        .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.focusDidChange)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "focus") }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "key window") }
     }
 
     /// A row's report into the shared geometry map: a DIRECT write on
@@ -900,10 +931,10 @@ struct VigilSidebarView: View {
     @ViewBuilder private func asideRow(
         _ pane: VigilWorkspaces.SidebarPane, session: String, tab: VigilWorkspaces.SidebarTab, level: Int
     ) -> some View {
-        if let paneId = pane.paneId {
-            ForEach(asides.kinds[paneId] ?? [], id: \.key) { kind in
-                asideRow(kind, paneId: paneId, pane, session: session, tab: tab, level: level)
-            }
+        // Keyed as the bars key it: another Mac's pane by its row id.
+        let paneId = pane.paneId ?? pane.id
+        ForEach(asides.kinds[paneId] ?? [], id: \.key) { kind in
+            asideRow(kind, paneId: paneId, pane, session: session, tab: tab, level: level)
         }
     }
 
@@ -913,7 +944,7 @@ struct VigilSidebarView: View {
     ) -> some View {
         let hoverId = Self.hostHover + "aside:" + VigilBars.Aside.id(pane: paneId, kind)
         return Button {
-            model.activate(.init(id: "\(tab.id)#\(pane.id)", kind: .pane(name: session, paneId: pane.paneId)))
+            model.activate(.init(id: "\(tab.id)#\(pane.id)", kind: .pane(name: session, paneId: pane.navigationId)))
             VigilBars.shared.frontAside(pane: paneId, kind)
         } label: {
             // The name cell's own columns (`VigilNameCell`): its mark sits
@@ -942,7 +973,7 @@ struct VigilSidebarView: View {
                     case .changes: VigilChangesPanel.window(pane: paneId, title: pane.title)
                     case .documents: VigilDocumentsPanel.window(pane: paneId, title: pane.title)
                     case .messages:
-                        VigilMessagesPanel.window(thread: VigilMessageStore.shared.key(paneId: paneId, id: pane.id, conversation: pane.conversation)
+                        VigilMessagesPanel.window(thread: VigilMessageStore.shared.key(paneId: pane.paneId, id: pane.id, conversation: pane.conversation)
                             .flatMap(VigilMessagesPanel.thread(of:))?.id)
                     case .watches: VigilWatchesPanel.window()
                     case .file(let file): VigilFilePanel.window(file)
@@ -1072,8 +1103,7 @@ struct VigilSidebarView: View {
                 // agent holds a conversation, or messages already wait.
                 if pane.conversation != nil || messages.pending(paneId: pane.paneId, id: pane.id) != nil {
                     Button {
-                        VigilMessagesPanel.show(
-                            paneId: pane.paneId, id: pane.id, title: pane.title, conversation: pane.conversation, in: model.hostController)
+                        VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, in: model.hostController)
                     } label: { Label("Messages", systemImage: "envelope") }
                 }
                 // The watches whose verdict reaches it, live and ended.
@@ -1172,6 +1202,14 @@ struct VigilSidebarView: View {
         .opacity(hintFade(id)
             * (pane.paneId.map { dragSourceFade(.pane(session: session, paneId: $0, isDock: pane.isDock)) } ?? 1))
         .overlay(alignment: .leading) { hintChip(id, depth: level) }
+        // Its thread is open in a right bar: the row says so, as the
+        // thread's head names the row.
+        .overlay {
+            if asides.kinds[pane.paneId ?? pane.id]?.contains(.messages) == true {
+                RoundedRectangle(cornerRadius: 4).strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     /// Ink's one copy action, for the rows' Copy items (a menu has no
@@ -1260,11 +1298,10 @@ struct VigilSidebarView: View {
         HStack(spacing: marks.gap) {
             if let ended = pane.ended { EndedMark(ends: [ended], sizes: marks) }
             // Messages for it that wait on its agent, or that you have not
-            // read: a press opens its thread beside it.
+            // read: a press opens its thread in the bar's Messages.
             if let pending = messages.pending(paneId: pane.paneId, id: pane.id) {
                 MessagesMark(pending: [pending], sizes: marks) {
-                    VigilMessagesPanel.show(
-                        paneId: pane.paneId, id: pane.id, title: pane.title, conversation: pane.conversation, in: model.hostController)
+                    VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, in: model.hostController)
                 }
             }
             // Watches whose verdict will reach it, in the care tone when

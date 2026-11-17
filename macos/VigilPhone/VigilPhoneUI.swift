@@ -36,23 +36,39 @@ import VigilWire
 struct VigilPhoneRoot: View {
     @EnvironmentObject private var core: TerminalCore
     @StateObject private var model = VigilPhone.shared
+    @ObservedObject private var messages = VigilPhoneMessages.shared.marks
     @State private var path: [PaneRef] = []
+    /// The two sections, a tab each: the panes' tree and every chat.
+    enum Section: Hashable { case panes, messages }
+    @State private var section = Section.panes
 
     var body: some View {
-        NavigationStack(path: $path) {
-            HomeView()
+        TabView(selection: $section) {
+            Tab("Panes", systemImage: "rectangle.split.2x1", value: Section.panes) {
+                NavigationStack(path: $path) {
+                    HomeView()
+                }
+            }
+            // Every thread with agents, of every Mac, badged with what you
+            // have not read.
+            Tab("Messages", systemImage: "envelope", value: Section.messages) {
+                NavigationStack {
+                    PhoneMessagesScreen()
+                }
+            }
+            .badge(messages.unread)
         }
         .environmentObject(model)
         // vigil://pane/<id> (a request's Go there, a row of the activity).
         .onOpenURL { url in
             Task { @MainActor in
-                if let ref = await model.resolve(url: url) { path = [ref] }
+                if let ref = await model.resolve(url: url) { open(ref) }
             }
         }
-        // A tapped question's pane, a pane just created.
+        // A tapped question's pane, a pane just created, a message's "go to".
         .onChange(of: model.opening) { _, ref in
             guard let ref else { return }
-            path = [ref]
+            open(ref)
             model.opening = nil
         }
         // The new-workspace sheet, from wherever it was asked for; the
@@ -102,6 +118,12 @@ struct VigilPhoneRoot: View {
     }
 
     private var closeTitle: String { model.closing?.tab == true ? "Close tab?" : "Close pane?" }
+
+    /// A pane opened from anywhere is shown in Panes, whichever tab was in front.
+    private func open(_ ref: PaneRef) {
+        section = .panes
+        path = [ref]
+    }
 }
 
 /// The close items for a pane and its tab: the same on a row's long
@@ -171,25 +193,21 @@ struct HomeView: View {
         // The bar carries the buttons only: the app's name on its own line
         // took the space of three rows.
         .toolbarTitleDisplayMode(.inline)
-        .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref) }
+        // A pane is edge to edge: the tab bar would take the terminal's rows.
+        .navigationDestination(for: PaneRef.self) { ref in PaneScreen(ref: ref).toolbar(.hidden, for: .tabBar) }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button { settings = true } label: { Image(systemName: "gearshape") }
                     .accessibilityLabel("Settings")
-            }
-            // A new workspace, said in full in the sheet: which Mac (chosen
-            // there unless only one can take it), which folder, what runs.
-            // A Mac's own row and every row's long press create in context.
-            // Every thread with agents, of every Mac.
-            ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink { PhoneMessagesScreen() } label: { MessagesButtonLabel() }
-                    .accessibilityLabel("Messages")
             }
             // Every watch of every Mac, the broken counted.
             ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink { PhoneWatchesScreen() } label: { WatchesButtonLabel() }
                     .accessibilityLabel("Watches")
             }
+            // A new workspace, said in full in the sheet: which Mac (chosen
+            // there unless only one can take it), which folder, what runs.
+            // A Mac's own row and every row's long press create in context.
             ToolbarItem(placement: .topBarTrailing) {
                 Button { model.composing = .init(host: model.onlyReachable, folder: nil) } label: {
                     Image(systemName: "plus")
