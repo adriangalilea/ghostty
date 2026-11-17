@@ -459,8 +459,13 @@ extension VigilWorkspaces {
                 sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": "reap", "workspace": request.session])
                 return Reply(id: request.id, ok: true, code: "committed", message: "Ended on its Mac.", revision: nil, session: request.session)
             }
-            guard let back = exhume(request.session) else {
+            let back: String
+            switch exhume(request.session) {
+            case .refused:
                 return .failure(request, "closing", "Its close began on its Mac, or whether it did cannot be read: it cannot be undone.")
+            case .saveFailed:
+                return .failure(request, "commit_failed", "The pane ownership changed in memory but its Mac could not save the registry.")
+            case .restored(let workspace): back = workspace
             }
             sessionLog.info("session command committed", [
                 "id": request.id.uuidString, "operation": "exhume", "workspace": request.session, "back": back,

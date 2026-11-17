@@ -261,6 +261,8 @@ extension VigilWorkspaces {
         if alert.runModal() == .alertFirstButtonReturn { doKill() }
     }
 
+    enum Exhumation { case refused, saveFailed, restored(String) }
+
     /// Undo of a close or a kill, the one undo (⌘⇧T, the tray, a command
     /// from another Mac), everything still running. A closed tab or pane
     /// goes back where it stood (`buriedFrom`): the pane beside the pane it
@@ -269,10 +271,9 @@ extension VigilWorkspaces {
     /// updates by pane id. A killed workspace, or a burial whose workspace
     /// is gone too, comes back as itself. Returns the workspace it is in.
     @discardableResult
-    func exhume(_ name: String) -> String? {
+    func exhume(_ name: String) -> Exhumation {
         // A close begun is no undo (U2): its fenced panes are closed for good.
-        guard undoAllowed(burial: name) else { return nil }
-        guard var burial = graveyard.removeValue(forKey: name) else { return nil }
+        guard undoAllowed(burial: name), var burial = graveyard.removeValue(forKey: name) else { return .refused }
         graveyardDeadlines[name] = nil
         try? FileManager.default.removeItem(at: dumpsDir(name))
         if let origin = burial.buriedFrom, var home = workspaces[origin.workspace] {
@@ -301,18 +302,18 @@ extension VigilWorkspaces {
             workspaces[origin.workspace] = home
             reconcileViews(of: origin.workspace)
             revive(burial.tabs.flatMap(\.paneIds))
-            persist()
+            guard persist() else { return .saveFailed }
             graveyardLog.info("exhumed into its workspace", ["burial": name, "workspace": origin.workspace, "tab": origin.tab, "beside": origin.beside])
-            return origin.workspace
+            return .restored(origin.workspace)
         }
         burial.buriedFrom = nil
         burial.layoutShape = ""
         workspaces[name] = burial
         revive(burial.tabs.flatMap(\.paneIds))
-        persist()
+        guard persist() else { return .saveFailed }
         open(name: name)
         graveyardLog.info("exhumed as itself", ["workspace": name])
-        return name
+        return .restored(name)
     }
 
     /// A window that slipped past registration (safety net) gets the same
