@@ -158,6 +158,13 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         messages.target = self
         messages.image = NSImage(systemSymbolName: "envelope", accessibilityDescription: nil)
         menu.addItem(messages)
+        // Every watch on every Mac: what is broken is counted in its title.
+        let broken = VigilWatchStore.shared.brokenTotal
+        let watches = NSMenuItem(
+            title: broken > 0 ? "Watches (\(broken) broken)…" : "Watches…", action: #selector(openWatches(_:)), keyEquivalent: "")
+        watches.target = self
+        watches.image = NSImage(systemSymbolName: "binoculars", accessibilityDescription: nil)
+        menu.addItem(watches)
 
         menu.addItem(.separator())
         // vigil drive's settings (its grants, their state, the button for
@@ -191,6 +198,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func openMessages(_ sender: NSMenuItem) {
         VigilMessagesPanel.window(thread: nil)
+    }
+
+    @objc private func openWatches(_ sender: NSMenuItem) {
+        VigilWatchesPanel.window()
     }
 
     @objc private func openDrive(_ sender: NSMenuItem) {

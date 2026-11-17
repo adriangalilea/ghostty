@@ -241,6 +241,48 @@ struct MessagesMark: View {
     }
 }
 
+/// Watches whose verdict will reach the pane (`WatchRecord`, on its own
+/// Mac): binoculars, as a watch is drawn wherever it speaks (a thread's
+/// sender), and how many when more than one. In the care tone, with the
+/// count of them, while any is broken (its pane gone or holding another
+/// conversation, its command failing, a verdict never receipted: each in
+/// its tooltip); quiet otherwise. Several: a folded row's panes, summed.
+/// `press`, on one pane's, opens its watches. Nothing while none.
+struct WatchMark: View {
+    let watches: [WatchRecord]
+    let sizes: PaneMarkSizes
+    var press: (() -> Void)?
+
+    private var broken: [WatchRecord] { watches.filter(\.isBroken) }
+
+    var body: some View {
+        if !watches.isEmpty {
+            let shown = broken.isEmpty ? watches.count : broken.count
+            let mark = HStack(spacing: 1) {
+                Image(systemName: "binoculars.fill").font(sizes.symbol)
+                if shown > 1 || !broken.isEmpty { Text("\(shown)").font(sizes.count) }
+            }
+            .foregroundStyle(broken.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(InkTone.warn.color))
+            .fixedSize()
+            .help(said)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(said)
+            if let press {
+                Button(action: press) { mark }.buttonStyle(.plain)
+            } else {
+                mark
+            }
+        }
+    }
+
+    private var said: String {
+        let lines = watches.flatMap { w in
+            ["\(w.isBroken ? "Broken: " : "")\(w.command.joined(separator: " ")) (\(w.state.words))"] + w.broken.map { "  \($0.words)" }
+        }
+        return (lines + (press == nil ? [] : ["Press to see its watches."])).joined(separator: "\n")
+    }
+}
+
 /// Something is alive under the pane that no agent accounts for: what its
 /// turns left running, or a watch that declared itself (`what`, a line each).
 struct AntennaMark: View {

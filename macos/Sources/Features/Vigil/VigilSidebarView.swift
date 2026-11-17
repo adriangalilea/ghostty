@@ -41,6 +41,7 @@ struct VigilSidebarView: View {
     /// row's messages mark. A mailbox change that moves no count repaints
     /// nothing here.
     @ObservedObject private var messages = VigilMessageStore.shared.marks
+    @ObservedObject private var watches = VigilWatchStore.shared.marks
 
     /// What a fold control of row `id` tells of the pointer (`ThreadChildren`,
     /// `ThreadFolded`).
@@ -869,6 +870,7 @@ struct VigilSidebarView: View {
                     case .messages:
                         VigilMessagesPanel.window(thread: VigilMessageStore.shared.key(paneId: paneId, id: pane.id, conversation: pane.conversation)
                             .flatMap(VigilMessagesPanel.thread(of:))?.id)
+                    case .watches: VigilWatchesPanel.window()
                     }
                 } label: { Label("Move to Window", systemImage: "macwindow") }
                 Divider()
@@ -995,6 +997,12 @@ struct VigilSidebarView: View {
                         VigilMessagesPanel.show(
                             paneId: pane.paneId, id: pane.id, title: pane.title, conversation: pane.conversation, in: model.hostController)
                     } label: { Label("Messages", systemImage: "envelope") }
+                }
+                // The watches whose verdict reaches it, live and ended.
+                if !watches.watches(paneId: pane.paneId, id: pane.id).isEmpty {
+                    Button {
+                        VigilWatchesPanel.show(paneId: pane.paneId, id: pane.id, title: pane.title, in: model.hostController)
+                    } label: { Label("Watches", systemImage: "binoculars") }
                 }
                 // Its agent's conversation, forked: a second pane starts
                 // from the same state under a new id and this one goes on.
@@ -1176,6 +1184,11 @@ struct VigilSidebarView: View {
                         paneId: pane.paneId, id: pane.id, title: pane.title, conversation: pane.conversation, in: model.hostController)
                 }
             }
+            // Watches whose verdict will reach it, in the care tone when
+            // one is broken: a press opens them beside it.
+            WatchMark(watches: watches.watches(paneId: pane.paneId, id: pane.id), sizes: marks) {
+                VigilWatchesPanel.show(paneId: pane.paneId, id: pane.id, title: pane.title, in: model.hostController)
+            }
             if let arrived = pane.arrived { arrivedMark([arrived]) }
             // On a pane of this Mac a press opens the sheet that settles it;
             // another Mac's conflict is that Mac's to settle.
@@ -1232,6 +1245,7 @@ struct VigilSidebarView: View {
         GearsMark(backgrounds: panes.compactMap(\.background), sizes: marks)
         EndedMark(ends: panes.compactMap(\.ended), sizes: marks)
         MessagesMark(pending: panes.compactMap { messages.pending(paneId: $0.paneId, id: $0.id) }, sizes: marks)
+        WatchMark(watches: panes.flatMap { watches.watches(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         ConflictMark(conflicts: panes.compactMap(\.conflict), sizes: marks)
         lookerGlyphs(panes.flatMap(\.lookers))
     }
