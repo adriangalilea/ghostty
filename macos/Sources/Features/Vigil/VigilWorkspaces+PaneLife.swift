@@ -224,7 +224,7 @@ extension VigilWorkspaces {
             redial([pane])
             return .accepted
         case .died:
-            // A person's ask is for this pane alone (CODEX L6): it brings
+            // A person's ask is for this pane alone: it brings
             // back this one even when the service held it, never another.
             if asked { restoreAsked(pane, why: why) } else { restoreDied(why: why) }
             return .accepted

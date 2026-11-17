@@ -373,11 +373,10 @@ extension VigilWorkspaces {
             return
         }
         withheldReaps.remove(name)
-        // The close begins: from here the burial is no undo (CODEX4 U2: a
+        // The close begins: from here the burial is no undo (a
         // pane fenced is closed for good, and the service finishes a mark
         // the moment it is written), saved as such before the first fence.
-        // The work is the burial's members now, never a saved list (CODEX6
-        // W2: a saved list naming a pane the burial does not own would fence
+        // The work is the burial's members now, never a saved list (a saved list naming a pane the burial does not own would fence
         // it). A saved name that is not a member is said and dropped.
         if let saved = session.closing, !Set(saved).isSubset(of: ids) {
             graveyardLog.error("!! a burial's saved close named panes it does not own; they are not touched", [
@@ -386,7 +385,7 @@ extension VigilWorkspaces {
         }
         graveyard[name]?.closing = ids.sorted()
         // Accepted on disk (file and folder synced) before any fence, or
-        // nothing irreversible happens (CODEX5 V3: a save that failed once
+        // nothing irreversible happens (a save that failed once
         // left an undoable burial on disk over a pane already fenced). Not
         // saved: no fence, the burial says closing here, and it is tried
         // again; a crash meanwhile leaves the undoable burial that is true.
@@ -396,7 +395,7 @@ extension VigilWorkspaces {
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.fenceRetry + 1) { [weak self] in self?.reapIfExpired(name) }
             return
         }
-        // The close's durable intent (CODEX3 T4): a burial whose panes are
+        // The close's durable intent: a burial whose panes are
         // not all fenced is not dropped, so its ownership is never removed
         // with no stop decision accepted in its place. It stays, said as a
         // close not finished, tried again in a while.
@@ -598,7 +597,7 @@ extension VigilWorkspaces {
     /// "pending" with no login to follow. Of the panes the registry lists
     /// (a workspace's or a burial's) and no other, so nothing restored is
     /// ever an orphan; awaited off the main thread like every restore
-    /// (CODEX L2: a stuck service never holds the launch). A spec no
+    /// (a stuck service never holds the launch). A spec no
     /// registry lists is closed by `collectOrphans`.
     func respawnMachineKilledDaemons() {
         restoreDied(why: "launch")
@@ -675,8 +674,7 @@ extension VigilWorkspaces {
 
         let fm = FileManager.default
         // The inventory everything below decides from; one that cannot be
-        // taken decides nothing, and an incomplete read stays on record
-        // (CODEX4 U6).
+        // taken decides nothing, and an incomplete read stays on record.
         let entries: [String]
         let provisional: Set<String>
         do {
@@ -695,10 +693,10 @@ extension VigilWorkspaces {
         // pointer) is accounted for like one with a recipe.
         let evidence = ids(".ended").union(ids(".resume"))
         // A pane is closed or cleaned here only on the proof of a removal,
-        // its close's mark (CODEX3 T1). Absence from a registry that decoded
+        // its close's mark. Absence from a registry that decoded
         // proves nothing, a provisional record proves nothing (its edit may
-        // have committed, CODEX5 V1), and a mark that cannot be read proves
-        // nothing either (CODEX4 U1): such panes are kept, and counted.
+        // have committed), and a mark that cannot be read proves
+        // nothing either: such panes are kept, and counted.
         let states = Dictionary(uniqueKeysWithValues: specs.union(live).union(evidence).union(provisional).subtracting(owned).map {
             ($0, PaneFence.state($0, in: VigilPaths.panes))
         })
@@ -712,7 +710,7 @@ extension VigilWorkspaces {
         }
         if !unlisted.uncertain.isEmpty {
             // Born provisional and never adopted: whether their edit
-            // committed is not known (CODEX5 V1), so they are kept, as they
+            // committed is not known, so they are kept, as they
             // are, until a person or a mark says otherwise.
             daemonLog.error("!! provisional panes no registry lists: their edit may have committed; kept as they are", [
                 "panes": unlisted.uncertain.sorted(), "read": registryRead.rawValue,

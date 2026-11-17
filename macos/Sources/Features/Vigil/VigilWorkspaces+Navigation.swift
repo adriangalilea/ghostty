@@ -262,7 +262,7 @@ extension VigilWorkspaces {
     }
 
     /// The operations that start a pane's daemon. They wait on the pane
-    /// lifecycle service, awaited off the main thread (CODEX L2: a service
+    /// lifecycle service, awaited off the main thread (a service
     /// that is stuck never freezes the app); every other operation is an
     /// edit of the registry alone (`applySessionEdit`).
     static let birthOperations: Set<String> = ["create", "new_session", "split", "new_tab", "fork", "open_pane", "open_shell"]
@@ -286,7 +286,7 @@ extension VigilWorkspaces {
             return birthReply(request, await apiNewWorkspace(label: request.label, emoji: request.emoji, cwd: cwd,
                                                              command: request.command, openWindow: request.window == true))
         case "new_session":
-            // The same guards as any edit anchored on a pane (CODEX R7): a
+            // The same guards as any edit anchored on a pane: a
             // late request whose anchor moved or went is refused, never
             // born in another folder.
             guard let session = workspaces[request.session] else {
@@ -317,7 +317,7 @@ extension VigilWorkspaces {
             if let why = await openNow(request.anchor, why: "opened from another device", shellOnly: request.operation == "open_shell") {
                 return .failure(request, "not_opened", "Not opened on its Mac: \(why).")
             }
-            // Read again after the wait (CODEX R7): closed meanwhile, it is
+            // Read again after the wait: closed meanwhile, it is
             // in a burial now, which ends it at its reap; "open" would be
             // false. Moved to another workspace here, it is still open.
             guard let at = locate(request.anchor), !at.buried else {
@@ -363,7 +363,7 @@ extension VigilWorkspaces {
         let reply = applySessionEdit(request, preborn: planned.pane)
         // A commit that could not be confirmed on disk came after the edit:
         // the pane is in the workspace in memory and is saved with its next
-        // save. It runs and is listed: never closed (CODEX R7).
+        // save. It runs and is listed: never closed.
         if !reply.ok, reply.code == "commit_failed" {
             sessionLog.error("pane placed, its save not confirmed; kept", ["id": request.id.uuidString, "pane": planned.pane.id])
             return reply

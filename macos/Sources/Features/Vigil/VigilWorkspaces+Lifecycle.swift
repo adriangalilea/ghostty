@@ -123,7 +123,7 @@ extension VigilWorkspaces {
     /// the pane lifecycle service, the births' one owner and authority): the
     /// process half of creation. The app's own environment flows (plus
     /// VIGIL_WORKSPACE); vigild scrubs agent ancestry itself. Awaited off the
-    /// main thread (CODEX L2: a stuck service never freezes the app); the
+    /// main thread (a stuck service never freezes the app); the
     /// pane is a birth in flight meanwhile, so no view starts it too.
     /// Failure screams — a created session that is not running is the lie
     /// this call exists to kill.

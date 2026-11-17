@@ -663,7 +663,7 @@ class VigilWorkspaces {
         _ = Self.launchedAt // a static is lazy: stamp it at launch, not at the first status read
         acquireInstanceLock()
         // What the bundle says it speaks is what it speaks: the installer
-        // reads the former to pair an agent with this app (CODEX3 T3).
+        // reads the former to pair an agent with this app.
         precondition(Bundle.main.object(forInfoDictionaryKey: "VigilPaneLifeVersion") as? Int == PaneLife.version,
                      "Ghostty-Info.plist's VigilPaneLifeVersion is not PaneLife.version \(PaneLife.version)")
         load()
@@ -1409,8 +1409,7 @@ class VigilWorkspaces {
     /// nothing when the registry encodes to the bytes already on disk.
     /// `durable`: the registry is written as a lifecycle record is (file and
     /// folder synced, `Durable.replace`), for a save an irreversible act
-    /// waits on (a burial turning `closing` before its first fence, CODEX5
-    /// V3). True when it was written (or unchanged); false, and said, when
+    /// waits on (a burial turning `closing` before its first fence). True when it was written (or unchanged); false, and said, when
     /// it was not.
     @discardableResult
     func persist(publish: Bool = true, onlyIfChanged: Bool = false, durable: Bool = false) -> Bool {
@@ -1440,7 +1439,7 @@ class VigilWorkspaces {
         // crash mid-write can truncate a plain write to nothing).
         // Only a previous version that decodes becomes the backup: an
         // unreadable one would put the evidence of an incomplete read over
-        // the one good copy (CODEX3 T1). It is kept aside instead, once.
+        // the one good copy. It is kept aside instead, once.
         if let previous = try? Data(contentsOf: persistURL), !previous.isEmpty {
             if (try? JSONDecoder().decode([Registry.Workspace].self, from: previous)) != nil {
                 try? previous.write(to: persistBackupURL, options: .atomic)
@@ -1713,7 +1712,7 @@ class VigilWorkspaces {
         // the backup is newer, because the backup IS an older live file.
         // How it was read decides what its silence proves (`registryRead`):
         // only the live file read whole says a pane it does not list is no
-        // one's (CODEX R1).
+        // one's.
         let files = FileManager.default
         var payload = try? Data(contentsOf: persistURL)
         var decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Workspace].self, from: $0) }
@@ -1732,7 +1731,7 @@ class VigilWorkspaces {
             }
         }
         // An incomplete read on record from an earlier launch outlives the
-        // registry that launch saved (CODEX3 T1); this launch's own is put
+        // registry that launch saved; this launch's own is put
         // on record before anything is saved.
         let fromBackup = registryRead == .recovered
         do { registryRead = try PaneLife.RegistryProvenance(file: provenanceURL).settle(registryRead) } catch {
@@ -1787,7 +1786,7 @@ class VigilWorkspaces {
                 session.buriedFrom = entry.buriedFrom
                 session.movedTo = entry.movedTo
                 // Its close's progress from the marks, not only from what was
-                // saved (CODEX5 V3).
+                // saved.
                 session.closing = entry.reconciled(mark: memberMark).closing
                 graveyard[entry.name] = session
                 if fromBackup || deadline == .distantFuture {

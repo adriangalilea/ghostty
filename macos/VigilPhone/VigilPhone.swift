@@ -660,7 +660,7 @@ final class VigilPhone: ObservableObject {
             let listed = directories[host.id]?.workspaces ?? []
             let conflicts = Registry.conflictingPanes(in: listed.map { Set($0.paneIds) })
             return listed.compactMap { workspace in
-                // A burial whose close began is no undo (CODEX4 U2): not
+                // A burial whose close began is no undo: not
                 // offered in "Recently closed".
                 let conflict = !conflicts.isDisjoint(with: workspace.paneIds)
                 guard let until = workspace.buriedUntil, conflict || (until > now && workspace.undoable) else { return nil }
