@@ -341,7 +341,11 @@ extension VigilWorkspaces {
         }
         // The identity is never recycled, born or not.
         persist()
-        guard await startDaemon(pane: planned.born, session: request.session) else {
+        // Provisional (CODEX4 U3): the service records the pane as its own
+        // before it runs, so a pane whose edit is refused and whose close
+        // never lands (a fence that fails, the app gone) still has a durable
+        // owner: unadopted and unlisted, the next launch closes it.
+        guard await startDaemon(pane: planned.born, session: request.session, provisional: true) else {
             // Its outcome may be unknown (it may run, or start late): closed,
             // since no registry will list it, and the closed mark keeps any
             // late birth of it from running.
@@ -364,7 +368,10 @@ extension VigilWorkspaces {
                 "id": request.id.uuidString, "pane": planned.pane.id, "code": reply.code,
             ])
             killDaemons([planned.pane.id])
+            return reply
         }
+        // Committed: the registry on disk lists it, so it is the app's.
+        Self.adopt([planned.pane.id])
         return reply
     }
 
@@ -438,9 +445,17 @@ extension VigilWorkspaces {
                 return .failure(request, "not_found", "It is no longer waiting: its time ran out or it was already undone.")
             }
             if request.operation == "reap" {
-                reapNow(request.session)
+                // Ended, or closing (a fence not accepted): never said ended
+                // of a burial that stays (CODEX4 U2).
+                guard reapNow(request.session) else {
+                    sessionLog.warn("session command not finished", ["id": request.id.uuidString, "operation": "reap", "workspace": request.session])
+                    return .failure(request, "closing", "Its close began on its Mac and is not finished; it cannot be undone, and its Mac goes on with it.")
+                }
                 sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": "reap", "workspace": request.session])
                 return Reply(id: request.id, ok: true, code: "committed", message: "Ended on its Mac.", revision: nil, session: request.session)
+            }
+            if graveyard[request.session]?.closing != nil {
+                return .failure(request, "closing", "Its close began on its Mac: it cannot be undone.")
             }
             let back = exhume(request.session)
             sessionLog.info("session command committed", [

@@ -658,7 +658,9 @@ final class VigilPhone: ObservableObject {
         return hosts.flatMap { host -> [Burial] in
             let listed = directories[host.id]?.workspaces ?? []
             return listed.compactMap { workspace in
-                guard let until = workspace.buriedUntil, until > now else { return nil }
+                // A burial whose close began is no undo (CODEX4 U2): not
+                // offered in "Recently closed".
+                guard let until = workspace.buriedUntil, until > now, workspace.undoable else { return nil }
                 let from = workspace.buriedFrom.map { origin in
                     "\(listed.first { $0.name == origin.workspace }?.label ?? origin.workspace) › tab \(origin.tab + 1)"
                 }

@@ -404,6 +404,9 @@ class VigilWorkspaces {
         var front: String?
         /// A burial of panes brought to another Mac: that Mac's name.
         var movedTo: String?
+        /// A burial whose close began: its panes not yet fenced, and no
+        /// undo (`Registry.Workspace.closing`).
+        var closing: [String]?
         /// Live while windowed (refreshed on overview open), frozen at the
         /// moment of detach while it holds runtimes. Runtime-only.
         var thumbnail: NSImage?
@@ -1367,7 +1370,7 @@ class VigilWorkspaces {
             Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, front: $0.front)
         }
         entries += graveyard.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, closing: $0.closing)
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
@@ -1713,6 +1716,7 @@ class VigilWorkspaces {
                 // daemons are still out there), reap immediately if spent.
                 session.buriedFrom = entry.buriedFrom
                 session.movedTo = entry.movedTo
+                session.closing = entry.closing
                 graveyard[entry.name] = session
                 graveyardDeadlines[entry.name] = deadline
                 let wait = max(deadline.timeIntervalSinceNow, 0) + 1

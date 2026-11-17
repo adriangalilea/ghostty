@@ -63,9 +63,10 @@ extension VigilWorkspaces {
 
     /// `birthSaying` on `lifeQueue`, awaited: the main thread is free while
     /// the service works.
-    nonisolated static func born(_ pane: Registry.Pane, session: String) async -> String? {
+    /// `provisional`: a pane no registry lists yet (`PaneLife.Birth`).
+    nonisolated static func born(_ pane: Registry.Pane, session: String, provisional: Bool = false) async -> String? {
         await withCheckedContinuation { done in
-            lifeQueue.async { done.resume(returning: birthSaying(pane, session: session)) }
+            lifeQueue.async { done.resume(returning: birthSaying(pane, session: session, provisional: provisional)) }
         }
     }
 
@@ -241,7 +242,7 @@ extension VigilWorkspaces {
     /// `settled` reads the pane's files). Bounded: at most the birth's
     /// deadline plus a `result`'s. On `lifeQueue` only, never main (`born`
     /// awaits it from there).
-    nonisolated static func birthSaying(_ pane: Registry.Pane, session: String) -> String? {
+    nonisolated static func birthSaying(_ pane: Registry.Pane, session: String, provisional: Bool = false) -> String? {
         dispatchPrecondition(condition: .onQueue(lifeQueue))
         // The folder is vigild's to resolve (a missing one falls back to its
         // nearest existing parent), never this process's working directory.
@@ -256,7 +257,7 @@ extension VigilWorkspaces {
             }
         }
         let asked = PaneLife.Birth(pane: pane.id, cwd: pane.cwd, workspace: session, shellCommand: shell, argv: argv,
-                                   environment: ProcessInfo.processInfo.environment)
+                                   environment: ProcessInfo.processInfo.environment, provisional: provisional)
         // Proved to be vigil-agent before the environment is sent, and
         // bounded (`PaneLifeClient`); an answer lost is asked for by id,
         // never sent again.

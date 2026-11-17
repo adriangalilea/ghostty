@@ -114,6 +114,8 @@ extension VigilWorkspaces {
         /// The other Mac holding it (its tether root and name); nil here.
         let device: String?
         let mac: String?
+        /// Its close began: no undo, only waiting for it to finish (U2).
+        let closing: Bool
     }
 
     func sidebarBurials() -> [SidebarBurial] {
@@ -127,17 +129,18 @@ extension VigilWorkspaces {
             return SidebarBurial(
                 id: burial.name, name: burial.name, emoji: burial.emoji, label: burial.label,
                 remaining: max(0, Int(deadline.timeIntervalSinceNow)),
-                from: from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }, device: nil, mac: nil)
+                from: from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }, device: nil, mac: nil,
+                closing: burial.closing != nil)
         }
         let elsewhere = VigilRemote.shared.hosts.flatMap { host -> [SidebarBurial] in
             let listed = host.directory?.workspaces ?? []
             return listed.compactMap { burial in
-                guard let until = burial.buriedUntil, until > Date() else { return nil }
+                guard let until = burial.buriedUntil, until > Date() || burial.closing != nil else { return nil }
                 return SidebarBurial(
                     id: VigilRemote.compositeId(host.device, burial.name), name: burial.name, emoji: burial.emoji,
                     label: burial.label, remaining: max(0, Int(until.timeIntervalSinceNow)),
                     from: from(burial.buriedFrom, moved: burial.movedTo) { name in listed.first { $0.name == name }?.label },
-                    device: host.device, mac: host.name)
+                    device: host.device, mac: host.name, closing: burial.closing != nil)
             }
         }
         return (here + elsewhere).sorted { $0.remaining < $1.remaining }
@@ -145,6 +148,7 @@ extension VigilWorkspaces {
 
     /// Undo from the tray: here, or on the Mac that holds it.
     func undoBurial(_ burial: SidebarBurial) {
+        guard !burial.closing else { return }
         guard let device = burial.device else { exhume(burial.name); return }
         sendToBurialHome(device, burial, operation: "exhume")
     }
@@ -182,7 +186,9 @@ extension VigilWorkspaces {
 
     func burials() -> [Burial] {
         graveyard.values.compactMap { session in
-            guard let deadline = graveyardDeadlines[session.name] else { return nil }
+            // The overview's tray offers recovery: a close begun has none
+            // (the sidebar's tray says it is closing).
+            guard let deadline = graveyardDeadlines[session.name], session.closing == nil else { return nil }
             return Burial(
                 name: session.name,
                 label: session.label,
@@ -264,6 +270,11 @@ extension VigilWorkspaces {
     /// is gone too, comes back as itself. Returns the workspace it is in.
     @discardableResult
     func exhume(_ name: String) -> String? {
+        // A close begun is no undo (U2): its fenced panes are closed for good.
+        if let closing = graveyard[name]?.closing {
+            graveyardLog.warn("undo refused: its close began", ["burial": name, "unfenced": closing])
+            return nil
+        }
         guard var burial = graveyard.removeValue(forKey: name) else { return nil }
         graveyardDeadlines[name] = nil
         try? FileManager.default.removeItem(at: dumpsDir(name))
@@ -333,9 +344,13 @@ extension VigilWorkspaces {
     /// Reap NOW, before the grace expires: the daemons die immediately and
     /// the burial is dropped. For "get this out of my face" from the tray
     /// instead of waiting out the 120s.
-    func reapNow(_ name: String) {
+    /// True when the burial is gone (its close accepted whole); false when
+    /// it stays, closing (a fence not accepted), as its reply must say.
+    @discardableResult
+    func reapNow(_ name: String) -> Bool {
         graveyardDeadlines[name] = Date.distantPast
         reapIfExpired(name)
+        return graveyard[name] == nil
     }
 
     /// The grace ran out: now the death actually happens. The burial's
@@ -347,13 +362,19 @@ extension VigilWorkspaces {
         guard let deadline = graveyardDeadlines[name], Date() >= deadline,
               let session = graveyard[name] else { return }
         let ids = ownedPaneIds(session)
-        // The close's durable intent first (CODEX3 T4): a burial whose
-        // panes are not all fenced is not dropped, so its ownership is never
-        // removed with no stop decision accepted in its place. It stays in
-        // the tray, tried again in a while.
-        let unfenced = fence(ids)
+        // The close begins: from here the burial is no undo (CODEX4 U2: a
+        // pane fenced is closed for good, and the service finishes a mark
+        // the moment it is written), saved as such before the first fence.
+        graveyard[name]?.closing = (session.closing ?? ids.sorted())
+        persist()
+        // The close's durable intent (CODEX3 T4): a burial whose panes are
+        // not all fenced is not dropped, so its ownership is never removed
+        // with no stop decision accepted in its place. It stays, said as a
+        // close not finished, tried again in a while.
+        let unfenced = fence(Set(graveyard[name]?.closing ?? ids.sorted()))
+        graveyard[name]?.closing = unfenced.sorted()
         guard unfenced.isEmpty else {
-            graveyardLog.error("!! reap put off: its close could not be fenced; the burial is kept", ["workspace": name, "panes": unfenced.sorted()])
+            graveyardLog.error("!! reap not finished: its close could not be fenced; the burial is kept, closing", ["workspace": name, "panes": unfenced.sorted()])
             graveyardDeadlines[name] = Date().addingTimeInterval(Self.fenceRetry)
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.fenceRetry + 1) { [weak self] in self?.reapIfExpired(name) }
             persist()
@@ -422,9 +443,26 @@ extension VigilWorkspaces {
         case .failure(let failure):
             graveyardLog.error("!! closes not finished cannot be listed", ["err": failure])
         case .success(let pending):
-            guard !pending.isEmpty else { return }
-            graveyardLog.warn("closes left unfinished; finishing them", ["panes": pending])
-            Self.closeQueue.async { Self.closePanes(Set(pending), why: "unfinished") }
+            if !pending.unreadable.isEmpty {
+                graveyardLog.error("!! closes' marks that cannot be read: nothing is decided about them", ["panes": pending.unreadable])
+            }
+            guard !pending.fenced.isEmpty else { return }
+            graveyardLog.warn("closes left unfinished; finishing them", ["panes": pending.fenced])
+            Self.closeQueue.async { Self.closePanes(Set(pending.fenced), why: "unfinished") }
+        }
+    }
+
+    /// Provisional births the registry now holds, told to the service
+    /// (`adopt`). Not answered, they stay provisional and are adopted at the
+    /// next launch, which finds them listed.
+    nonisolated static func adopt(_ panes: Set<String>) {
+        lifeQueue.async {
+            switch PaneLifeClient.settle(PaneLife.Request(.adopt, panes: panes.sorted())) {
+            case .answered(let reply) where reply.ok:
+                daemonLog.info("provisional panes adopted", ["panes": panes.sorted()])
+            case let other:
+                daemonLog.warn("provisional panes not adopted yet; the next launch adopts them", ["panes": panes.sorted(), "said": "\(other)"])
+            }
         }
     }
 
@@ -571,27 +609,62 @@ extension VigilWorkspaces {
         for session in graveyard.values { owned.formUnion(ownedPaneIds(session)) }
 
         let fm = FileManager.default
-        let entries = (try? fm.contentsOfDirectory(atPath: vigildStateDir.path)) ?? []
-        let specs = Set(entries.filter { $0.hasSuffix(".spec") && $0.hasPrefix("vigil-") }.map { String($0.dropLast(".spec".count)) })
-        let live = Set(entries.filter { $0.hasSuffix(".lock") && $0.hasPrefix("vigil-") }.map { String($0.dropLast(".lock".count)) }
-            .filter { !owned.contains($0) && Self.daemonAlive($0) })
-        // A pane is closed or cleaned here only on the proof of a removal,
-        // its close's mark (CODEX3 T1): absence from a registry that decoded
-        // proves nothing (one written from an incomplete read, or left by a
-        // crash before a pane was saved, lacks panes nobody removed).
-        let fenced = { (pane: String) in PaneFence.state(pane, in: VigilPaths.panes) != .none }
-        let unlisted = PaneLife.Unlisted(owned: owned, specs: specs, live: live,
-                                         fenced: Set(specs.union(live).subtracting(owned).filter(fenced)))
+        // The inventory everything below decides from; one that cannot be
+        // taken decides nothing, and an incomplete read stays on record
+        // (CODEX4 U6).
+        let entries: [String]
+        let provisional: Set<String>
+        do {
+            entries = try fm.contentsOfDirectory(atPath: vigildStateDir.path)
+            provisional = try PaneLife.provisionals(in: VigilPaths.agent).get()
+        } catch {
+            daemonLog.error("!! the panes on disk cannot be listed: nothing is closed, cleaned or settled this launch", ["err": error])
+            return
+        }
+        func ids(_ suffix: String) -> Set<String> {
+            Set(entries.filter { $0.hasSuffix(suffix) && $0.hasPrefix("vigil-") }.map { String($0.dropLast(suffix.count)) })
+        }
+        let specs = ids(".spec")
+        let live = ids(".lock").filter { !owned.contains($0) && Self.daemonAlive($0) }
+        // A pane something on disk still speaks of (its end, its resume
+        // pointer) is accounted for like one with a recipe.
+        let evidence = ids(".ended").union(ids(".resume"))
+        // A pane is closed or cleaned here only on the proof of a removal:
+        // its close's mark, or a provisional birth never adopted (CODEX3
+        // T1, CODEX4 U3). Absence from a registry that decoded proves
+        // nothing, and a mark that cannot be read proves nothing either
+        // (CODEX4 U1): its pane is decided about not at all.
+        let states = Dictionary(uniqueKeysWithValues: specs.union(live).union(evidence).union(provisional).subtracting(owned).map {
+            ($0, PaneFence.state($0, in: VigilPaths.panes))
+        })
+        let closed = Set(states.filter { PaneFence.provesClose($0.value) }.keys)
+        let unreadable = Set(states.filter { if case .unreadable = $0.value { return true } else { return false } }.keys)
+        let unlisted = PaneLife.Unlisted(owned: owned, specs: specs, live: live, evidence: evidence, fenced: closed,
+                                         provisional: provisional, unreadable: unreadable)
         if !unlisted.closes.isEmpty {
             daemonLog.warn("closes no registry lists, finished", ["panes": unlisted.closes.sorted()])
-            Self.closeQueue.async { Self.closePanes(unlisted.closes, why: "unlisted, fenced") }
+            let fresh = unlisted.closes.subtracting(closed)
+            // A provisional birth never adopted is closed as decided now:
+            // fenced first, its record kept until its close is clean.
+            if !fresh.isEmpty { killDaemons(fresh) }
+            let marked = unlisted.closes.intersection(closed)
+            if !marked.isEmpty { Self.closeQueue.async { Self.closePanes(marked, why: "unlisted, fenced") } }
+        }
+        // Provisional births the registry holds: the app's (a save that came
+        // after its edit, or a crash before the adoption reached the
+        // service).
+        let adopted = provisional.intersection(owned)
+        if !adopted.isEmpty { Self.adopt(adopted) }
+        if !unlisted.unknown.isEmpty {
+            daemonLog.error("!! panes whose close's mark cannot be read: nothing is decided about them", ["panes": unlisted.unknown.sorted()])
         }
         if !unlisted.lost.isEmpty {
             // Kept as they are: running, or restorable by the service.
             daemonLog.error("!! panes on disk no registry lists, never closed: kept as they are", [
                 "panes": unlisted.lost.sorted(), "read": registryRead.rawValue,
             ])
-        } else if registryRead != .current, registryRead != .absent {
+        }
+        if unlisted.settled, registryRead != .current, registryRead != .absent {
             // Nothing on disk depends on what the incomplete read missed.
             do {
                 try PaneLife.RegistryProvenance(file: provenanceURL).clear()
@@ -602,6 +675,7 @@ extension VigilWorkspaces {
         }
         // What a closed pane left that no close removed: only of a pane with
         // its mark, whatever the registry says.
+        let fenced = { (pane: String) in PaneFence.provesClose(PaneFence.state(pane, in: VigilPaths.panes)) }
         for entry in entries where entry.hasPrefix("vigil-") && (entry.hasSuffix(".resume") || entry.hasSuffix(".ended")) {
             let id = String(entry.prefix(upTo: entry.lastIndex(of: ".")!))
             guard !owned.contains(id), fenced(id), !Self.daemonAlive(id) else { continue }

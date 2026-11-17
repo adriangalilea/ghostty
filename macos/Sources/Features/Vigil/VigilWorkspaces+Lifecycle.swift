@@ -127,10 +127,10 @@ extension VigilWorkspaces {
     /// Failure screams — a created session that is not running is the lie
     /// this call exists to kill.
     @discardableResult
-    func startDaemon(pane: Registry.Pane, session: String) async -> Bool {
+    func startDaemon(pane: Registry.Pane, session: String, provisional: Bool = false) async -> Bool {
         fresh.remove(pane.id)
         births.insert(pane.id)
-        let failed = await Self.born(pane, session: session)
+        let failed = await Self.born(pane, session: session, provisional: provisional)
         settled([pane.id], said: failed.map { [pane.id: $0] } ?? [:])
         return failed == nil
     }
