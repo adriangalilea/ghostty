@@ -623,6 +623,9 @@ class VigilWorkspaces {
     /// The machine is going down. Cancelling termination now stalls the
     /// shutdown itself, so service mode is off the table from here on.
     fileprivate(set) var systemPoweringOff = false
+    /// How the registry was read at launch (`load`): only `.current` lets
+    /// `collectOrphans` close a pane it does not list.
+    fileprivate(set) var registryRead: PaneLife.RegistryRead = .absent
     /// Panes whose leaked surface was already reported this run.
     var reportedLeaks = Set<String>()
 
@@ -1620,13 +1623,24 @@ class VigilWorkspaces {
         // The backup is a fallback, never a merge: whichever file decodes
         // is the workspace. A live file that decodes always wins, even if
         // the backup is newer, because the backup IS an older live file.
+        // How it was read decides what its silence proves (`registryRead`):
+        // only the live file read whole says a pane it does not list is no
+        // one's (CODEX R1).
+        let files = FileManager.default
         var payload = try? Data(contentsOf: persistURL)
         var decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Workspace].self, from: $0) }
+        registryRead = .current
         if decoded == nil {
             payload = try? Data(contentsOf: persistBackupURL)
             decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Workspace].self, from: $0) }
             if decoded != nil {
-                registryLog.error("registry unreadable; recovered from backup")
+                registryRead = .recovered
+                registryLog.error("registry unreadable; recovered from backup: nothing is closed as no one's this run")
+            } else if files.fileExists(atPath: persistURL.path) || files.fileExists(atPath: persistBackupURL.path) {
+                registryRead = .unreadable
+                registryLog.error("!! registry and backup unreadable: nothing is closed as no one's this run")
+            } else {
+                registryRead = .absent
             }
         }
         guard let entries = decoded else { return }

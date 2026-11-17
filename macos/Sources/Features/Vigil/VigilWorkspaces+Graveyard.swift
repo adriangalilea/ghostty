@@ -373,48 +373,50 @@ extension VigilWorkspaces {
     /// is gone before the signal).
     func killDaemons(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }
-        // The intent on disk now, in this turn, before the registry without
-        // these panes is saved (a tick later): a quit or a crash from here
-        // on leaves the close to finish at the next launch, never a pane no
-        // registry lists and nothing will close.
-        do { try PendingCloses().add(ids) } catch {
-            graveyardLog.error("!! close intent not saved; closing all the same", ["panes": ids.sorted(), "err": error])
+        // The close's durable intent, now, in this turn, before the registry
+        // without these panes is saved (a tick later): vigild's closed mark
+        // (`PaneFence`), the one word every party reads. From here no birth
+        // of these panes runs, and the lifecycle service finishes the close
+        // before it restores anything, after a crash or a reboot as well
+        // (CODEX R9); it waits on no lock (R2).
+        for id in ids.sorted() {
+            do { try PaneFence.fence(id, in: VigilPaths.panes) } catch {
+                graveyardLog.error("!! close not fenced; asked all the same (vigild's kill fences it first)", ["pane": id, "err": error])
+            }
         }
-        // Never behind a birth or a restore (`lifeQueue`): vigild's closed
-        // mark makes a close final whichever runs first, so a stuck birth
-        // holds no close back.
+        // Never behind a birth or a restore (`lifeQueue`).
         Self.closeQueue.async { Self.closePanes(ids, why: "closed") }
     }
 
-    /// The closes asked and not yet seen done (`PendingCloses`), finished:
-    /// at launch, after the restore and the orphans.
+    /// The closes fenced and not finished (marks not `clean`), finished: at
+    /// launch, after the restore and the orphans. The service finishes them
+    /// at its own start too; this one is for a service that does not answer.
     func finishPendingCloses() {
-        let pending = PendingCloses().read()
-        guard !pending.isEmpty else { return }
-        graveyardLog.warn("closes left unfinished by an earlier run; finishing them", ["panes": pending.sorted()])
-        Self.closeQueue.async { Self.closePanes(pending, why: "unfinished") }
+        switch PaneFence.unfinished(in: VigilPaths.panes) {
+        case .failure(let failure):
+            graveyardLog.error("!! closes not finished cannot be listed", ["err": failure])
+        case .success(let pending):
+            guard !pending.isEmpty else { return }
+            graveyardLog.warn("closes left unfinished; finishing them", ["panes": pending])
+            Self.closeQueue.async { Self.closePanes(Set(pending), why: "unfinished") }
+        }
     }
 
     /// Every close, one at a time, off the main thread and apart from
     /// births (`lifeQueue`).
     nonisolated static let closeQueue = DispatchQueue(label: "vigil.pane-close", qos: .userInitiated)
 
-    /// A close, on `closeQueue`. Durable before it is asked (`PendingCloses`,
-    /// CODEX L2): the panes are written there first, and leave only when
-    /// vigild's files say each is closed (`PaneLifeClient.closed`: its closed
-    /// mark, no spec, no daemon; a dead daemon beside a spec is a pane to
-    /// restore, never a close done). Asked of the lifecycle service; when
-    /// nothing reached it, it did not answer in time or it left a pane
-    /// unclosed, this app runs the same `vigild kill` itself, fenced the
-    /// same (the closed mark is vigild's, written before anything else a
-    /// kill does, and no birth of the pane runs after it). What still does
-    /// not read closed stays pending for the next launch and the next close.
+    /// A close, on `closeQueue`, fenced already (`killDaemons`). Finished
+    /// only when vigild's files say so (`PaneLifeClient.closed`: the mark
+    /// `clean`, which vigild's kill writes once daemon, recipe and launchd
+    /// job are gone, no spec, no daemon). Asked of the lifecycle service;
+    /// when nothing reached it, it did not answer in time or it left a pane
+    /// unfinished, this app runs the same `vigild kill` itself (bounded:
+    /// vigild waits at most 15 s for the lifecycle lock, its mark written
+    /// before). What is still unfinished stays so on disk, for the service
+    /// and the next launch.
     nonisolated static func closePanes(_ ids: Set<String>, why: String) {
         let sorted = ids.sorted()
-        let pending = PendingCloses()
-        do { try pending.add(sorted) } catch {
-            graveyardLog.error("!! close intent not saved; asking all the same", ["panes": sorted, "err": error])
-        }
         let ask = PaneLifeClient.settle(PaneLife.Request(.close, panes: sorted))
         let isClosed: (String) -> Bool = { PaneLifeClient.closed($0, daemonAlive: VigilWorkspaces.daemonAlive) }
         if case .answered(let reply) = ask, !reply.ok {
@@ -444,13 +446,10 @@ extension VigilWorkspaces {
             try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).state"))
             try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).seen"))
         }
-        do { try pending.remove(done) } catch {
-            graveyardLog.error("!! closes done but not taken off the pending list; finished again at the next launch", ["panes": done, "err": error])
-        }
         if open.isEmpty {
             graveyardLog.success("panes closed, verified", ["panes": sorted, "why": why])
         } else {
-            graveyardLog.error("panes not closed; kept pending", ["panes": open, "why": why])
+            graveyardLog.error("panes fenced, their close not finished; the lifecycle service finishes it", ["panes": open, "why": why])
         }
     }
 
@@ -541,23 +540,29 @@ extension VigilWorkspaces {
             return
         }
 
+        // Everything below closes or deletes what the registry does not
+        // list, which proves nothing unless the registry was read whole
+        // (CODEX R1: an unreadable registry, or a backup older than a pane,
+        // once closed valid panes for good). Kept as it is, and said.
+        guard registryRead.provesOwnership else {
+            daemonLog.error("!! orphan collection skipped: the registry was read \(registryRead.rawValue); nothing on disk is closed or removed as no one's", [
+                "read": registryRead.rawValue,
+            ])
+            return
+        }
+
         var owned = Set<String>()
         for session in workspaces.values { owned.formUnion(ownedPaneIds(session)) }
         for session in graveyard.values { owned.formUnion(ownedPaneIds(session)) }
 
         let fm = FileManager.default
         let entries = (try? fm.contentsOfDirectory(atPath: vigildStateDir.path)) ?? []
-        var orphans = Set<String>()
-        for entry in entries where entry.hasSuffix(".lock") && entry.hasPrefix("vigil-") {
-            let id = String(entry.dropLast(".lock".count))
-            if !owned.contains(id), Self.daemonAlive(id) { orphans.insert(id) }
-        }
-        // A spec no registry lists, its daemon dead: the lifecycle service
-        // would restore it (it restores every spec), as an orphan. Closed.
-        for entry in entries where entry.hasSuffix(".spec") && entry.hasPrefix("vigil-") {
-            let id = String(entry.dropLast(".spec".count))
-            if !owned.contains(id) { orphans.insert(id) }
-        }
+        // A spec no registry lists, its daemon dead, is an orphan as a live
+        // daemon is: the lifecycle service would restore it.
+        let specs = Set(entries.filter { $0.hasSuffix(".spec") && $0.hasPrefix("vigil-") }.map { String($0.dropLast(".spec".count)) })
+        let live = Set(entries.filter { $0.hasSuffix(".lock") && $0.hasPrefix("vigil-") }.map { String($0.dropLast(".lock".count)) }
+            .filter { !owned.contains($0) && Self.daemonAlive($0) })
+        let orphans = PaneLife.orphans(read: registryRead, owned: owned, specs: specs, live: live)
         if !orphans.isEmpty {
             daemonLog.warn("orphan daemons and specs closed", ["panes": orphans.sorted()])
             killDaemons(orphans)
