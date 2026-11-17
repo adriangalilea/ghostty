@@ -459,15 +459,14 @@ extension VigilWorkspaces {
                 sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": "reap", "workspace": request.session])
                 return Reply(id: request.id, ok: true, code: "committed", message: "Ended on its Mac.", revision: nil, session: request.session)
             }
-            if !undoAllowed(burial: request.session) {
+            guard let back = exhume(request.session) else {
                 return .failure(request, "closing", "Its close began on its Mac, or whether it did cannot be read: it cannot be undone.")
             }
-            let back = exhume(request.session)
             sessionLog.info("session command committed", [
                 "id": request.id.uuidString, "operation": "exhume", "workspace": request.session, "back": back,
             ])
             return Reply(id: request.id, ok: true, code: "committed", message: "Back on its Mac.",
-                         revision: back.flatMap { workspaces[$0]?.layoutRevision }, session: back)
+                         revision: workspaces[back]?.layoutRevision, session: back)
         }
         // A workspace of another Mac, brought here as itself: `session` names
         // it there, never a workspace of this registry.

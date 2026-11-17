@@ -595,6 +595,7 @@ class BaseTerminalController: NSWindowController,
             withTarget: self,
             expiresAfter: undoExpiration
         ) { target in
+            guard VigilWorkspaces.shared.permitsNativeUndo(in: target, to: oldTree) else { return }
             target.surfaceTree = oldTree
             if let oldView {
                 DispatchQueue.main.async {

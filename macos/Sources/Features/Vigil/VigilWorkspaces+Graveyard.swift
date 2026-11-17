@@ -271,7 +271,7 @@ extension VigilWorkspaces {
     @discardableResult
     func exhume(_ name: String) -> String? {
         // A close begun is no undo (U2): its fenced panes are closed for good.
-        guard graveyard[name] == nil || undoAllowed(burial: name) else { return nil }
+        guard undoAllowed(burial: name) else { return nil }
         guard var burial = graveyard.removeValue(forKey: name) else { return nil }
         graveyardDeadlines[name] = nil
         try? FileManager.default.removeItem(at: dumpsDir(name))
@@ -359,6 +359,7 @@ extension VigilWorkspaces {
         guard let deadline = graveyardDeadlines[name], Date() >= deadline,
               let session = graveyard[name] else { return }
         let ids = ownedPaneIds(session)
+        guard !conflictingOwnership(ids) else { return }
         // The close begins: from here the burial is no undo (CODEX4 U2: a
         // pane fenced is closed for good, and the service finishes a mark
         // the moment it is written), saved as such before the first fence.
@@ -427,7 +428,7 @@ extension VigilWorkspaces {
             graveyardLog.error("!! close not fenced; asked all the same (vigild's kill fences it first)", ["panes": unfenced.sorted()])
         }
         // Never behind a birth or a restore (`lifeQueue`).
-        Self.closeQueue.async { Self.closePanes(ids, why: "closed") }
+        deliverClose(ids)
     }
 
     /// How long a reap whose fence failed waits before it tries again.
@@ -482,34 +483,40 @@ extension VigilWorkspaces {
         }
     }
 
-    /// Whether the burial `name` may be undone, decided now, at the moment
-    /// a pane would leave it (CODEX6 W3, W4): not while its close began,
-    /// and not when any member's mark proves a close or cannot be read
-    /// (read again here, whatever launch made of it; an unknown is never
-    /// taken for "no mark"). A burial found so is saved `closing`.
+    func conflictingOwnership(_ ids: Set<String>) -> Bool {
+        let conflicts = Registry.conflictingPanes(in: (Array(workspaces.values) + Array(graveyard.values)).map(ownedPaneIds))
+            .intersection(ids)
+        if !conflicts.isEmpty { graveyardLog.error("ownership conflict prevents pane transfer or close", ["panes": conflicts.sorted()]) }
+        return !conflicts.isEmpty
+    }
+
     func undoAllowed(burial name: String) -> Bool {
         guard let burial = graveyard[name] else { return false }
-        if let closing = burial.closing {
-            graveyardLog.warn("undo refused: its close began", ["burial": name, "unfenced": closing])
-            return false
+        let members = ownedPaneIds(burial)
+        guard !conflictingOwnership(members) else { return false }
+        let states = members.map { ($0, memberMark($0)) }
+        switch Registry.Workspace.undoDecision(closing: burial.closing, marks: states.map(\.1)) {
+        case .allowed: return true
+        case .unreadable:
+            graveyardLog.warn("undo unavailable until the member marks can be read", ["burial": name])
+        case .closing:
+            if burial.closing == nil {
+                graveyard[name]?.closing = states.filter { !PaneFence.provesClose($0.1) }.map(\.0).sorted()
+                persist()
+            }
         }
-        let states = Dictionary(uniqueKeysWithValues: ownedPaneIds(burial).map { ($0, PaneFence.state($0, in: VigilPaths.panes)) })
-        let settled = states.filter { if case .none = $0.value { return false } else { return true } }
-        guard !settled.isEmpty else { return true }
-        graveyardLog.error("!! undo refused: a member is closed, or whether it is cannot be read; the burial is closing", [
-            "burial": name, "members": settled.keys.sorted(),
-        ])
-        graveyard[name]?.closing = states.filter { !PaneFence.provesClose($0.value) }.keys.sorted()
-        persist()
         return false
     }
 
-    /// Whether `pane` may leave wherever it lives for a tree: anywhere but a
-    /// burial, or a burial that may be undone (`undoAllowed`).
-    func undoAllowed(pane: String) -> Bool {
-        guard let at = locate(pane), at.buried else { return true }
-        return undoAllowed(burial: at.owner)
+    func permitsJoin(_ pane: String, undoIn workspace: String? = nil) -> Bool {
+        guard !conflictingOwnership([pane]) else { return false }
+        let at = locate(pane)
+        let origin: Registry.JoinOrigin = at.map { $0.buried ? .buried : .live(workspace: $0.owner) }
+            ?? .unowned(minted: fresh.contains(pane))
+        return origin.permits(undoIn: workspace) { at.map { undoAllowed(burial: $0.owner) } ?? false }
     }
+
+
 
     /// Every close, one at a time, off the main thread and apart from
     /// births (`lifeQueue`).

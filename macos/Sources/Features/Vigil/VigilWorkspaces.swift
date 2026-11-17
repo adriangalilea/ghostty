@@ -775,12 +775,17 @@ class VigilWorkspaces {
     /// regroup) changes nothing. Membership follows the tree, so callers
     /// assign the tree FIRST.
     func registerMember(_ controller: TerminalController, name: String, after parent: TerminalController? = nil) {
-        memberships.setObject(name as NSString, forKey: controller)
-        guard workspaces[name] != nil else { return }
+        guard let workspace = workspaces[name] else { return }
         let dock = dockMap.object(forKey: controller)
         let ids = controller.surfaceTree.compactMap(\.vigilAttachId)
             + (dock?.views.compactMap(\.vigilAttachId) ?? [])
-        guard let first = ids.first, !ownedPaneIds(workspaces[name]!).contains(first) else { return }
+        let owned = ownedPaneIds(workspace)
+        guard ids.allSatisfy({ owned.contains($0) || permitsJoin($0) }) else {
+            registryLog.error("tab registration refused an unowned or closing pane", ["workspace": name, "panes": ids])
+            return
+        }
+        memberships.setObject(name as NSString, forKey: controller)
+        guard let first = ids.first, !owned.contains(first) else { return }
         var carried: [Registry.Pane] = []
         var names: [(Registry.Name, from: String)] = []
         for id in ids {
@@ -1131,23 +1136,35 @@ class VigilWorkspaces {
             collapsed: runtime.collapsed)
     }
 
-    /// THE chokepoint for ghostty-driven structure changes in a session
-    /// window: a split born (⌘D), a split closed (⌘W, a process exit, an
-    /// undo), a surface dragged between windows. Vigil's own swaps never
-    /// arrive here (`withTreeSwap`).
+    func permitsNativeUndo(in controller: BaseTerminalController, to tree: SplitTree<Ghostty.SurfaceView>) -> Bool {
+        let name: String?
+        if controller is QuickTerminalController { name = floatingName }
+        else if let terminal = controller as? TerminalController { name = workspaceName(of: terminal) }
+        else { return true }
+        guard let name else { return true }
+        let joined = Set(tree.compactMap(\.vigilAttachId)).subtracting(controller.surfaceTree.compactMap(\.vigilAttachId))
+        return joined.allSatisfy { permitsJoin($0, undoIn: name) }
+    }
+
+
+
     func treeDidChange(
         _ controller: TerminalController,
         from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>
     ) {
         guard treeSwaps == 0, let name = workspaceName(of: controller), workspaces[name] != nil else { return }
-        applyTreeDiff(session: name, from: from, to: to)
+        applyTreeDiff(session: name, from: from, to: to) { swapTree(controller, from) }
     }
 
     /// The quick terminal's tree changed while a session floats in it:
     /// same chokepoint, the floated tab.
-    func quickTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
+    func quickTreeDidChange(_ controller: QuickTerminalController, from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
         guard !quickTreeSwap, let name = floatingName, workspaces[name] != nil else { return }
-        applyTreeDiff(session: name, from: from, to: to)
+        applyTreeDiff(session: name, from: from, to: to) {
+            quickTreeSwap = true
+            controller.surfaceTree = from
+            quickTreeSwap = false
+        }
     }
 
     /// Diff the pane ids of one tab's tree before and after, and edit the
@@ -1158,7 +1175,7 @@ class VigilWorkspaces {
     /// is inferred later, so a close and a move can never be confused.
     private func applyTreeDiff(
         session name: String,
-        from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>
+        from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>, rollback: () -> Void
     ) {
         let before = Set(from.compactMap(\.vigilAttachId))
         let after = Set(to.compactMap(\.vigilAttachId))
@@ -1174,16 +1191,11 @@ class VigilWorkspaces {
         /// Panes this tree took back from a burial: an undo.
         var unburied: [String] = []
         let joined = after.subtracting(before)
-        // A pane taken back from a burial is an undo, and an undo of a close
-        // that began (or whose marks cannot be read) is refused whichever
-        // way it comes: Ghostty's own undo of a split close lands here
-        // without passing `exhume` (CODEX6 W4). Nothing of this edit is
-        // taken into the registry, and the tree is put back as the registry
-        // has it, in a turn of its own.
-        let refused = joined.filter { !listedHere.contains($0) && !undoAllowed(pane: $0) }
+        // Refuse before capture so the originating projection can retain the previous tree.
+        let refused = joined.filter { !listedHere.contains($0) && !permitsJoin($0) }
         if !refused.isEmpty {
             registryLog.error("!! an undo of a close that began refused; the tree is put back", ["panes": refused.sorted(), "workspace": name])
-            DispatchQueue.main.async { [weak self] in self?.reconcileViews(of: name) }
+            rollback()
             return
         }
         // Once the registry holds them (below): a pane taken back may have
@@ -1758,7 +1770,7 @@ class VigilWorkspaces {
                 session.movedTo = entry.movedTo
                 // Its close's progress from the marks, not only from what was
                 // saved (CODEX5 V3).
-                session.closing = entry.reconciled { PaneFence.state($0, in: VigilPaths.panes) }.closing
+                session.closing = entry.reconciled(mark: memberMark).closing
                 graveyard[entry.name] = session
                 graveyardDeadlines[entry.name] = deadline
                 let wait = max(deadline.timeIntervalSinceNow, 0) + 1
