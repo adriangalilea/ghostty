@@ -79,6 +79,7 @@ final class VigilRemote: ObservableObject {
         stopped = true
         hubWatch?.cancel()
         hubWatch = nil
+        if let peersSocket { shutdown(peersSocket, SHUT_RDWR) }
         unfollowAll()
         for host in hosts { keep(host.device) }
         remoteLog.info("directories no longer followed")
@@ -160,79 +161,133 @@ final class VigilRemote: ObservableObject {
         followingMachine.removeAll()
     }
 
-    /// One dial of the hub's Macs stream at a time, and none while one is
-    /// open. `hubChanged`: its folder changed while a dial was in flight,
-    /// so a dial that fails is made again at once.
-    private var peersDialing = false
-    private var peersOpen = false
-    private var hubChanged = false
+    /// The hub's Macs stream, one at a time. Each attempt is numbered and its
+    /// reader's events are applied on the main queue, which runs them in the
+    /// order they were made (a task per event has no such order: a first
+    /// line applied after its own stream's end would read open, unwatched
+    /// and undialed, for good), and only while that attempt is the one in
+    /// hand.
+    private enum Peers {
+        case idle
+        /// Dialed and not yet answered. `changed`: the hub's folder changed
+        /// since, so the hub may have come up after this dial was refused.
+        case dialing(attempt: Int, changed: Bool)
+        case open(attempt: Int)
 
+        func holds(_ asked: Int) -> Bool {
+            switch self {
+            case .idle: false
+            case .dialing(let attempt, _), .open(let attempt): attempt == asked
+            }
+        }
+    }
+    private var peersState = Peers.idle
+    private var attempts = 0
+    /// The stream's socket while it is open: `stop` shuts it. Closed where its
+    /// reader's end is applied, on main, so the number is never another's.
+    private var peersSocket: Int32?
+
+    /// Dials the hub when nothing is dialed or open. The folder is watched
+    /// BEFORE the dial, every time: a hub that comes up between a refused
+    /// dial and a watch set after it changes its folder once, unseen, and
+    /// nothing dials it again (2026-11-17, a drill: the broker back within
+    /// a second, its Mac's dead pane restored a minute later, by an
+    /// unrelated event). A dial refused under the watch waits for the
+    /// folder's next change; nothing else may wait.
     private func followPeers() {
-        guard !stopped, !peersDialing, !peersOpen else { return }
-        peersDialing = true
-        hubChanged = false
-        // Watched before it is dialed, never after a dial failed: a hub that
-        // comes up between a refused dial and the watch being set changes
-        // its folder once, unseen, and nothing dials it again (2026-11-17, a
-        // drill: the broker back within a second, its Mac's dead pane
-        // restored a minute later, by an unrelated event).
+        guard !stopped, case .idle = peersState else { return }
+        attempts += 1
+        let attempt = attempts
+        peersState = .dialing(attempt: attempt, changed: false)
         awaitHub()
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            var socket: Int32 = -1
             let failure: (any Error)?
             do {
                 let fd = try Self.hub.request(.peers)
-                defer { close(fd) }
+                socket = fd
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        // Nobody to shut it later: shut now, and the read below ends.
+                        guard let self, !self.stopped, self.peersState.holds(attempt) else {
+                            shutdown(fd, SHUT_RDWR)
+                            return
+                        }
+                        self.peersSocket = fd
+                    }
+                }
                 let reader = Lines.Reader(fd: fd)
                 var answered = false
                 while let line = try reader.next() {
                     let peers = try JSONDecoder().decode([Local.Peer].self, from: line)
-                    // The hub's first line is the hub answering (a change in
-                    // its folder is not): a restore refused while it was
-                    // down, for want of its seal, is asked again now.
                     let first = !answered
                     answered = true
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        if first {
-                            // Open: its folder is no longer watched (the
-                            // broker replaces files there all day).
-                            self.peersDialing = false
-                            self.peersOpen = true
-                            self.hubWatch?.cancel()
-                            self.hubWatch = nil
-                        }
-                        self.peers(peers)
-                        if first { VigilWorkspaces.shared.restoreDied(why: "the hub answers") }
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { self?.heard(attempt, peers, first: first) }
                     }
                 }
                 failure = nil
             } catch {
                 failure = error
             }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if let failure {
-                    remoteLog.warn("macs stream failed; waiting for the hub", ["err": failure])
-                } else {
-                    remoteLog.info("macs stream closed by the hub; waiting for the hub")
+            let dialed = socket
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.ended(attempt, failure)
+                    if dialed >= 0 { close(dialed) }
                 }
-                self.unfollowAll()
-                self.peersDialing = false
-                self.peersOpen = false
-                // Its folder changed while this dial was out: the hub may be
-                // up by now. Otherwise the watch set before the dial stands.
-                if self.hubChanged { self.followPeers() } else { self.awaitHub() }
             }
         }
     }
 
-    /// The hub's directory, watched until its socket changes (a hub coming
-    /// up renames a listening socket into place): then the Macs are asked
-    /// for again. One watch at a time.
+    private func heard(_ attempt: Int, _ peers: [Local.Peer], first: Bool) {
+        guard !stopped, peersState.holds(attempt) else { return }
+        if first {
+            // Open: its folder is no longer watched (the broker replaces
+            // files there all day).
+            peersState = .open(attempt: attempt)
+            hubWatch?.cancel()
+            hubWatch = nil
+        }
+        self.peers(peers)
+        // The hub's first line is the hub answering (a change in its folder
+        // is not): a restore refused while it was down, for want of its
+        // seal, is asked again now.
+        if first { VigilWorkspaces.shared.restoreDied(why: "the hub answers") }
+    }
+
+    private func ended(_ attempt: Int, _ failure: (any Error)?) {
+        precondition(peersState.holds(attempt), "VigilRemote: attempt \(attempt) ended, in hand \(peersState)")
+        // A stream that was open is dialed again at once, under a new watch:
+        // no watch stood while it was open, so a hub that came back before
+        // this end was applied left no change to wait for. A dial that was
+        // never answered is made again only if the folder changed since;
+        // otherwise the watch set before it stands.
+        let again: Bool
+        switch peersState {
+        case .open: again = true
+        case .dialing(_, let changed): again = changed
+        case .idle: preconditionFailure("unreachable: holds(attempt)")
+        }
+        peersState = .idle
+        peersSocket = nil
+        unfollowAll()
+        remoteLog.warn("macs stream ended", [
+            "attempt": attempt, "err": failure.map { "\($0)" } ?? "closed by the hub", "next": again ? "dialed again" : "waits for the hub's folder",
+        ])
+        if again { followPeers() } else { awaitHub() }
+    }
+
+    /// The hub's directory, watched while no stream is open (a hub coming
+    /// up renames a listening socket into place): a change dials the hub,
+    /// or is kept for the end of the dial in flight. One watch at a time.
     private var hubWatch: DispatchSourceFileSystemObject?
     private func awaitHub() {
         guard !stopped, hubWatch == nil else { return }
         let dir = (VigilPaths.hub as NSString).deletingLastPathComponent
+        // The folder is the broker's to make; on a Mac where it never ran,
+        // there must still be something to watch for its first start.
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let fd = open(dir, O_EVTONLY)
         guard fd >= 0 else {
             remoteLog.error("hub folder not watched; other Macs out of reach until relaunch", ["path": dir, "errno": errno])
@@ -242,15 +297,13 @@ final class VigilRemote: ObservableObject {
         watch.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                // During a dial the change is kept for its end; the watch
-                // stays set, so nothing between the two is lost.
-                if self.peersDialing {
-                    self.hubChanged = true
-                    return
+                switch self.peersState {
+                case .dialing(let attempt, _): self.peersState = .dialing(attempt: attempt, changed: true)
+                case .idle: self.followPeers()
+                // A change made before the first line cancelled this watch,
+                // delivered after it: the stream is open, nothing to do.
+                case .open: break
                 }
-                self.hubWatch?.cancel()
-                self.hubWatch = nil
-                self.followPeers()
             }
         }
         watch.setCancelHandler { close(fd) }
