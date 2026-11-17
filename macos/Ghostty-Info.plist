@@ -2,6 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- vigil: the pane lifecycle protocol this app speaks (VigilWire's
+	     PaneLife.version, checked at launch). Sealed by the signature, so an
+	     installer reads it to refuse an agent of another protocol. -->
+	<key>VigilPaneLifeVersion</key>
+	<integer>3</integer>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Listens while you dictate into the focused pane.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
