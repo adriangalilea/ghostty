@@ -1,5 +1,6 @@
 import ActivityKit
 import Foundation
+import Log
 import TetherKit
 import UIKit
 import UserNotifications
@@ -17,10 +18,10 @@ import VigilWire
 ///
 /// The activity's token is the one fact only this phone has, and the Mac
 /// starts nothing else until it hears it, so it is delivered for sure: it is
-/// an act (`VigilActs`, kept on disk until the Mac takes it); iOS wakes the
-/// app for a push-started activity, and the app holds itself awake (a
-/// background task) while it brings tether up and the act lands, or until
-/// iOS's time runs out, and the outbox delivers it at the next launch. A second activity for one
+/// a kept intent (`VigilIntents`, on disk until the Mac answers); iOS wakes
+/// the app for a push-started activity, and the app holds itself awake (a
+/// background task) while it brings tether up and the intent lands, or until
+/// iOS's time runs out, and tether sends it at the next launch. A second activity for one
 /// Mac is a bug the Mac's one-start rule exists to prevent: seen here, it
 /// is said, and the older ends.
 @MainActor
@@ -148,8 +149,9 @@ enum VigilAgents {
     }
 
     /// Follows a pane on a Mac, or stops: the Mac shows it (starting its
-    /// activity when none runs), now or when it is back (an act: followed,
-    /// then let go before it landed, the letting go is what arrives).
+    /// activity when none runs), now or when it is back (a kept intent:
+    /// followed, then let go before either was sent, the letting go is what
+    /// goes; once sent, both land, in order).
     static func follow(pane: String, on mac: String, _ on: Bool) {
         if on {
             macs[mac, default: []].append(pane)
@@ -215,12 +217,12 @@ enum VigilAgents {
         }
     }
 
-    /// Tells a Mac what runs here, surely: the route is an act (kept until
-    /// the Mac takes it, the newest replacing an older one still waiting, so
-    /// the order they were made in is the order that counts). Woken in the
-    /// background, the app holds iOS's time while tether is up and the act
-    /// lands, and lets tether go after; what iOS's time did not cover lands
-    /// at the next launch, from the outbox on disk.
+    /// Tells a Mac what runs here, surely: the route is a kept intent (kept
+    /// until the Mac answers, the newest replacing an older one never sent,
+    /// so the order they were made in is the order that counts). Woken in
+    /// the background, the app holds iOS's time while tether is up and the
+    /// intent lands, and lets tether go after; what iOS's time did not cover
+    /// lands at the next launch, from tether's outbox on disk.
     private static func deliver(_ mac: String) async {
         let app = UIApplication.shared
         let task = app.beginBackgroundTask(withName: "agents route to \(mac.prefix(10))")
@@ -228,9 +230,9 @@ enum VigilAgents {
         let background = app.applicationState == .background
         if background { await VigilAuthz.shared.runtime.start() }
         await tell(mac)
-        guard background, let acts = VigilPhone.shared.acts else { return }
+        guard background, let intents = VigilPhone.shared.intents else { return }
         let landed = await withTaskGroup(of: Bool.self) { group in
-            group.addTask { await acts.drained(mac); return true }
+            group.addTask { await intents.drained(mac); return true }
             group.addTask {
                 let left = await MainActor.run { app.backgroundTimeRemaining }
                 try? await Task.sleep(for: .seconds(max(left - 4, 0)))
@@ -271,20 +273,39 @@ enum VigilAgents {
         macs[mac] = panes
     }
 
-    /// One act for a Mac, through the outbox: refused there, it is said and
-    /// dropped (the next change tells it again).
+    /// One intent for a Mac, kept until it answers (`heard`).
     private static func send(_ mac: String, _ open: Open) async {
         do {
-            guard let acts = VigilPhone.shared.acts else { throw WireError.refused("vigil is not connected to tether yet") }
-            switch try await acts.send(device: mac, open) {
-            case .delivered: break
-            case .kept(let why):
-                VigilPhone.shared.receipts.info("agents", "told when the mac is back", ["mac": String(mac.prefix(10)), "op": open.op.rawValue, "why": why])
-            case .dropped(let why): throw WireError.refused(why)
-            }
+            guard let intents = VigilPhone.shared.intents else { throw WireError.refused("vigil is not connected to tether yet") }
+            try intents.send(device: mac, open)
         } catch {
             if open.op == .agents { told[mac] = nil }
             VigilPhone.shared.receipts.warn("agents", "not told", ["mac": String(mac.prefix(10)), "op": open.op.rawValue, "err": error])
+        }
+    }
+
+    /// A Mac's answer to a route or a follow. Refused or never reaching it,
+    /// said, and a route is told again at the next change; lost (the Mac
+    /// stopped mid-answer, or it reached the Mac a week late, not done),
+    /// made again from what holds now.
+    static func heard(_ answer: VigilIntents.Answer, mac name: String) {
+        let mac = answer.device
+        let fields: LogFields = ["mac": name, "key": answer.key ?? ""]
+        switch answer.heard {
+        case .applied:
+            VigilPhone.shared.receipts.info("agents", "told", fields)
+        case .refused(let why, _), .dropped(let why):
+            if answer.key == "agents" { told[mac] = nil }
+            VigilPhone.shared.receipts.warn("agents", "not told", fields.merging(["why": why]) { a, _ in a })
+        case .lost(let why):
+            VigilPhone.shared.receipts.warn("agents", "lost; told again from what holds now", fields.merging(["why": why]) { a, _ in a })
+            if answer.key == "agents" {
+                Task { await tell(mac, force: true) }
+            } else if let key = answer.key, key.hasPrefix("follow ") {
+                let pane = String(key.dropFirst("follow ".count))
+                let on = macs[mac]?.contains(pane) == true
+                Task { await send(mac, on ? .follow(Follow(pane: pane)) : .unfollow(Follow(pane: pane))) }
+            }
         }
     }
 }

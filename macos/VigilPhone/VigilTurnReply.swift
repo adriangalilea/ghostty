@@ -11,7 +11,7 @@ import VigilWire
 /// tether go after.
 ///
 /// It is sent now or not at all: a line that reaches a pane late is typed
-/// into a screen nobody is looking at (`VigilActs`' rule for `send`). One
+/// into a screen nobody is looking at (`Open.intentKey`'s rule). One
 /// that did not land is said by a notification of its own, with the line,
 /// so it is never lost in silence and never sent twice.
 @MainActor

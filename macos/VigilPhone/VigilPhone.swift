@@ -249,8 +249,12 @@ final class VigilPhone: ObservableObject {
     /// vigil's tether node (the one its authz endpoint runs), once up.
     private var node: TetherNode?
     /// What this phone changes on a Mac (a pane seen, followed, where its
-    /// activity is reached), kept until that Mac can be reached (`VigilActs`).
-    private(set) var acts: VigilActs?
+    /// activity is reached), kept intents until that Mac answers
+    /// (`VigilIntents`).
+    private(set) var intents: VigilIntents?
+    /// Each seen mark sent and not answered yet, by intent id: what its row
+    /// showed before, put back when the Mac does not take it.
+    private var seenSent: [String: (ref: PaneRef, revision: String, before: Double?)] = [:]
     /// Why vigil has no tether node (it could not start one): the home
     /// screen says so instead of an empty list.
     @Published private(set) var unlinked: String?
@@ -275,12 +279,14 @@ final class VigilPhone: ObservableObject {
         self.node = node
         unlinked = nil
         let receipts = receipts
-        acts = VigilActs(
-            node: node,
-            file: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("tether/vigil-acts.json")
-        ) { what, facts in
-            Task { @MainActor in receipts.info("act", what, facts) }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let intents = VigilIntents(node: node, kept: support.appendingPathComponent("tether/vigil-intents-kept.json")) { what, facts in
+            Task { @MainActor in receipts.info("intent", what, facts) }
+        }
+        self.intents = intents
+        intents.carry(acts: support.appendingPathComponent("tether/vigil-acts.json")) // PURGE(release C: every device ran release B once)
+        Task {
+            await intents.run { [weak self] answer in await self?.heard(answer) }
         }
         receipts.info("tether", "node up", ["root": String(node.root().prefix(10))])
         VigilPhoneMessages.shared.attach(node: node)
@@ -669,7 +675,7 @@ final class VigilPhone: ObservableObject {
         Task {
             do {
                 let request = WorkspaceCommand.Request.burial(burial.name, operation)
-                let data = try await VigilLink.call(linked(), device: burial.host.id, .session(try request.line))
+                let data = try await VigilLink.command(linked(), device: burial.host.id, try request.line)
                 let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
                 let fields: LogFields = ["op": operation, "mac": burial.host.name, "workspace": burial.name]
                 if outcome.ok {
@@ -782,7 +788,7 @@ final class VigilPhone: ObservableObject {
         do { node = try linked() } catch { throw CreateError.refused(VigilLink.reason(error)) }
         let outcome: WorkspaceCommand.Outcome
         do {
-            let data = try await VigilLink.call(node, device: host.id, .session(try request.line))
+            let data = try await VigilLink.command(node, device: host.id, try request.line)
             outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
         } catch {
             receipts.error("create", "outcome unknown", fields.merging(["err": error]) { a, _ in a })
@@ -898,7 +904,7 @@ final class VigilPhone: ObservableObject {
         receipts.info("close", "sent", fields)
         Task {
             do {
-                let data = try await VigilLink.call(linked(), device: host.id, .session(try request.line))
+                let data = try await VigilLink.command(linked(), device: host.id, try request.line)
                 let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
                 guard outcome.ok else {
                     receipts.warn("close", "refused", fields.merging(["code": outcome.code, "why": outcome.message]) { a, _ in a })
@@ -1430,26 +1436,41 @@ final class VigilPhone: ObservableObject {
     private func markSeen(_ ref: PaneRef) {
         guard let truth = directories[ref.host.id]?.panes[ref.pane], let revision = truth.unseenRevision else { return }
         directories[ref.host.id]?.panes[ref.pane]?.seen = truth.since
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                guard let acts else { throw WireError.refused("vigil is not connected to tether yet") }
-                switch try await acts.send(device: ref.host.id, .seen(ref.pane, revision: revision)) {
-                case .delivered:
-                    receipts.info("seen", "marked", ["pane": ref.pane, "mac": ref.host.name])
-                case .kept(let why):
-                    // Kept: the Mac takes it when it is back (a newer state
-                    // there by then refuses it, as it should).
-                    receipts.info("seen", "marked when the mac is back", ["pane": ref.pane, "mac": ref.host.name, "why": why])
-                case .dropped(let why):
-                    throw WireError.refused(why)
-                }
-            } catch {
-                if directories[ref.host.id]?.panes[ref.pane]?.stateRevision == revision {
-                    directories[ref.host.id]?.panes[ref.pane]?.seen = truth.seen
-                }
-                receipts.error("seen", "not marked", ["pane": ref.pane, "mac": ref.host.name, "err": error])
-            }
+        do {
+            guard let intents else { throw WireError.refused("vigil is not connected to tether yet") }
+            // Kept until the Mac answers (a newer state there by then refuses
+            // it, as it should): `heard` says how it landed.
+            let id = try intents.send(device: ref.host.id, .seen(ref.pane, revision: revision))
+            seenSent[id] = (ref, revision, truth.seen)
+            receipts.info("seen", "sent", ["pane": ref.pane, "mac": ref.host.name, "id": String(id.prefix(8))])
+        } catch {
+            unsee(ref, revision: revision, before: truth.seen)
+            receipts.error("seen", "not marked", ["pane": ref.pane, "mac": ref.host.name, "err": error])
+        }
+    }
+
+    /// A seen mark the Mac did not take: the row shows what it showed before,
+    /// unless the Mac has moved on since.
+    private func unsee(_ ref: PaneRef, revision: String, before: Double?) {
+        if directories[ref.host.id]?.panes[ref.pane]?.stateRevision == revision {
+            directories[ref.host.id]?.panes[ref.pane]?.seen = before
+        }
+    }
+
+    /// An answer to one of this phone's intents (every one, also those sent
+    /// before a restart): a seen mark's, or the agents activity's.
+    private func heard(_ answer: VigilIntents.Answer) {
+        let mac = hosts.first { $0.id == answer.device }?.name ?? String(answer.device.prefix(10))
+        guard answer.key?.hasPrefix("seen ") == true else { return VigilAgents.heard(answer, mac: mac) }
+        let sent = seenSent.removeValue(forKey: answer.id)
+        let fields: LogFields = ["pane": sent?.ref.pane ?? String(answer.key?.dropFirst(5) ?? ""), "mac": mac]
+        switch answer.heard {
+        case .applied:
+            receipts.info("seen", "marked", fields)
+        case .refused(let why, _), .dropped(let why), .lost(let why):
+            // A seen mark is let go: the Mac's directory says what holds.
+            if let sent { unsee(sent.ref, revision: sent.revision, before: sent.before) }
+            receipts.warn("seen", "not marked", fields.merging(["why": why]) { a, _ in a })
         }
     }
 
