@@ -355,6 +355,7 @@ extension VigilWorkspaces {
         guard session.layoutRevision == request.revision else {
             return .failure(request, "conflict", "The workspace changed in the meantime. Look at it again and retry.")
         }
+        if WorkspaceCommand.moveOperations.contains(request.operation) { return applyMove(request) }
         guard let index = session.tabs.firstIndex(where: { $0.paneIds.contains(request.anchor) }) else {
             return .failure(request, "not_found", "That pane is no longer in this workspace.")
         }
@@ -503,6 +504,129 @@ extension VigilWorkspaces {
         ])
         return Reply(id: request.id, ok: true, code: "committed", message: "Workspace edit committed.",
                      revision: workspaces[request.session]?.layoutRevision, pane: created?.id)
+    }
+
+    /// A move asked by name (`vigil workspace merge`, `tab move|extract`,
+    /// `pane move`), done by the very functions the sidebar's drags and its
+    /// Merge Into run, then judged by where the registry lists what moved:
+    /// those functions log a refusal and change nothing, so the registry is
+    /// the outcome. The source's revision was compared by the caller.
+    private func applyMove(_ request: VigilSessionControl.Request) -> VigilSessionControl.Reply {
+        typealias Reply = VigilSessionControl.Reply
+        let source = request.session
+        guard workspaces[source]?.float == nil else {
+            return .failure(request, "presentation_busy", "This workspace is in the floating terminal on its Mac. Put it back before moving its tabs or panes.")
+        }
+        if let target = request.target {
+            guard workspaces[target] != nil else {
+                return .failure(request, "not_found", "The workspace it goes into does not exist on that Mac.")
+            }
+            guard workspaces[target]?.float == nil else {
+                return .failure(request, "presentation_busy", "The workspace it goes into is in the floating terminal on its Mac.")
+            }
+        }
+        if request.operation != "merge" {
+            guard locate(request.anchor).map({ $0.owner == source && !$0.buried }) == true else {
+                return .failure(request, "not_found", "That pane is no longer in this workspace.")
+            }
+        }
+        /// Where the panes that moved are listed now, and the workspace that
+        /// holds them (nil: not where they were asked to go).
+        func landed(_ panes: [String], in owner: String) -> Bool {
+            !panes.isEmpty && panes.allSatisfy { locate($0).map { $0.owner == owner && !$0.buried } == true }
+        }
+        func committed(_ owner: String, _ message: String) -> Reply {
+            persist()
+            sessionLog.info("session command committed", [
+                "id": request.id.uuidString, "operation": request.operation, "workspace": source,
+                "anchor": request.anchor, "target": owner,
+            ])
+            return Reply(id: request.id, ok: true, code: "committed", message: message,
+                         revision: workspaces[owner]?.layoutRevision, session: owner)
+        }
+        let refused = { (what: String) in
+            Reply.failure(request, "not_moved", "\(what) did not move on its Mac; its log says why (mise run log move).")
+        }
+        switch request.operation {
+        case "merge":
+            let target = request.target!
+            let panes = workspaces[source]!.tabs.flatMap(\.paneIds)
+            mergeWorkspace(source, into: target)
+            guard landed(panes, in: target) else { return refused("The workspace") }
+            return committed(target, "Merged; the emptied workspace rests in Recently closed.")
+        case "move_tab":
+            let target = request.target!
+            guard target != source else {
+                // Among its own tabs: the sidebar's reorder.
+                let tabs = workspaces[source]!.tabs
+                let onto = request.position.flatMap { tabs.indices.contains($0) ? tabs[$0].paneIds.first : nil }
+                reorderTab(anchor: request.anchor, in: source, onto: onto)
+                return committed(source, "Tab moved.")
+            }
+            let panes = workspaces[source]!.tabs.first { $0.paneIds.contains(request.anchor) }?.paneIds ?? []
+            moveTab(anchor: request.anchor, from: source, to: target)
+            guard landed(panes, in: target) else { return refused("The tab") }
+            if let position = request.position, var tabs = workspaces[target]?.tabs,
+               let from = tabs.firstIndex(where: { $0.paneIds.contains(request.anchor) }), position < from {
+                tabs.insert(tabs.remove(at: from), at: position)
+                workspaces[target]!.tabs = tabs
+            }
+            return committed(target, "Tab moved.")
+        case "extract_tab":
+            guard let tab = workspaces[source]!.tabs.first(where: { $0.paneIds.contains(request.anchor) }) else {
+                return .failure(request, "not_found", "That pane's tab is a dock tenant's; name a pane of the tab.")
+            }
+            guard workspaces[source]!.tabs.count > 1 else {
+                return .failure(request, "unsupported_target", "That is the workspace's only tab: it already is a workspace of its own.")
+            }
+            let old = workspaces[source]!
+            let name = newWorkspaceId()
+            // Its name and face: the tab's own, else the drag-out's lineage
+            // label and the workspace's face.
+            var label = tab.label
+            if label == nil {
+                var ordinal = 2
+                let taken = Set(workspaces.values.map(\.label))
+                while taken.contains("\(old.label) \(ordinal)") { ordinal += 1 }
+                label = "\(old.label) \(ordinal)"
+            }
+            var made = Workspace(name: name, label: label!, cwd: tab.panes.first?.cwd ?? old.cwd)
+            made.emoji = tab.emoji ?? old.emoji
+            workspaces[name] = made
+            moveTab(anchor: request.anchor, from: source, to: name)
+            guard landed(tab.paneIds, in: name) else {
+                if workspaces[name]?.tabs.isEmpty == true { workspaces[name] = nil }
+                return refused("The tab")
+            }
+            // The name is the workspace's now, never the tab's twice.
+            if let index = workspaces[name]!.tabs.firstIndex(where: { $0.paneIds.contains(request.anchor) }) {
+                workspaces[name]!.tabs[index].label = nil
+                workspaces[name]!.tabs[index].emoji = nil
+            }
+            lifecycleLog.info("minted by a tab extract", ["workspace": name, "label": made.label, "source": source])
+            return committed(name, "The tab is a workspace of its own.")
+        case "move_pane":
+            let target = request.target!
+            let isDock = workspaces[source]!.tabs.contains { $0.dock?.panes.contains { $0.id == request.anchor } == true }
+            if let into = request.targetTab {
+                guard locate(into).map({ $0.owner == target && !$0.buried }) == true else {
+                    return .failure(request, "not_found", "The tab it joins is not in that workspace.")
+                }
+                movePane(paneId: request.anchor, from: source, intoTabAnchoredBy: into, of: target)
+                let joined = workspaces[target]?.tabs.first { $0.paneIds.contains(into) }?.paneIds.contains(request.anchor) == true
+                guard joined else {
+                    return landed([request.anchor], in: target)
+                        ? committed(target, "Moved; it stays a tab of its own there (the tab is on screen elsewhere).")
+                        : refused("The pane")
+                }
+                return committed(target, "Pane moved into the tab.")
+            }
+            movePane(paneId: request.anchor, from: source, to: target, isDock: isDock)
+            guard landed([request.anchor], in: target) else { return refused("The pane") }
+            return committed(target, "Pane moved.")
+        default:
+            return .failure(request, "unsupported_operation", "vigil on that Mac can't do this; update it.")
+        }
     }
 
     /// A workspace born for a command, as its reply: committed only once
