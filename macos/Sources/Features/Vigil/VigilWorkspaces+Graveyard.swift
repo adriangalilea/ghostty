@@ -347,6 +347,18 @@ extension VigilWorkspaces {
         guard let deadline = graveyardDeadlines[name], Date() >= deadline,
               let session = graveyard[name] else { return }
         let ids = ownedPaneIds(session)
+        // The close's durable intent first (CODEX3 T4): a burial whose
+        // panes are not all fenced is not dropped, so its ownership is never
+        // removed with no stop decision accepted in its place. It stays in
+        // the tray, tried again in a while.
+        let unfenced = fence(ids)
+        guard unfenced.isEmpty else {
+            graveyardLog.error("!! reap put off: its close could not be fenced; the burial is kept", ["workspace": name, "panes": unfenced.sorted()])
+            graveyardDeadlines[name] = Date().addingTimeInterval(Self.fenceRetry)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.fenceRetry + 1) { [weak self] in self?.reapIfExpired(name) }
+            persist()
+            return
+        }
         for runtime in session.held { runtime.dock?.unmount() }
         dropBurial(name)
         // Death is explicit for the surfaces too: every view attached to a
@@ -373,19 +385,33 @@ extension VigilWorkspaces {
     /// is gone before the signal).
     func killDaemons(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }
-        // The close's durable intent, now, in this turn, before the registry
-        // without these panes is saved (a tick later): vigild's closed mark
-        // (`PaneFence`), the one word every party reads. From here no birth
-        // of these panes runs, and the lifecycle service finishes the close
-        // before it restores anything, after a crash or a reboot as well
-        // (CODEX R9); it waits on no lock (R2).
-        for id in ids.sorted() {
-            do { try PaneFence.fence(id, in: VigilPaths.panes) } catch {
-                graveyardLog.error("!! close not fenced; asked all the same (vigild's kill fences it first)", ["pane": id, "err": error])
-            }
+        let unfenced = fence(ids)
+        if !unfenced.isEmpty {
+            graveyardLog.error("!! close not fenced; asked all the same (vigild's kill fences it first)", ["panes": unfenced.sorted()])
         }
         // Never behind a birth or a restore (`lifeQueue`).
         Self.closeQueue.async { Self.closePanes(ids, why: "closed") }
+    }
+
+    /// How long a reap whose fence failed waits before it tries again.
+    static let fenceRetry: TimeInterval = 10
+
+    /// The close's durable intent, in this turn, before the registry
+    /// without these panes is saved (a tick later): vigild's closed mark
+    /// (`PaneFence`), durably accepted (written or found, and synced), the
+    /// one word every party reads. From here no birth of these panes runs,
+    /// and the lifecycle service finishes the close (it watches the marks)
+    /// after a crash or a reboot as well; it waits on no lock. The panes
+    /// whose fence was not accepted.
+    func fence(_ ids: Set<String>) -> Set<String> {
+        var failed = Set<String>()
+        for id in ids.sorted() {
+            do { try PaneFence.fence(id, in: VigilPaths.panes) } catch {
+                graveyardLog.error("!! close not fenced", ["pane": id, "err": error])
+                failed.insert(id)
+            }
+        }
+        return failed
     }
 
     /// The closes fenced and not finished (marks not `clean`), finished: at
@@ -540,53 +566,53 @@ extension VigilWorkspaces {
             return
         }
 
-        // Everything below closes or deletes what the registry does not
-        // list, which proves nothing unless the registry was read whole
-        // (CODEX R1: an unreadable registry, or a backup older than a pane,
-        // once closed valid panes for good). Kept as it is, and said.
-        guard registryRead.provesOwnership else {
-            daemonLog.error("!! orphan collection skipped: the registry was read \(registryRead.rawValue); nothing on disk is closed or removed as no one's", [
-                "read": registryRead.rawValue,
-            ])
-            return
-        }
-
         var owned = Set<String>()
         for session in workspaces.values { owned.formUnion(ownedPaneIds(session)) }
         for session in graveyard.values { owned.formUnion(ownedPaneIds(session)) }
 
         let fm = FileManager.default
         let entries = (try? fm.contentsOfDirectory(atPath: vigildStateDir.path)) ?? []
-        // A spec no registry lists, its daemon dead, is an orphan as a live
-        // daemon is: the lifecycle service would restore it.
         let specs = Set(entries.filter { $0.hasSuffix(".spec") && $0.hasPrefix("vigil-") }.map { String($0.dropLast(".spec".count)) })
         let live = Set(entries.filter { $0.hasSuffix(".lock") && $0.hasPrefix("vigil-") }.map { String($0.dropLast(".lock".count)) }
             .filter { !owned.contains($0) && Self.daemonAlive($0) })
-        let orphans = PaneLife.orphans(read: registryRead, owned: owned, specs: specs, live: live)
-        if !orphans.isEmpty {
-            daemonLog.warn("orphan daemons and specs closed", ["panes": orphans.sorted()])
-            killDaemons(orphans)
+        // A pane is closed or cleaned here only on the proof of a removal,
+        // its close's mark (CODEX3 T1): absence from a registry that decoded
+        // proves nothing (one written from an incomplete read, or left by a
+        // crash before a pane was saved, lacks panes nobody removed).
+        let fenced = { (pane: String) in PaneFence.state(pane, in: VigilPaths.panes) != .none }
+        let unlisted = PaneLife.Unlisted(owned: owned, specs: specs, live: live,
+                                         fenced: Set(specs.union(live).subtracting(owned).filter(fenced)))
+        if !unlisted.closes.isEmpty {
+            daemonLog.warn("closes no registry lists, finished", ["panes": unlisted.closes.sorted()])
+            Self.closeQueue.async { Self.closePanes(unlisted.closes, why: "unlisted, fenced") }
         }
-        for entry in entries where entry.hasSuffix(".resume") && entry.hasPrefix("vigil-") {
-            let id = String(entry.dropLast(".resume".count))
-            guard !owned.contains(id), !Self.daemonAlive(id) else { continue }
-            try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry))
-            try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry + ".seal"))
-            daemonLog.info("stale resume pointer removed", ["pane": id])
+        if !unlisted.lost.isEmpty {
+            // Kept as they are: running, or restorable by the service.
+            daemonLog.error("!! panes on disk no registry lists, never closed: kept as they are", [
+                "panes": unlisted.lost.sorted(), "read": registryRead.rawValue,
+            ])
+        } else if registryRead != .current, registryRead != .absent {
+            // Nothing on disk depends on what the incomplete read missed.
+            do {
+                try PaneLife.RegistryProvenance(file: provenanceURL).clear()
+                daemonLog.info("the registry's incomplete read is settled: every pane on disk is listed or closed", ["was": registryRead.rawValue])
+            } catch {
+                daemonLog.error("!! the registry's incomplete read could not be cleared", ["err": error])
+            }
         }
-        // An ended record whose pane nothing holds any more: nobody can open
-        // it, and no close will come to remove it.
-        for entry in entries where entry.hasSuffix(".ended") && entry.hasPrefix("vigil-") {
-            let id = String(entry.dropLast(".ended".count))
-            guard !owned.contains(id), !Self.daemonAlive(id) else { continue }
+        // What a closed pane left that no close removed: only of a pane with
+        // its mark, whatever the registry says.
+        for entry in entries where entry.hasPrefix("vigil-") && (entry.hasSuffix(".resume") || entry.hasSuffix(".ended")) {
+            let id = String(entry.prefix(upTo: entry.lastIndex(of: ".")!))
+            guard !owned.contains(id), fenced(id), !Self.daemonAlive(id) else { continue }
             try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry))
-            try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry + ".txt"))
-            daemonLog.info("ended record of a pane nothing holds removed", ["pane": id])
+            try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry + (entry.hasSuffix(".resume") ? ".seal" : ".txt")))
+            daemonLog.info("what a closed pane left removed", ["pane": id, "file": entry])
         }
         for entry in (try? fm.contentsOfDirectory(atPath: agentStateDir.path)) ?? []
         where entry.hasSuffix(".state") || entry.hasSuffix(".seen") {
             let id = String(entry.prefix(upTo: entry.lastIndex(of: ".")!))
-            guard !owned.contains(id), !Self.daemonAlive(id) else { continue }
+            guard !owned.contains(id), fenced(id), !Self.daemonAlive(id) else { continue }
             try? fm.removeItem(at: agentStateDir.appendingPathComponent(entry))
         }
     }

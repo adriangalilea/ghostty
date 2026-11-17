@@ -520,6 +520,12 @@ class VigilWorkspaces {
         persistURL.appendingPathExtension("bak")
     }
 
+    /// The record that the registry came from an incomplete read
+    /// (`PaneLife.RegistryProvenance`), beside it.
+    var provenanceURL: URL {
+        persistURL.deletingLastPathComponent().appendingPathComponent("registry-incomplete")
+    }
+
     /// Held for the process lifetime; the kernel releases it on ANY death.
     private static var instanceLockFD: Int32 = -1
 
@@ -623,8 +629,10 @@ class VigilWorkspaces {
     /// The machine is going down. Cancelling termination now stalls the
     /// shutdown itself, so service mode is off the table from here on.
     fileprivate(set) var systemPoweringOff = false
-    /// How the registry was read at launch (`load`): only `.current` lets
-    /// `collectOrphans` close a pane it does not list.
+    /// How the registry was read at launch (`load`), an incomplete read on
+    /// record from an earlier launch included (`PaneLife.RegistryProvenance`).
+    /// Said with the panes it may have missed; no pane is closed for being
+    /// missing from it, whatever it is (only a close's mark closes one).
     fileprivate(set) var registryRead: PaneLife.RegistryRead = .absent
     /// Panes whose leaked surface was already reported this run.
     var reportedLeaks = Set<String>()
@@ -633,6 +641,10 @@ class VigilWorkspaces {
         Record.keep(service: "vigil")
         _ = Self.launchedAt // a static is lazy: stamp it at launch, not at the first status read
         acquireInstanceLock()
+        // What the bundle says it speaks is what it speaks: the installer
+        // reads the former to pair an agent with this app (CODEX3 T3).
+        precondition(Bundle.main.object(forInfoDictionaryKey: "VigilPaneLifeVersion") as? Int == PaneLife.version,
+                     "Ghostty-Info.plist's VigilPaneLifeVersion is not PaneLife.version \(PaneLife.version)")
         load()
         respawnMachineKilledDaemons()
         closeFinished(workspaces.values.flatMap(ownedPaneIds))
@@ -1371,8 +1383,17 @@ class VigilWorkspaces {
         // cheap guarantees that failure mode deserves: the previous good
         // version is kept beside it, and the new one lands ATOMICALLY (a
         // crash mid-write can truncate a plain write to nothing).
+        // Only a previous version that decodes becomes the backup: an
+        // unreadable one would put the evidence of an incomplete read over
+        // the one good copy (CODEX3 T1). It is kept aside instead, once.
         if let previous = try? Data(contentsOf: persistURL), !previous.isEmpty {
-            try? previous.write(to: persistBackupURL, options: .atomic)
+            if (try? JSONDecoder().decode([Registry.Workspace].self, from: previous)) != nil {
+                try? previous.write(to: persistBackupURL, options: .atomic)
+            } else {
+                let aside = persistURL.deletingLastPathComponent().appendingPathComponent("vigil.json.unreadable-\(Int(Date().timeIntervalSince1970))")
+                try? previous.write(to: aside, options: .atomic)
+                registryLog.error("!! the registry on disk did not decode; kept aside, never made the backup", ["aside": aside.path])
+            }
         }
         do {
             try data.write(to: persistURL, options: .atomic)
@@ -1642,6 +1663,13 @@ class VigilWorkspaces {
             } else {
                 registryRead = .absent
             }
+        }
+        // An incomplete read on record from an earlier launch outlives the
+        // registry that launch saved (CODEX3 T1); this launch's own is put
+        // on record before anything is saved.
+        do { registryRead = try PaneLife.RegistryProvenance(file: provenanceURL).settle(registryRead) } catch {
+            registryLog.error("!! the registry's provenance cannot be recorded; acting as unreadable", ["err": error])
+            registryRead = .unreadable
         }
         guard let entries = decoded else { return }
         // One daemon = ONE pane: a registry claiming an id twice would
