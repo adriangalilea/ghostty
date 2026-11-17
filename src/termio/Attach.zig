@@ -365,7 +365,7 @@ pub fn threadEnter(
         // daemon; it is applied to the pty only while this client owns the
         // size (claimed on focus, or adopted when nobody owns it yet).
         self.sendHello(if (self.given_fd != null) "app" else if (self.host != null) "remote" else "surface");
-        self.sendResize();
+        self.sendResize(.connect);
     }
     // Runs before the descriptor's errdefer above: the writer may hold the
     // number already, so it is retired before the number can be reused.
@@ -475,7 +475,7 @@ pub fn focusGained(
 pub fn vigilViewport(self: *Attach) void {
     if (self.viewport) return;
     self.viewport = true;
-    self.sendResize();
+    self.sendResize(.viewport);
     if (self.write_fd < 0) return;
     if (self.focus_pending) self.enqueueFrame('o', "");
     self.focus_pending = false;
@@ -490,7 +490,7 @@ pub fn vigilClaim(self: *Attach, claim: bool) void {
     if (claim and !self.viewport) {
         self.viewport = true;
         self.focus_pending = false;
-        self.sendResize();
+        self.sendResize(.claim);
     }
     self.enqueueFrame(if (claim) 'o' else 'y', if (claim) "intent" else "");
 }
@@ -711,7 +711,26 @@ fn writeThreadMain(self: *Attach) void {
     }
 }
 
-fn sendResize(self: *Attach) void {
+/// Why a size frame goes to the daemon, named in its receipt.
+const SizeWhy = enum {
+    /// The stream opened: hello, then the grid.
+    connect,
+    /// The stream came back in place after its daemon or path was lost.
+    reconnect,
+    /// The embedder declared the viewport laid out.
+    viewport,
+    /// An explicit claim declared the viewport with its grid.
+    claim,
+    /// The io thread's coalesced resize reached the backend.
+    grid,
+};
+
+/// Every 'r' frame sent writes one receipt naming the pane, this client
+/// (the daemon's log names it by the same `ghostty:<pid>/<id>`), the grid
+/// as rows x cols (the daemon's order) and why, so each pty resize in a
+/// pane's log is matched to the app's reason for it. warn, not info: the
+/// receipt must reach the unified log in a release build.
+fn sendResize(self: *Attach, why: SizeWhy) void {
     if (self.write_fd < 0 or !self.viewport) return;
     const rows: u16 = @intCast(self.grid_size.rows);
     const cols: u16 = @intCast(self.grid_size.columns);
@@ -720,6 +739,7 @@ fn sendResize(self: *Attach) void {
         @intCast(cols & 0xff), @intCast((cols >> 8) & 0xff),
     };
     self.enqueueFrame('r', &payload);
+    log.warn("attach: {s} ghostty:{d}/{x} size {d}x{d} sent: {s}", .{ self.id, std.c.getpid(), self.client_id, rows, cols, @tagName(why) });
 }
 
 pub fn resize(
@@ -729,7 +749,7 @@ pub fn resize(
 ) !void {
     _ = screen_size;
     self.grid_size = grid_size;
-    self.sendResize();
+    self.sendResize(.grid);
 }
 
 pub fn queueWrite(
@@ -958,7 +978,7 @@ fn reconnect(self: *Attach, closing: *std.atomic.Value(bool), quit: posix.fd_t) 
             self.write_thread = t;
             self.setStream(nfd);
             self.sendHello(if (self.host != null) "remote" else "surface");
-            self.sendResize();
+            self.sendResize(.reconnect);
             self.setTransport(1);
             // warn, not info: the receipt must reach the unified log in a
             // release build; "I saw no overlay" is not a fact.
