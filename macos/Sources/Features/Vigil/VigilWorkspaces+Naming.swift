@@ -4,6 +4,7 @@ import Listen
 import Say
 import SwiftUI
 import GhosttyKit
+import Log
 import VigilHarness
 import VigilWire
 
@@ -255,6 +256,48 @@ extension VigilWorkspaces {
             }
         }
         return out
+    }
+
+    // MARK: Names that move (VigilWire NameMoves.swift is the rule)
+
+    /// A name leaving `from` with what it described lands on `tab` of `to`
+    /// (and on its pane `pane` where the tab has its own): every move puts
+    /// a name here, and every name that moves is one line in scope
+    /// `naming`, a name with no place the loudest.
+    func wear(_ name: Registry.Name, on tab: inout Registry.Tab, pane: String? = nil, from: String, to: String, by move: String) {
+        guard !name.isEmpty else { return }
+        said(tab.wear(name, pane: pane), tab: tab.paneIds.first ?? "", pane: pane, from: from, to: to, by: move)
+    }
+
+    /// A name that came with a pane alone (a dock tenant joining a tab that
+    /// is not its to rename) lands on the pane `pane` of `to`.
+    func wear(_ name: Registry.Name, onPane pane: String, from: String, to: String, by move: String) {
+        guard !name.isEmpty, let at = locate(pane), !at.buried, at.owner == to else { return }
+        var tab = workspaces[to]!.tabs[at.tab]
+        let landing: Registry.Landing
+        if let i = tab.panes.firstIndex(where: { $0.id == pane }) {
+            landing = tab.panes[i].wear(name)
+        } else if let i = tab.dock?.panes.firstIndex(where: { $0.id == pane }) {
+            landing = tab.dock!.panes[i].wear(name)
+        } else {
+            return
+        }
+        workspaces[to]!.tabs[at.tab] = tab
+        said(landing, tab: tab.paneIds.first ?? "", pane: pane, from: from, to: to, by: move)
+    }
+
+    private func said(_ landing: Registry.Landing, tab: String, pane: String?, from: String, to: String, by move: String) {
+        guard !landing.isEmpty else { return }
+        var fields: LogFields = [
+            "move": move, "from": from, "to": to, "tab": tab,
+            "on tab": landing.tab.description, "on pane": landing.pane.description,
+        ]
+        if let pane { fields["pane"] = pane }
+        namingLog.info("name moved with what it named", fields)
+        if !landing.dropped.isEmpty {
+            fields["dropped"] = landing.dropped.description
+            namingLog.error("!! a moved name had no place: the tab and its pane are named otherwise", fields)
+        }
     }
 
 }

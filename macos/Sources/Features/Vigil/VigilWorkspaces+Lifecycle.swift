@@ -832,22 +832,26 @@ extension VigilWorkspaces {
     /// Drag-out: these tabs left their session's window; they become their
     /// own session (registerMember claims their registry entries from the
     /// old one). The ID stays a fresh random handle (identity is NEVER
-    /// derived — the adrian-N lesson); lineage lives in the LABEL:
-    /// "<parent label> 2", "… 3", renameable.
+    /// derived — the adrian-N lesson). Its name is the tab's
+    /// (`Registry.extract`): one tab gives it its own name and face and
+    /// keeps none; a tab with none, or several tabs, give none, so the id
+    /// is its name.
     func createWorkspace(from controllers: [TerminalController], inheriting old: Workspace) {
         let name = newWorkspaceId()
         let cwd = controllers.first?.focusedSurface?.pwd ?? old.cwd
-        var ordinal = 2
-        let taken = Set(workspaces.values.map(\.label))
-        while taken.contains("\(old.label) \(ordinal)") { ordinal += 1 }
-        var session = Workspace(name: name, label: "\(old.label) \(ordinal)", cwd: cwd)
-        session.emoji = old.emoji // visual lineage, renameable like the label
-        workspaces[name] = session
+        workspaces[name] = Workspace(name: name, label: name, cwd: cwd)
         for controller in controllers { registerMember(controller, name: name) }
-        lifecycleLog.info("minted by a drag-out", ["workspace": name, "label": session.label, "source": old.name, "tabs": controllers.count])
-        // No async label refinement here: the lineage label is already
-        // meaningful (unlike an id seed), and silently replacing it would
-        // erase exactly the breadcrumb the mint just created. Rename wins.
+        let (given, tabs) = Registry.extract(workspaces[name]!.tabs)
+        workspaces[name]!.tabs = tabs
+        workspaces[name]!.label = Registry.Workspace.label(given, id: name)
+        workspaces[name]!.emoji = given.emoji
+        if !given.isEmpty {
+            namingLog.info("a tab's name named the workspace it left for", [
+                "move": "drag-out", "from": old.name, "to": name, "name": given.description,
+            ])
+            for controller in controllers { syncTabTitle(controller) }
+        }
+        lifecycleLog.info("minted by a drag-out", ["workspace": name, "label": workspaces[name]!.label, "source": old.name, "tabs": controllers.count])
         persist()
     }
 
@@ -855,6 +859,10 @@ extension VigilWorkspaces {
     /// absorbs them, captured tabs included. Attention escalates; nothing dies.
     private func absorb(_ other: String, into absorberName: String) {
         guard workspaces[other] != nil, workspaces[absorberName] != nil else { return }
+        // Its name goes with its tabs (the merge rule), whichever way each
+        // tab arrives: live through registerMember, captured below.
+        let given = workspaces[other]!.given
+        let leaving = Set(ownedPaneIds(workspaces[other]!))
         for controller in members(of: other) {
             registerMember(controller, name: absorberName)
         }
@@ -863,6 +871,12 @@ extension VigilWorkspaces {
             for id in tab.paneIds { chown(id, to: absorberName) }
         }
         workspaces[absorberName]!.tabs += absorbed.tabs
+        for index in workspaces[absorberName]!.tabs.indices
+        where !leaving.isDisjoint(with: workspaces[absorberName]!.tabs[index].paneIds) {
+            var tab = workspaces[absorberName]!.tabs[index]
+            wear(given, on: &tab, from: other, to: absorberName, by: "drag-in")
+            workspaces[absorberName]!.tabs[index] = tab
+        }
         if absorbed.attention.rawValue > workspaces[absorberName]!.attention.rawValue {
             workspaces[absorberName]!.attention = absorbed.attention
             workspaces[absorberName]!.attentionSince = absorbed.attentionSince
@@ -949,6 +963,13 @@ extension VigilWorkspaces {
         moveLog.info("vacated viewport handed to the target", ["target": target])
     }
 
+    /// Nothing is left in `name` for a move to leave behind: the tabs it
+    /// lists hold no pane (`clearIfEmpty` buries it), so its name must go
+    /// with what left.
+    func emptiedByMove(_ name: String) -> Bool {
+        workspaces[name]?.tabs.allSatisfy { $0.panes.isEmpty && ($0.dock?.panes.isEmpty ?? true) } ?? false
+    }
+
     /// A source emptied by moves clears: identity through the tray
     /// (120s, undoable), never a silent delete.
     func clearIfEmpty(_ name: String) {
@@ -986,9 +1007,14 @@ extension VigilWorkspaces {
         } else if let index = workspaces[source]!.tabs.firstIndex(where: { $0.paneIds.contains(anchor) }) {
             moved = workspaces[source]!.tabs.remove(at: index)
         }
-        guard let moved else {
+        guard var moved else {
             moveLog.error("tab move refused: tab not found", ["tab": anchor, "source": source])
             return
+        }
+        // Its workspace's last tab: the workspace clears below, so its name
+        // goes with the tab.
+        if emptiedByMove(source) {
+            wear(workspaces[source]!.given, on: &moved, from: source, to: target, by: "tab moved")
         }
         // A warm tab moves warm: its running surfaces belong to the target now.
         let warm = takeWarm(moved, from: source)
@@ -1049,10 +1075,9 @@ extension VigilWorkspaces {
         // The registry entry: from the vacated tab (already lifted out of
         // the source), else taken from wherever it lives. An emptied tab's
         // NAME AND FACE travel with its only pane instead of dying with the
-        // husk.
+        // husk, and so do its workspace's when that emptied too.
         var pane: Registry.Pane?
-        var inheritedLabel: String?
-        var inheritedEmoji: String?
+        var carried = Registry.Name.unnamed
         if let vacated {
             pane = (vacated.panes + (vacated.dock?.panes ?? [])).first { $0.id == paneId }
             // The tab's captured siblings and its dock tenants stay registered
@@ -1065,16 +1090,14 @@ extension VigilWorkspaces {
                     : Registry.Dock(panes: keep, active: min(d.active, keep.count - 1), width: d.width, collapsed: d.collapsed)
             }
             if rest.isEmpty, restDock == nil {
-                inheritedLabel = vacated.label
-                inheritedEmoji = vacated.emoji
+                carried = vacated.given.over(emptiedByMove(source) ? workspaces[source]!.given : .unnamed)
             } else {
                 workspaces[source]!.tabs.append(Registry.Tab(
                     panes: rest, layout: nil, dock: restDock, label: vacated.label, emoji: vacated.emoji))
             }
         } else if let taken = takePane(paneId) {
             pane = taken.pane
-            inheritedLabel = taken.tabLabel
-            inheritedEmoji = taken.tabEmoji
+            carried = taken.name
         }
         guard let pane else {
             moveLog.error("pane move refused: pane registered nowhere", ["pane": paneId])
@@ -1118,10 +1141,13 @@ extension VigilWorkspaces {
                 dock.panes.append(pane)
                 workspaces[target]!.tabs[0].dock = dock
             }
+            // A tenant joins a tab that is not its to rename: what it
+            // carried lands on the tenant itself.
+            wear(carried, onPane: pane.id, from: source, to: target, by: "pane moved to a dock")
         } else {
-            workspaces[target]!.tabs.append(Registry.Tab(
-                panes: [pane], layout: nil,
-                label: inheritedLabel, emoji: inheritedEmoji))
+            var tab = Registry.Tab(panes: [pane], layout: nil)
+            wear(carried, on: &tab, pane: pane.id, from: source, to: target, by: "pane moved")
+            workspaces[target]!.tabs.append(tab)
         }
         if let vacatedController {
             settleVacatedController(vacatedController, movedTo: target)
@@ -1171,6 +1197,9 @@ extension VigilWorkspaces {
             // listed pane materialize, never a foreign one to claim.
             session.tabs[tabIndex].panes.append(contentsOf: fresh.panes)
             workspaces[target] = session
+            // The tab it joined is not its to rename: what the fresh tab
+            // wore lands on the pane.
+            wear(fresh.given, onPane: paneId, from: source, to: target, by: "pane moved into a tab")
             let newView = adoptable(fresh.panes[0].id)
                 ?? Ghostty.SurfaceView(app, baseConfig: resurrectConfig(name: target, pane: fresh.panes[0]))
             if let tree = try? controller.surfaceTree.inserting(view: newView, at: view, direction: .right) {
@@ -1180,6 +1209,7 @@ extension VigilWorkspaces {
             session.tabs[tabIndex].panes.append(contentsOf: fresh.panes)
             session.tabs[tabIndex].layout = nil
             workspaces[target] = session
+            wear(fresh.given, onPane: paneId, from: source, to: target, by: "pane moved into a tab")
         } else {
             session.tabs.append(fresh) // anchor gone: stay a new tab
             workspaces[target] = session
@@ -1214,6 +1244,8 @@ extension VigilWorkspaces {
             return
         }
         workspaces[name]!.tabs[into].panes.append(taken.pane)
+        // The tab it emptied, if it did, names the pane now.
+        wear(taken.name, onPane: paneId, from: name, to: name, by: "pane moved into a tab")
 
         if let anchorView, let anchorHome, let app = ghosttyApp?.app {
             // The target tab is on screen: lift the view out of its own tree,
@@ -1306,11 +1338,16 @@ extension VigilWorkspaces {
 
     /// Merge: every tab of `source` becomes a captured tab of `target`; the
     /// source's windows move on (viewport rule) and its emptied identity
-    /// clears through the tray.
+    /// clears through the tray. Its name and face go with its tabs: each
+    /// tab wears what it lacks of them (`Registry.Tab.wear`).
     func mergeWorkspace(_ source: String, into target: String) {
         guard source != target, workspaces[source] != nil, workspaces[target] != nil else { return }
         let ms = members(of: source)
-        let moving = workspaces[source]!.tabs
+        let given = workspaces[source]!.given
+        var moving = workspaces[source]!.tabs
+        for index in moving.indices {
+            wear(given, on: &moving[index], from: source, to: target, by: "merge")
+        }
         workspaces[target]!.tabs.append(contentsOf: moving)
         workspaces[source]!.tabs = []
         for tab in moving {
@@ -1346,6 +1383,7 @@ extension VigilWorkspaces {
                 killController(member)
             }
         }
+        for controller in members(of: target) { syncTabTitle(controller) }
         persist()
         onAttentionChange?()
         assertInvariants("merge")

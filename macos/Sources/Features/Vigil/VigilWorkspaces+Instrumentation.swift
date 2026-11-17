@@ -36,6 +36,7 @@ let watchdogLog = Log.log.scope("watchdog")
 let invariantsLog = Log.log.scope("invariants")
 let messagesLog = Log.log.scope("messages")
 let watchesLog = Log.log.scope("watches")
+let namingLog = Log.log.scope("naming")
 
 extension VigilWorkspaces {
     // MARK: Instrumentation

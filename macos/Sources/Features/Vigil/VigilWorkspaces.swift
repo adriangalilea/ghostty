@@ -423,6 +423,9 @@ class VigilWorkspaces {
         var buriedFrom: Registry.Origin?
 
         var paneCount: Int { tabs.reduce(0) { $0 + $1.panes.count } }
+
+        /// The name and face you gave it; a label that is its id is none.
+        var given: Registry.Name { Registry.Name(label: label == name ? nil : label, emoji: emoji) }
     }
 
     /// Every edit is saved: an edit schedules one save a tick later, so a
@@ -743,20 +746,20 @@ class VigilWorkspaces {
             + (dock?.views.compactMap(\.vigilAttachId) ?? [])
         guard let first = ids.first, !ownedPaneIds(workspaces[name]!).contains(first) else { return }
         var carried: [Registry.Pane] = []
-        var label: String?
-        var emoji: String?
+        var names: [(Registry.Name, from: String)] = []
         for id in ids {
             guard let taken = takePane(id) else { continue }
             carried.append(taken.pane)
-            label = label ?? taken.tabLabel
-            emoji = emoji ?? taken.tabEmoji
+            names.append((taken.name, taken.from))
             chown(id, to: name)
         }
         let (panes, layout) = capture(controller.surfaceTree, carrying: carried)
-        let tab = Registry.Tab(
+        var tab = Registry.Tab(
             panes: panes, layout: layout,
-            dock: dock.flatMap { captureDock($0, carrying: carried) },
-            label: label, emoji: emoji)
+            dock: dock.flatMap { captureDock($0, carrying: carried) })
+        for (carriedName, from) in names {
+            wear(carriedName, on: &tab, from: from, to: name, by: "a tab joined")
+        }
         // A ⌘T lands right after its parent tab (where AppKit places the
         // native tab), never at the end: registry order IS the tab order.
         let parentIds = Set(parent?.surfaceTree.compactMap(\.vigilAttachId) ?? [])
@@ -967,7 +970,8 @@ class VigilWorkspaces {
     /// Take a pane OUT of wherever it lives (a session's tab, a dock, a
     /// burial). An emptied tab is dropped and hands its own name and face
     /// to the taker (the identity travels with the only pane instead of
-    /// dying with the husk); an emptied burial is dropped; a held runtime
+    /// dying with the husk), and so does a workspace this take empties,
+    /// under the tab's (`TakenPane.name`); an emptied burial is dropped; a held runtime
     /// releases the pane's view so no two trees ever hold one daemon. The
     /// one primitive under every move and every re-claim.
     func takePane(_ id: String) -> TakenPane? {
@@ -1032,15 +1036,19 @@ class VigilWorkspaces {
         // tab, or (the tab emptied) at the tab's position.
         let origin = at.buried ? nil : Registry.Origin(
             workspace: at.owner, tab: at.tab, beside: emptied ? nil : tab.panes.first?.id, dock: fromDock ? true : nil)
-        return TakenPane(pane: pane, tabLabel: emptied ? tab.label : nil, tabEmoji: emptied ? tab.emoji : nil, origin: origin)
+        let tabName = emptied ? tab.given : .unnamed
+        let workspaceName = !at.buried && session.tabs.isEmpty ? session.given : .unnamed
+        return TakenPane(pane: pane, name: tabName.over(workspaceName), from: at.owner, origin: origin)
     }
 
-    /// What `takePane` hands the taker: the pane, the emptied tab's name and
-    /// face (nil when the tab stays), and where it stood.
+    /// What `takePane` hands the taker: the pane; the name and face of what
+    /// it emptied (its tab's, each field it lacks from its workspace's when
+    /// that emptied too; none when both stay), for the taker to put on what
+    /// carries the pane now (`wear`); the workspace it left; where it stood.
     struct TakenPane {
         let pane: Registry.Pane
-        let tabLabel: String?
-        let tabEmoji: String?
+        let name: Registry.Name
+        let from: String
         let origin: Registry.Origin?
     }
 
@@ -1126,8 +1134,7 @@ class VigilWorkspaces {
         }
         let listedHere = tabIndex().map { Set(workspaces[name]!.tabs[$0].paneIds) } ?? []
         var carried: [Registry.Pane] = []
-        var inheritedLabel: String?
-        var inheritedEmoji: String?
+        var names: [(Registry.Name, pane: String, from: String)] = []
         /// Panes this tree took back from a burial: an undo.
         var unburied: [String] = []
         let joined = after.subtracting(before)
@@ -1145,8 +1152,7 @@ class VigilWorkspaces {
                 continue
             }
             carried.append(taken.pane)
-            inheritedLabel = inheritedLabel ?? taken.tabLabel
-            inheritedEmoji = inheritedEmoji ?? taken.tabEmoji
+            names.append((taken.name, id, taken.from))
             chown(id, to: name)
             registryLog.info("pane claimed", ["pane": id, "workspace": name])
         }
@@ -1164,16 +1170,25 @@ class VigilWorkspaces {
             let captured = session.tabs[index].panes.filter { !touched.contains($0.id) }
             session.tabs[index].panes = panes + captured
             if captured.isEmpty { session.tabs[index].layout = layout }
-            if session.tabs[index].label == nil { session.tabs[index].label = inheritedLabel }
-            if session.tabs[index].emoji == nil { session.tabs[index].emoji = inheritedEmoji }
             if session.tabs[index].panes.isEmpty, session.tabs[index].dock?.panes.isEmpty ?? true {
                 session.tabs.remove(at: index)
             }
         } else if !panes.isEmpty {
             registryLog.error("live tree with no registry tab appended", ["workspace": name])
-            session.tabs.append(Registry.Tab(panes: panes, layout: layout, label: inheritedLabel, emoji: inheritedEmoji))
+            var tab = Registry.Tab(panes: panes, layout: layout)
+            for (carriedName, pane, from) in names {
+                wear(carriedName, on: &tab, pane: pane, from: from, to: name, by: "a pane joined a tab")
+            }
+            session.tabs.append(tab)
         }
         workspaces[name] = session
+        // A pane that joined a tab standing here brings its old tab's name,
+        // and its workspace's, to itself: the tab is not its to rename.
+        if index != nil {
+            for (carriedName, pane, from) in names {
+                wear(carriedName, onPane: pane, from: from, to: name, by: "a pane joined a tab")
+            }
+        }
         // Beside a pane the tab keeps; at the tab's place when it emptied.
         let origin = index.map { Registry.Origin(workspace: name, tab: $0, beside: panes.first?.id) }
         for pane in closed { buryPane(pane, from: name, origin: origin) }
