@@ -1,4 +1,5 @@
 import Combine
+import Ink
 import SwiftUI
 import TetherKit
 import UIKit
@@ -187,8 +188,13 @@ struct PaneMessages: View {
     @ObservedObject private var store = VigilPhoneMessages.shared
 
     var body: some View {
-        // What its row mark counts, so reading it here clears the mark.
-        VigilThreadColumn(key: key, thread: store.paneThread(key), host: store.host)
+        // What its row mark counts, so reading it here clears the mark. The
+        // pane screen's bar names the pane, so the column draws no head.
+        let thread = store.paneThread(key)
+        let people = VigilChatPeople(threads: thread.map { [$0] } ?? [], host: store.host)
+        InkChat.Column {
+            VigilThreadConversation(key: key, thread: thread, people: people, host: store.host)
+        }
     }
 }
 
