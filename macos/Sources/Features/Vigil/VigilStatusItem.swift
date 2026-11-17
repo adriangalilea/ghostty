@@ -41,6 +41,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         VigilWorkspaces.shared.onAttentionChange = { [weak self] in
             self?.updateBadge()
         }
+        // An agent's message to the person read or arrived: the count moves.
+        NotificationCenter.default.addObserver(forName: VigilMessageStore.forYouDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateBadge() }
+        }
         updateBadge()
         installMainMenu()
 
@@ -82,20 +86,25 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         mainMenu.insertItem(holder, at: max(0, mainMenu.items.count - 1))
     }
 
-    /// The eye opens when sessions want you: filled symbol + count. The image
-    /// is a TEMPLATE so the menu bar tints it correctly for light/dark and the
-    /// open-menu highlight (the Apple-clean way; a raw colour would not adapt).
+    /// The eye opens when sessions want you or an agent's message to you is
+    /// unread: filled symbol + the count of each (`3`, `✉2`, `3 ✉2`). The
+    /// image is a TEMPLATE so the menu bar tints it correctly for light/dark
+    /// and the open-menu highlight (the Apple-clean way; a raw colour would
+    /// not adapt).
     private func updateBadge() {
         guard let button = statusItem.button else { return }
         let count = VigilWorkspaces.shared.pendingCount
+        let messages = VigilMessageStore.shared.forYouCount
         let eye = NSImage(
-            systemSymbolName: count > 0 ? "eye.fill" : "eye",
+            systemSymbolName: count + messages > 0 ? "eye.fill" : "eye",
             accessibilityDescription: "vigil")
         eye?.isTemplate = true
         button.image = eye
-        button.title = count > 0 ? "\(count)" : ""
-        button.setAccessibilityLabel(
-            count > 0 ? "vigil, \(count) need you" : "vigil")
+        button.title = [count > 0 ? "\(count)" : nil, messages > 0 ? "✉\u{FE0E}\(messages)" : nil]
+            .compactMap { $0 }.joined(separator: " ")
+        let said = [count > 0 ? "\(count) need you" : nil, messages > 0 ? "\(messages) unread messages for you" : nil]
+            .compactMap { $0 }
+        button.setAccessibilityLabel(said.isEmpty ? "vigil" : "vigil, " + said.joined(separator: ", "))
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {

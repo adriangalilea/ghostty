@@ -327,6 +327,12 @@ class AppDelegate: NSObject,
         )
         NotificationCenter.default.addObserver(
             self,
+            selector: #selector(vigilMessagesForYouDidChange(_:)),
+            name: VigilMessageStore.forYouDidChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
             selector: #selector(ghosttyNewWindow(_:)),
             name: Ghostty.Notification.ghosttyNewWindow,
             object: nil)
@@ -818,6 +824,11 @@ class AppDelegate: NSObject,
         }
     }
 
+    /// vigil: the Dock's badge counts the person's unread messages too.
+    @objc private func vigilMessagesForYouDidChange(_ notification: Notification) {
+        syncDockBadge()
+    }
+
     @objc private func terminalWindowHasBell(_ notification: Notification) {
         guard notification.object is BaseTerminalController else { return }
         syncDockBadge()
@@ -895,8 +906,10 @@ class AppDelegate: NSObject,
         let bellCount = NSApp.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .reduce(0) { $0 + ($1.bell ? 1 : 0) }
-        let wantsBadge = ghostty.config.bellFeatures.contains(.attention) && bellCount > 0
-        let label = wantsBadge ? (bellCount > 99 ? "99+" : String(bellCount)) : nil
+        let bells = ghostty.config.bellFeatures.contains(.attention) ? bellCount : 0
+        // vigil: and every message an agent addressed to the person, unread.
+        let count = bells + MainActor.assumeIsolated { VigilMessageStore.shared.forYouCount }
+        let label = count > 0 ? (count > 99 ? "99+" : String(count)) : nil
         NSApp.dockTile.badgeLabel = label
         NSApp.dockTile.display()
     }
@@ -1058,7 +1071,10 @@ class AppDelegate: NSObject,
         didReceive: UNNotificationResponse,
         withCompletionHandler: () -> Void
     ) {
-        ghostty.handleUserNotification(response: didReceive)
+        // vigil: a message's notification opens its thread (VigilMessageAlerts).
+        if !VigilMessageAlerts.open(didReceive) {
+            ghostty.handleUserNotification(response: didReceive)
+        }
         withCompletionHandler()
     }
 
@@ -1067,7 +1083,10 @@ class AppDelegate: NSObject,
         willPresent: UNNotification,
         withCompletionHandler: (UNNotificationPresentationOptions) -> Void
     ) {
-        let shouldPresent = ghostty.shouldPresentNotification(notification: willPresent)
+        // vigil: a message's notification is posted only while the app is not
+        // in front, so it is shown as posted (VigilMessageAlerts).
+        let shouldPresent = VigilMessageAlerts.ours(willPresent)
+            || ghostty.shouldPresentNotification(notification: willPresent)
         let options: UNNotificationPresentationOptions = shouldPresent ? [.banner, .sound] : []
         withCompletionHandler(options)
     }

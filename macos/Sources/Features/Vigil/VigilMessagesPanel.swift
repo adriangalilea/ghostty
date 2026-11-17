@@ -2,6 +2,7 @@ import AppKit
 import AuthzProtocol
 import Combine
 import SwiftUI
+import UserNotifications
 import VigilHarness
 import VigilWire
 
@@ -177,7 +178,19 @@ final class VigilMessageStore: ObservableObject {
     private func recount() {
         let next = MessageThreads.pending(mailboxes)
         if next != marks.pending { marks.pending = next }
+        let due = MessageThreads.forYou(threads)
+        VigilMessageAlerts.shared.due(due, names: host)
+        if due.count != forYouCount {
+            forYouCount = due.count
+            NotificationCenter.default.post(name: Self.forYouDidChange, object: nil)
+        }
     }
+
+    /// The messages agents addressed to the person that they have not read
+    /// (`MessageThreads.forYou`): what the Dock's badge and the menu bar count.
+    private(set) var forYouCount = 0
+    /// `forYouCount` changed.
+    static let forYouDidChange = Notification.Name("vigilMessagesForYouDidChange")
 
     // MARK: Names (from the sidebar's own rows: the one naming rule)
 
@@ -345,6 +358,81 @@ enum VigilMessagesPanel {
     static func thread(of key: MessageThread.Key) -> MessageThread? {
         let threads = VigilMessageStore.shared.threads
         return threads.first { $0.key == key } ?? threads.first { $0.key.root == key.root && $0.key.pane == key.pane }
+    }
+}
+
+/// A macOS notification for each message an agent addresses to the person
+/// while Vigil is not the front app: one per message, only for one that
+/// arrived after this app started (a mailbox opened at launch is history,
+/// not news), never for the person's own. Pressed, it opens that message's
+/// thread; read anywhere, it is taken away. What is due is the threads' own
+/// rule (`MessageThreads.forYou`), handed in by the store at every change.
+@MainActor
+final class VigilMessageAlerts {
+    static let shared = VigilMessageAlerts()
+    /// The thread a notification opens, in its user info.
+    static let threadKey = "vigil.message.thread"
+
+    private let started = Date().timeIntervalSince1970
+    /// Every message already weighed: each is notified once at most.
+    private var weighed: Set<String> = []
+    /// The messages due at the last change: one no longer due was read.
+    private var due: Set<String> = []
+
+    func due(_ now: [MessageThreads.ForYou], names: VigilChatHost) {
+        let ids = Set(now.map(\.item.id))
+        let read = due.subtracting(ids)
+        if !read.isEmpty {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: read.map(Self.identifier))
+        }
+        due = ids
+        let front = NSApp.isActive
+        for one in now where weighed.insert(one.item.id).inserted {
+            guard one.item.record.arrived >= started, !front else { continue }
+            post(one, names: names)
+        }
+    }
+
+    private static func identifier(_ message: String) -> String { "vigil.message.\(message)" }
+
+    private func post(_ one: MessageThreads.ForYou, names: VigilChatHost) {
+        let message = one.item.record.message
+        let pane = names.name(one.item.senderRoot, message.from.pane ?? message.to.pane)
+        let content = UNMutableNotificationContent()
+        content.title = [pane.face, pane.said].compactMap { $0 }.joined(separator: " ")
+        content.body = one.item.words
+        content.sound = .default
+        content.threadIdentifier = one.thread
+        content.userInfo = [Self.threadKey: one.thread]
+        let request = UNNotificationRequest(identifier: Self.identifier(one.item.id), content: content, trigger: nil)
+        let center = UNUserNotificationCenter.current()
+        let id = one.item.id
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            guard granted else {
+                return messagesLog.warn("message not notified", ["id": id, "why": error.map { "\($0)" } ?? "notifications are not allowed"])
+            }
+            center.add(request) { error in
+                if let error { messagesLog.warn("message not notified", ["id": id, "why": "\(error)"]) }
+                else { messagesLog.info("message notified", ["id": id]) }
+            }
+        }
+    }
+
+    /// A press on one of ours: its thread, in the Messages window, in front.
+    /// False for any other notification.
+    nonisolated static func open(_ response: UNNotificationResponse) -> Bool {
+        guard let thread = response.notification.request.content.userInfo[threadKey] as? String else { return false }
+        if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            Task { @MainActor in
+                NSApp.activate()
+                VigilMessagesPanel.window(thread: thread)
+            }
+        }
+        return true
+    }
+
+    nonisolated static func ours(_ notification: UNNotification) -> Bool {
+        notification.request.content.userInfo[threadKey] != nil
     }
 }
 
