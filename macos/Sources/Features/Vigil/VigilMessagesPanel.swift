@@ -153,7 +153,7 @@ final class VigilMessageStore: ObservableObject {
         guard mailboxWatch == nil else { return }
         let folder = VigilPaths.agent.appendingPathComponent("mailbox").path
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let fd = open(folder, O_EVTONLY)
+        let fd = Darwin.open(folder, O_EVTONLY)
         guard fd >= 0 else { return messagesLog.error("mailbox folder not watched; this Mac's messages follow again when the hub does", ["path": folder]) }
         let watch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
         watch.setEventHandler {
