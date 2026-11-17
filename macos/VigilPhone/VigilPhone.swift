@@ -284,6 +284,7 @@ final class VigilPhone: ObservableObject {
         }
         receipts.info("tether", "node up", ["root": String(node.root().prefix(10))])
         VigilPhoneMessages.shared.attach(node: node)
+        VigilPhoneWatches.shared.attach(node: node)
         VigilAgents.begin()
         readPeers()
         Task { [weak self] in
@@ -336,6 +337,8 @@ final class VigilPhone: ObservableObject {
         }
         // Each Mac's mailbox, followed as its directory is.
         VigilPhoneMessages.shared.macs(Set(hosts.map(\.id)))
+        // And each Mac's watches.
+        VigilPhoneWatches.shared.macs(Set(hosts.map(\.id)))
         // Each Mac learns where this phone's agents activity is reached and
         // what is followed there.
         VigilAgents.macs(Dictionary(uniqueKeysWithValues: hosts.map { host in

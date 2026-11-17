@@ -109,15 +109,7 @@ final class VigilPhoneMessages: ObservableObject {
     var host: VigilChatHost {
         VigilChatHost(
             here: nil, macName: UIDevice.current.name,
-            name: { root, pane in
-                let phone = VigilPhone.shared
-                let mac = phone.hosts.first { $0.id == root }?.name ?? "a Mac"
-                let face = phone.directories[root]?.place(of: pane)?.workspace.emoji
-                guard let node = phone.node(for: PaneRef(host: .init(id: root, name: mac), pane: pane, title: "")) else {
-                    return VigilChatPane.of(conversation: nil, title: pane, face: face, mac: mac)
-                }
-                return VigilChatPane.of(conversation: node.glance?.title, title: node.title, face: face, mac: mac)
-            },
+            name: { root, pane in Self.pane(root: root, pane: pane) },
             post: { message, root in try await Self.post(message, root: root) },
             act: { act, root in try await Self.act(act, root: root) },
             open: { root, pane in Self.open(root: root, pane: pane) },
@@ -157,8 +149,20 @@ final class VigilPhoneMessages: ObservableObject {
         return acted
     }
 
-    /// Go to a pane from a message: the pane screen, over whatever shows.
-    private static func open(root: String, pane: String) {
+    /// A pane of the Mac `root` as its row names it, with its Mac: what a
+    /// thread and a watch call it.
+    static func pane(root: String, pane: String) -> VigilChatPane {
+        let phone = VigilPhone.shared
+        let mac = phone.hosts.first { $0.id == root }?.name ?? "a Mac"
+        let face = phone.directories[root]?.place(of: pane)?.workspace.emoji
+        guard let node = phone.node(for: PaneRef(host: .init(id: root, name: mac), pane: pane, title: "")) else {
+            return VigilChatPane.of(conversation: nil, title: pane, face: face, mac: mac)
+        }
+        return VigilChatPane.of(conversation: node.glance?.title, title: node.title, face: face, mac: mac)
+    }
+
+    /// Go to a pane from a message or a watch: the pane screen, over whatever shows.
+    static func open(root: String, pane: String, from scope: String = "messages") {
         let phone = VigilPhone.shared
         let mac = phone.hosts.first { $0.id == root }?.name ?? ""
         if let node = phone.node(for: PaneRef(host: .init(id: root, name: mac), pane: pane, title: "")), let ref = node.pane {
@@ -166,7 +170,7 @@ final class VigilPhoneMessages: ObservableObject {
         } else {
             phone.openPane(pane)
         }
-        phone.receipts.info("messages", "went to a pane", ["pane": pane])
+        phone.receipts.info(scope, "went to a pane", ["pane": pane])
     }
 }
 

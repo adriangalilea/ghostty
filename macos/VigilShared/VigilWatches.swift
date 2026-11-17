@@ -58,6 +58,28 @@ enum VigilWatchList {
         ].filter { !$0.items.isEmpty }
     }
 
+    /// What rows wear (`WatchMark`): the live watches reaching each pane,
+    /// by root then pane, each pane's in id order.
+    static func marks(_ boards: [String: [String: WatchRecord]]) -> [String: [String: [WatchRecord]]] {
+        var marks: [String: [String: [WatchRecord]]] = [:]
+        for (root, records) in boards {
+            for record in records.values where record.live {
+                for pane in Set(record.panes) { marks[root, default: [:]][pane, default: []].append(record) }
+            }
+        }
+        return marks.mapValues { $0.mapValues { $0.sorted { $0.id < $1.id } } }
+    }
+
+    /// Whether two sets of marks draw the same: which watches, their state
+    /// and what is broken (a run's history is the list's alone), so a
+    /// store replaces what rows observe only when a row would change.
+    static func drawSame(_ a: [String: [String: [WatchRecord]]], _ b: [String: [String: [WatchRecord]]]) -> Bool {
+        func drawn(_ all: [String: [String: [WatchRecord]]]) -> [String: [String: [String]]] {
+            all.mapValues { $0.mapValues { $0.map { "\($0.id) \($0.state.kind) \($0.broken.map(\.words))" } } }
+        }
+        return drawn(a) == drawn(b)
+    }
+
     static func tone(_ record: WatchRecord) -> InkTone {
         if record.isBroken { return .warn }
         switch record.state.kind {

@@ -185,6 +185,11 @@ struct HomeView: View {
                 NavigationLink { PhoneMessagesScreen() } label: { MessagesButtonLabel() }
                     .accessibilityLabel("Messages")
             }
+            // Every watch of every Mac, the broken counted.
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink { PhoneWatchesScreen() } label: { WatchesButtonLabel() }
+                    .accessibilityLabel("Watches")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { model.composing = .init(host: model.onlyReachable, folder: nil) } label: {
                     Image(systemName: "plus")
@@ -313,6 +318,9 @@ struct TreeNodeView: View {
     /// The conflict whose two copies are on screen (a tap on its mark: which
     /// Mac, when each was last written, what each holds past what they share).
     @State private var showingConflict: PaneConflict?
+    /// The pane's watches, over the tree (its long press).
+    @State private var showingWatches = false
+    @ObservedObject private var watches = VigilPhoneWatches.shared.marks
     private var foldable: Bool { !node.children.isEmpty }
 
     var body: some View {
@@ -424,6 +432,10 @@ struct TreeNodeView: View {
                           systemImage: following ? FollowMark.unfollowSymbol : FollowMark.symbol)
                 }
             }
+            // The watches whose verdict reaches it, as the Mac's row offers them.
+            if let ref = node.pane, !watches.watches(root: ref.host.id, pane: ref.pane).isEmpty {
+                Button { showingWatches = true } label: { Label("Watches", systemImage: "binoculars") }
+            }
             if let host = model.host(of: node), model.reachable(host) {
                 if node.kind == .host {
                     QuickCreateItems(host: host)
@@ -446,6 +458,9 @@ struct TreeNodeView: View {
                 }
             }
         }
+        .sheet(isPresented: $showingWatches) {
+            if let ref = node.pane { PhonePaneWatches(ref: ref) }
+        }
     }
 
     /// The tree's columns, a finger's (`ThreadTreeMetrics.touch`), and the
@@ -467,6 +482,9 @@ struct TreeNodeView: View {
         AntennaMark(what: backgrounds.flatMap(\.commands), sizes: Self.markSizes)
         // Its messages you have not read, or yours not handed yet.
         PhoneMessagesMark(refs: (node.kind == .pane ? [node] : (folded ? node.leaves : [])).compactMap(\.pane), sizes: Self.markSizes)
+        // Watches whose verdict will reach it, in the care tone when one is
+        // broken; its long press opens them.
+        PhoneWatchMark(refs: (node.kind == .pane ? [node] : (folded ? node.leaves : [])).compactMap(\.pane), sizes: Self.markSizes)
         if node.onAnotherMac {
             Image(systemName: "laptopcomputer").font(.caption2.weight(.bold)).foregroundStyle(.cyan)
                 .accessibilityLabel("Open on another Mac right now")
@@ -1250,6 +1268,9 @@ struct PaneScreen: View {
     @State private var mode: Mode
     /// The current pane's feed, followed while its conversation can show.
     @State private var conversation: Conversation?
+    /// The pane's watches, over the screen (its menu).
+    @State private var showingWatches = false
+    @ObservedObject private var watches = VigilPhoneWatches.shared.marks
 
     enum Mode: CaseIterable {
         case conversation, changes, documents, messages, terminal
@@ -1342,6 +1363,7 @@ struct PaneScreen: View {
         .navigationBarBackButtonHidden(true)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar { toolbar }
+        .sheet(isPresented: $showingWatches) { PhonePaneWatches(ref: current) }
         .task {
             screenVisible = true
             await show(current)
@@ -1478,6 +1500,12 @@ struct PaneScreen: View {
                         }
                     }
                     .disabled(model.creating != nil || !model.reachable(current.host))
+                    // The watches whose verdict reaches it, as the Mac's row offers them.
+                    if !watches.watches(root: current.host.id, pane: current.pane).isEmpty {
+                        Section {
+                            Button { showingWatches = true } label: { Label("Watches", systemImage: "binoculars") }
+                        }
+                    }
                     Section("Switch to") {
                         ForEach(model.livePanes(on: current.host).filter { $0.pane != current }) { other in
                             if let ref = other.pane {

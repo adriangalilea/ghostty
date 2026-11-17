@@ -105,19 +105,8 @@ final class VigilWatchStore: ObservableObject {
     }
 
     private func remark() {
-        var next: [String: [String: [WatchRecord]]] = [:]
-        for (root, records) in boards {
-            for record in records.values where record.live {
-                for pane in Set(record.panes) { next[root, default: [:]][pane, default: []].append(record) }
-            }
-        }
-        // What a row draws: which watches, their state and what is broken
-        // (a run's history is the window's alone).
-        func drawn(_ all: [String: [String: [WatchRecord]]]) -> [String: [String: [String]]] {
-            all.mapValues { $0.mapValues { $0.map { "\($0.id) \($0.state.kind) \($0.broken.map(\.words))" }.sorted() } }
-        }
-        let sorted = next.mapValues { $0.mapValues { $0.sorted { $0.id < $1.id } } }
-        if drawn(sorted) != drawn(marks.reaching) { marks.reaching = sorted }
+        let next = VigilWatchList.marks(boards)
+        if !VigilWatchList.drawSame(next, marks.reaching) { marks.reaching = next }
     }
 
     // MARK: The host the views ask
