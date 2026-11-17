@@ -128,11 +128,17 @@ extension VigilWorkspaces {
     /// this call exists to kill.
     @discardableResult
     func startDaemon(pane: Registry.Pane, session: String, provisional: Bool = false) async -> Bool {
+        await startDaemonSaying(pane: pane, session: session, provisional: provisional) == nil
+    }
+
+    /// The same, saying why it is not up (nil: up): the service's outcome
+    /// word first (`collision: …` for an id that is another pane's).
+    func startDaemonSaying(pane: Registry.Pane, session: String, provisional: Bool = false) async -> String? {
         fresh.remove(pane.id)
         births.insert(pane.id)
         let failed = await Self.born(pane, session: session, provisional: provisional)
         settled([pane.id], said: failed.map { [pane.id: $0] } ?? [:])
-        return failed == nil
+        return failed
     }
 
     /// New Workspace (⌘N, menu-bar New Workspace, overview `n`): the fresh
@@ -215,7 +221,28 @@ extension VigilWorkspaces {
                 maxIndex = max(maxIndex, n)
             }
         }
-        let minted = max(session.paneSeq, maxIndex + 1)
+        var minted = max(session.paneSeq, maxIndex + 1)
+        // The counter is a floor, never the proof: an id is minted only when
+        // nothing of it exists on disk (CODEX6 W1: a counter from an older
+        // registry, after a scan that failed, once named a pane that ran).
+        // Taken ids are passed over; one whose traces cannot be looked up
+        // is never minted on the counter's word: the clock (seconds since
+        // 1970, above any index minted one by one) floors the next instead,
+        // and it is said.
+        probing: while true {
+            switch PaneLife.freshness("vigil-\(name)-\(minted)", panes: VigilPaths.panes, agent: VigilPaths.agent) {
+            case .fresh:
+                break probing
+            case .taken(let trace):
+                registryLog.warn("pane id already in use on disk; passed over", ["pane": "vigil-\(name)-\(minted)", "trace": trace])
+                minted += 1
+            case .unknown(let why):
+                let floor = Int(Date().timeIntervalSince1970)
+                guard minted < floor else { break probing }
+                registryLog.error("!! a pane id's traces cannot be looked up; minting above the clock", ["pane": "vigil-\(name)-\(minted)", "why": why])
+                minted = floor
+            }
+        }
         workspaces[name]!.paneSeq = minted + 1
         // An id made now names a pane that has not run: the one fact that
         // lets its daemon be started unasked (`PaneLife.tend`).
