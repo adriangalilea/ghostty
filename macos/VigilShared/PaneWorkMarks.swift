@@ -201,6 +201,46 @@ struct ConflictMark: View {
     }
 }
 
+/// Messages for the pane that you have not read, or that you wrote and wait
+/// to be handed to its agent (`MessageThreads.Pending`): an envelope and how
+/// many, blue while any is unread, quiet while only yours wait. Several: a
+/// folded row's panes, summed. `press`, on one pane's, opens its thread.
+/// Nothing while there is none.
+struct MessagesMark: View {
+    let pending: [MessageThreads.Pending]
+    let sizes: PaneMarkSizes
+    var press: (() -> Void)?
+
+    private var unread: Int { pending.reduce(0) { $0 + $1.unread } }
+    private var waiting: Int { pending.reduce(0) { $0 + $1.waiting } }
+
+    var body: some View {
+        if unread + waiting > 0 {
+            let mark = HStack(spacing: 1) {
+                Image(systemName: "envelope.fill").font(sizes.symbol)
+                Text("\(unread > 0 ? unread : waiting)").font(sizes.count)
+            }
+            .foregroundStyle(unread > 0 ? AnyShapeStyle(.blue) : AnyShapeStyle(.secondary))
+            .fixedSize()
+            .help(said)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(said)
+            if let press {
+                Button(action: press) { mark }.buttonStyle(.plain)
+            } else {
+                mark
+            }
+        }
+    }
+
+    private var said: String {
+        var lines: [String] = []
+        if unread > 0 { lines.append(unread == 1 ? "1 message you have not read" : "\(unread) messages you have not read") }
+        if waiting > 0 { lines.append(waiting == 1 ? "1 of yours waits to be handed to its agent" : "\(waiting) of yours wait to be handed to its agent") }
+        return lines.joined(separator: "\n") + (press == nil ? "" : "\nPress to open its thread.")
+    }
+}
+
 /// Something is alive under the pane that no agent accounts for: what its
 /// turns left running, or a watch that declared itself (`what`, a line each).
 struct AntennaMark: View {

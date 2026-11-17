@@ -254,6 +254,8 @@ final class VigilRemote: ObservableObject {
         // is not): a restore refused while it was down, for want of its
         // seal, is asked again now.
         if first { VigilWorkspaces.shared.restoreDied(why: "the hub answers") }
+        // This Mac's mailbox is the hub's to serve, from its first line on.
+        if first { VigilMessageStore.shared.hubAnswers() }
     }
 
     private func ended(_ attempt: Int, _ failure: (any Error)?) {
@@ -272,6 +274,7 @@ final class VigilRemote: ObservableObject {
         peersState = .idle
         peersSocket = nil
         unfollowAll()
+        VigilMessageStore.shared.hubGone()
         remoteLog.warn("macs stream ended", [
             "attempt": attempt, "err": failure.map { "\($0)" } ?? "closed by the hub", "next": again ? "dialed again" : "waits for the hub's folder",
         ])
@@ -332,6 +335,7 @@ final class VigilRemote: ObservableObject {
             follow(peer.id)
             followMachine(peer.id)
         }
+        VigilMessageStore.shared.macs(wanted)
         remoteLog.info("macs", ["macs": peers.map(\.name)])
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }

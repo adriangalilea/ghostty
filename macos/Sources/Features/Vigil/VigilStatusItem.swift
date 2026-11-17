@@ -150,6 +150,14 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         create.target = self
         create.image = NSImage(systemSymbolName: "plus.rectangle", accessibilityDescription: nil)
         menu.addItem(create)
+        // Every thread between agents and you, on every Mac: what waits on
+        // you or is unread is counted in its title.
+        let pending = VigilMessageStore.shared.pendingTotal
+        let messages = NSMenuItem(
+            title: pending > 0 ? "Messages (\(pending))…" : "Messages…", action: #selector(openMessages(_:)), keyEquivalent: "")
+        messages.target = self
+        messages.image = NSImage(systemSymbolName: "envelope", accessibilityDescription: nil)
+        menu.addItem(messages)
 
         menu.addItem(.separator())
         // vigil drive's settings (its grants, their state, the button for
@@ -179,6 +187,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func quitForReal(_ sender: NSMenuItem) {
         VigilWorkspaces.shared.quitForReal()
+    }
+
+    @objc private func openMessages(_ sender: NSMenuItem) {
+        VigilMessagesPanel.window(thread: nil)
     }
 
     @objc private func openDrive(_ sender: NSMenuItem) {

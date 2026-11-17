@@ -260,11 +260,13 @@ final class VigilBars {
         enum Kind: String {
             case changes = "Changes"
             case documents = "Documents"
+            case messages = "Messages"
 
             var symbol: String {
                 switch self {
                 case .changes: "plusminus"
                 case .documents: "doc.text"
+                case .messages: "envelope"
                 }
             }
         }

@@ -34,6 +34,7 @@ let dictationLog = Log.log.scope("dictation")
 let cortexLog = Log.log.scope("cortex")
 let watchdogLog = Log.log.scope("watchdog")
 let invariantsLog = Log.log.scope("invariants")
+let messagesLog = Log.log.scope("messages")
 
 extension VigilWorkspaces {
     // MARK: Instrumentation

@@ -37,6 +37,8 @@ struct VigilSidebarView: View {
     private static let hostHover = "own:"
     /// The panes whose changes stand in a right bar: each has a row under it.
     @ObservedObject private var asides = VigilBars.shared.asideMarks
+    /// Every Mac's mailbox: a pane row's messages mark.
+    @ObservedObject private var messages = VigilMessageStore.shared
 
     /// What a fold control of row `id` tells of the pointer (`ThreadChildren`,
     /// `ThreadFolded`).
@@ -862,6 +864,9 @@ struct VigilSidebarView: View {
                     switch kind {
                     case .changes: VigilChangesPanel.window(pane: paneId, title: pane.title)
                     case .documents: VigilDocumentsPanel.window(pane: paneId, title: pane.title)
+                    case .messages:
+                        VigilMessagesPanel.window(thread: VigilMessageStore.shared.key(paneId: paneId, id: pane.id, conversation: pane.conversation)
+                            .flatMap(VigilMessagesPanel.thread(of:))?.id)
                     }
                 } label: { Label("Move to Window", systemImage: "macwindow") }
                 Divider()
@@ -979,6 +984,15 @@ struct VigilSidebarView: View {
                     Button {
                         VigilDocumentsPanel.show(pane: pane.paneId ?? pane.id, title: pane.title, in: model.hostController)
                     } label: { Label("Documents", systemImage: "doc.text") }
+                }
+                // Its thread: what agents and you said to its agent and what
+                // it said back, beside it (another Mac's pane too). Where an
+                // agent holds a conversation, or messages already wait.
+                if pane.conversation != nil || messages.pending(paneId: pane.paneId, id: pane.id) != nil {
+                    Button {
+                        VigilMessagesPanel.show(
+                            paneId: pane.paneId, id: pane.id, title: pane.title, conversation: pane.conversation, in: model.hostController)
+                    } label: { Label("Messages", systemImage: "envelope") }
                 }
                 // Its agent's conversation, forked: a second pane starts
                 // from the same state under a new id and this one goes on.
@@ -1152,6 +1166,14 @@ struct VigilSidebarView: View {
     private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         HStack(spacing: marks.gap) {
             if let ended = pane.ended { EndedMark(ends: [ended], sizes: marks) }
+            // Messages for it that wait on its agent, or that you have not
+            // read: a press opens its thread beside it.
+            if let pending = messages.pending(paneId: pane.paneId, id: pane.id) {
+                MessagesMark(pending: [pending], sizes: marks) {
+                    VigilMessagesPanel.show(
+                        paneId: pane.paneId, id: pane.id, title: pane.title, conversation: pane.conversation, in: model.hostController)
+                }
+            }
             if let arrived = pane.arrived { arrivedMark([arrived]) }
             // On a pane of this Mac a press opens the sheet that settles it;
             // another Mac's conflict is that Mac's to settle.
@@ -1207,6 +1229,7 @@ struct VigilSidebarView: View {
     private func foldedMarks(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
         GearsMark(backgrounds: panes.compactMap(\.background), sizes: marks)
         EndedMark(ends: panes.compactMap(\.ended), sizes: marks)
+        MessagesMark(pending: panes.compactMap { messages.pending(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         ConflictMark(conflicts: panes.compactMap(\.conflict), sizes: marks)
         lookerGlyphs(panes.flatMap(\.lookers))
     }
