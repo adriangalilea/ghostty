@@ -48,8 +48,14 @@ extension VigilWorkspaces {
     /// a moment longer; one killed between its record and its cleanup left
     /// its spec).
     nonisolated static func standing(_ pane: String) -> PaneStanding {
-        if let end = endOnDisk(pane) { return .ended(end) }
-        if endRecorded(pane) { return .lost }
+        let record = VigilPaths.panes.appendingPathComponent(pane + ".ended")
+        switch Durable.read(record, limit: 64 * 1024) {
+        case .absent: break
+        case .unreadable: return .lost
+        case .data(let bytes):
+            guard let end = try? JSONDecoder().decode(PaneEnd.self, from: bytes) else { return .lost }
+            return .ended(end)
+        }
         if daemonAlive(pane) { return .running }
         if specExists(pane) { return .died }
         if FileManager.default.fileExists(atPath: VigilPaths.panes.appendingPathComponent("\(pane).pid").path) { return .lost }
@@ -227,8 +233,9 @@ extension VigilWorkspaces {
             // the app made (or one brought here and not opened yet). For
             // any other its files are missing, which is no leave to run
             // what the registry says it ran.
-            guard asked || fresh.contains(pane) || dormantPanes.contains(pane), let entry = registered(pane) else {
-                note(pane, Self.note(for: standing, said: "nothing of it is on disk"))
+            guard fresh.contains(pane) || dormantPanes.contains(pane), let entry = registered(pane) else {
+                if asked { return reopen(pane, why: why) }
+                note(pane, Self.note(for: .lost, said: nil))
                 return .noted
             }
             bear(entry, in: at.owner, why: why)
@@ -252,10 +259,13 @@ extension VigilWorkspaces {
         daemonLog.info("pane's note pressed", ["pane": pane, "offered": view.vigilNote?.offers, "host": view.vigilHost])
         guard let device = view.vigilHost else {
             if view.vigilNote?.shellOnly == true {
-                guard !births.contains(pane), !Self.daemonAlive(pane) else { return }
-                switch Self.standing(pane) {
-                case .unborn, .ended, .lost: _ = reopen(pane, why: "the person asked for a shell")
-                case .died, .running: note(pane, Self.note(for: Self.standing(pane), said: nil))
+                guard !births.contains(pane) else { return }
+                let current = Self.standing(pane)
+                switch current {
+                case .unborn, .ended, .lost:
+                    guard !Self.daemonAlive(pane) else { return }
+                    _ = reopen(pane, why: "the person asked for a shell")
+                case .died, .running: note(pane, Self.note(for: current, said: nil))
                 }
             } else {
                 tend(pane, asked: true, why: "the person asked")
@@ -265,7 +275,7 @@ extension VigilWorkspaces {
         guard let remote = VigilRemote.shared.host(device),
               let workspace = remote.directory?.live.first(where: { $0.paneIds.contains(pane) }) else { return }
         ask(RowHome(device: device, workspace: workspace.name),
-            WorkspaceCommand.Request(session: workspace.name, revision: "", operation: "open_pane", anchor: pane),
+            WorkspaceCommand.Request(session: workspace.name, revision: "", operation: view.vigilNote?.shellOnly == true ? "open_shell" : "open_pane", anchor: pane),
             failing: "Not opened on \(remote.name)")
     }
 
@@ -440,7 +450,7 @@ extension VigilWorkspaces {
     /// may say "done" only of what is done. Nil: its daemon runs. Else why it
     /// does not. The service is awaited off the main thread; the pane is a
     /// birth in flight meanwhile (`births`), so nothing else starts it.
-    func openNow(_ pane: String, why: String) async -> String? {
+    func openNow(_ pane: String, why: String, shellOnly: Bool = false) async -> String? {
         guard let at = locate(pane), !at.buried else { return "no workspace of this Mac lists it" }
         guard !births.contains(pane) else { return "it is being started" }
         let entry: Registry.Pane
@@ -449,6 +459,7 @@ extension VigilWorkspaces {
             redial([pane])
             return nil
         case .died:
+            guard !shellOnly else { return "the pane now holds a restore recipe; refresh before choosing what to open" }
             births.insert(pane)
             let said = await Self.restored(why: why, panes: [pane], person: true)
             settled([pane], said: said)
@@ -459,7 +470,7 @@ extension VigilWorkspaces {
             entry = shell
         case .unborn:
             guard let listed = registered(pane) else { return "no workspace of this Mac lists it" }
-            if fresh.contains(pane) || dormantPanes.contains(pane) {
+            if !shellOnly && (fresh.contains(pane) || dormantPanes.contains(pane)) {
                 entry = listed
             } else {
                 guard let shell = madeShell(pane, why: why) else { return "the shell could not be saved" }

@@ -265,7 +265,7 @@ extension VigilWorkspaces {
     /// lifecycle service, awaited off the main thread (CODEX L2: a service
     /// that is stuck never freezes the app); every other operation is an
     /// edit of the registry alone (`applySessionEdit`).
-    static let birthOperations: Set<String> = ["create", "new_session", "split", "new_tab", "fork", "open_pane"]
+    static let birthOperations: Set<String> = ["create", "new_session", "split", "new_tab", "fork", "open_pane", "open_shell"]
 
     /// The home app's session transaction. Remote callers supply identities
     /// and intent, never a replacement registry or local cwd. A birth is
@@ -304,7 +304,7 @@ extension VigilWorkspaces {
             let cwd = liveView(attachId: request.anchor)?.pwd
                 ?? tab.panes.first(where: { $0.id == request.anchor })?.cwd ?? session.cwd
             return birthReply(request, await apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
-        case "open_pane":
+        case "open_pane", "open_shell":
             // A pane that is not running, opened by a person at another
             // device: what opening it here would do (`tend`).
             guard let session = workspaces[request.session],
@@ -314,7 +314,7 @@ extension VigilWorkspaces {
             // Done before it is answered, as a split or a new tab is: this
             // reply is kept on disk and answers a retry, so "committed" is
             // said only of a daemon that runs.
-            if let why = await openNow(request.anchor, why: "opened from another device") {
+            if let why = await openNow(request.anchor, why: "opened from another device", shellOnly: request.operation == "open_shell") {
                 return .failure(request, "not_opened", "Not opened on its Mac: \(why).")
             }
             // Read again after the wait (CODEX R7): closed meanwhile, it is
@@ -442,7 +442,7 @@ extension VigilWorkspaces {
     /// (`preborn`, a split's, a tab's or a fork's). Synchronous, on main.
     func applySessionEdit(_ request: VigilSessionControl.Request, preborn: Registry.Pane? = nil) -> VigilSessionControl.Reply {
         typealias Reply = VigilSessionControl.Reply
-        precondition(!Self.birthOperations.contains(request.operation) || (preborn != nil && !["create", "new_session", "open_pane"].contains(request.operation)),
+        precondition(!Self.birthOperations.contains(request.operation) || (preborn != nil && !["create", "new_session", "open_pane", "open_shell"].contains(request.operation)),
                      "\(request.operation) starts a daemon: applySessionCommand awaits it")
         refreshWorkspaceRevisions()
         // A burial, by its name: undone (back where it stood) or ended now.
