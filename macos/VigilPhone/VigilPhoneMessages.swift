@@ -111,10 +111,11 @@ final class VigilPhoneMessages: ObservableObject {
             name: { root, pane in
                 let phone = VigilPhone.shared
                 let mac = phone.hosts.first { $0.id == root }?.name ?? "a Mac"
+                let face = phone.directories[root]?.place(of: pane)?.workspace.emoji
                 guard let node = phone.node(for: PaneRef(host: .init(id: root, name: mac), pane: pane, title: "")) else {
-                    return VigilChatPane(title: pane, mac: mac)
+                    return VigilChatPane.of(conversation: nil, title: pane, face: face, mac: mac)
                 }
-                return VigilChatPane(title: node.path ?? node.title, mac: mac)
+                return VigilChatPane.of(conversation: node.glance?.title, title: node.title, face: face, mac: mac)
             },
             post: { message, root in try await Self.post(message, root: root) },
             act: { act, root in try await Self.act(act, root: root) },

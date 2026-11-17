@@ -1,4 +1,5 @@
 import Foundation
+import GitViews
 import Ink
 import MarkdownText
 import SwiftUI
@@ -17,14 +18,26 @@ import VigilWire
 /// `MessageThreads` from each Mac's mailbox; where a message goes, what an
 /// act does and where "go to" leads are the host's (`VigilChatHost`).
 
-/// A pane as a thread names it.
+/// A pane as a thread names it: its agent's name and face in every bubble
+/// and every thread's head.
 struct VigilChatPane: Equatable, Sendable {
-    /// What its row is called: the one naming rule (`Directory.titles`).
+    /// What it is called: its agent's conversation, else its row's name.
     var title: String
+    /// Its workspace's face (an emoji), when it wears one.
+    var face: String?
     /// Its Mac's name, when it is not this one.
     var mac: String?
 
     var said: String { mac.map { "\(title) on \($0)" } ?? title }
+
+    /// The one rule every surface names a pane's agent by, from what its Mac
+    /// knows now: the conversation's name from the pane's glance
+    /// (`PaneGlance.title`, what the agent is called this minute), else its
+    /// row's name (`Directory.titles`); its workspace's emoji; its Mac when
+    /// it is not this one.
+    static func of(conversation: String?, title: String, face: String?, mac: String?) -> VigilChatPane {
+        VigilChatPane(title: conversation ?? title, face: face.flatMap { $0.isEmpty ? nil : $0 }, mac: mac)
+    }
 }
 
 /// What the views ask of the app that holds them.
@@ -63,7 +76,7 @@ struct VigilChat: View {
         ) {
             InkConversations(
                 threads.map { people.summary($0) }, selection: $chosen, people: people.all, me: Message.you,
-                picture: { _ in EmptyView() },
+                picture: { people.picture($0) },
                 empty: {
                     Text("No messages yet. An agent's message to another, or to you (`vigil send you`), starts a thread here.")
                         .inkText(.detail)
@@ -109,13 +122,19 @@ struct VigilChatPeople {
     let all: [InkChat.Person]
     let host: VigilChatHost
     private let names: [String: String]
+    /// Each pane's workspace face, by the person's key: what their face draws.
+    private let faces: [String: String]
 
     @MainActor init(threads: [MessageThread], host: VigilChatHost) {
         self.host = host
         var people: [String: InkChat.Person] = [Message.you: InkChat.Person(Message.you, name: "You")]
+        var faces: [String: String] = [:]
+        func pane(_ key: String, _ pane: VigilChatPane, kind: Message.Sender.Kind, agent: String?) {
+            people[key] = Self.paneAgent(key, pane, kind: kind, agent: agent)
+            faces[key] = pane.face
+        }
         for thread in threads {
             let own = Self.key(root: thread.key.root, pane: thread.key.pane)
-            if people[own] == nil { people[own] = Self.paneAgent(own, host.name(thread.key.root, thread.key.pane), kind: .agent) }
             for item in thread.items {
                 let from = item.record.message.from
                 let key = Self.key(of: item)
@@ -123,19 +142,45 @@ struct VigilChatPeople {
                 switch from.kind {
                 case .person: break
                 case .agent, .tool:
-                    let pane = from.pane.map { host.name(item.senderRoot, $0) } ?? VigilChatPane(title: from.agent ?? "a command")
-                    people[key] = Self.paneAgent(key, pane, kind: from.kind)
+                    if let at = from.pane {
+                        pane(key, host.name(item.senderRoot, at), kind: from.kind, agent: from.agent)
+                    } else {
+                        pane(key, VigilChatPane(title: from.agent ?? "a command"), kind: from.kind, agent: from.agent)
+                    }
                 case .watch: people[key] = InkChat.Person(key, name: "watch \(from.watch ?? "")", symbol: "binoculars")
                 case .feed: people[key] = InkChat.Person(key, name: "feed \(from.watch ?? "")", symbol: "dot.radiowaves.up.forward")
                 }
             }
+            if people[own] == nil { pane(own, host.name(thread.key.root, thread.key.pane), kind: .agent, agent: nil) }
         }
         all = people.values.sorted { $0.id < $1.id }
         names = people.mapValues(\.name)
+        self.faces = faces
     }
 
-    private static func paneAgent(_ key: String, _ pane: VigilChatPane, kind: Message.Sender.Kind) -> InkChat.Person {
-        InkChat.Person(key, name: pane.said, short: pane.title, symbol: kind == .agent ? "sparkles" : "terminal")
+    private static func paneAgent(_ key: String, _ pane: VigilChatPane, kind: Message.Sender.Kind, agent: String?) -> InkChat.Person {
+        InkChat.Person(key, name: pane.said, short: pane.title, symbol: kind == .agent ? symbol(agent) : "terminal")
+    }
+
+    /// An agent's mark where its workspace wears no face.
+    private static func symbol(_ agent: String?) -> String {
+        switch agent {
+        case "claude": "asterisk"
+        case "codex": "chevron.left.forwardslash.chevron.right"
+        default: "sparkles"
+        }
+    }
+
+    /// A person's face: their pane's workspace emoji where it wears one, else
+    /// Ink's own (the agent's mark, the person's initial).
+    @ViewBuilder func picture(_ person: InkChat.Person) -> some View {
+        if let face = faces[person.id] {
+            GeometryReader { g in
+                Text(face)
+                    .font(.system(size: (min(g.size.width, g.size.height) * 0.62).rounded()))
+                    .frame(width: g.size.width, height: g.size.height)
+            }
+        }
     }
 
     static func key(root: String, pane: String) -> String { "pane:\(root)/\(pane)" }
@@ -177,20 +222,27 @@ enum VigilThreadWords {
         let elsewhere = message.from.pane.map { (item.senderRoot, $0) }
             .flatMap { $0 == (thread.key.root, thread.key.pane) ? nil : $0 }
         let place = people.host.name(elsewhere?.0 ?? item.root, elsewhere?.1 ?? message.to.pane).said
+        // One bubble per message: its corrections are its edits (`MessageThreads`
+        // folds them), so it says its newest words, stands as they stand, and
+        // its "edited" opens the words before.
+        let removed = item.record.removed != nil || record.state.kind == .withdrawn
         return InkChat.Message(
-            record.id, from: VigilChatPeople.key(of: item), at: Date(timeIntervalSince1970: message.sent), words(record),
-            answers: message.replyTo ?? message.corrects,
+            record.id, from: VigilChatPeople.key(of: item), at: Date(timeIntervalSince1970: message.sent), words(item),
+            answers: message.replyTo,
             reactions: InkChat.Reaction.counted(record.reactions.map { .init($0.emoji, by: $0.by) }, me: Message.you, name: people.name),
-            delivery: message.to.isPerson ? nil : delivery(record.state), edited: record.edited != nil, place: place)
+            delivery: message.to.isPerson ? nil : delivery(item.latest.state), edited: !removed && item.edited,
+            earlier: removed ? [] : item.earlier, place: place)
     }
 
-    /// Its words, or what became of them when the person removed it.
-    static func words(_ record: Message.Record) -> String {
+    /// Its words now, or what became of them when the person removed it.
+    static func words(_ item: MessageThread.Item) -> String {
+        let record = item.record
         if record.state.kind == .withdrawn { return "*Removed before any agent had it.*" }
         if record.removed != nil {
-            return record.state.kind.reachedAgent ? "*Removed here. The agent already has it.*" : "*Removed.*"
+            return item.every.contains { $0.record.state.kind.reachedAgent }
+                ? "*Removed here. The agent already has it.*" : "*Removed.*"
         }
-        return record.message.body
+        return item.words
     }
 
     /// How it stands on its way, as Ink marks it; nil where it has no way
@@ -213,7 +265,7 @@ enum VigilThreadWords {
     /// they do (delivery switched off for that agent program, no agent in
     /// the pane), in the mailbox's own words.
     @MainActor static func detail(_ thread: MessageThread, people: VigilChatPeople) -> String {
-        let waiting = thread.items.last { $0.record.waits }.map { $0.record.state.words }
+        let waiting = thread.items.flatMap(\.every).last { $0.record.waits }.map { $0.record.state.words }
         let others = Set(thread.items.map { VigilChatPeople.key(of: $0) }).subtracting([Message.you]).map(people.name).sorted()
         let who = ListFormatter.localizedString(byJoining: others + ["you"])
         return waiting.map { "Yours is \($0)" } ?? who
@@ -252,6 +304,10 @@ struct VigilThreadConversation: View {
             messages, people: people.all, me: Message.you, unread: thread?.firstUnread, acts: acts(messages)
         ) {
             MarkdownView($0.words)
+        } picture: {
+            people.picture($0)
+        } change: { before, after in
+            DiffView(old: before, new: after).diffLineNumbers(.hidden)
         } empty: {
             Text("Nothing said here yet. What you write goes to this pane's agent as yours.").inkText(.detail)
         }
@@ -281,14 +337,21 @@ struct VigilThreadConversation: View {
                 act(.react(message.id, emoji, on: !given), on: message.id)
             },
             edit: { message in
-                // The mailbox's own rule: a recorded one is corrected.
-                guard let record = record(message.id), record.editable else { return }
+                // The mailbox's own rule: a recorded one is corrected. An edit
+                // is always of the message itself, whatever corrected it before.
+                guard let item = item(message.id), item.record.editable else { return }
                 replying = nil
                 editing = message.id
-                draft = record.message.body
+                draft = item.words
             },
-            remove: { message in act(.remove(message.id), on: message.id) },
-            copy: { message in VigilChatPasteboard.copy(record(message.id)?.message.body ?? message.words) },
+            // The message and every correction of it: none of its words stays
+            // on its way once the person removed it.
+            remove: { message in
+                for one in item(message.id)?.every ?? [] where one.record.removed == nil {
+                    act(.remove(one.id), on: one.id)
+                }
+            },
+            copy: { message in VigilChatPasteboard.copy(item(message.id)?.words ?? message.words) },
             open: { message in
                 guard let item = items.first(where: { $0.id == message.id }) else { return }
                 let message = item.record.message
@@ -300,8 +363,10 @@ struct VigilThreadConversation: View {
             })
     }
 
-    private func record(_ id: String) -> Message.Record? { items.first { $0.id == id }?.record }
-    private func root(of id: String) -> String { items.first { $0.id == id }?.root ?? key.root }
+    private func item(_ id: String) -> MessageThread.Item? { items.first { $0.id == id } }
+    private func root(of id: String) -> String {
+        items.flatMap(\.every).first { $0.id == id }?.root ?? key.root
+    }
 
     private func cancel() {
         replying = nil

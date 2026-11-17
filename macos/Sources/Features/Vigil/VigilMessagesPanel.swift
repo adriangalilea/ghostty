@@ -199,7 +199,9 @@ final class VigilMessageStore: ObservableObject {
         for row in VigilWorkspaces.shared.sidebarSnapshot() {
             for pane in row.tabs.flatMap(\.panes) {
                 guard let paneId = pane.paneId else { continue }
-                next["\(here)/\(paneId)"] = Named(pane: VigilChatPane(title: pane.title), workspace: row.id, navigation: paneId)
+                next["\(here)/\(paneId)"] = Named(
+                    pane: VigilChatPane.of(conversation: pane.conversationName, title: pane.title, face: row.emoji, mac: nil),
+                    workspace: row.id, navigation: paneId)
             }
         }
         for row in VigilRemote.shared.sidebarRows() {
@@ -207,7 +209,8 @@ final class VigilMessageStore: ObservableObject {
             for pane in row.tabs.flatMap(\.panes) {
                 guard let (_, name) = VigilRemote.split(pane.id) else { continue }
                 next["\(device)/\(name)"] = Named(
-                    pane: VigilChatPane(title: pane.title, mac: row.host?.name), workspace: row.id, navigation: pane.id)
+                    pane: VigilChatPane.of(conversation: pane.conversationName, title: pane.title, face: row.emoji, mac: row.host?.name),
+                    workspace: row.id, navigation: pane.id)
             }
         }
         if next != panes { panes = next }
@@ -221,7 +224,9 @@ final class VigilMessageStore: ObservableObject {
             here: here, macName: Host.current().localizedName ?? "this Mac",
             name: { root, pane in
                 panes["\(root)/\(pane)"]?.pane
-                    ?? VigilChatPane(title: pane, mac: root == here ? nil : VigilRemote.shared.hosts.first { $0.device == root }?.name ?? "another Mac")
+                    ?? VigilChatPane.of(
+                        conversation: nil, title: pane, face: nil,
+                        mac: root == here ? nil : VigilRemote.shared.hosts.first { $0.device == root }?.name ?? "another Mac")
             },
             post: { message, root in try await Self.post(message, root: root, here: here) },
             act: { act, root in try await Self.act(act, root: root, here: here) },
