@@ -478,26 +478,60 @@ struct VigilSidebarView: View {
         .padding(.trailing, tree.edge + Grid.inset)
     }
 
-    /// "Bring Here…" in a row's menu. When the move would leave something
-    /// behind on that Mac (uncommitted, unpushed, a stash, from what this
-    /// Mac already holds of its directory) the item is orange, title and
+    /// A row's move (VigilWire's `Move`), the same rule wherever the row
+    /// lives: one Mac it may go to is one item ("Bring Here…" when that is
+    /// this Mac, else "Move to <Mac>…"); more are one "Move To" submenu,
+    /// this Mac first when it is one of them. A Mac out of reach is listed,
+    /// disabled, with why. When the move would leave something behind on
+    /// the workspace's Mac (uncommitted, unpushed, a stash, from what this
+    /// Mac already holds of its directory) the items are orange, title and
     /// icon: there is something to settle, and the dialog says what.
-    private func bringItem(
-        device: String, workspace: String, anchor: String = "", part: Registry.Workspace.Part? = nil
+    @ViewBuilder private func moveItem(
+        _ home: VigilWorkspaces.RowHome, anchor: String = "", part: Registry.Workspace.Part? = nil
     ) -> some View {
-        let leaves = VigilWorkspaces.shared.leavesBehind(device: device, workspace: workspace)
-        return Button {
-            VigilWorkspaces.shared.bringWithSheet(device: device, workspace: workspace, anchor: anchor, part: part)
-        } label: {
-            if leaves {
-                Label {
-                    Text("Bring Here…").foregroundStyle(.orange)
-                } icon: {
-                    Image(nsImage: Self.orangeBringIcon)
+        let manager = VigilWorkspaces.shared
+        let leaves = manager.leavesBehind(home)
+        switch Move.menu(manager.moveTargets(home: home.device)) {
+        case .none:
+            EmptyView()
+        case .one(let target):
+            moveButton(target, target.action, home, anchor: anchor, part: part, leaves: leaves,
+                       symbol: target.device == nil ? Self.bringSymbol : Self.moveSymbol)
+        case .submenu(let targets):
+            Menu {
+                menu {
+                    ForEach(targets) { target in
+                        moveButton(target, target.title, home, anchor: anchor, part: part, leaves: leaves,
+                                   symbol: target.device == nil ? Self.bringSymbol : "desktopcomputer")
+                    }
                 }
-            } else {
-                Label("Bring Here…", systemImage: Self.bringSymbol)
+            } label: {
+                moveLabel("Move To", symbol: Self.moveSymbol, leaves: leaves)
             }
+        }
+    }
+
+    private func moveButton(
+        _ target: Move.Target, _ title: String, _ home: VigilWorkspaces.RowHome, anchor: String,
+        part: Registry.Workspace.Part?, leaves: Bool, symbol: String
+    ) -> some View {
+        Button {
+            VigilWorkspaces.shared.moveWithSheet(home, to: target, anchor: anchor, part: part)
+        } label: {
+            moveLabel(target.unreachable.map { "\(title) (\($0))" } ?? title, symbol: symbol, leaves: leaves && target.unreachable == nil)
+        }
+        .disabled(target.unreachable != nil)
+    }
+
+    @ViewBuilder private func moveLabel(_ title: String, symbol: String, leaves: Bool) -> some View {
+        if leaves {
+            Label {
+                Text(title).foregroundStyle(.orange)
+            } icon: {
+                Image(nsImage: Self.orange(symbol))
+            }
+        } else {
+            Label(title, systemImage: symbol)
         }
     }
 
@@ -520,10 +554,13 @@ struct VigilSidebarView: View {
     }
 
     private static let bringSymbol = "arrow.down.to.line"
+    private static let moveSymbol = "arrow.right.to.line"
     /// A menu draws a symbol as a template, in the menu's own ink: the
-    /// orange one is drawn into an image that is not one.
-    private static let orangeBringIcon: NSImage = {
-        let symbol = NSImage(systemSymbolName: bringSymbol, accessibilityDescription: "Work would stay behind")!
+    /// orange one is drawn into an image that is not one, once per symbol.
+    @MainActor private static var orangeIcons: [String: NSImage] = [:]
+    @MainActor private static func orange(_ name: String) -> NSImage {
+        if let image = orangeIcons[name] { return image }
+        let symbol = NSImage(systemSymbolName: name, accessibilityDescription: "Work would stay behind")!
             .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))!
         let image = NSImage(size: symbol.size, flipped: false) { rect in
             symbol.draw(in: rect)
@@ -532,8 +569,9 @@ struct VigilSidebarView: View {
             return true
         }
         image.isTemplate = false
+        orangeIcons[name] = image
         return image
-    }()
+    }
 
     private static func symbol(of priority: Registry.Priority) -> String {
         switch priority {
@@ -682,9 +720,7 @@ struct VigilSidebarView: View {
                         VigilWorkspaces.shared.newTab(home, after: anchor, in: model.hostController)
                     } label: { Label("New Tab", systemImage: "plus.rectangle.on.rectangle") }
                 }
-                if let device = home.device {
-                    bringItem(device: device, workspace: home.workspace)
-                }
+                moveItem(home)
                 // Merging moves panes between two workspaces of one Mac:
                 // offered among this Mac's.
                 if home.device == nil, model.rows.contains(where: { $0.id != id && $0.host == nil }) {
@@ -790,10 +826,8 @@ struct VigilSidebarView: View {
                             context: "a terminal tab. running: \(tab.panes.map(\.title).joined(separator: ", "))\n"
                                 + VigilWorkspaces.shared.workContext(panes: tab.panes.compactMap(\.paneId)))
                     } label: { Label("Rename…", systemImage: "pencil") }
-                    // A tab of another Mac's workspace can come alone.
-                    if let device = home.device {
-                        bringItem(device: device, workspace: home.workspace, anchor: anchor, part: .tab)
-                    }
+                    // A tab can move alone, from any Mac.
+                    moveItem(home, anchor: anchor, part: .tab)
                 }
                 Divider()
                 Button(role: .destructive) {
@@ -970,10 +1004,8 @@ struct VigilSidebarView: View {
                             context: "a terminal pane, running: \(pane.program ?? "a shell")\n"
                                 + (pane.paneId.map { VigilWorkspaces.shared.workContext(panes: [$0]) } ?? ""))
                     } label: { Label("Rename…", systemImage: "pencil") }
-                    // A pane of another Mac's workspace can come alone.
-                    if let device = home.device {
-                        bringItem(device: device, workspace: home.workspace, anchor: there, part: .pane)
-                    }
+                    // A pane can move alone, from any Mac.
+                    moveItem(home, anchor: there, part: .pane)
                 }
                 Divider()
                 // What its agent edited, its repositories, any other on its

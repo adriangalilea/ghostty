@@ -2,26 +2,41 @@ import AppKit
 import SwiftUI
 import VigilWire
 
-/// The dialog of a Bring Here (PORTABILITY.md "Before anything moves, what it
-/// depends on"): what stands between a workspace of another Mac and this
-/// one, each thing said once for all the panes it holds back and with what
-/// settles it beside it, then the panes and what opening each does here.
+/// The dialog of a move (PORTABILITY.md "Before anything moves, what it
+/// depends on"): what stands between a workspace and the Mac it moves to,
+/// each thing said once for all the panes it holds back and with what
+/// settles it beside it, then the panes and what opening each does there.
+/// A Bring Here is the move to this Mac; a Move to names another, which
+/// reads the sheet itself (`Open.bringSheet`).
 ///
 /// What can be settled where is the need's own fact (`Bring.Need.Kind`): a
-/// repository this Mac lacks is cloned here, a commit it lacks is fetched
-/// here, and work that exists only on the other Mac (uncommitted, unpushed,
-/// a stash) is settled there, so its row opens a pane of that repository on
-/// that Mac. After any of them the sheet is read again from what that Mac
-/// publishes; nothing here is remembered.
+/// repository the target lacks is cloned there, a commit it lacks is fetched
+/// there (from this dialog only when the target is this Mac: a clone on
+/// another Mac is its person's to start), and work that exists only on the
+/// workspace's own Mac (uncommitted, unpushed, a stash) is settled on it,
+/// so its row opens a pane of that repository there. After any of them the
+/// sheet is read again; nothing here is remembered.
 @MainActor
 final class BringDialogModel: ObservableObject {
-    let device: String
     let workspace: String
     let anchor: String
     let part: Registry.Workspace.Part?
+    /// The workspace's own Mac, by name ("this Mac" when it is this one).
     let mac: String
+    /// The Mac it moves to; nil: this Mac (a Bring Here).
+    let target: String?
     let what: String
     let away: String?
+    /// The target's home folder, how its lines name folders.
+    let home: String
+    /// The sheet, read again (with what to settle first, for this Mac only).
+    let read: @Sendable ([Bring.Need]) throws -> Bring.Answer
+    /// Whether this dialog settles anything (only on this Mac).
+    var settles: Bool { target == nil }
+    /// The move's verb, on its button.
+    var verb: String { target.map { "Move to \($0)" } ?? "Bring Here" }
+    /// The Mac the lines' "this Mac" is, in a sentence.
+    var destination: String { target ?? "this Mac" }
 
     @Published private(set) var lines: [Bring.Line]
     /// A need being settled, by its text: what is being done.
@@ -44,16 +59,18 @@ final class BringDialogModel: ObservableObject {
     /// (the app: the Changes view over the hub).
     var changes: ((Bring.Group) -> AnyView)?
 
-    init(device: String, workspace: String, anchor: String, part: Registry.Workspace.Part?, mac: String, what: String,
-         away: String?, lines: [Bring.Line]) {
-        self.device = device
+    init(workspace: String, anchor: String, part: Registry.Workspace.Part?, mac: String, target: String?, what: String,
+         away: String?, home: String, lines: [Bring.Line], read: @escaping @Sendable ([Bring.Need]) throws -> Bring.Answer) {
         self.workspace = workspace
         self.anchor = anchor
         self.part = part
         self.mac = mac
+        self.target = target
         self.what = what
         self.away = away
+        self.home = home
         self.lines = lines
+        self.read = read
     }
 
     /// Every distinct need with the panes it holds back, in the order a
@@ -62,26 +79,20 @@ final class BringDialogModel: ObservableObject {
 
     var unknown: Bool { lines.contains { $0.work == nil } }
 
-    /// The sheet read again, from what this Mac holds and that Mac publishes
-    /// now; with `settling`, vigil-agent first does those (a clone, a fetch:
-    /// the one place they are done, `vigil move --settle` too). Asked off the
-    /// main thread: a clone takes as long as it takes.
+    /// The sheet read again, by the Mac it moves to, from what it holds and
+    /// the workspace's Mac publishes now; with `settling` (this Mac only),
+    /// vigil-agent first does those (a clone, a fetch: the one place they
+    /// are done, `vigil move --settle` too). Asked off the main thread: a
+    /// clone takes as long as it takes.
     func reload(settling needs: [Bring.Need] = [], saying: String = "") {
-        guard let host = VigilRemote.shared.host(device), let directory = host.directory,
-              let whole = directory.live.first(where: { $0.name == workspace }),
-              let source = part.map({ whole.only($0, of: anchor) }) ?? whole else {
-            readError = "\(mac) no longer lists it."
-            return
-        }
-        let question = Bring.Question(
-            panes: directory.bringing(source, here: FileManager.default.homeDirectoryForCurrentUser.path), commit: false,
-            settle: needs.isEmpty ? nil : needs)
+        precondition(needs.isEmpty || settles, "only this Mac's own dialog settles")
         for need in needs {
             working[need.text] = saying
             failed[need.text] = nil
         }
+        let read = read
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try Local.Client(socket: VigilPaths.hub).bring(question) }
+            let result = Result { try read(needs) }
             DispatchQueue.main.async {
                 for need in needs { self.working[need.text] = nil }
                 switch result {
@@ -90,7 +101,7 @@ final class BringDialogModel: ObservableObject {
                     self.failed.merge(answer.failed) { _, new in new }
                     self.readError = nil
                 case .failure(let error):
-                    self.readError = "vigil-agent did not answer: \(error)"
+                    self.readError = "\(self.target ?? "vigil-agent") did not answer: \(error)"
                 }
             }
         }
@@ -103,7 +114,7 @@ final class BringDialogModel: ObservableObject {
     /// What this Mac does about a repository by itself, as its button says
     /// it; nil: nothing here does.
     func hereAction(for group: Bring.Group) -> String? {
-        guard let need = group.here.first else { return nil }
+        guard settles, let need = group.here.first else { return nil }
         return need.kind == .clone ? "Clone Here" : "Fetch"
     }
 
@@ -134,7 +145,7 @@ final class BringDialogModel: ObservableObject {
     }
 
     /// Everything this Mac can do by itself, at once (`vigil move --settle`).
-    var settledHere: [Bring.Need] { standing.map(\.need).filter(\.settledHere) }
+    var settledHere: [Bring.Need] { settles ? standing.map(\.need).filter(\.settledHere) : [] }
     func settleAllHere() { reload(settling: settledHere, saying: "Working…") }
 }
 
@@ -165,7 +176,7 @@ struct BringDialog: View {
                 Button { model.showing = nil } label: { Label("Back", systemImage: "chevron.left") }
                     .keyboardShortcut(.cancelAction)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(group.title(home: NSHomeDirectory())) on \(model.mac)").font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Text("\(group.title(home: model.home)) on \(model.mac)").font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     Text(group.needs.compactMap(\.brief).joined(separator: " · "))
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -186,8 +197,10 @@ struct BringDialog: View {
     private var sheet: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Bring \(model.what) here from \(model.mac)").font(.system(size: 14, weight: .semibold))
-                Text("Nothing runs until you open a pane." + (model.away.map { " \(model.mac) is away: this is as of \($0)." } ?? ""))
+                Text(model.target.map { "Move \(model.what) from \(model.mac) to \($0)" } ?? "Bring \(model.what) here from \(model.mac)")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Nothing runs until you open a pane" + (model.target.map { " on \($0)." } ?? ".")
+                     + (model.away.map { " \(model.mac) is away: this is as of \($0)." } ?? ""))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -200,7 +213,7 @@ struct BringDialog: View {
                     }
                     let groups = model.groups
                     if !groups.isEmpty {
-                        section("Before it moves", "What this Mac lacks, or \(model.mac) alone has. Bringing it anyway leaves these as they are.") {
+                        section("Before it moves", "What \(model.destination) lacks, or \(model.mac) alone has. Moving it anyway leaves these as they are.") {
                             ForEach(groups) { row($0) }
                         }
                     }
@@ -224,7 +237,7 @@ struct BringDialog: View {
             Divider()
             HStack(spacing: 10) {
                 Button { model.reload() } label: { Label("Check Again", systemImage: "arrow.clockwise") }
-                    .help("Read again what this Mac holds and what \(model.mac) publishes")
+                    .help("Read again what \(model.destination) holds and what \(model.mac) publishes")
                 if model.settledHere.count > 1 {
                     Button { model.settleAllHere() } label: { Label("Settle What This Mac Can", systemImage: "arrow.down.circle") }
                         .help("Clone and fetch everything listed that this Mac can get by itself")
@@ -233,12 +246,12 @@ struct BringDialog: View {
                 Spacer()
                 Button("Cancel") { model.close(.cancel) }.keyboardShortcut(.cancelAction)
                 if model.standing.isEmpty {
-                    Button("Bring Here") { model.close(.bring) }.keyboardShortcut(.defaultAction)
+                    Button(model.verb) { model.close(.bring) }.keyboardShortcut(.defaultAction)
                 } else {
                     // Never the default while something stands: Return must
                     // not leave work behind on the other Mac.
-                    Button("Bring Anyway") { model.close(.bring) }
-                        .help("Bring it though this Mac lacks what is listed")
+                    Button(model.settles ? "Bring Anyway" : "Move Anyway") { model.close(.bring) }
+                        .help("Move it though \(model.destination) lacks what is listed")
                 }
             }
             .padding(.horizontal, 20).padding(.vertical, 12)
@@ -265,7 +278,7 @@ struct BringDialog: View {
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: Self.symbol(kind)).font(.system(size: 11)).foregroundStyle(Self.tint(kind)).frame(width: 14)
             VStack(alignment: .leading, spacing: 2) {
-                Text(group.title(home: NSHomeDirectory())).font(.system(size: 12, weight: .medium))
+                Text(group.title(home: model.home)).font(.system(size: 12, weight: .medium))
                     .fixedSize(horizontal: false, vertical: true)
                 if group.root != nil {
                     ForEach(group.needs, id: \.text) { need in
@@ -315,7 +328,7 @@ struct BringDialog: View {
             }
             .frame(width: 14)
             VStack(alignment: .leading, spacing: 1) {
-                Text(line.name ?? Directory.folder(line.folder, home: NSHomeDirectory()))
+                Text(line.name ?? Directory.folder(line.folder, home: model.home))
                     .font(.system(size: 12, weight: .medium)).lineLimit(1)
                 Text(line.opens).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
