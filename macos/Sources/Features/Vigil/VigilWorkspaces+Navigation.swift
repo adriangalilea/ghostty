@@ -347,7 +347,15 @@ extension VigilWorkspaces {
         // next launch counts it, uncertain, and keeps it (its edit may have
         // committed, CODEX5 V1). Only its mark, written when its edit is
         // refused, closes it.
-        guard await startDaemon(pane: planned.born, session: request.session, provisional: true) else {
+        if let failed = await startDaemonSaying(pane: planned.born, session: request.session, provisional: true) {
+            // The id was another pane's, or whether it was free could not be
+            // read: nothing ran, and nothing is this birth's to clean up; the
+            // other pane is never touched (CODEX6 W1).
+            if failed.hasPrefix("collision") || failed.hasPrefix("unknown") {
+                sessionLog.error("!! a split's pane id is not free; nothing started, nothing closed", ["pane": planned.pane.id, "said": failed])
+                persist()
+                return .failure(request, "id_in_use", "The new pane's id is in use on its Mac; nothing was started. Try again.")
+            }
             // Its outcome may be unknown (it may run, or start late): closed,
             // since no registry will list it, and the closed mark keeps any
             // late birth of it from running.
@@ -456,8 +464,8 @@ extension VigilWorkspaces {
                 sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": "reap", "workspace": request.session])
                 return Reply(id: request.id, ok: true, code: "committed", message: "Ended on its Mac.", revision: nil, session: request.session)
             }
-            if graveyard[request.session]?.closing != nil {
-                return .failure(request, "closing", "Its close began on its Mac: it cannot be undone.")
+            if !undoAllowed(burial: request.session) {
+                return .failure(request, "closing", "Its close began on its Mac, or whether it did cannot be read: it cannot be undone.")
             }
             let back = exhume(request.session)
             sessionLog.info("session command committed", [

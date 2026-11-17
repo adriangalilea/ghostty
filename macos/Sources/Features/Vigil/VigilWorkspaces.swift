@@ -1157,6 +1157,18 @@ class VigilWorkspaces {
         /// Panes this tree took back from a burial: an undo.
         var unburied: [String] = []
         let joined = after.subtracting(before)
+        // A pane taken back from a burial is an undo, and an undo of a close
+        // that began (or whose marks cannot be read) is refused whichever
+        // way it comes: Ghostty's own undo of a split close lands here
+        // without passing `exhume` (CODEX6 W4). Nothing of this edit is
+        // taken into the registry, and the tree is put back as the registry
+        // has it, in a turn of its own.
+        let refused = joined.filter { !listedHere.contains($0) && !undoAllowed(pane: $0) }
+        if !refused.isEmpty {
+            registryLog.error("!! an undo of a close that began refused; the tree is put back", ["panes": refused.sorted(), "workspace": name])
+            DispatchQueue.main.async { [weak self] in self?.reconcileViews(of: name) }
+            return
+        }
         // Once the registry holds them (below): a pane taken back may have
         // ended and is reopened; a view that reported no stream before its
         // pane was registered (a pane just made) is answered now.
@@ -1729,7 +1741,7 @@ class VigilWorkspaces {
                 session.movedTo = entry.movedTo
                 // Its close's progress from the marks, not only from what was
                 // saved (CODEX5 V3).
-                session.closing = entry.reconciled { PaneFence.provesClose(PaneFence.state($0, in: VigilPaths.panes)) }.closing
+                session.closing = entry.reconciled { PaneFence.state($0, in: VigilPaths.panes) }.closing
                 graveyard[entry.name] = session
                 graveyardDeadlines[entry.name] = deadline
                 let wait = max(deadline.timeIntervalSinceNow, 0) + 1
