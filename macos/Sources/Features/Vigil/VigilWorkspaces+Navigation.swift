@@ -451,12 +451,10 @@ extension VigilWorkspaces {
             guard graveyard[request.session] != nil else {
                 return .failure(request, "not_found", "It is no longer waiting: its time ran out or it was already undone.")
             }
+            if let burial = graveyard[request.session], conflictingOwnership(ownedPaneIds(burial)) {
+                return .failure(request, "ownership_conflict", "More than one registry entry owns a pane in this burial.")
+            }
             if request.operation == "reap" {
-                // Ended, or closing (a fence not accepted): never said ended
-                // of a burial that stays (CODEX4 U2).
-                if let burial = graveyard[request.session], conflictingOwnership(ownedPaneIds(burial)) {
-                    return .failure(request, "ownership_conflict", "More than one registry entry owns a pane in this burial.")
-                }
                 guard reapNow(request.session) else {
                     sessionLog.warn("session command not finished", ["id": request.id.uuidString, "operation": "reap", "workspace": request.session])
                     return .failure(request, "closing", "Its close began on its Mac and is not finished; it cannot be undone, and its Mac goes on with it.")

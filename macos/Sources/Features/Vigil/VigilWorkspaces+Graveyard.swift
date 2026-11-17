@@ -110,6 +110,7 @@ extension VigilWorkspaces {
         let label: String
         let remaining: Int
         let waiting: Bool
+        let conflict: Bool
         /// Where it stood ("finances › tab 3"); nil for a killed workspace.
         let from: String?
         /// The other Mac holding it (its tether root and name); nil here.
@@ -125,21 +126,26 @@ extension VigilWorkspaces {
                 .compactMap { $0 }
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
         }
+        let conflicts = graveyard.isEmpty ? [] : Registry.conflictingPanes(in: (Array(workspaces.values) + Array(graveyard.values)).map(ownedPaneIds))
         let here = graveyard.values.compactMap { burial -> SidebarBurial? in
             guard let deadline = graveyardDeadlines[burial.name] else { return nil }
             return SidebarBurial(
                 id: burial.name, name: burial.name, emoji: burial.emoji, label: burial.label,
                 remaining: max(0, Int(deadline.timeIntervalSinceNow)), waiting: deadline == .distantFuture,
+                conflict: !conflicts.isDisjoint(with: ownedPaneIds(burial)),
                 from: from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }, device: nil, mac: nil,
                 closing: burial.closing != nil)
         }
         let elsewhere = VigilRemote.shared.hosts.flatMap { host -> [SidebarBurial] in
             let listed = host.directory?.workspaces ?? []
+            let conflicts = Registry.conflictingPanes(in: listed.map { Set($0.paneIds) })
             return listed.compactMap { burial in
-                guard let until = burial.buriedUntil, until > Date() || burial.closing != nil else { return nil }
+                guard let until = burial.buriedUntil else { return nil }
+                let conflict = !conflicts.isDisjoint(with: burial.paneIds)
+                guard until > Date() || burial.closing != nil || conflict else { return nil }
                 return SidebarBurial(
                     id: VigilRemote.compositeId(host.device, burial.name), name: burial.name, emoji: burial.emoji,
-                    label: burial.label, remaining: max(0, Int(until.timeIntervalSinceNow)), waiting: until == .distantFuture,
+                    label: burial.label, remaining: max(0, Int(until.timeIntervalSinceNow)), waiting: until == .distantFuture, conflict: conflict,
                     from: from(burial.buriedFrom, moved: burial.movedTo) { name in listed.first { $0.name == name }?.label },
                     device: host.device, mac: host.name, closing: burial.closing != nil)
             }
@@ -149,13 +155,14 @@ extension VigilWorkspaces {
 
     /// Undo from the tray: here, or on the Mac that holds it.
     func undoBurial(_ burial: SidebarBurial) {
-        guard !burial.closing else { return }
+        guard !burial.conflict, !burial.closing else { return }
         guard let device = burial.device else { exhume(burial.name); return }
         sendToBurialHome(device, burial, operation: "exhume")
     }
 
     /// End it now from the tray: here, or on the Mac that holds it.
     func endBurial(_ burial: SidebarBurial) {
+        guard !burial.conflict else { return }
         guard let device = burial.device else { reapNow(burial.name); return }
         sendToBurialHome(device, burial, operation: "reap")
     }

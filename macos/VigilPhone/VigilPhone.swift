@@ -650,6 +650,7 @@ final class VigilPhone: ObservableObject {
         /// Where it goes back ("finances › tab 3"); nil for a workspace.
         let from: String?
         let until: Date
+        let conflict: Bool
     }
     @Published private(set) var burials: [Burial] = []
 
@@ -657,14 +658,16 @@ final class VigilPhone: ObservableObject {
         let now = Date()
         return hosts.flatMap { host -> [Burial] in
             let listed = directories[host.id]?.workspaces ?? []
+            let conflicts = Registry.conflictingPanes(in: listed.map { Set($0.paneIds) })
             return listed.compactMap { workspace in
                 // A burial whose close began is no undo (CODEX4 U2): not
                 // offered in "Recently closed".
-                guard let until = workspace.buriedUntil, until > now, workspace.undoable else { return nil }
+                let conflict = !conflicts.isDisjoint(with: workspace.paneIds)
+                guard let until = workspace.buriedUntil, conflict || (until > now && workspace.undoable) else { return nil }
                 let from = workspace.buriedFrom.map { origin in
                     "\(listed.first { $0.name == origin.workspace }?.label ?? origin.workspace) › tab \(origin.tab + 1)"
                 }
-                return Burial(host: host, name: workspace.name, label: workspace.label, emoji: workspace.emoji, from: from, until: until)
+                return Burial(host: host, name: workspace.name, label: workspace.label, emoji: workspace.emoji, from: from, until: until, conflict: conflict)
             }
         }
         .sorted { $0.until < $1.until }
@@ -673,6 +676,7 @@ final class VigilPhone: ObservableObject {
     /// Undo (`exhume`) or End (`reap`) on the burial's Mac; what happened
     /// is a receipt, and a refusal is said on the row's section.
     func settle(_ burial: Burial, undo: Bool) {
+        guard !burial.conflict else { return }
         let operation = undo ? "exhume" : "reap"
         Task {
             do {

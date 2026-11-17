@@ -416,7 +416,7 @@ struct VigilSidebarView: View {
             }
             Spacer(minLength: 4)
             // A close begun has no grace left to count: it is closing.
-            Text(burial.closing ? "closing" : burial.waiting ? "recovered" : "\(burial.remaining)s")
+            Text(burial.conflict ? "ownership conflict" : burial.closing ? "closing" : burial.waiting ? "recovered" : "\(burial.remaining)s")
                 .font(.system(size: 9 * scale))
                 .monospacedDigit()
                 .foregroundColor(.secondary)
@@ -430,6 +430,7 @@ struct VigilSidebarView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(burial.conflict)
             .help("Let it die now (skips the remaining grace).")
         }
         .frame(height: (burial.from != nil || burial.mac != nil ? 30 : 22) * scale)
@@ -439,7 +440,7 @@ struct VigilSidebarView: View {
         .contentShape(Rectangle())
         .onHover { inside in hovered = inside ? id : (hovered == id ? nil : hovered) }
         .onTapGesture { VigilWorkspaces.shared.undoBurial(burial) }
-        .help(burial.closing
+        .help(burial.conflict ? "Two registry entries own the same pane. Resolve ownership on its Mac to continue." : burial.closing
             ? "Its close began and is not finished\(burial.mac.map { " on \($0)" } ?? ""): it cannot be brought back. The ✕ tries to finish it now."
             : burial.waiting ? "Recovered from a backup. Bring it back or end it now." : "Closed; dies for real in \(burial.remaining)s. Click to bring it back where it was\(burial.mac.map { " on \($0)" } ?? " (⌘⇧T too)").")
     }

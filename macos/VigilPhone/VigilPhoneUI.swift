@@ -305,7 +305,8 @@ struct BurialTray: View {
                     }
                     Spacer(minLength: 4)
                     Group {
-                        if burial.until == .distantFuture { Text("Recovered") }
+                        if burial.conflict { Text("Ownership conflict") }
+                        else if burial.until == .distantFuture { Text("Recovered") }
                         else { Text(timerInterval: Date()...burial.until, countsDown: true) }
                     }
                         .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
@@ -316,6 +317,7 @@ struct BurialTray: View {
                 // Swiped away = ended now, the way a notification is cleared.
                 .swipeToDismiss { model.settle(burial, undo: false) }
                 .onTapGesture { model.settle(burial, undo: true) }
+                .disabled(burial.conflict)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityHint("Brings it back where it was")
             }
