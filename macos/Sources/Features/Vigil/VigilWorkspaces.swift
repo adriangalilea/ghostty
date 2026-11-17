@@ -903,6 +903,38 @@ class VigilWorkspaces {
         Set(session.tabs.flatMap(\.paneIds))
     }
 
+    /// Every workspace and burial, as its key and the panes it lists, in
+    /// tab order: what `Registry.listedTwice` and `alreadyListed` judge.
+    var listings: [(name: String, paneIds: [String])] {
+        workspaces.map { ($0.key, $0.value.tabs.flatMap(\.paneIds)) }
+            + graveyard.map { ($0.key, $0.value.tabs.flatMap(\.paneIds)) }
+    }
+
+    /// The one way a workspace arrives in the registry already holding
+    /// panes (a birth, a workspace brought here): refused, loudly, when its
+    /// name is taken or any of its panes is listed by another workspace or
+    /// a burial. A pane is in exactly one place; one listed twice is killed
+    /// with whichever of its two workspaces dies first.
+    func admit(_ session: Workspace, _ why: String) -> Bool {
+        guard admissible(session, why) else { return false }
+        workspaces[session.name] = session
+        return true
+    }
+
+    /// What `admit` judges, without listing it: for a birth that lists
+    /// the workspace only once its pane runs.
+    func admissible(_ session: Workspace, _ why: String) -> Bool {
+        let clash = Registry.alreadyListed(session.tabs.flatMap(\.paneIds), in: listings)
+        let nameTaken = workspaces[session.name] != nil || graveyard[session.name] != nil
+        guard !nameTaken, clash.isEmpty else {
+            registryLog.error("!! workspace refused: its name or a pane of it is listed already", [
+                "workspace": session.name, "why": why, "panes": clash, "nameTaken": nameTaken,
+            ])
+            return false
+        }
+        return true
+    }
+
     /// The live session that owns a pane (never a burial): where a link to
     /// the pane lands.
     func owner(ofPane id: String) -> String? {
@@ -1582,7 +1614,14 @@ class VigilWorkspaces {
             }
         }
         guard let entries = decoded else { return }
-        var seen = Set<String>()
+        // One daemon = ONE pane: a registry claiming an id twice would
+        // attach two surfaces to one socket (frames interleave into
+        // garbage), and the kill of either workspace kills the other's
+        // pane. `admit` refuses it at every arrival; a file that has it
+        // anyway screams, naming both.
+        for (pane, owners) in Registry.listedTwice(entries.map { ($0.name, $0.paneIds) }).sorted(by: { $0.key < $1.key }) {
+            registryLog.error("!! pane listed twice", ["pane": pane, "workspaces": owners])
+        }
         for entry in entries {
             var session = Workspace(
                 name: entry.name,
@@ -1591,13 +1630,6 @@ class VigilWorkspaces {
                 cwd: entry.cwd,
                 tabs: entry.tabs ?? [],
                 order: entry.order ?? 0)
-            // One daemon = ONE pane: a registry claiming an id twice would
-            // attach two surfaces to one socket (frames interleave into
-            // garbage). The writer cannot produce this; a file that has it
-            // screams.
-            for id in session.tabs.flatMap(\.paneIds) where !seen.insert(id).inserted {
-                registryLog.error("pane listed twice", ["workspace": entry.name, "pane": id])
-            }
             // The counter must clear every index this session has ever
             // used: a mint that reuses an index inherits a dead pane's
             // resume pointer and resumes a long-dead conversation in a

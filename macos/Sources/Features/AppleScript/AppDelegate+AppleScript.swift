@@ -234,9 +234,14 @@ extension NSApplication {
             let cwd = try text("workingDirectory", "initial working directory")
             let program = try text("command", "command")
             let openWindow = (args["openWindow"] as? NSNumber)?.boolValue ?? false
-            let name = VigilWorkspaces.shared.apiNewWorkspace(
-                label: label, emoji: emoji, cwd: cwd, command: program, openWindow: openWindow).name
-            return ["name": name, "label": label ?? name] as NSDictionary
+            let birth = VigilWorkspaces.shared.apiNewWorkspace(
+                label: label, emoji: emoji, cwd: cwd, command: program, openWindow: openWindow)
+            guard birth.running else {
+                command.scriptErrorNumber = errAEEventFailed
+                command.scriptErrorString = "No workspace was created: its terminal did not start (mise run log)."
+                return nil
+            }
+            return ["name": birth.name, "label": label ?? birth.name] as NSDictionary
         } catch {
             command.scriptErrorNumber = errAECoercionFail
             command.scriptErrorString = error.localizedDescription

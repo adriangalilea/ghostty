@@ -509,7 +509,7 @@ extension VigilWorkspaces {
     /// its pane runs and vigil.json lists it.
     private func birthReply(_ request: VigilSessionControl.Request, _ birth: Birth) -> VigilSessionControl.Reply {
         guard birth.running else {
-            return .failure(request, "spawn_failed", "The workspace was created on its Mac, but its terminal did not start; its log says why (mise run log).")
+            return .failure(request, "spawn_failed", "No workspace was created on its Mac: its terminal did not start, and its log says why (mise run log).")
         }
         guard let data = try? Data(contentsOf: persistURL),
               let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),

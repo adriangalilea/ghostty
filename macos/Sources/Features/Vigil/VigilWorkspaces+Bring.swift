@@ -38,7 +38,9 @@ extension VigilWorkspaces {
         session.paneSeq = entry.paneSeq ?? session.tabs.flatMap(\.members).count
         session.pinned = entry.pinned ?? false
         session.layoutShape = VigilSessionControl.revision(session.tabs)
-        workspaces[entry.name] = session
+        guard admit(session, "brought") else {
+            return .failure(request, "commit_failed", "This Mac's registry already lists that workspace's name or one of its panes; nothing was brought.")
+        }
         persist()
         guard let data = try? Data(contentsOf: persistURL),
               let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
