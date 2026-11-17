@@ -250,10 +250,6 @@ final class VigilRemote: ObservableObject {
             hubWatch = nil
         }
         self.peers(peers)
-        // The hub's first line is the hub answering (a change in its folder
-        // is not): a restore refused while it was down, for want of its
-        // seal, is asked again now.
-        if first { VigilWorkspaces.shared.restoreDied(why: "the hub answers") }
         // This Mac's mailbox is the hub's to serve, from its first line on.
         if first { VigilMessageStore.shared.hubAnswers() }
         if first { VigilWatchStore.shared.hubAnswers() }

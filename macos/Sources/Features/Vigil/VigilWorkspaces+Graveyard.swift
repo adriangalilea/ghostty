@@ -362,11 +362,15 @@ extension VigilWorkspaces {
         persist()
     }
 
-    /// Kill pane daemons, deterministically: one `vigild kill` with every
-    /// id, which unlinks their survival state, signals, and WAITS until
-    /// each is gone (escalating to SIGKILL). Off the main thread (a stuck
-    /// daemon must not freeze the app); the verification screams into the
-    /// log and the state files of the dead are pruned when it returns.
+    /// Kill pane daemons, deterministically: the lifecycle service's close
+    /// (one `vigild kill` with every id, which unlinks their survival state,
+    /// signals, and WAITS until each is gone, escalating to SIGKILL, then
+    /// boots out each job's record). Off the main thread (a stuck daemon
+    /// must not freeze the app); the verification screams into the log and
+    /// the state files of the dead are pruned when it returns. A close
+    /// works with the service down too: then this app runs that same
+    /// `vigild kill` itself, which races nothing (what a restore runs from
+    /// is gone before the signal).
     private func killDaemons(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }
         let bin = Self.vigildBin
@@ -375,13 +379,19 @@ extension VigilWorkspaces {
         // Behind any birth in flight (`lifeQueue`): a pane closed while its
         // daemon is still being approved is killed once that is over.
         Self.lifeQueue.async {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: bin)
-            p.arguments = ["kill"] + sorted
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            try? p.run()
-            p.waitUntilExit()
+            do {
+                let reply = try PaneLife.call(PaneLife.Request(.close, panes: sorted))
+                if !reply.ok { graveyardLog.error("close refused by the lifecycle service", ["panes": sorted, "err": reply.error]) }
+            } catch {
+                graveyardLog.warn("the lifecycle service did not answer; closing with vigild kill here", ["panes": sorted, "err": error])
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: bin)
+                p.arguments = ["kill"] + sorted
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                try? p.run()
+                p.waitUntilExit()
+            }
             let survivors = sorted.filter { VigilWorkspaces.daemonAlive($0) }
             for id in sorted where !survivors.contains(id) {
                 try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).state"))
@@ -390,7 +400,7 @@ extension VigilWorkspaces {
             if survivors.isEmpty {
                 graveyardLog.success("daemons dead, verified", ["panes": sorted])
             } else {
-                graveyardLog.error("daemons still alive after vigild kill", ["panes": survivors, "status": p.terminationStatus])
+                graveyardLog.error("daemons still alive after their close", ["panes": survivors])
             }
         }
     }
@@ -431,44 +441,33 @@ extension VigilWorkspaces {
         }
     }
 
-    /// `vigild restore` of `panes` and no others; every spec when none is
-    /// named (launch, before anything is read). What vigild said of each
-    /// pane it did not bring up ("refused…", "ended", "unreadable…"), by
-    /// pane.
+    /// The pane lifecycle service's restore of `panes` and no others; every
+    /// spec when none is named (launch, before anything is read). What it
+    /// said of each pane it did not bring up ("refused: …", "ended",
+    /// "unavailable: …"), by pane; the service not answering is said of
+    /// every pane named, and nothing is restored in its place (it restores
+    /// at its own start).
+    /// `person`: a person's act asked for it (it brings back a pane the
+    /// service held for dying too often).
     @discardableResult
-    nonisolated static func restoreFromSpecs(why: String, panes: [String] = []) -> [String: String] {
-        // The app is the births' authority (`PaneBirth`), which waits for
-        // the restore before anything is read: its report goes to a file (a
-        // pipe nobody drains would stall a long report).
-        let report = FileManager.default.temporaryDirectory.appendingPathComponent("vigil-restore-\(UUID().uuidString)")
+    nonisolated static func restoreFromSpecs(why: String, panes: [String] = [], person: Bool = false) -> [String: String] {
         do {
-            FileManager.default.createFile(atPath: report.path, contents: nil, attributes: [.posixPermissions: 0o600])
-            let handle = try FileHandle(forWritingTo: report)
-            defer { try? FileManager.default.removeItem(at: report) }
-            let status = try PaneBirth.run(["restore"] + panes, vouch: Self.vouch, output: handle, errors: handle)
-            try? handle.close()
-            let data = (try? Data(contentsOf: report)) ?? Data()
-            // Lossy on purpose: a bad byte reads as U+FFFD, the rest still reads.
-            // swiftlint:disable:next optional_data_string_conversion
-            let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
-            let respawned = lines.filter { $0.hasSuffix(" up") }.count
-            let others = lines.filter { !$0.hasSuffix(" up") }
-            if respawned > 0 || status != 0 || !others.isEmpty {
-                daemonLog.info("machine-killed daemons respawned from their specs", [
-                    "respawned": respawned, "status": status, "why": why, "output": others,
+            let reply = try PaneLife.call(PaneLife.Request(.restore, panes: panes, person: person))
+            guard reply.ok else {
+                daemonLog.error("restore refused by the lifecycle service", ["why": why, "err": reply.error])
+                return Dictionary(uniqueKeysWithValues: panes.map { ($0, reply.error ?? "the lifecycle service refused the restore") })
+            }
+            let notUp = reply.outcomes.filter { $0.outcome != "up" && $0.outcome != "alive" }
+            let respawned = reply.outcomes.filter { $0.outcome == "up" }.map(\.pane)
+            if !respawned.isEmpty || !notUp.isEmpty {
+                daemonLog.info("daemons restored from their specs by the lifecycle service", [
+                    "respawned": respawned, "why": why, "others": notUp.map { "\($0.pane) \($0.outcome)" },
                 ])
             }
-            // `vigild: '<pane>' <what it says>`, one line per pane.
-            var said: [String: String] = [:]
-            for line in others {
-                let parts = line.split(separator: "'", maxSplits: 2, omittingEmptySubsequences: false)
-                guard parts.count == 3 else { continue }
-                said[String(parts[1])] = parts[2].trimmingCharacters(in: .whitespaces)
-            }
-            return said
+            return Dictionary(notUp.map { ($0.pane, "\($0.outcome)\($0.said.map { ": \($0)" } ?? "")") }, uniquingKeysWith: { $1 })
         } catch {
-            daemonLog.error("vigild restore could not run", ["err": error])
-            return Dictionary(uniqueKeysWithValues: panes.map { ($0, "vigild restore could not run: \(error)") })
+            daemonLog.error("restore not asked: the lifecycle service did not answer", ["why": why, "err": error])
+            return Dictionary(uniqueKeysWithValues: panes.map { ($0, "\(error)") })
         }
     }
 

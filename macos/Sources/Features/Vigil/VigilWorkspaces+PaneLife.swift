@@ -160,7 +160,7 @@ extension VigilWorkspaces {
             redial([pane])
             return .accepted
         case .died:
-            restoreDied(why: why)
+            restoreDied(why: why, person: asked)
             return .accepted
         case .unborn:
             // Nothing on disk is "never ran" only for a pane this run of
@@ -212,47 +212,47 @@ extension VigilWorkspaces {
         return VigilPaneNote(says: "Not running on \(remote.name)", offers: "Start it there", explains: "This pane has no daemon on \(remote.name). Starting it restores it from its record there, or opens a shell in its folder.", symbol: "bolt.slash")
     }
 
-    /// `vigild new` for one pane, this app its birth authority. Off the
-    /// main thread.
+    /// One pane's daemon started by the pane lifecycle service (`PaneLife`
+    /// birth: `vigild new`, the service its birth authority with the pane
+    /// key in hand, so no broker or hub is asked). Off the main thread.
     nonisolated static func birth(_ pane: Registry.Pane, session: String) -> Bool {
         birthSaying(pane, session: session) == nil
     }
 
-    /// The same, saying why it did not come up (nil: it is up): the birth
-    /// authority's own words when it refused (a seal that does not verify, a
-    /// hub that does not answer), else where to read more.
+    /// The same, saying why it did not come up (nil: it is up): the
+    /// service's own words (a seal that does not verify, launchd that did
+    /// not take the job), or that the service did not answer, in which case
+    /// nothing was started.
     nonisolated static func birthSaying(_ pane: Registry.Pane, session: String) -> String? {
         // The folder is vigild's to resolve (a missing one falls back to its
         // nearest existing parent), never this process's working directory.
-        var args = ["new", pane.id, "--cwd", pane.cwd]
+        var shell: String?
+        var argv: [String]?
         if let cmd = pane.command {
             if cmd.hasPrefix("direct:") {
                 // ghostty's command syntax: `direct:` argv, space-separated.
-                args.append("--")
-                args += cmd.dropFirst("direct:".count).split(separator: " ").map(String.init)
+                argv = cmd.dropFirst("direct:".count).split(separator: " ").map(String.init)
             } else {
-                args += ["-c", cmd]
+                shell = cmd
             }
         }
-        var env = ProcessInfo.processInfo.environment
-        env["VIGIL_WORKSPACE"] = session
-        let refused = OSAllocatedUnfairLock<String?>(initialState: nil)
+        let asked = PaneLife.Birth(pane: pane.id, cwd: pane.cwd, workspace: session, shellCommand: shell, argv: argv,
+                                   environment: ProcessInfo.processInfo.environment)
         do {
-            let status = try PaneBirth.run(args, environment: env, vouch: { question in
-                let answer = Self.vouch(question)
-                if case .failure(let refusal) = answer { refused.withLock { $0 = refusal.description } }
-                return answer
-            })
-            if status == 0 {
+            let reply = try PaneLife.call(.birth(asked))
+            guard reply.ok, let outcome = reply.outcomes.first else {
+                daemonLog.error("daemon not asked for: the lifecycle service refused the request", ["pane": pane.id, "err": reply.error])
+                return reply.error ?? "the lifecycle service answered nothing"
+            }
+            if outcome.outcome == "up" {
                 daemonLog.info("daemon up", ["pane": pane.id])
                 return nil
             }
-            let said = refused.withLock { $0 }
-            daemonLog.error("daemon spawn failed", ["pane": pane.id, "status": status, "refused": said])
-            return said.map { "refused: \($0)" } ?? "vigild exited \(status); the pane's log says why"
+            daemonLog.error("daemon not born", ["pane": pane.id, "outcome": outcome.outcome, "said": outcome.said])
+            return "\(outcome.outcome)\(outcome.said.map { ": \($0)" } ?? "")"
         } catch {
-            daemonLog.error("daemon spawn failed", ["pane": pane.id, "err": error])
-            return "vigild could not be run: \(error)"
+            daemonLog.error("daemon not born: the lifecycle service did not answer", ["pane": pane.id, "err": error])
+            return "\(error)"
         }
     }
 
@@ -308,20 +308,21 @@ extension VigilWorkspaces {
     }
 
     /// Every owned pane whose daemon died with its spec standing, restored
-    /// in one `vigild restore` naming them and no others. A daemon can die
+    /// by the lifecycle service, naming them and no others. A daemon can die
     /// under a running app (2026-11-16: the Dock sent SIGTERM to the broker
-    /// and four pane daemons; why those is not known). Asked for when a
-    /// pidfile leaves or a daemon is found gone, when a view has no stream,
-    /// on the person's ask, and when the hub answers again (a restore needs
-    /// its seal, and the hub may have died in the same blow).
-    func restoreDied(why: String) {
+    /// and four pane daemons; why those is not known), and the service has
+    /// most often brought it back already from its own watch (then each
+    /// reads `alive`). Asked for when a pidfile leaves or a daemon is found
+    /// gone, when a view has no stream, and on the person's ask (`person`:
+    /// then a pane the service held for dying too often comes back too).
+    func restoreDied(why: String, person: Bool = false) {
         let dead = (workspaces.values.flatMap(ownedPaneIds) + graveyard.values.flatMap(ownedPaneIds))
             .filter { !births.contains($0) && Self.standing($0) == .died }.sorted()
         guard !dead.isEmpty else { return }
         births.formUnion(dead)
         daemonLog.warn("daemons gone with their specs on disk; restoring", ["panes": dead, "why": why])
         Self.lifeQueue.async {
-            let said = Self.restoreFromSpecs(why: why, panes: dead)
+            let said = Self.restoreFromSpecs(why: why, panes: dead, person: person)
             Task { @MainActor in VigilWorkspaces.shared.settled(dead, said: said) }
         }
     }
@@ -393,7 +394,7 @@ extension VigilWorkspaces {
             return nil
         case .died:
             births.insert(pane)
-            let said = Self.restoreFromSpecs(why: why, panes: [pane])
+            let said = Self.restoreFromSpecs(why: why, panes: [pane], person: true)
             settled([pane], said: said)
             return Self.daemonAlive(pane) ? nil : (said[pane] ?? "it was not restored")
         case .ended, .lost:
