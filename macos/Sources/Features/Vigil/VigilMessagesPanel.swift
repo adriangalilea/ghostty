@@ -18,9 +18,29 @@ final class VigilMessageStore: ObservableObject {
     /// Each Mac's records by its tether root.
     @Published private(set) var mailboxes: [String: [String: Message.Record]] = [:]
     /// This Mac's tether root, said by the hub when this Mac's mailbox opens.
-    @Published private(set) var here: String?
-    /// Every pane's count for its row mark (`MessageThreads.pending`).
-    @Published private(set) var pending: [String: [String: MessageThreads.Pending]] = [:]
+    @Published private(set) var here: String? {
+        didSet { if marks.here != here { marks.here = here } }
+    }
+    /// What the sidebar's rows draw of the mailboxes, apart from them: a
+    /// history note, a receipt or a read moves `mailboxes` and repaints the
+    /// window, never the sidebar; only a changed count does (the sidebar's
+    /// revision rule, CLAUDE.md "Descriptor lifetime and file observations").
+    let marks = Marks()
+
+    @MainActor
+    final class Marks: ObservableObject {
+        /// Every pane's count (`MessageThreads.pending`), replaced only when it differs.
+        @Published fileprivate(set) var pending: [String: [String: MessageThreads.Pending]] = [:]
+        @Published fileprivate(set) var here: String?
+
+        /// The count a pane row wears: `paneId` for this Mac's, the composite
+        /// row id (`device/pane`) for another's.
+        func pending(paneId: String?, id: String) -> MessageThreads.Pending? {
+            if let paneId { return here.flatMap { pending[$0]?[paneId] } }
+            guard let (device, pane) = VigilRemote.split(id) else { return nil }
+            return pending[device]?[pane]
+        }
+    }
     /// What each pane is called, by `root/pane` (`VigilChatPane`), and where
     /// its row is (the workspace row and the pane id a sidebar click takes).
     @Published private(set) var panes: [String: Named] = [:]
@@ -44,14 +64,12 @@ final class VigilMessageStore: ObservableObject {
     }
 
     var threads: [MessageThread] { MessageThreads.threads(mailboxes) }
-    var pendingTotal: Int { pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread + $1.waiting } }
+    var pendingTotal: Int { marks.pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread + $1.waiting } }
 
-    /// The count a pane row wears: `paneId` for this Mac's, the composite
-    /// row id (`device/pane`) for another's.
-    func pending(paneId: String?, id: String) -> MessageThreads.Pending? {
-        if let paneId { return here.flatMap { pending[$0]?[paneId] } }
-        guard let (device, pane) = VigilRemote.split(id) else { return nil }
-        return pending[device]?[pane]
+    /// A pane's every thread as one: what its aside shows, holding exactly
+    /// what its row mark counts.
+    func paneThread(_ key: MessageThread.Key) -> MessageThread? {
+        MessageThreads.pane(mailboxes, root: key.root, pane: key.pane, conversation: key.conversation)
     }
 
     /// A thread's key for a pane row: its Mac, the pane, the conversation it holds.
@@ -78,18 +96,29 @@ final class VigilMessageStore: ObservableObject {
         recount()
     }
 
-    /// Every follow ended with the hub (VigilRemote's stream ended).
+    /// Every follow ended with the hub (VigilRemote's stream ended): each is
+    /// followed again when the hub answers.
     func hubGone() {
         for task in following.values { task.cancel() }
         following.removeAll()
+        mailboxWatch?.cancel()
+        mailboxWatch = nil
     }
 
+    /// A follow that ends while the hub stands is followed again by itself,
+    /// on an event and never on a clock: at once when it had delivered (it
+    /// fell behind its backlog, or a path dropped), else at the next change
+    /// of this Mac's mailbox folder (the broker writes every message there)
+    /// for this Mac's, and at the next word of the paired Macs for
+    /// another's (whose follow tether itself keeps open). One that never
+    /// delivers is never dialed in a loop.
     private func follow(device: String?) {
         let key = device ?? ""
         guard following[key] == nil else { return }
         let steps = Self.hub.messageSteps(device: device)
         following[key] = Task { [weak self] in
             var root = device
+            var delivered = false
             for await step in steps {
                 switch step.step {
                 case .open:
@@ -101,15 +130,43 @@ final class VigilMessageStore: ObservableObject {
                     messagesLog.info("mailbox followed", ["device": String((step.root ?? "?").prefix(10)), "here": device == nil])
                 case .changes:
                     guard let root, let changes = step.changes else { continue }
+                    delivered = true
                     self?.apply(root, changes)
                 // Out of reach: what it held is shown as it was.
                 case .waiting: messagesLog.info("mailbox out of reach", ["device": String(key.prefix(10)), "why": step.reason ?? ""])
                 }
             }
-            // The hub's socket ended: followed again when the hub answers.
             guard let self, !Task.isCancelled else { return }
             self.following[key] = nil
+            messagesLog.warn("mailbox follow ended", ["device": String(key.prefix(10)), "next": delivered ? "followed again" : "waits for a change"])
+            if delivered {
+                self.follow(device: device)
+            } else if device == nil {
+                self.awaitMailbox()
+            }
         }
+    }
+
+    /// This Mac's mailbox folder, watched while its follow waits.
+    private var mailboxWatch: DispatchSourceFileSystemObject?
+    private func awaitMailbox() {
+        guard mailboxWatch == nil else { return }
+        let folder = VigilPaths.agent.appendingPathComponent("mailbox").path
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let fd = open(folder, O_EVTONLY)
+        guard fd >= 0 else { return messagesLog.error("mailbox folder not watched; this Mac's messages follow again when the hub does", ["path": folder]) }
+        let watch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
+        watch.setEventHandler {
+            MainActor.assumeIsolated {
+                let store = VigilMessageStore.shared
+                store.mailboxWatch?.cancel()
+                store.mailboxWatch = nil
+                store.follow(device: nil)
+            }
+        }
+        watch.setCancelHandler { close(fd) }
+        mailboxWatch = watch
+        watch.resume()
     }
 
     private func apply(_ root: String, _ changes: Message.Changes) {
@@ -119,7 +176,7 @@ final class VigilMessageStore: ObservableObject {
 
     private func recount() {
         let next = MessageThreads.pending(mailboxes)
-        if next != pending { pending = next }
+        if next != marks.pending { marks.pending = next }
     }
 
     // MARK: Names (from the sidebar's own rows: the one naming rule)
@@ -168,7 +225,9 @@ final class VigilMessageStore: ObservableObject {
             },
             post: { message, root in try await Self.post(message, root: root, here: here) },
             act: { act, root in try await Self.act(act, root: root, here: here) },
-            open: { root, pane in VigilMessageStore.shared.open(root: root, pane: pane) })
+            open: { root, pane in VigilMessageStore.shared.open(root: root, pane: pane) },
+            // The app's own seen rule: a hand on this Mac after it arrived.
+            handAfter: { VigilWorkspaces.personActed(after: Date(timeIntervalSince1970: $0)) })
     }
 
     private struct Failed: Error, CustomStringConvertible { let description: String }
@@ -298,6 +357,8 @@ private struct VigilMessagesAside: View {
     @ObservedObject private var store = VigilMessageStore.shared
 
     var body: some View {
-        VigilThreadColumn(key: key, thread: store.threads.first { $0.key == key }, host: store.host)
+        // The pane's every thread: what its row mark counts, so opening it
+        // is what clears the mark.
+        VigilThreadColumn(key: key, thread: store.paneThread(key), host: store.host)
     }
 }

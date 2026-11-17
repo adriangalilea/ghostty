@@ -41,6 +41,10 @@ struct VigilChatHost {
     var act: @Sendable (_ act: Message.Act, _ root: String) async throws -> Message.Acted
     /// Go to the pane `pane` of the Mac `root`.
     var open: @MainActor (_ root: String, _ pane: String) -> Void
+    /// Whether a person's hand was on this device after the moment (unix
+    /// seconds), or within the minute before: the app's seen rule
+    /// (`VigilWorkspaces.personActed(after:)`). Read needs it.
+    var handAfter: @MainActor (_ moment: Double) -> Bool
 }
 
 /// Every thread, and the one chosen beside the list.
@@ -229,6 +233,16 @@ struct VigilThreadConversation: View {
     @State private var replying: String?
     @State private var editing: String?
     @State private var failure: String?
+    /// The ids a read is on its way for: asked once.
+    @State private var marking: Set<String> = []
+    #if os(macOS)
+        @Environment(\.controlActiveState) private var active
+        /// In front: its window is the key one.
+        private var front: Bool { active == .key }
+    #else
+        @Environment(\.scenePhase) private var phase
+        private var front: Bool { phase == .active }
+    #endif
 
     private var items: [MessageThread.Item] { thread?.items ?? [] }
 
@@ -241,7 +255,12 @@ struct VigilThreadConversation: View {
         } empty: {
             Text("Nothing said here yet. What you write goes to this pane's agent as yours.").inkText(.detail)
         }
-        .task(id: thread?.items.filter { $0.record.unread }.map(\.id)) { markRead() }
+        // Read is asked when what is unread changes, when the window comes to
+        // the front, and when a hand moves over the thread: each an event,
+        // and the hand itself is the host's seen rule.
+        .onChange(of: thread?.items.filter { $0.record.unread }.map(\.id), initial: true) { markRead() }
+        .onChange(of: front) { markRead() }
+        .onContinuousHover { _ in markRead() }
         InkComposer(
             text: $draft, prompt: "Message \(people.title(of: key))",
             replying: replying.flatMap { id in messages.first { $0.id == id } }.map { InkChat.Answered($0, people: people.all) },
@@ -262,7 +281,8 @@ struct VigilThreadConversation: View {
                 act(.react(message.id, emoji, on: !given), on: message.id)
             },
             edit: { message in
-                guard let record = record(message.id), !record.state.kind.final else { return }
+                // The mailbox's own rule: a recorded one is corrected.
+                guard let record = record(message.id), record.editable else { return }
                 replying = nil
                 editing = message.id
                 draft = record.message.body
@@ -318,14 +338,21 @@ struct VigilThreadConversation: View {
         }
     }
 
-    /// What the person has in front of them is read: the thread's unread
-    /// messages, marked on the Mac that holds each.
+    /// What a person had in front of them is read: while the thread is in
+    /// front, its pane's unread messages that a hand on this device followed
+    /// (`toMarkRead`, the host's seen rule), marked on the Mac that holds
+    /// each. The view merely existing reads nothing.
     private func markRead() {
-        let unread = Dictionary(grouping: items.filter { $0.record.unread }, by: \.root)
+        guard front, let thread else { return }
+        let due = thread.toMarkRead(handAfter: host.handAfter).filter { !marking.contains($0.id) }
+        guard !due.isEmpty else { return }
+        marking.formUnion(due.map(\.id))
         let run = host.act
-        for (root, items) in unread {
+        for (root, items) in Dictionary(grouping: due, by: \.root) {
             let ids = items.map(\.id)
-            Task { _ = try? await run(.read(ids), root) }
+            Task {
+                do { _ = try await run(.read(ids), root) } catch { marking.subtract(ids) }
+            }
         }
     }
 }

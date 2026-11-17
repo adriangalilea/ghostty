@@ -37,8 +37,10 @@ struct VigilSidebarView: View {
     private static let hostHover = "own:"
     /// The panes whose changes stand in a right bar: each has a row under it.
     @ObservedObject private var asides = VigilBars.shared.asideMarks
-    /// Every Mac's mailbox: a pane row's messages mark.
-    @ObservedObject private var messages = VigilMessageStore.shared
+    /// What rows draw of every Mac's mailbox (its counts alone): a pane
+    /// row's messages mark. A mailbox change that moves no count repaints
+    /// nothing here.
+    @ObservedObject private var messages = VigilMessageStore.shared.marks
 
     /// What a fold control of row `id` tells of the pointer (`ThreadChildren`,
     /// `ThreadFolded`).
