@@ -97,7 +97,7 @@ extension VigilWorkspaces {
             refreshWorkspaceRevisions()
             guard let now = workspaces[request.session], let tab = now.tabs.first(where: { $0.paneIds.contains(pane) }) else { continue }
             let whole = Set(tab.paneIds).isSubset(of: leaving)
-            let reply = applySessionCommand(VigilSessionControl.Request(
+            let reply = applySessionEdit(VigilSessionControl.Request(
                 session: request.session, revision: now.layoutRevision, operation: whole ? "close_tab" : "close_pane", anchor: pane))
             guard reply.ok else {
                 lifecycleLog.error("a pane brought to another Mac did not close here", ["pane": pane, "why": reply.message])
@@ -253,7 +253,7 @@ extension VigilWorkspaces {
             away: Self.away(host), home: here, lines: lines, read: read)
         present(model, source: device, sourceHome: directory.home, targetHome: here) { [weak self] in
             guard let self else { return }
-            let reply = self.applySessionCommand(.bring(name, from: device, anchor: anchor, part: part))
+            let reply = self.applySessionEdit(.bring(name, from: device, anchor: anchor, part: part))
             guard !reply.ok else { return }
             let failed = NSAlert()
             failed.messageText = "\(source.label) was not brought"

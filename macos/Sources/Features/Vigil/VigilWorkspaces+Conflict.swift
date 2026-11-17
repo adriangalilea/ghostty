@@ -154,9 +154,12 @@ extension VigilWorkspaces {
         // tab beside this pane's.
         if let line = outcome.opens, let workspace = owner(ofPane: pane) {
             refreshWorkspaceRevisions()
-            let reply = applySessionCommand(.birth(
-                in: workspace, revision: workspaces[workspace]?.layoutRevision ?? "", anchor: pane, split: nil, command: line))
-            if !reply.ok {
+            let request = VigilSessionControl.Request.birth(
+                in: workspace, revision: workspaces[workspace]?.layoutRevision ?? "", anchor: pane, split: nil, command: line)
+            // Its birth is awaited off the main thread.
+            Task { @MainActor in
+                let reply = await self.applySessionCommand(request)
+                guard !reply.ok else { return }
                 lifecycleLog.error("the kept conversation's tab was not opened", ["conversation": outcome.forked, "why": reply.message])
                 let failed = NSAlert()
                 failed.messageText = "Both are kept; its tab did not open"

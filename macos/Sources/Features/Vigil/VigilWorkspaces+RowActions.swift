@@ -59,8 +59,12 @@ extension VigilWorkspaces {
             alert.runModal()
         }
         guard let device = home.device else {
-            let reply = applySessionCommand(request)
-            return said(reply.ok ? nil : reply.message)
+            // A birth among them is awaited off the main thread.
+            Task { @MainActor in
+                let reply = await self.applySessionCommand(request)
+                said(reply.ok ? nil : reply.message)
+            }
+            return
         }
         let mac = home.mac ?? "its Mac"
         DispatchQueue.global(qos: .userInitiated).async {
@@ -156,19 +160,24 @@ extension VigilWorkspaces {
                 return sidebarLog.warn("birth refused: no such workspace", ["workspace": home.workspace])
             }
             let request = request(revision)
-            let reply = applySessionCommand(request)
-            guard reply.ok, let pane = reply.pane else {
-                sidebarLog.error("row action not committed", [
-                    "op": request.operation, "workspace": home.workspace, "anchor": request.anchor, "why": reply.message])
-                let alert = NSAlert()
-                alert.messageText = failing
-                alert.informativeText = reply.message
-                alert.runModal()
-                return
+            // Its birth is awaited off the main thread; the pane is landed
+            // on when the reply comes.
+            Task { @MainActor [weak host] in
+                let reply = await self.applySessionCommand(request)
+                guard reply.ok, let pane = reply.pane else {
+                    sidebarLog.error("row action not committed", [
+                        "op": request.operation, "workspace": home.workspace, "anchor": request.anchor, "why": reply.message])
+                    let alert = NSAlert()
+                    alert.messageText = failing
+                    alert.informativeText = reply.message
+                    alert.runModal()
+                    return
+                }
+                sidebarLog.info("row action committed", [
+                    "op": request.operation, "workspace": home.workspace, "anchor": request.anchor, "pane": pane])
+                self.activatePane(name: home.workspace, paneId: pane, in: host)
             }
-            sidebarLog.info("row action committed", [
-                "op": request.operation, "workspace": home.workspace, "anchor": request.anchor, "pane": pane])
-            return activatePane(name: home.workspace, paneId: pane, in: host)
+            return
         }
         guard let remote = VigilRemote.shared.host(device),
               let revision = remote.directory?.live.first(where: { $0.name == home.workspace })?.layoutRevision else {

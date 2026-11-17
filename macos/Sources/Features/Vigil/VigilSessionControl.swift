@@ -139,7 +139,7 @@ enum VigilSessionControl {
                     return
                 }
                 Task { @MainActor in
-                    let reply = transact(request)
+                    let reply = await transact(request)
                     DispatchQueue.global(qos: .userInitiated).async { send(reply, to: fd) }
                 }
                 return
@@ -167,8 +167,13 @@ enum VigilSessionControl {
         let reply: Reply?
     }
 
+    /// Commands under way, by id: a birth is awaited, so a retry of one can
+    /// arrive while it is still being done (its receipt holds no reply yet,
+    /// which otherwise means the app stopped during it).
+    @MainActor private static var underWay: Set<UUID> = []
+
     @MainActor
-    static func transact(_ request: Request) -> Reply {
+    static func transact(_ request: Request) async -> Reply {
         guard request.version == 1 else { return .failure(request, "unsupported_version", "Workspace command version 1 is required.") }
         // The rule the hub asks of another device's request, asked of every
         // sender (this Mac's own included).
@@ -186,7 +191,10 @@ enum VigilSessionControl {
         if request.operation == "status" {
             return .init(id: request.id, ok: true, code: "ok", message: "App status.", status: VigilWorkspaces.shared.status())
         }
-        if request.operation == "describe" { return VigilWorkspaces.shared.applySessionCommand(request) }
+        if request.operation == "describe" { return VigilWorkspaces.shared.applySessionEdit(request) }
+        guard !underWay.contains(request.id) else {
+            return .failure(request, "in_progress", "This command is still being done on its Mac. Ask again in a moment for its outcome.")
+        }
         let receipts = directory.appendingPathComponent("workspace-receipts")
         let file = receipts.appendingPathComponent(request.id.uuidString + ".json")
         let encoder = JSONEncoder()
@@ -214,7 +222,9 @@ enum VigilSessionControl {
             // Write intent before any side effect. A crash can leave an
             // indeterminate receipt but a retry cannot create another pane.
             try encoder.encode(Receipt(request: request, reply: nil)).write(to: file, options: .atomic)
-            let reply = VigilWorkspaces.shared.applySessionCommand(request)
+            underWay.insert(request.id)
+            defer { underWay.remove(request.id) }
+            let reply = await VigilWorkspaces.shared.applySessionCommand(request)
             try encoder.encode(Receipt(request: request, reply: reply)).write(to: file, options: .atomic)
             return reply
         } catch {

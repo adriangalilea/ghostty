@@ -49,28 +49,19 @@ extension VigilWorkspaces {
     /// the identity plus one daemon-backed pane. Display is the
     /// viewport's business, entirely orthogonal; the shell/claude lives
     /// in the pane's daemon (not any window's pty).
-    /// Nil when the registry refused it (`admit`): only a mint that
-    /// handed out an id in use can make that happen, and it screams.
-    func createWorkspace(cwd: String, command: String? = nil) -> String? {
-        let session = newborn(cwd: cwd, command: command)
-        guard admit(session, "born") else { return nil }
-        fresh.insert(session.tabs[0].panes[0].id)
-        lifecycleLog.info("born", ["workspace": session.name, "cwd": cwd, "command": command])
-        return session.name
-    }
-
-    /// A fresh workspace with its one pane, listed nowhere yet.
-    private func newborn(cwd: String, command: String?) -> Workspace {
+    func createWorkspace(cwd: String, command: String? = nil) -> String {
         let name = newWorkspaceId()
         var session = Workspace(name: name, label: name, cwd: cwd)
         session.tabs = [Registry.Tab(panes: [Registry.Pane(id: "vigil-\(name)-0", cwd: cwd, command: command)], layout: nil)]
         session.paneSeq = 1 // index 0 consumed at birth
-        return session
+        fresh.insert("vigil-\(name)-0")
+        workspaces[name] = session
+        lifecycleLog.info("born", ["workspace": name, "cwd": cwd, "command": command])
+        return name
     }
 
     /// A workspace born through the api: its id, its one pane, and whether
-    /// that pane's daemon started. Not running = not born: the registry
-    /// does not list it.
+    /// that pane's daemon started.
     struct Birth {
         let name: String
         let pane: Registry.Pane
@@ -81,30 +72,21 @@ extension VigilWorkspaces {
     /// `create` or `new_session` from another device): CREATE means the
     /// workspace exists AND runs — its pane daemon spawns headless at birth
     /// (the shape the whole fleet has after ⌘Q), never a registry row
-    /// waiting for a click. The registry lists the workspace only once its
-    /// pane's daemon is up: one that did not start leaves nothing listed
-    /// (the M4, 2026-11-17: a birth whose `vigild new` refused stayed
-    /// listed, owning another workspace's running pane). No window opens
-    /// unless asked (`openWindow`): the workspace appears in every sidebar
-    /// and the viewport under Adrian's hands is never touched.
+    /// waiting for a click. No window opens unless asked (`openWindow`):
+    /// the workspace appears in every sidebar and the viewport under
+    /// Adrian's hands is never touched.
     @discardableResult
-    func apiNewWorkspace(label: String?, emoji: String? = nil, cwd: String?, command: String?, openWindow: Bool) -> Birth {
+    func apiNewWorkspace(label: String?, emoji: String? = nil, cwd: String?, command: String?, openWindow: Bool) async -> Birth {
+        let made = apiCreate(label: label, emoji: emoji, cwd: cwd, command: command)
+        let running = await startDaemon(pane: made.pane, session: made.name)
+        return apiStarted(made, label: label, running: running, openWindow: openWindow)
+    }
+
+    /// The registry half of `apiNewWorkspace`: the workspace, named and
+    /// saved with its one pane, its daemon not asked for yet.
+    func apiCreate(label: String?, emoji: String?, cwd: String?, command: String?) -> (name: String, pane: Registry.Pane) {
         let cwd = cwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-        let session = newborn(cwd: cwd, command: command)
-        let name = session.name
-        let pane = session.tabs[0].panes[0]
-        // Judged before the daemon starts (a refused pane id may be another
-        // workspace's live daemon), listed after: the spawn's wait spins the
-        // run loop, where a scheduled save would write a workspace not yet born.
-        guard admissible(session, "born through the api") else { return Birth(name: name, pane: pane, running: false) }
-        lifecycleLog.info("born", ["workspace": name, "cwd": cwd, "command": command])
-        let running = startDaemon(pane: pane, session: name)
-        guard running, admit(session, "born through the api") else {
-            lifecycleLog.error("not born: its pane's daemon did not start, so nothing lists the workspace", [
-                "workspace": name, "pane": pane.id, "label": label, "running": running,
-            ])
-            return Birth(name: name, pane: pane, running: false)
-        }
+        let name = createWorkspace(cwd: cwd, command: command)
         // A face given is the face; else one written in front of the label
         // is taken from it (`faced`), so no row wears its emoji as text.
         let written = label.map(Self.faced)
@@ -113,27 +95,44 @@ extension VigilWorkspaces {
         if face != nil || called?.isEmpty == false {
             rename(name: name, label: called.flatMap { $0.isEmpty ? nil : $0 } ?? name, emoji: face)
         }
-        lifecycleLog.info("born through the api", ["workspace": name, "label": label, "window": openWindow])
-        if openWindow { open(name: name) } else { persist() }
-        if !openWindow {
+        let panes = workspaces[name]!.tabs.flatMap(\.panes)
+        assert(panes.count == 1, "a workspace is born with one pane")
+        persist()
+        return (name, panes[0])
+    }
+
+    /// What follows its daemon's birth. The workspace may have been killed
+    /// while the service worked: then it opens nothing and its pane, buried
+    /// with it, is closed by its reap.
+    func apiStarted(_ made: (name: String, pane: Registry.Pane), label: String?, running: Bool, openWindow: Bool) -> Birth {
+        let listed = workspaces[made.name] != nil
+        lifecycleLog.info("born through the api", ["workspace": made.name, "label": label, "window": openWindow, "running": running, "listed": listed])
+        guard listed else { return Birth(name: made.name, pane: made.pane, running: false) }
+        if openWindow { open(name: made.name) } else { persist() }
+        if running, !openWindow {
             // No window will learn its end from a stream: the snapshots do,
             // and a command already over by now is answered at once.
-            bornUnseen.insert(pane.id)
-            closeFinished([pane.id])
+            bornUnseen.insert(made.pane.id)
+            closeFinished([made.pane.id])
         }
-        return Birth(name: name, pane: pane, running: true)
+        return Birth(name: made.name, pane: made.pane, running: running)
     }
 
     /// Start a pane's daemon headless (`vigild new <id> [-c cmd]`, asked of
     /// the pane lifecycle service, the births' one owner and authority): the
     /// process half of creation. The app's own environment flows (plus
-    /// VIGIL_WORKSPACE); vigild scrubs agent ancestry itself.
+    /// VIGIL_WORKSPACE); vigild scrubs agent ancestry itself. Awaited off the
+    /// main thread (CODEX L2: a stuck service never freezes the app); the
+    /// pane is a birth in flight meanwhile, so no view starts it too.
     /// Failure screams — a created session that is not running is the lie
     /// this call exists to kill.
     @discardableResult
-    func startDaemon(pane: Registry.Pane, session: String) -> Bool {
+    func startDaemon(pane: Registry.Pane, session: String) async -> Bool {
         fresh.remove(pane.id)
-        return Self.birth(pane, session: session)
+        births.insert(pane.id)
+        let failed = await Self.born(pane, session: session)
+        settled([pane.id], said: failed.map { [pane.id: $0] } ?? [:])
+        return failed == nil
     }
 
     /// New Workspace (⌘N, menu-bar New Workspace, overview `n`): the fresh
@@ -151,7 +150,7 @@ extension VigilWorkspaces {
             ?? viewport?.focusedSurface?.pwd
             ?? FileManager.default.homeDirectoryForCurrentUser.path
         if explicitCwd == nil, let viewport, remoteSessionCommand(in: viewport, operation: "new_session") { return }
-        guard let name = createWorkspace(cwd: cwd) else { return }
+        let name = createWorkspace(cwd: cwd)
         if let viewport {
             shapeshift(in: viewport, to: name)
         } else {
@@ -216,16 +215,7 @@ extension VigilWorkspaces {
                 maxIndex = max(maxIndex, n)
             }
         }
-        var minted = max(session.paneSeq, maxIndex + 1)
-        // A pane is in exactly one place: an index another workspace or a
-        // burial already lists (one that moved away from here) is never
-        // minted again, and the counter skipping it says so.
-        while let listed = locate("vigil-\(name)-\(minted)") {
-            registryLog.error("!! pane index skipped: its id is listed already", [
-                "workspace": name, "pane": "vigil-\(name)-\(minted)", "listedBy": listed.owner,
-            ])
-            minted += 1
-        }
+        let minted = max(session.paneSeq, maxIndex + 1)
         workspaces[name]!.paneSeq = minted + 1
         // An id made now names a pane that has not run: the one fact that
         // lets its daemon be started unasked (`PaneLife.tend`).

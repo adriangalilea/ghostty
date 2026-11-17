@@ -1,6 +1,7 @@
 import AppKit
 import GhosttyKit
 import os
+import VigilHarness
 import VigilWire
 
 /// What a view of this Mac's pane shows while it has no stream to it: how
@@ -54,10 +55,26 @@ extension VigilWorkspaces {
         return .unborn
     }
 
-    /// Every birth and every kill, one at a time and off the main thread
-    /// (each waits for vigild): a kill asked while a birth of that pane is
-    /// still being approved runs after it, never around it.
+    /// Every birth and restore, one at a time and off the main thread (each
+    /// waits for the lifecycle service, within a deadline). Closes run on
+    /// their own queue (`closeQueue`): vigild's closed mark makes a close
+    /// final whether it lands before a birth of the pane or after.
     nonisolated static let lifeQueue = DispatchQueue(label: "vigil.pane-life", qos: .userInitiated)
+
+    /// `birthSaying` on `lifeQueue`, awaited: the main thread is free while
+    /// the service works.
+    nonisolated static func born(_ pane: Registry.Pane, session: String) async -> String? {
+        await withCheckedContinuation { done in
+            lifeQueue.async { done.resume(returning: birthSaying(pane, session: session)) }
+        }
+    }
+
+    /// `restoreFromSpecs` on `lifeQueue`, awaited.
+    nonisolated static func restored(why: String, panes: [String], person: Bool) async -> [String: String] {
+        await withCheckedContinuation { done in
+            lifeQueue.async { done.resume(returning: restoreFromSpecs(why: why, panes: panes, person: person)) }
+        }
+    }
 
     /// This Mac's views of a pane (mirrors too; a remote pane's stream is
     /// its hub's).
@@ -160,7 +177,9 @@ extension VigilWorkspaces {
             redial([pane])
             return .accepted
         case .died:
-            restoreDied(why: why, person: asked)
+            // A person's ask is for this pane alone (CODEX L6): it brings
+            // back this one even when the service held it, never another.
+            if asked { restoreAsked(pane, why: why) } else { restoreDied(why: why) }
             return .accepted
         case .unborn:
             // Nothing on disk is "never ran" only for a pane this run of
@@ -214,16 +233,16 @@ extension VigilWorkspaces {
 
     /// One pane's daemon started by the pane lifecycle service (`PaneLife`
     /// birth: `vigild new`, the service its birth authority with the pane
-    /// key in hand, so no broker or hub is asked). Off the main thread.
-    nonisolated static func birth(_ pane: Registry.Pane, session: String) -> Bool {
-        birthSaying(pane, session: session) == nil
-    }
-
-    /// The same, saying why it did not come up (nil: it is up): the
-    /// service's own words (a seal that does not verify, launchd that did
-    /// not take the job), or that the service did not answer, in which case
-    /// nothing was started.
+    /// key in hand, so no broker or hub is asked), saying why it did not
+    /// come up (nil: it is up): the service's own words (a seal that does
+    /// not verify, launchd that did not take the job, a pane already
+    /// closed), that nothing reached the service (nothing was started), or
+    /// that it was asked and did not say how it went (it may have started:
+    /// `settled` reads the pane's files). Bounded: at most the birth's
+    /// deadline plus a `result`'s. On `lifeQueue` only, never main (`born`
+    /// awaits it from there).
     nonisolated static func birthSaying(_ pane: Registry.Pane, session: String) -> String? {
+        dispatchPrecondition(condition: .onQueue(lifeQueue))
         // The folder is vigild's to resolve (a missing one falls back to its
         // nearest existing parent), never this process's working directory.
         var shell: String?
@@ -238,8 +257,11 @@ extension VigilWorkspaces {
         }
         let asked = PaneLife.Birth(pane: pane.id, cwd: pane.cwd, workspace: session, shellCommand: shell, argv: argv,
                                    environment: ProcessInfo.processInfo.environment)
-        do {
-            let reply = try PaneLife.call(.birth(asked))
+        // Proved to be vigil-agent before the environment is sent, and
+        // bounded (`PaneLifeClient`); an answer lost is asked for by id,
+        // never sent again.
+        switch PaneLifeClient.settle(.birth(asked)) {
+        case .answered(let reply):
             guard reply.ok, let outcome = reply.outcomes.first else {
                 daemonLog.error("daemon not asked for: the lifecycle service refused the request", ["pane": pane.id, "err": reply.error])
                 return reply.error ?? "the lifecycle service answered nothing"
@@ -250,9 +272,13 @@ extension VigilWorkspaces {
             }
             daemonLog.error("daemon not born", ["pane": pane.id, "outcome": outcome.outcome, "said": outcome.said])
             return "\(outcome.outcome)\(outcome.said.map { ": \($0)" } ?? "")"
-        } catch {
-            daemonLog.error("daemon not born: the lifecycle service did not answer", ["pane": pane.id, "err": error])
-            return "\(error)"
+        case .unanswered(let why):
+            daemonLog.error("daemon not asked for: nothing reached the lifecycle service", ["pane": pane.id, "why": why])
+            return why
+        case .indeterminate(let why):
+            // It may run: the pane's files say, and its views dial it if so.
+            daemonLog.error("daemon birth asked, outcome not known", ["pane": pane.id, "why": why])
+            return "not known whether it started: \(why)"
         }
     }
 
@@ -271,7 +297,7 @@ extension VigilWorkspaces {
     /// A birth or a restore is over: each pane is looked at again, as it
     /// stands now. One that runs is dialed by its views; any other says why
     /// on them.
-    private func settled(_ panes: [String], said: [String: String]) {
+    func settled(_ panes: [String], said: [String: String]) {
         births.subtract(panes)
         for pane in panes {
             let standing = Self.standing(pane)
@@ -313,17 +339,29 @@ extension VigilWorkspaces {
     /// and four pane daemons; why those is not known), and the service has
     /// most often brought it back already from its own watch (then each
     /// reads `alive`). Asked for when a pidfile leaves or a daemon is found
-    /// gone, when a view has no stream, and on the person's ask (`person`:
-    /// then a pane the service held for dying too often comes back too).
-    func restoreDied(why: String, person: Bool = false) {
+    /// gone and when a view has no stream; no person asked, so the service
+    /// holds these to its own budget (a pane it held stays held).
+    func restoreDied(why: String) {
         let dead = (workspaces.values.flatMap(ownedPaneIds) + graveyard.values.flatMap(ownedPaneIds))
             .filter { !births.contains($0) && Self.standing($0) == .died }.sorted()
         guard !dead.isEmpty else { return }
         births.formUnion(dead)
         daemonLog.warn("daemons gone with their specs on disk; restoring", ["panes": dead, "why": why])
         Self.lifeQueue.async {
-            let said = Self.restoreFromSpecs(why: why, panes: dead, person: person)
+            let said = Self.restoreFromSpecs(why: why, panes: dead)
             Task { @MainActor in VigilWorkspaces.shared.settled(dead, said: said) }
+        }
+    }
+
+    /// One pane whose daemon died, restored on a person's ask (its note's
+    /// button): that pane alone, a held one included.
+    func restoreAsked(_ pane: String, why: String) {
+        guard !births.contains(pane) else { return }
+        births.insert(pane)
+        daemonLog.info("a person asked for a pane whose daemon died", ["pane": pane, "why": why])
+        Self.lifeQueue.async {
+            let said = Self.restoreFromSpecs(why: why, panes: [pane], person: true)
+            Task { @MainActor in VigilWorkspaces.shared.settled([pane], said: said) }
         }
     }
 
@@ -380,11 +418,12 @@ extension VigilWorkspaces {
         return entry
     }
 
-    /// Open a pane and say what happened, on this thread and done when it
-    /// returns: for a command whose reply is kept and answers a retry
-    /// (`open_pane`), which may say "done" only of what is done. Nil: its
-    /// daemon runs. Else why it does not.
-    func openNow(_ pane: String, why: String) -> String? {
+    /// Open a pane and say what happened, done when it returns: for a
+    /// command whose reply is kept and answers a retry (`open_pane`), which
+    /// may say "done" only of what is done. Nil: its daemon runs. Else why it
+    /// does not. The service is awaited off the main thread; the pane is a
+    /// birth in flight meanwhile (`births`), so nothing else starts it.
+    func openNow(_ pane: String, why: String) async -> String? {
         guard let at = locate(pane), !at.buried else { return "no workspace of this Mac lists it" }
         guard !births.contains(pane) else { return "it is being started" }
         let entry: Registry.Pane
@@ -394,7 +433,7 @@ extension VigilWorkspaces {
             return nil
         case .died:
             births.insert(pane)
-            let said = Self.restoreFromSpecs(why: why, panes: [pane], person: true)
+            let said = await Self.restored(why: why, panes: [pane], person: true)
             settled([pane], said: said)
             return Self.daemonAlive(pane) ? nil : (said[pane] ?? "it was not restored")
         case .ended, .lost:
@@ -407,7 +446,7 @@ extension VigilWorkspaces {
         }
         births.insert(pane)
         fresh.remove(pane)
-        let failed = Self.birthSaying(entry, session: at.owner)
+        let failed = await Self.born(entry, session: at.owner)
         settled([pane], said: failed.map { [pane: $0] } ?? [:])
         return failed
     }
@@ -449,7 +488,7 @@ extension VigilWorkspaces {
     /// any whose record or pidfile changed, a birth no snapshot saw running
     /// (`bornUnseen`) and those that could not be closed yet. The close is
     /// of that one pane, in the registry (the edit a close from another Mac
-    /// makes, `applySessionCommand`), and every view follows the registry;
+    /// makes, `applySessionEdit`), and every view follows the registry;
     /// it never passes through a window's own close, whose scope is the
     /// tab. A workspace whose every pane finished is killed whole (its
     /// window goes to the next workspace). A program that ended any other
@@ -539,7 +578,7 @@ extension VigilWorkspaces {
             note(pane, Self.note(for: .ended(end), said: nil))
             return false
         }
-        let reply = applySessionCommand(VigilSessionControl.Request(
+        let reply = applySessionEdit(VigilSessionControl.Request(
             session: name, revision: session.layoutRevision, operation: "close_pane", anchor: pane))
         if reply.ok {
             finishedWaiting.remove(pane)

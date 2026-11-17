@@ -35,15 +35,20 @@ extension VigilWorkspaces {
             let request = VigilSessionControl.Request(version: 1, id: UUID(), issuedAt: Date().timeIntervalSince1970,
                 session: composite, revision: expectedRevision ?? session.layoutRevision,
                 operation: operation, anchor: anchor, direction: direction)
-            let reply = VigilSessionControl.transact(request)
-            guard reply.ok else { remoteCommandError(controller, reply.message); return true }
-            if let name = reply.session, name != composite {
-                shapeshift(in: controller, to: name, anchor: reply.pane)
-            } else if operation == "new_tab", let pane = reply.pane {
-                mirrorInto(controller, name: composite, anchor: pane)
-            } else if let pane = reply.pane, let landing = controller.surfaceTree.first(where: { $0.vigilAttachId == pane }) {
-                Ghostty.moveFocus(to: landing)
-                if controller.window?.isKeyWindow == true { landing.vigilRequestSize(reason: "session edit") }
+            // Its birth is awaited off the main thread; the window is
+            // landed when the reply comes.
+            Task { @MainActor [weak controller] in
+                let reply = await VigilSessionControl.transact(request)
+                guard let controller else { return }
+                guard reply.ok else { return self.remoteCommandError(controller, reply.message) }
+                if let name = reply.session, name != composite {
+                    self.shapeshift(in: controller, to: name, anchor: reply.pane)
+                } else if operation == "new_tab", let pane = reply.pane {
+                    self.mirrorInto(controller, name: composite, anchor: pane)
+                } else if let pane = reply.pane, let landing = controller.surfaceTree.first(where: { $0.vigilAttachId == pane }) {
+                    Ghostty.moveFocus(to: landing)
+                    if controller.window?.isKeyWindow == true { landing.vigilRequestSize(reason: "session edit") }
+                }
             }
             return true
         }
@@ -256,10 +261,151 @@ extension VigilWorkspaces {
         }
     }
 
-    /// The home app's serialized session transaction. Remote callers supply
-    /// identities and intent, never a replacement registry or local cwd.
-    func applySessionCommand(_ request: VigilSessionControl.Request) -> VigilSessionControl.Reply {
+    /// The operations that start a pane's daemon. They wait on the pane
+    /// lifecycle service, awaited off the main thread (CODEX L2: a service
+    /// that is stuck never freezes the app); every other operation is an
+    /// edit of the registry alone (`applySessionEdit`).
+    static let birthOperations: Set<String> = ["create", "new_session", "split", "new_tab", "fork", "open_pane"]
+
+    /// The home app's session transaction. Remote callers supply identities
+    /// and intent, never a replacement registry or local cwd. A birth is
+    /// awaited before its edit: the main thread runs other work meanwhile,
+    /// so the edit is checked against the revision asked for once the pane
+    /// runs, and a pane born for an edit that no longer applies is closed.
+    func applySessionCommand(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
+        guard Self.birthOperations.contains(request.operation) else { return applySessionEdit(request) }
+        refreshWorkspaceRevisions()
+        switch request.operation {
+        case "create":
+            // A workspace of its own: in the folder asked (`~` is this Mac's
+            // home), running what was asked, through the one birth path. A
+            // window only for this Mac's own command line (`vigil new
+            // --window`): the hub refuses one from another device.
+            guard let asked = request.cwd else { return .failure(request, "invalid_request", "A new workspace names its folder.") }
+            let cwd = (asked as NSString).expandingTildeInPath
+            return birthReply(request, await apiNewWorkspace(label: request.label, emoji: request.emoji, cwd: cwd,
+                                                             command: request.command, openWindow: request.window == true))
+        case "new_session":
+            guard let session = workspaces[request.session] else {
+                return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
+            }
+            let tab = session.tabs.first { $0.paneIds.contains(request.anchor) }
+            let cwd = liveView(attachId: request.anchor)?.pwd
+                ?? tab?.panes.first(where: { $0.id == request.anchor })?.cwd ?? session.cwd
+            return birthReply(request, await apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
+        case "open_pane":
+            // A pane that is not running, opened by a person at another
+            // device: what opening it here would do (`tend`).
+            guard let session = workspaces[request.session],
+                  session.tabs.contains(where: { $0.members.contains { $0.id == request.anchor } }) else {
+                return .failure(request, "not_found", "That pane is no longer in this workspace on its Mac.")
+            }
+            // Done before it is answered, as a split or a new tab is: this
+            // reply is kept on disk and answers a retry, so "committed" is
+            // said only of a daemon that runs.
+            if let why = await openNow(request.anchor, why: "opened from another device") {
+                return .failure(request, "not_opened", "Not opened on its Mac: \(why).")
+            }
+            sessionLog.info("session command committed", [
+                "id": request.id.uuidString, "operation": request.operation, "workspace": request.session, "anchor": request.anchor,
+            ])
+            return VigilSessionControl.Reply(id: request.id, ok: true, code: "committed", message: "Open on its Mac.",
+                                             revision: workspaces[request.session]?.layoutRevision, session: request.session)
+        default:
+            break
+        }
+        // A split, a tab, a fork: what it would run, from the workspace as
+        // it stands now; refused here when it cannot apply, before anything
+        // is born.
+        let planned: (pane: Registry.Pane, born: Registry.Pane)
+        switch plannedPane(request) {
+        case .failure(let refused): return refused.reply
+        case .success(let plan): planned = plan
+        }
+        // The identity is never recycled, born or not.
+        persist()
+        guard await startDaemon(pane: planned.born, session: request.session) else {
+            // Its outcome may be unknown (it may run, or start late): closed,
+            // since no registry will list it, and the closed mark keeps any
+            // late birth of it from running.
+            killDaemons([planned.pane.id])
+            return .failure(request, "spawn_failed", "The terminal could not start on its Mac; its log says why (mise run log).")
+        }
+        refreshWorkspaceRevisions()
+        let reply = applySessionEdit(request, preborn: planned.pane)
+        if !reply.ok {
+            // Born for an edit that no longer applies (the workspace changed
+            // or went while it was being born): in no registry, so closed.
+            sessionLog.warn("pane born for an edit that no longer applies; closing it", [
+                "id": request.id.uuidString, "pane": planned.pane.id, "code": reply.code,
+            ])
+            killDaemons([planned.pane.id])
+        }
+        return reply
+    }
+
+    /// A refusal, as a value (a `Result` failure).
+    struct Refused: Error {
+        let reply: VigilSessionControl.Reply
+    }
+
+    /// The pane a split, tab or fork would add (its program from then on)
+    /// and what it is born running (a fork's line is not its program), with
+    /// its id minted; or why the request cannot apply. The same checks the
+    /// edit makes again once the pane runs.
+    private func plannedPane(_ request: VigilSessionControl.Request) -> Result<(pane: Registry.Pane, born: Registry.Pane), Refused> {
+        func refused(_ code: String, _ message: String) -> Result<(pane: Registry.Pane, born: Registry.Pane), Refused> {
+            .failure(Refused(reply: .failure(request, code, message)))
+        }
+        guard let session = workspaces[request.session] else { return refused("not_found", "That workspace no longer exists on its Mac.") }
+        guard session.layoutRevision == request.revision else {
+            return refused("conflict", "The workspace changed in the meantime. Look at it again and retry.")
+        }
+        guard let tab = session.tabs.first(where: { $0.paneIds.contains(request.anchor) }) else {
+            return refused("not_found", "That pane is no longer in this workspace.")
+        }
+        guard session.float == nil else {
+            return refused("presentation_busy", "This workspace is in the floating terminal on its Mac. Put it back before changing its tabs or splits.")
+        }
+        guard let anchor = tab.panes.first(where: { $0.id == request.anchor }) else {
+            return refused("unsupported_target", "A dock tenant cannot anchor a split or tab.")
+        }
+        let asTab = request.operation == "new_tab" || (request.operation == "fork" && request.direction == nil)
+        if !asTab, !["left", "right", "up", "down"].contains(request.direction ?? "") {
+            return refused("invalid_direction", "Expected left, right, up or down.")
+        }
+        // The home pane supplies cwd. No environment or path is inherited
+        // from the sender; its command is the one thing it names.
+        let folder = liveView(attachId: anchor.id)?.pwd ?? anchor.cwd
+        var command = request.command
+        /// What the new pane is born running, when that is not the program
+        /// it is from then on (a fork: `Fork.Birth`).
+        var born = request.command
+        if request.operation == "fork" {
+            // The fork's line is this Mac's own: built from its broker's
+            // record of the anchor's conversation, never from the wire.
+            guard let source = Fork.source(pane: anchor.id, in: VigilPaths.conversations),
+                  let birth = Fork.birth(of: source, folder: folder) else {
+                return refused("not_forkable", "That pane holds no conversation its agent can fork.")
+            }
+            command = birth.program
+            born = birth.line
+            sessionLog.info("fork", [
+                "id": request.id.uuidString, "workspace": request.session, "anchor": anchor.id,
+                "harness": source.harness, "conversation": source.conversation, "folder": folder,
+            ])
+        }
+        let id = "vigil-\(request.session)-\(nextPaneIndex(name: request.session))"
+        return .success((Registry.Pane(id: id, cwd: folder, command: command), Registry.Pane(id: id, cwd: folder, command: born)))
+    }
+
+    /// A session transaction that starts nothing: every operation but a
+    /// birth (`birthOperations`), and the placing of a pane already born
+    /// (`preborn`, a split's, a tab's or a fork's). Synchronous, on main.
+    func applySessionEdit(_ request: VigilSessionControl.Request, preborn: Registry.Pane? = nil) -> VigilSessionControl.Reply {
         typealias Reply = VigilSessionControl.Reply
+        precondition(!Self.birthOperations.contains(request.operation) || (preborn != nil && !["create", "new_session", "open_pane"].contains(request.operation)),
+                     "\(request.operation) starts a daemon: applySessionCommand awaits it")
         refreshWorkspaceRevisions()
         // A burial, by its name: undone (back where it stood) or ended now.
         // The tray of every Mac sends these to the burial's home.
@@ -278,16 +424,6 @@ extension VigilWorkspaces {
             ])
             return Reply(id: request.id, ok: true, code: "committed", message: "Back on its Mac.",
                          revision: back.flatMap { workspaces[$0]?.layoutRevision }, session: back)
-        }
-        // A workspace of its own: in the folder asked (`~` is this Mac's
-        // home), running what was asked, through the one birth path. A
-        // window only for this Mac's own command line (`vigil new
-        // --window`): the hub refuses one from another device.
-        if request.operation == "create" {
-            guard let asked = request.cwd else { return .failure(request, "invalid_request", "A new workspace names its folder.") }
-            let cwd = (asked as NSString).expandingTildeInPath
-            return birthReply(request, apiNewWorkspace(label: request.label, emoji: request.emoji, cwd: cwd,
-                                                       command: request.command, openWindow: request.window == true))
         }
         // A workspace of another Mac, brought here as itself: `session` names
         // it there, never a workspace of this registry.
@@ -331,19 +467,6 @@ extension VigilWorkspaces {
             }
             setPriority(pane: request.anchor, priority)
             return done("Priority set.")
-        case "open_pane":
-            // A pane that is not running, opened by a person at another
-            // device: what opening it here would do (`tend`).
-            guard holds(request.anchor) else {
-                return .failure(request, "not_found", "That pane is no longer in this workspace on its Mac.")
-            }
-            // Done before it is answered, as a split or a new tab is: this
-            // reply is kept on disk and answers a retry, so "committed" is
-            // said only of a daemon that runs.
-            if let why = openNow(request.anchor, why: "opened from another device") {
-                return .failure(request, "not_opened", "Not opened on its Mac: \(why).")
-            }
-            return done("Open on its Mac.")
         case "close_workspace":
             kill(name: request.session)
             sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": request.operation, "workspace": request.session])
@@ -370,10 +493,6 @@ extension VigilWorkspaces {
         /// The closed pane was a dock tenant (it goes back into the dock).
         var closedFromDock = false
         switch request.operation {
-        case "new_session":
-            let cwd = liveView(attachId: request.anchor)?.pwd
-                ?? tab.panes.first(where: { $0.id == request.anchor })?.cwd ?? session.cwd
-            return birthReply(request, apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
         case "split", "new_tab", "fork":
             guard let anchor = tab.panes.first(where: { $0.id == request.anchor }) else {
                 return .failure(request, "unsupported_target", "A dock tenant cannot anchor a split or tab.")
@@ -383,33 +502,9 @@ extension VigilWorkspaces {
             if !asTab, !["left", "right", "up", "down"].contains(request.direction ?? "") {
                 return .failure(request, "invalid_direction", "Expected left, right, up or down.")
             }
-            // The home pane supplies cwd. No environment or path is inherited
-            // from the sender; its command is the one thing it names.
-            let folder = liveView(attachId: anchor.id)?.pwd ?? anchor.cwd
-            var command = request.command
-            /// What the new pane is born running, when that is not the
-            /// program it is from then on (a fork: `Fork.Birth`).
-            var born = request.command
-            if request.operation == "fork" {
-                // The fork's line is this Mac's own: built from its broker's
-                // record of the anchor's conversation, never from the wire.
-                guard let source = Fork.source(pane: anchor.id, in: VigilPaths.conversations),
-                      let birth = Fork.birth(of: source, folder: folder) else {
-                    return .failure(request, "not_forkable", "That pane holds no conversation its agent can fork.")
-                }
-                command = birth.program
-                born = birth.line
-                sessionLog.info("fork", [
-                    "id": request.id.uuidString, "workspace": request.session, "anchor": anchor.id,
-                    "harness": source.harness, "conversation": source.conversation, "folder": folder,
-                ])
-            }
-            let id = "vigil-\(request.session)-\(nextPaneIndex(name: request.session))"
-            let pane = Registry.Pane(id: id, cwd: folder, command: command)
-            guard startDaemon(pane: Registry.Pane(id: id, cwd: folder, command: born), session: request.session) else {
-                persist() // the allocated identity is never recycled
-                return .failure(request, "spawn_failed", "The terminal could not start on its Mac; its log says why (mise run log).")
-            }
+            // Born already, before this edit (`applySessionCommand`): the
+            // edit only places it, against the revision it was asked for.
+            guard let pane = preborn else { preconditionFailure("a split, tab or fork is placed only once its pane was born") }
             created = pane
             session.paneSeq = workspaces[request.session]!.paneSeq
             if asTab {
