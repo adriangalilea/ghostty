@@ -343,8 +343,10 @@ extension VigilWorkspaces {
         persist()
         // Provisional (CODEX4 U3): the service records the pane as its own
         // before it runs, so a pane whose edit is refused and whose close
-        // never lands (a fence that fails, the app gone) still has a durable
-        // owner: unadopted and unlisted, the next launch closes it.
+        // never lands (a fence that fails, the app gone) is never lost: the
+        // next launch counts it, uncertain, and keeps it (its edit may have
+        // committed, CODEX5 V1). Only its mark, written when its edit is
+        // refused, closes it.
         guard await startDaemon(pane: planned.born, session: request.session, provisional: true) else {
             // Its outcome may be unknown (it may run, or start late): closed,
             // since no registry will list it, and the closed mark keeps any

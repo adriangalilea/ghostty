@@ -1361,7 +1361,13 @@ class VigilWorkspaces {
 
     /// `onlyIfChanged`: the scheduled save, which writes and publishes
     /// nothing when the registry encodes to the bytes already on disk.
-    func persist(publish: Bool = true, onlyIfChanged: Bool = false) {
+    /// `durable`: the registry is written as a lifecycle record is (file and
+    /// folder synced, `Durable.replace`), for a save an irreversible act
+    /// waits on (a burial turning `closing` before its first fence, CODEX5
+    /// V3). True when it was written (or unchanged); false, and said, when
+    /// it was not.
+    @discardableResult
+    func persist(publish: Bool = true, onlyIfChanged: Bool = false, durable: Bool = false) -> Bool {
         persisting = true
         if publish { refreshLiveFacts() }
         refreshWorkspaceRevisions()
@@ -1375,9 +1381,9 @@ class VigilWorkspaces {
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
             registryLog.error("registry not encoded")
-            return
+            return false
         }
-        if onlyIfChanged, data == lastSaved { return }
+        if onlyIfChanged, data == lastSaved { return true }
         try? FileManager.default.createDirectory(
             at: persistURL.deletingLastPathComponent(),
             withIntermediateDirectories: true)
@@ -1399,16 +1405,21 @@ class VigilWorkspaces {
             }
         }
         do {
-            try data.write(to: persistURL, options: .atomic)
+            if durable {
+                try Durable.replace(persistURL, with: data)
+            } else {
+                try data.write(to: persistURL, options: .atomic)
+            }
         } catch {
-            registryLog.error("registry not saved", ["err": error])
-            return
+            registryLog.error("registry not saved", ["err": error, "durable": durable])
+            return false
         }
         lastSaved = data
         if publish {
             syncWindowMarks()
             NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
         }
+        return true
     }
 
     /// Tab regroups in flight (mount's one-tick native-tab batches): while
@@ -1716,7 +1727,9 @@ class VigilWorkspaces {
                 // daemons are still out there), reap immediately if spent.
                 session.buriedFrom = entry.buriedFrom
                 session.movedTo = entry.movedTo
-                session.closing = entry.closing
+                // Its close's progress from the marks, not only from what was
+                // saved (CODEX5 V3).
+                session.closing = entry.reconciled { PaneFence.provesClose(PaneFence.state($0, in: VigilPaths.panes)) }.closing
                 graveyard[entry.name] = session
                 graveyardDeadlines[entry.name] = deadline
                 let wait = max(deadline.timeIntervalSinceNow, 0) + 1

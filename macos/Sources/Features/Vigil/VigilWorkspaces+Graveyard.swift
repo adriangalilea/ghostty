@@ -366,7 +366,17 @@ extension VigilWorkspaces {
         // pane fenced is closed for good, and the service finishes a mark
         // the moment it is written), saved as such before the first fence.
         graveyard[name]?.closing = (session.closing ?? ids.sorted())
-        persist()
+        // Accepted on disk (file and folder synced) before any fence, or
+        // nothing irreversible happens (CODEX5 V3: a save that failed once
+        // left an undoable burial on disk over a pane already fenced). Not
+        // saved: no fence, the burial says closing here, and it is tried
+        // again; a crash meanwhile leaves the undoable burial that is true.
+        guard persist(durable: true) else {
+            graveyardLog.error("!! reap not begun: its closing could not be saved; nothing fenced, tried again", ["workspace": name])
+            graveyardDeadlines[name] = Date().addingTimeInterval(Self.fenceRetry)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.fenceRetry + 1) { [weak self] in self?.reapIfExpired(name) }
+            return
+        }
         // The close's durable intent (CODEX3 T4): a burial whose panes are
         // not all fenced is not dropped, so its ownership is never removed
         // with no stop decision accepted in its place. It stays, said as a
@@ -629,11 +639,11 @@ extension VigilWorkspaces {
         // A pane something on disk still speaks of (its end, its resume
         // pointer) is accounted for like one with a recipe.
         let evidence = ids(".ended").union(ids(".resume"))
-        // A pane is closed or cleaned here only on the proof of a removal:
-        // its close's mark, or a provisional birth never adopted (CODEX3
-        // T1, CODEX4 U3). Absence from a registry that decoded proves
-        // nothing, and a mark that cannot be read proves nothing either
-        // (CODEX4 U1): its pane is decided about not at all.
+        // A pane is closed or cleaned here only on the proof of a removal,
+        // its close's mark (CODEX3 T1). Absence from a registry that decoded
+        // proves nothing, a provisional record proves nothing (its edit may
+        // have committed, CODEX5 V1), and a mark that cannot be read proves
+        // nothing either (CODEX4 U1): such panes are kept, and counted.
         let states = Dictionary(uniqueKeysWithValues: specs.union(live).union(evidence).union(provisional).subtracting(owned).map {
             ($0, PaneFence.state($0, in: VigilPaths.panes))
         })
@@ -643,12 +653,15 @@ extension VigilWorkspaces {
                                          provisional: provisional, unreadable: unreadable)
         if !unlisted.closes.isEmpty {
             daemonLog.warn("closes no registry lists, finished", ["panes": unlisted.closes.sorted()])
-            let fresh = unlisted.closes.subtracting(closed)
-            // A provisional birth never adopted is closed as decided now:
-            // fenced first, its record kept until its close is clean.
-            if !fresh.isEmpty { killDaemons(fresh) }
-            let marked = unlisted.closes.intersection(closed)
-            if !marked.isEmpty { Self.closeQueue.async { Self.closePanes(marked, why: "unlisted, fenced") } }
+            Self.closeQueue.async { Self.closePanes(unlisted.closes, why: "unlisted, fenced") }
+        }
+        if !unlisted.uncertain.isEmpty {
+            // Born provisional and never adopted: whether their edit
+            // committed is not known (CODEX5 V1), so they are kept, as they
+            // are, until a person or a mark says otherwise.
+            daemonLog.error("!! provisional panes no registry lists: their edit may have committed; kept as they are", [
+                "panes": unlisted.uncertain.sorted(), "read": registryRead.rawValue,
+            ])
         }
         // Provisional births the registry holds: the app's (a save that came
         // after its edit, or a crash before the adoption reached the
