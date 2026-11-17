@@ -280,11 +280,14 @@ extension VigilWorkspaces {
                          revision: back.flatMap { workspaces[$0]?.layoutRevision }, session: back)
         }
         // A workspace of its own: in the folder asked (`~` is this Mac's
-        // home), running what was asked, through the one birth path.
+        // home), running what was asked, through the one birth path. A
+        // window only for this Mac's own command line (`vigil new
+        // --window`): the hub refuses one from another device.
         if request.operation == "create" {
             guard let asked = request.cwd else { return .failure(request, "invalid_request", "A new workspace names its folder.") }
             let cwd = (asked as NSString).expandingTildeInPath
-            return birthReply(request, apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
+            return birthReply(request, apiNewWorkspace(label: request.label, emoji: request.emoji, cwd: cwd,
+                                                       command: request.command, openWindow: request.window == true))
         }
         // A workspace of another Mac, brought here as itself: `session` names
         // it there, never a workspace of this registry.
