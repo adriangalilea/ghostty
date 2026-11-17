@@ -91,11 +91,21 @@ extension VigilWorkspaces {
     /// loud; NOT derived from the cwd (that named everything in $HOME "adrian-N"
     /// and made real workspaces look like cruft). The human label is a separate
     /// device. The daemon id is `vigil-<id>-<index>`, split on the LAST dash, so
-    /// the dash in the id is safe.
+    /// the dash in the id is safe. An id is fresh only if no workspace, burial
+    /// or pane has ever used it (`Registry.idsInUse`): a pane keeps the id it
+    /// was born under when it moves, so a workspace name alone does not say
+    /// whether `vigil-<id>-0` is free.
     func newWorkspaceId() -> String {
+        let fm = FileManager.default
+        let all = Array(workspaces.values) + Array(graveyard.values)
+        let inUse = Registry.idsInUse(
+            names: all.map(\.name),
+            paneIds: all.flatMap { ownedPaneIds($0) },
+            paneFiles: [VigilPaths.panes, VigilPaths.state].flatMap {
+                (try? fm.contentsOfDirectory(atPath: $0.path)) ?? []
+            })
         func taken(_ s: String) -> Bool {
-            workspaces[s] != nil || graveyard[s] != nil
-                || FileManager.default.fileExists(atPath: dumpsDir(s).path)
+            inUse.contains(s) || fm.fileExists(atPath: dumpsDir(s).path)
         }
         func gen() -> String {
             "\(Self.idAdjectives.randomElement()!)-\(Self.idNouns.randomElement()!)"
