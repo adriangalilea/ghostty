@@ -537,6 +537,7 @@ final class VigilRemote: ObservableObject {
                             conversation: truth?.meaning?.conversation,
                             conversationName: truth?.meaning?.title,
                             forkedFrom: truth?.meaning?.forkedFrom,
+                            member: truth?.meaning?.member,
                             background: truth?.meaning?.background,
                             ended: truth?.ended,
                             refused: truth?.meaning?.refused,

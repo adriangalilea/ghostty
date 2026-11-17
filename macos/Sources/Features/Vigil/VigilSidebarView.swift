@@ -549,6 +549,7 @@ struct VigilSidebarView: View {
         case "Pane ID": "number"
         case "Conversation Name": "text.bubble"
         case "Conversation ID": "bubble.left.and.text.bubble.right"
+        case "Handle": "at"
         default: "doc.on.doc"
         }
     }
@@ -605,6 +606,7 @@ struct VigilSidebarView: View {
                     if let tab = row.soleTab {
                         ForEach(tab.panes) { pane in
                             paneRow(pane, session: row.id, tab: tab, level: 1)
+                            subagentRows(pane, level: 1)
                             asideRow(pane, session: row.id, tab: tab, level: 1)
                         }
                     } else {
@@ -614,6 +616,7 @@ struct VigilSidebarView: View {
                                 foldable(tab.id, level: 1, fold: { model.collapsedTabs.insert(tab.id) }) {
                                     ForEach(tab.panes) { pane in
                                         paneRow(pane, session: row.id, tab: tab, level: 2)
+                                        subagentRows(pane, level: 2)
                                         asideRow(pane, session: row.id, tab: tab, level: 2)
                                     }
                                 }
@@ -857,6 +860,43 @@ struct VigilSidebarView: View {
     /// read as a row out of place. A press goes to the pane and brings it
     /// in front; its menu moves it to a window or closes it (which ends
     /// nothing).
+    /// Its agent's running subagents under its row, as its Mac's
+    /// `#subagent` tuples fold them (the glance's `member`): each by name
+    /// and type, deeper ones further in. Finished ones are the member
+    /// card's to list (a long conversation spawns dozens). A press opens
+    /// the card.
+    @ViewBuilder private func subagentRows(_ pane: VigilWorkspaces.SidebarPane, level: Int) -> some View {
+        if let member = pane.member {
+            ForEach(member.subagents.filter(\.running), id: \.key) { sub in
+                let hoverId = Self.hostHover + "subagent:" + sub.key
+                Button {
+                    VigilMemberCard.show(pane)
+                } label: {
+                    HStack(spacing: 4 * scale) {
+                        Image(systemName: "arrow.turn.down.right").font(.system(size: 8 * scale, weight: .semibold))
+                            .frame(width: VigilNameCell<EmptyView>.face * scale)
+                        Text(sub.name.isEmpty ? sub.handle : sub.name).font(.system(size: 11 * scale)).lineLimit(1)
+                        if let type = sub.type {
+                            Text(type).font(.system(size: 9 * scale)).foregroundStyle(.tertiary).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        Circle().fill(sub.running ? Color.green.opacity(0.8) : Color.secondary.opacity(0.35))
+                            .frame(width: 5 * scale, height: 5 * scale)
+                    }
+                    .foregroundStyle(sub.running ? .secondary : .tertiary)
+                    .frame(height: 18 * scale)
+                    .padding(rowInsets(level: level + sub.depth))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(rowBackground(id: hoverId, hovered: hovered == hoverId))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onHover { inside in hovered = inside ? hoverId : (hovered == hoverId ? nil : hovered) }
+                .help("@\(sub.handle)" + (sub.running ? " · running" : " · finished") + "\nvigil send @\(sub.handle) reaches it through its parent")
+            }
+        }
+    }
+
     @ViewBuilder private func asideRow(
         _ pane: VigilWorkspaces.SidebarPane, session: String, tab: VigilWorkspaces.SidebarTab, level: Int
     ) -> some View {
@@ -1041,6 +1081,11 @@ struct VigilSidebarView: View {
                     Button {
                         VigilWatchesPanel.show(paneId: pane.paneId, id: pane.id, title: pane.title, in: model.hostController)
                     } label: { Label("Watches", systemImage: "binoculars") }
+                }
+                // Who its conversation is, as its Mac's tuples say:
+                // handle, lineage, subagents, the runs that speak for it.
+                if pane.member != nil {
+                    Button { VigilMemberCard.show(pane) } label: { Label("Member…", systemImage: "person.text.rectangle") }
                 }
                 // Its agent's conversation, forked: a second pane starts
                 // from the same state under a new id and this one goes on.

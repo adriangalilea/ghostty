@@ -55,6 +55,9 @@ extension VigilWorkspaces {
         var conversationName: String?
         /// The conversation its own was forked from, by id (its glance).
         var forkedFrom: String?
+        /// The member it holds, as its Mac's tuples say (its glance): the
+        /// handle, the subagent tree under its row, the member card.
+        var member: MemberGlance?
         /// What its agent runs in the background now (its glance): counted,
         /// with the first running task's title.
         var background: PaneGlance.Background?
@@ -78,7 +81,7 @@ extension VigilWorkspaces {
         /// pane's daemon id, its conversation's name and id.
         var identifiers: [Identifier] {
             [("Pane ID", paneId ?? VigilRemote.split(id)?.name), ("Conversation Name", conversationName),
-             ("Conversation ID", conversation)]
+             ("Conversation ID", conversation), ("Handle", member.map { "@\($0.handle)" })]
                 .compactMap { label, value in value.map { Identifier(label: label, value: $0) } }
         }
     }
@@ -230,6 +233,7 @@ extension VigilWorkspaces {
                 conversation: meaning?.conversation,
                 conversationName: meaning?.title,
                 forkedFrom: meaning?.forkedFrom,
+                member: meaning?.member,
                 background: meaning?.background,
                 ended: facts.ended,
                 arrived: pane.dormant == true ? pane.from : nil,
