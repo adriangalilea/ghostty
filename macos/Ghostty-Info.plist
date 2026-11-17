@@ -6,7 +6,7 @@
 	     PaneLife.version, checked at launch). Sealed by the signature, so an
 	     installer reads it to refuse an agent of another protocol. -->
 	<key>VigilPaneLifeVersion</key>
-	<integer>5</integer>
+	<integer>6</integer>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Listens while you dictate into the focused pane.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
