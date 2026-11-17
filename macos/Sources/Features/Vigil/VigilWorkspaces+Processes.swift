@@ -40,11 +40,10 @@ extension VigilWorkspaces {
     /// argv column of a tree/died file. Line 1 is the daemon's child: a
     /// shell for an ordinary pane, the PROGRAM for a session-API pane
     /// (`/bin/sh -lc cmd` execs in place). Never skipped by position;
-    /// `Program.label` nils shells by name.
+    /// `Program.label` nils shells by name. The line saying what a bounded
+    /// tree left out is no process (`Program.commands`).
     private func paneCommands(_ pane: String, _ ext: String) -> [String] {
-        paneFileLines(pane, ext).map {
-            $0.split(separator: "\t", maxSplits: 1).last.map(String.init) ?? ""
-        }
+        Program.commands(paneFileLines(pane, ext))
     }
 
     /// The label of the pane's deep foreground process (pidfile line 3,
@@ -473,6 +472,11 @@ extension VigilWorkspaces {
                 continue
             }
             for died in procs {
+                // A command line the tree cut short is not the one that ran.
+                guard !died.command.hasSuffix(Program.cut) else {
+                    daemonLog.info("relaunch refused: its command line was cut short", ["pane": pane, "command": died.command])
+                    continue
+                }
                 view.surfaceModel?.sendText(died.command + "\r")
                 daemonLog.info("relaunched", ["pane": pane, "command": died.command])
             }
