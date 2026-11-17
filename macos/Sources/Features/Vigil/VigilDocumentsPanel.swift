@@ -32,21 +32,20 @@ enum VigilDocumentsPanel {
             }.value
         }
         let watch: PaneDocumentWatch = { hub.documentChanges(device: remote?.device, pane: id) }
-        // One line typed and entered in the pane, as `vigil send` types it:
-        // this Mac's pane over its own socket, another Mac's through the hub.
+        // The person's words for the pane's agent (`Open.say`): its Mac
+        // posts them to its mailbox where its agent's carrier is on, types
+        // them otherwise; this Mac's pane asked of its own hub, another
+        // Mac's through it.
         let tell: PaneTell = { line in
-            try await Task.detached {
+            let said: Said = try await Task.detached {
                 do {
-                    if let remote {
-                        _ = try hub.call(device: remote.device, .send(id, text: line))
-                    } else {
-                        try PaneLink.send(id, line: line, hello: "vigil documents")
-                    }
+                    let answer = try remote.map { try hub.call(device: $0.device, .say(id, text: line)) } ?? hub.here(.say(id, text: line))
+                    return try JSONDecoder().decode(Said.self, from: answer)
                 } catch {
                     throw Failed(description: "\(error)")
                 }
             }.value
-            sidebarLog.info("documents: agent told", ["pane": pane])
+            sidebarLog.info("documents: agent told", ["pane": pane, "how": said.words])
         }
         return VigilDocuments(call: call, watch: watch, tell: tell, local: remote == nil)
     }

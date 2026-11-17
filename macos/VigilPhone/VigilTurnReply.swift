@@ -4,8 +4,9 @@ import VigilActivity
 import VigilWire
 
 /// A line chosen or typed under a turn's notification, sent to its pane:
-/// typed there by the pane's Mac, as the app's reply box sends it
-/// (`Open.Op.send`). iOS wakes the app in the background for it, so the app
+/// a typed Reply as the app's reply box sends it (`Open.Op.say`: a message
+/// for its agent where its Mac hands one), a canned Continue or Yes typed
+/// at the prompt (`Open.Op.send`). iOS wakes the app in the background for it, so the app
 /// holds iOS's time while tether comes up and the line lands, and lets
 /// tether go after.
 ///
@@ -26,7 +27,7 @@ enum VigilTurnReply {
             if let node = VigilAuthz.shared.runtime.node { VigilPhone.shared.attach(node: node) }
         }
         do {
-            try await VigilPhone.shared.send(line, pane: turn.pane, mac: turn.home)
+            try await VigilPhone.shared.reply(line, pane: turn.pane, mac: turn.home, canned: turn.canned)
         } catch {
             receipts.error("feed", "reply not sent", ["pane": turn.pane, "mac": turn.mac, "err": error])
             await unsent(line, to: turn, why: error)

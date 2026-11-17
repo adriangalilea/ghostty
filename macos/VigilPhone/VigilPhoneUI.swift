@@ -1325,7 +1325,7 @@ struct PaneScreen: View {
                         throw PaneGitCallFailed(description: VigilLink.reason(error))
                     }
                 }, watch: { [phone = VigilPhone.shared, current] in phone.documentChanges(in: current) }, tell: { [current] line in
-                    do { try await VigilPhone.shared.send(line, to: current) } catch {
+                    do { try await VigilPhone.shared.say(line, to: current) } catch {
                         throw PaneGitCallFailed(description: VigilLink.reason(error))
                     }
                 }, local: false)

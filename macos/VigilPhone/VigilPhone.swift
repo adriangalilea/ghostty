@@ -1185,17 +1185,30 @@ final class VigilPhone: ObservableObject {
         return said
     }
 
-    /// A line typed into a pane named by its Mac and its id alone (a reply
-    /// under a notification: the app may hold no directory yet).
-    func send(_ text: String, pane: String, mac: String) async throws {
+    /// A reply under a notification, to a pane named by its Mac and its id
+    /// alone (the app may hold no directory yet). The person's own words
+    /// go as `say`: a message for the pane's agent where its Mac hands one,
+    /// typed otherwise. A canned answer (Continue, Yes) is a key the person
+    /// chose by name, typed at the prompt as it was asked (`send`).
+    func reply(_ text: String, pane: String, mac: String, canned: Bool) async throws {
         guard Open.validPane(pane), Open.validText(text) else { throw WireError.refused("not a line a pane takes") }
-        _ = try await VigilLink.call(linked(), device: mac, .send(pane, text: text))
-        receipts.info("feed", "reply sent", ["mac": String(mac.prefix(10)), "pane": pane, "bytes": text.utf8.count, "from": "notification"])
+        let answer = try await VigilLink.call(linked(), device: mac, canned ? .send(pane, text: text) : .say(pane, text: text))
+        receipts.info("feed", "reply sent", ["mac": String(mac.prefix(10)), "pane": pane, "bytes": text.utf8.count, "from": "notification",
+                                             "how": canned ? "typed, canned" : Self.said(answer)])
     }
 
-    func send(_ text: String, to ref: PaneRef) async throws {
-        _ = try await VigilLink.call(linked(), device: ref.host.id, .send(ref.pane, text: text))
-        receipts.info("feed", "reply sent", ["mac": ref.host.name, "pane": ref.pane, "bytes": text.utf8.count])
+    /// The person's words for the pane (the reply box, Documents' Tell):
+    /// its Mac decides between a message and typing (`Open.say`). Answers
+    /// what it did, in words.
+    @discardableResult
+    func say(_ text: String, to ref: PaneRef) async throws -> String {
+        let said = Self.said(try await VigilLink.call(linked(), device: ref.host.id, .say(ref.pane, text: text)))
+        receipts.info("feed", "reply sent", ["mac": ref.host.name, "pane": ref.pane, "bytes": text.utf8.count, "how": said])
+        return said
+    }
+
+    private static func said(_ answer: Data) -> String {
+        (try? JSONDecoder().decode(Said.self, from: answer))?.words ?? "sent"
     }
 
     // MARK: Surfaces: the model owns every live stream

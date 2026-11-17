@@ -357,7 +357,7 @@ final class Conversation: ObservableObject {
             do {
                 // Shown as sent when the feed carries it as a prompt
                 // (`apply`), which may be before this returns.
-                try await VigilPhone.shared.send(text, to: ref)
+                try await VigilPhone.shared.say(text, to: ref)
             } catch {
                 guard reply?.text == text else { return }
                 reply?.failed = VigilLink.reason(error)
