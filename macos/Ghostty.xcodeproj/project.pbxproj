@@ -680,11 +680,11 @@
 			);
 			mainGroup = A5B30528299BEAAA0047F10C;
 			packageReferences = (
-				0DAA111100000000000002A1 /* authz.space */,
+				0DAA111100000000000002A1 /* XCLocalSwiftPackageReference "authz.space" */,
 				0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */,
 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
-				0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */,
-				0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */,
+				0DAA111100000000000000A1 /* XCRemoteSwiftPackageReference "swift-senses" */,
+				0DAA111100000000000000C1 /* XCRemoteSwiftPackageReference "swift-utils" */,
 			);
 			productRefGroup = A5B30532299BEAAA0047F10C /* Products */;
 			projectDirPath = "";
@@ -1890,19 +1890,27 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		0DAA111100000000000002A1 = {isa = XCLocalSwiftPackageReference; relativePath = "../../../authz.space"; };
+		0DAA111100000000000002A1 /* XCLocalSwiftPackageReference "authz.space" */ = {isa = XCLocalSwiftPackageReference; relativePath = "../../../authz.space"; };
 		0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */ = {isa = XCLocalSwiftPackageReference; relativePath = "../../harness"; };
-		0DAA111100000000000000A1 /* XCLocalSwiftPackageReference "swift-senses" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = "../../../untitled/experiments/swift-senses";
-		};
-		0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = "../../../swift-utils";
-		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		0DAA111100000000000000A1 /* XCRemoteSwiftPackageReference "swift-senses" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/adriangalilea/swift-senses";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+		0DAA111100000000000000C1 /* XCRemoteSwiftPackageReference "swift-utils" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/adriangalilea/swift-utils";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.102.12;
+			};
+		};
 		A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";

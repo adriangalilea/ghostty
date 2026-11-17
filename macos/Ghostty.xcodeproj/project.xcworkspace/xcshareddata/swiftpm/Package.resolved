@@ -1,5 +1,5 @@
 {
-  "originHash" : "223c758cb69c3071b16ca0dd25f623ec59a911f667d765b57d87b3eaec068ea3",
+  "originHash" : "27f4b6cf2956e27b894d23c421c2b6b475e3e13a8ce526a881009699cdc8448e",
   "pins" : [
     {
       "identity" : "cbor",
@@ -61,6 +61,24 @@
       "state" : {
         "revision" : "08ddb528923cc1a6527e02b7a1aee9e516ca749a",
         "version" : "0.9.0"
+      }
+    },
+    {
+      "identity" : "swift-senses",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/adriangalilea/swift-senses",
+      "state" : {
+        "branch" : "main",
+        "revision" : "7e8b14c68222c20cfd657359e2b8f258c501284a"
+      }
+    },
+    {
+      "identity" : "swift-utils",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/adriangalilea/swift-utils",
+      "state" : {
+        "revision" : "26377022f38196efe57bfdad0ab7a85bf5c79cd4",
+        "version" : "0.102.13"
       }
     }
   ],
