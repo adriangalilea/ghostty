@@ -116,7 +116,18 @@ final class VigilPhoneMessages: ObservableObject {
             // On the phone the thread on screen in an active scene (the
             // view's own `front`) is in the person's hand: the screen locks
             // when nobody holds it.
-            handAfter: { _ in true })
+            handAfter: { _ in true },
+            mention: { call, root in try await Self.mention(call, root: root) })
+    }
+
+    /// An ask about the files a message names, of the Mac they are on.
+    private static func mention(_ call: MentionCall, root: String) async throws -> Data {
+        do {
+            return try await VigilLink.call(linked(), device: root, .mention(call))
+        } catch {
+            shared.receipts.warn("messages", "mention not answered", ["mac": String(root.prefix(10)), "ask": call.kind.rawValue, "err": VigilLink.reason(error)])
+            throw Failed(description: VigilLink.reason(error))
+        }
     }
 
     private struct Failed: Error, CustomStringConvertible { let description: String }

@@ -58,6 +58,29 @@ struct VigilChatHost {
     /// seconds), or within the minute before: the app's seen rule
     /// (`VigilWorkspaces.personActed(after:)`). Read needs it.
     var handAfter: @MainActor (_ moment: Double) -> Bool
+    /// One ask about the files a message names, of the Mac `root` they are
+    /// on (`Open.mention`): which are files there, and one read.
+    var mention: @Sendable (_ call: MentionCall, _ root: String) async throws -> Data
+    /// A file a message names, shown where the host shows files, beside the
+    /// pane of the thread it was pressed in (`key`). Nil: the conversation
+    /// pushes its page itself (the phone).
+    var openFile: (@MainActor (_ file: VigilMentionedFile, _ key: MessageThread.Key) -> Void)? = nil
+
+    /// Whether a folder on the Mac `root` can be shown here: revealed in
+    /// this Mac's Finder, so only this Mac's own.
+    func reveals(_ root: String) -> Bool {
+        #if os(macOS)
+            root == here
+        #else
+            false
+        #endif
+    }
+
+    /// A named file's text from its Mac.
+    func read(_ file: VigilMentionedFile) -> @Sendable () async throws -> DocumentText {
+        let mention = mention
+        return { try JSONDecoder().decode(DocumentText.self, from: await mention(.read(file.path), file.root)) }
+    }
 }
 
 /// Every thread, and the one chosen beside the list.
@@ -322,6 +345,9 @@ struct VigilThreadConversation: View {
     @State private var failure: String?
     /// The ids a read is on its way for: asked once.
     @State private var marking: Set<String> = []
+    /// A file a message names, pushed as its page where the host has no
+    /// place of its own for files.
+    @State private var opened: VigilMentionedFile?
     #if os(macOS)
         @Environment(\.controlActiveState) private var active
         /// In front: its window is the key one.
@@ -337,8 +363,9 @@ struct VigilThreadConversation: View {
         let messages = thread.map { VigilThreadWords.messages($0, people: people) } ?? []
         InkConversation(
             messages, people: people.all, me: Message.you, unread: thread?.firstUnread, acts: acts(messages)
-        ) {
-            MarkdownView($0.words)
+        ) { message in
+            VigilMessageWords(
+                id: message.id, words: message.words, place: item(message.id)?.mentionPlace, host: host, open: open)
         } picture: {
             people.picture($0)
         } change: { before, after in
@@ -358,6 +385,29 @@ struct VigilThreadConversation: View {
             editing: editing != nil, blocked: failure, cancel: { cancel() }
         ) { words in
             send(words)
+        }
+        #if os(iOS)
+            .navigationDestination(item: $opened) { file in
+                VigilFilePage(file: file, read: host.read(file))
+                    .navigationTitle(file.name)
+                    .toolbarTitleDisplayMode(.inline)
+            }
+        #endif
+    }
+
+    /// A file a message names, pressed: the host's place for files, else a
+    /// page pushed here. A folder is revealed in Finder (only this Mac's are links).
+    private func open(_ file: VigilMentionedFile) {
+        #if os(macOS)
+            if file.folder {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
+                return
+            }
+        #endif
+        if let openFile = host.openFile {
+            openFile(file, key)
+        } else {
+            opened = file
         }
     }
 

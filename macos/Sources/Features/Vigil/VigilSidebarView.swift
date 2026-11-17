@@ -861,7 +861,7 @@ struct VigilSidebarView: View {
         _ pane: VigilWorkspaces.SidebarPane, session: String, tab: VigilWorkspaces.SidebarTab, level: Int
     ) -> some View {
         if let paneId = pane.paneId {
-            ForEach(asides.kinds[paneId] ?? [], id: \.self) { kind in
+            ForEach(asides.kinds[paneId] ?? [], id: \.key) { kind in
                 asideRow(kind, paneId: paneId, pane, session: session, tab: tab, level: level)
             }
         }
@@ -881,7 +881,7 @@ struct VigilSidebarView: View {
             HStack(spacing: 4 * scale) {
                 Image(systemName: kind.symbol).font(.system(size: 9 * scale, weight: .semibold))
                     .frame(width: VigilNameCell<EmptyView>.face * scale)
-                Text(kind.rawValue).font(.system(size: 11 * scale)).lineLimit(1)
+                Text(kind.word).font(.system(size: 11 * scale)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
                 Image(systemName: "sidebar.right").font(.system(size: 9 * scale)).foregroundStyle(.tertiary)
             }
@@ -905,13 +905,19 @@ struct VigilSidebarView: View {
                         VigilMessagesPanel.window(thread: VigilMessageStore.shared.key(paneId: paneId, id: pane.id, conversation: pane.conversation)
                             .flatMap(VigilMessagesPanel.thread(of:))?.id)
                     case .watches: VigilWatchesPanel.window()
+                    case .file(let file): VigilFilePanel.window(file)
                     }
                 } label: { Label("Move to Window", systemImage: "macwindow") }
                 Divider()
-                Button { VigilBars.shared.closeAside(pane: paneId, kind) } label: { Label("Close \(kind.rawValue)", systemImage: "xmark") }
+                Button { VigilBars.shared.closeAside(pane: paneId, kind) } label: { Label("Close \(kind.word)", systemImage: "xmark") }
             }
         }
-        .help("\(pane.title)'s \(kind.rawValue.lowercased()), in the right bar")
+        .help(asideHelp(kind, pane: pane))
+    }
+
+    private func asideHelp(_ kind: VigilBars.Aside.Kind, pane: VigilWorkspaces.SidebarPane) -> String {
+        if case .file(let file) = kind { return "\(file.shown), from \(pane.title)'s messages, in the right bar" }
+        return "\(pane.title)'s \(kind.word.lowercased()), in the right bar"
     }
 
     private func paneRow(

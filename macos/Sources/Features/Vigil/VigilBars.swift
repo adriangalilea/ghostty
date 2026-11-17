@@ -253,15 +253,38 @@ final class VigilBars {
     /// documents. It is about one pane and is shown only beside that pane:
     /// in the bar of the window whose tab holds it, as one more chip of the
     /// dock's strip, gone from the bar when another tab takes the window and
-    /// back when its tab returns. A pane has one of each kind at most. It
-    /// lives in memory alone and owns nothing a close could kill.
+    /// back when its tab returns. A pane has one of each kind at most, and
+    /// one for each file its messages opened. It lives in memory alone and
+    /// owns nothing a close could kill.
     final class Aside {
         /// What it shows of its pane: its word on the pane's row.
-        enum Kind: String {
-            case changes = "Changes"
-            case documents = "Documents"
-            case messages = "Messages"
-            case watches = "Watches"
+        enum Kind: Hashable {
+            case changes
+            case documents
+            case messages
+            case watches
+            /// A file a message names: each file its own aside, by its
+            /// Mac and its path there (`key`), whatever line it opened at.
+            case file(VigilMentionedFile)
+
+            /// Its word on the pane's row.
+            var word: String {
+                switch self {
+                case .changes: "Changes"
+                case .documents: "Documents"
+                case .messages: "Messages"
+                case .watches: "Watches"
+                case .file(let file): file.name
+                }
+            }
+
+            /// What it is called in an id, and its place among a pane's rows.
+            var key: String {
+                switch self {
+                case .file(let file): "File \(file.root)\(file.path)"
+                default: word
+                }
+            }
 
             var symbol: String {
                 switch self {
@@ -269,6 +292,7 @@ final class VigilBars {
                 case .documents: "doc.text"
                 case .messages: "envelope"
                 case .watches: "binoculars"
+                case .file: "doc.richtext"
                 }
             }
         }
@@ -288,7 +312,7 @@ final class VigilBars {
 
         var symbol: String { kind.symbol }
         var id: String { Self.id(pane: pane, kind) }
-        static func id(pane: String, _ kind: Kind) -> String { "\(pane)#\(kind.rawValue)" }
+        static func id(pane: String, _ kind: Kind) -> String { "\(pane)#\(kind.key)" }
 
         init(pane: String, kind: Kind, title: String, view: AnyView, popOut: (() -> Void)? = nil) {
             self.pane = pane
@@ -309,7 +333,7 @@ final class VigilBars {
     private var asides: [String: Aside] = [:] {
         didSet {
             var kinds: [String: [Aside.Kind]] = [:]
-            for aside in asides.values.sorted(by: { $0.kind.rawValue < $1.kind.rawValue }) { kinds[aside.pane, default: []].append(aside.kind) }
+            for aside in asides.values.sorted(by: { $0.kind.key < $1.kind.key }) { kinds[aside.pane, default: []].append(aside.kind) }
             if kinds != asideMarks.kinds { asideMarks.kinds = kinds }
         }
     }

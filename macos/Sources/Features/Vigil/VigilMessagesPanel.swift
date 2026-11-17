@@ -245,7 +245,24 @@ final class VigilMessageStore: ObservableObject {
             act: { act, root in try await Self.act(act, root: root, here: here) },
             open: { root, pane in VigilMessageStore.shared.open(root: root, pane: pane) },
             // The app's own seen rule: a hand on this Mac after it arrived.
-            handAfter: { VigilWorkspaces.personActed(after: Date(timeIntervalSince1970: $0)) })
+            handAfter: { VigilWorkspaces.personActed(after: Date(timeIntervalSince1970: $0)) },
+            mention: { call, root in try await Self.mention(call, root: root, here: here) },
+            openFile: { file, key in
+                VigilFilePanel.show(file, beside: key.root == here ? key.pane : "\(key.root)/\(key.pane)")
+            })
+    }
+
+    /// An ask about the files a message names, of the Mac they are on: this
+    /// Mac's hub for its own (`Local.here`), another Mac's through it.
+    nonisolated static func mention(_ call: MentionCall, root: String, here: String?) async throws -> Data {
+        try await Task.detached {
+            do {
+                return root == here ? try hub.here(.mention(call)) : try hub.call(device: root, .mention(call))
+            } catch {
+                messagesLog.warn("mention not answered", ["mac": String(root.prefix(10)), "ask": call.kind.rawValue, "err": "\(error)"])
+                throw Failed(description: "\(error)")
+            }
+        }.value
     }
 
     private struct Failed: Error, CustomStringConvertible { let description: String }
