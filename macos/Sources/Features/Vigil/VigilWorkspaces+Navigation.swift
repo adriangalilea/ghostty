@@ -286,12 +286,23 @@ extension VigilWorkspaces {
             return birthReply(request, await apiNewWorkspace(label: request.label, emoji: request.emoji, cwd: cwd,
                                                              command: request.command, openWindow: request.window == true))
         case "new_session":
+            // The same guards as any edit anchored on a pane (CODEX R7): a
+            // late request whose anchor moved or went is refused, never
+            // born in another folder.
             guard let session = workspaces[request.session] else {
                 return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
             }
-            let tab = session.tabs.first { $0.paneIds.contains(request.anchor) }
+            guard session.layoutRevision == request.revision else {
+                return .failure(request, "conflict", "The workspace changed in the meantime. Look at it again and retry.")
+            }
+            guard let tab = session.tabs.first(where: { $0.paneIds.contains(request.anchor) }) else {
+                return .failure(request, "not_found", "That pane is no longer in this workspace.")
+            }
+            guard session.float == nil else {
+                return .failure(request, "presentation_busy", "This workspace is in the floating terminal on its Mac. Put it back before changing its tabs or splits.")
+            }
             let cwd = liveView(attachId: request.anchor)?.pwd
-                ?? tab?.panes.first(where: { $0.id == request.anchor })?.cwd ?? session.cwd
+                ?? tab.panes.first(where: { $0.id == request.anchor })?.cwd ?? session.cwd
             return birthReply(request, await apiNewWorkspace(label: request.label, cwd: cwd, command: request.command, openWindow: false))
         case "open_pane":
             // A pane that is not running, opened by a person at another
@@ -305,6 +316,12 @@ extension VigilWorkspaces {
             // said only of a daemon that runs.
             if let why = await openNow(request.anchor, why: "opened from another device") {
                 return .failure(request, "not_opened", "Not opened on its Mac: \(why).")
+            }
+            // Read again after the wait (CODEX R7): closed meanwhile, it is
+            // in a burial now, which ends it at its reap; "open" would be
+            // false. Moved to another workspace here, it is still open.
+            guard let at = locate(request.anchor), !at.buried else {
+                return .failure(request, "not_opened", "It was closed on its Mac while it was being opened.")
             }
             sessionLog.info("session command committed", [
                 "id": request.id.uuidString, "operation": request.operation, "workspace": request.session, "anchor": request.anchor,
@@ -333,6 +350,13 @@ extension VigilWorkspaces {
         }
         refreshWorkspaceRevisions()
         let reply = applySessionEdit(request, preborn: planned.pane)
+        // A commit that could not be confirmed on disk came after the edit:
+        // the pane is in the workspace in memory and is saved with its next
+        // save. It runs and is listed: never closed (CODEX R7).
+        if !reply.ok, reply.code == "commit_failed" {
+            sessionLog.error("pane placed, its save not confirmed; kept", ["id": request.id.uuidString, "pane": planned.pane.id])
+            return reply
+        }
         if !reply.ok {
             // Born for an edit that no longer applies (the workspace changed
             // or went while it was being born): in no registry, so closed.
