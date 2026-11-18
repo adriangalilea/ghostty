@@ -110,6 +110,22 @@ extension VigilWorkspaces {
     @discardableResult
     func conflictSheet(pane: String) -> Bool {
         guard let conflict = paneConflict(pane) else { return true }
+        return conflictSheet(conflict, pane: pane)
+    }
+
+    /// The conflicts no pane here holds (`StandingConflicts`, vigil-agent's
+    /// list), read when the menu opens; nil when the list does not read,
+    /// which is said.
+    func unheldConflicts() -> [PaneConflict]? {
+        do { return try StandingConflicts.read().unheld } catch {
+            lifecycleLog.error("conflicts list not read: the menu lists none", ["err": error])
+            return nil
+        }
+    }
+
+    /// The sheet for one conflict, held by `pane` or by none (the menu's).
+    @discardableResult
+    func conflictSheet(_ conflict: PaneConflict, pane: String?) -> Bool {
         let alert = NSAlert()
         alert.messageText = conflict.headline()
         alert.informativeText = conflict.meaning() + " Whichever goes on, the other is kept aside (vigil conflicts --kept)."
@@ -134,7 +150,7 @@ extension VigilWorkspaces {
         alert.addButton(withTitle: "Not Now")
         let answer = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
         guard choices.indices.contains(answer) else {
-            lifecycleLog.info("conflict left standing", ["pane": pane, "conversation": conflict.conversation])
+            lifecycleLog.info("conflict left standing", ["pane": pane ?? "none", "conversation": conflict.conversation])
             return false
         }
         let keep = choices[answer]
@@ -142,17 +158,25 @@ extension VigilWorkspaces {
         do {
             outcome = try Local.Client(socket: VigilPaths.hub).settle(ConflictSettle(conversation: conflict.conversation, keep: keep))
         } catch {
-            lifecycleLog.error("conflict not settled", ["pane": pane, "conversation": conflict.conversation, "keep": keep.rawValue, "err": error])
+            lifecycleLog.error("conflict not settled", ["pane": pane ?? "none", "conversation": conflict.conversation, "keep": keep.rawValue, "err": error])
             let failed = NSAlert()
             failed.messageText = "Nothing was changed"
             failed.informativeText = "\(error)"
             failed.runModal()
             return false
         }
-        lifecycleLog.info("conflict settled", ["pane": pane, "conversation": conflict.conversation, "keep": keep.rawValue, "aside": outcome.aside, "forked": outcome.forked])
+        lifecycleLog.info("conflict settled", ["pane": pane ?? "none", "conversation": conflict.conversation, "keep": keep.rawValue, "aside": outcome.aside, "forked": outcome.forked])
+        // Both, with no pane here holding it: the new conversation is said
+        // with the line that opens it, for the person to run where they want.
+        if let line = outcome.opens, pane == nil {
+            let told = NSAlert()
+            told.messageText = "Both are kept"
+            told.informativeText = "\(conflict.mac)'s copy is a conversation of its own now. Open it in any pane with:\n\n\(line)"
+            told.runModal()
+        }
         // Both: that Mac's copy, a conversation of its own now, opens in a
         // tab beside this pane's.
-        if let line = outcome.opens, let workspace = owner(ofPane: pane) {
+        if let line = outcome.opens, let pane, let workspace = owner(ofPane: pane) {
             refreshWorkspaceRevisions()
             let request = VigilSessionControl.Request.birth(
                 in: workspace, revision: workspaces[workspace]?.layoutRevision ?? "", anchor: pane, split: nil, command: line)

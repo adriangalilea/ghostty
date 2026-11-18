@@ -174,6 +174,24 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         watches.target = self
         watches.image = NSImage(systemSymbolName: "binoculars", accessibilityDescription: nil)
         menu.addItem(watches)
+        // Conversations written on this Mac and another that no pane here
+        // holds, so no row wears them: listed where the person looks, each
+        // opening its sheet (a pane's own wears its mark on its row).
+        if let unheld = VigilWorkspaces.shared.unheldConflicts(), !unheld.isEmpty {
+            let holder = NSMenuItem(title: "Conversations in Conflict (\(unheld.count))", action: nil, keyEquivalent: "")
+            holder.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: nil)
+            let list = NSMenu()
+            for conflict in unheld {
+                let item = NSMenuItem(title: "\(conflict.agentName) \(conflict.conversation.prefix(8)) · \(conflict.mac)…",
+                                      action: #selector(openConflict(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = conflict.conversation
+                item.toolTip = conflict.headline()
+                list.addItem(item)
+            }
+            holder.submenu = list
+            menu.addItem(holder)
+        }
 
         menu.addItem(.separator())
         // vigil drive's settings (its grants, their state, the button for
@@ -212,6 +230,15 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func openWatches(_ sender: NSMenuItem) {
         VigilWatchesPanel.window()
+    }
+
+    @objc private func openConflict(_ sender: NSMenuItem) {
+        guard let conversation = sender.representedObject as? String,
+              let conflict = VigilWorkspaces.shared.unheldConflicts()?.first(where: { $0.conversation == conversation }) else {
+            return lifecycleLog.warn("conflict no longer stands", ["conversation": sender.representedObject as? String ?? ""])
+        }
+        NSApp.activate()
+        VigilWorkspaces.shared.conflictSheet(conflict, pane: nil)
     }
 
     @objc private func openDrive(_ sender: NSMenuItem) {
