@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Ink
 import SwiftUI
 import VigilWire
@@ -124,7 +125,11 @@ extension VigilWorkspaces {
                 let differences = Bring.standing(lines).filter { item in
                     item.panes.contains { $0.checkoutNeeds.contains(item.need) }
                 }.map(\.need.text).joined(separator: "\n")
-                return .failure(request, "checkout_changed", differences + "\nReview the move and choose Bring Anyway, or use --without to accept the destination checkout.")
+                // Only a digest of what was accepted is kept, so what moved
+                // is said as what it may be: the words below can read as
+                // before when only the paths they sample, or their status,
+                // changed.
+                return .failure(request, "checkout_changed", "This Mac's checkout differs from the sheet you accepted: a need came or went, or the changed paths behind one of these (which paths, or their status) are not the ones you saw.\n" + differences + "\nReview the move and choose Bring Anyway, or use --without to accept the destination checkout.")
             }
         } catch {
             lifecycleLog.error("not brought: vigil-agent did not write its resume pointers", ["workspace": source.name, "from": host.name, "err": error])
@@ -158,7 +163,10 @@ extension VigilWorkspaces {
         var move = WorkspaceCommand.Request.Moved(panes: source.paneIds, mac: Host.current().localizedName ?? "another Mac", transcripts: proofs)
         do {
             move.sourceWork = try Dictionary(uniqueKeysWithValues: source.paneIds.map { pane in
-                let work = directory.panes[pane]?.work ?? PaneWork(repos: [], at: 0)
+                // A source that never published its work: the sheet said
+                // "not known" and the person accepted that, so it binds
+                // nothing, as a `.work` cut to no repository does.
+                guard let work = directory.panes[pane]?.work else { return (pane, Bring.WorkStrength.untold.rawValue) }
                 return (pane, try Bring.sourceWorkRevision(work))
             })
         } catch { return .failure(request, "source_unknown", "The source checkout facts could not be recorded.") }
@@ -168,6 +176,13 @@ extension VigilWorkspaces {
         let mapping = Dictionary(uniqueKeysWithValues: session.tabs.flatMap(\.members).compactMap { pane in pane.from.map { ($0.pane, pane.id) } })
         move.arrivals = mapping
         let release = WorkspaceCommand.Request(id: request.id, session: source.name, revision: digest, operation: "release_move_v2", anchor: "", moved: move)
+        // The rule the source's hub and app ask of this release, asked here
+        // before anything is archived, saved or admitted: a release they
+        // would refuse is never half done on this Mac.
+        if let why = release.refusal {
+            lifecycleLog.error("bring: the release this Mac would send is malformed; nothing was admitted", ["workspace": source.name, "why": why])
+            return .failure(request, "commit_failed", "The move could not be asked of the source (\(why)); nothing was brought.")
+        }
         let folders = Dictionary(uniqueKeysWithValues: session.tabs.flatMap(\.members).map { ($0.id, $0.cwd) })
         var ticket = IncomingMove(source: device, request: release, panes: mapping, folders: folders)
         ticket.sourceName = host.name
@@ -1606,7 +1621,13 @@ extension VigilWorkspaces {
                       move.panes.allSatisfy({ memberMark($0) == .none && (move.returnOf != nil || !waitingForMove($0)) }) else {
                     return .failure(request, "source_changed", "A source pane is already closing or awaiting its own transfer.")
                 }
-                if let expected = move.sourceWork, !expected.isEmpty {
+                if let expected = move.sourceWork, expected.values.contains(where: Bring.recordedBefore) {
+                    return .failure(request, "source_changed", "This move was asked by an earlier vigil, whose record of the source checkout this one cannot check. Review a fresh move sheet. Its panes remain here.")
+                }
+                // A pane recorded `untold` binds nothing: its work is not
+                // read again (a repository there that cannot be read would
+                // refuse a move that never depended on it).
+                if let expected = move.sourceWork?.filter({ Bring.WorkRevision($0.value) != .untold }), !expected.isEmpty {
                     let members = workspaces[request.session]?.tabs.flatMap(\.members) ?? []
                     let panes = members.filter { expected[$0.id] != nil }.map {
                         Bring.Pane(pane: $0.id, agent: nil, conversation: nil, cwd: $0.cwd, name: nil)
@@ -1615,10 +1636,15 @@ extension VigilWorkspaces {
                     q.readWork = true
                     do {
                         let answer = try await readMove(q)
-                        let actual = try Dictionary(uniqueKeysWithValues: answer.lines.compactMap { line -> (String, String)? in
-                            try line.work.map { (line.pane, try Bring.sourceWorkRevision($0)) }
-                        })
-                        guard actual == expected else {
+                        // Compared at the strength each was recorded at: a
+                        // destination that held a trimmed `.work` recorded
+                        // only what it said.
+                        let fresh = Dictionary(answer.lines.compactMap { line in line.work.map { (line.pane, $0) } },
+                                               uniquingKeysWith: { first, _ in first })
+                        let same = try Set(fresh.keys) == Set(expected.keys) && expected.allSatisfy { pane, recorded in
+                            try fresh[pane].map { try Bring.sourceWorkMatches(recorded: recorded, fresh: $0) } ?? false
+                        }
+                        guard same else {
                             return .failure(request, "source_changed", "The source checkout changed. Review a fresh move sheet. Its panes remain here.")
                         }
                     } catch { return .failure(request, "waiting", "The source checkout could not be checked.") }
@@ -1909,35 +1935,75 @@ extension VigilWorkspaces {
         let homeDevice = home.device
         lifecycleLog.info("move: reading the sheet there", ["workspace": workspace, "to": target.name, "part": part?.rawValue ?? "all"])
         DispatchQueue.global(qos: .userInitiated).async {
-            let read = Result { () throws -> (from: String, answer: Bring.Answer) in
-                let from = try homeDevice ?? hub.me()
-                return (from, try hub.bringSheet(device: device, Move.Ask(from: from, workspace: workspace, anchor: anchor, part: part)))
-            }
+            let me = Result { try homeDevice ?? hub.me() }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let manager = VigilWorkspaces.shared
-                    switch read {
-                    case .failure(let error):
-                        lifecycleLog.error("move sheet not read", ["workspace": workspace, "to": target.name, "err": error])
-                        let alert = NSAlert()
-                        alert.messageText = "Can't move \(label) to \(target.name)"
-                        alert.informativeText = "\(target.name) did not answer: \(error)"
-                        alert.runModal()
-                    case .success(let (from, answer)):
-                        let ask = Move.Ask(from: from, workspace: workspace, anchor: anchor, part: part)
-                        let model = BringDialogModel(
-                            workspace: workspace, anchor: anchor, part: part, mac: sourceHost?.name ?? "this Mac", target: target.name,
-                            what: Self.moving(label, part), away: Self.away(sourceHost), home: targetHome ?? "/",
-                            lines: answer.lines, read: { _ in try hub.bringSheet(device: device, ask) })
-                        manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) { revision in
-                            guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, anchor: anchor, part: part, checkoutRevision: revision) else {
-                                return lifecycleLog.error("move: no order", ["workspace": workspace, "to": target.name])
-                            }
-                            manager.ask(RowHome(device: device, workspace: workspace), order.request, failing: "\(label) was not moved to \(target.name)")
+                    guard case .success(let from) = me else {
+                        if case .failure(let error) = me { lifecycleLog.error("move: this Mac's hub did not name it", ["err": error]) }
+                        return
+                    }
+                    let ask = Move.Ask(from: from, workspace: workspace, anchor: anchor, part: part)
+                    // The target reads it from what it heard of the source:
+                    // asked again whenever the source moves as this Mac hears
+                    // it (that Mac hears it too), each ask said in its log.
+                    let sources = BringDialogModel.Sources(
+                        question: { manager.moveQuestion(home: homeDevice, workspace: workspace, anchor: anchor, part: part) },
+                        heard: homeDevice == nil
+                            ? NotificationCenter.default.publisher(for: VigilWorkspaces.stateDidChange).map { _ in () }.eraseToAnyPublisher()
+                            : VigilRemote.shared.$hosts.map { _ in () }.eraseToAnyPublisher(),
+                        read: { _, _ in try hub.bringSheet(device: device, ask) },
+                        // The target reads its sheet from its own kept
+                        // directory: a read asked of the source from here
+                        // would change nothing the target reads.
+                        changes: nil,
+                        askSource: nil)
+                    let model = BringDialogModel(
+                        workspace: workspace, anchor: anchor, part: part, mac: sourceHost?.name ?? "this Mac", target: target.name,
+                        what: Self.moving(label, part), home: targetHome ?? "/", sources: sources)
+                    guard model.open() else {
+                        return lifecycleLog.error("move: the workspace is not listed", ["workspace": workspace, "to": target.name])
+                    }
+                    manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) { revision in
+                        guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, anchor: anchor, part: part, checkoutRevision: revision) else {
+                            return lifecycleLog.error("move: no order", ["workspace": workspace, "to": target.name])
                         }
+                        manager.ask(RowHome(device: device, workspace: workspace), order.request, failing: "\(label) was not moved to \(target.name)")
                     }
                 }
             }
+        }
+    }
+
+    /// A move's panes as the source says them now (this Mac's registry and
+    /// work facts, or another Mac's directory as heard here), and how that
+    /// Mac stands; nil when it no longer lists them.
+    func moveQuestion(home device: String?, workspace name: String, anchor: String, part: Registry.Workspace.Part?)
+        -> (question: Bring.Question, standing: BringDialogModel.Standing)? {
+        let here = FileManager.default.homeDirectoryForCurrentUser.path
+        guard let device else {
+            guard let session = workspaces[name] else { return nil }
+            let tabs = part == nil ? session.tabs : session.tabs.filter { $0.members.contains { $0.id == anchor } }
+            let members = part == .pane ? tabs.flatMap(\.members).filter { $0.id == anchor } : tabs.flatMap(\.members)
+            return (Bring.Question(panes: members.map { pane in
+                Bring.Pane(pane: pane.id, agent: nil, conversation: nil, cwd: pane.cwd, name: pane.name, work: paneWork(pane.id))
+            }, commit: false), .here)
+        }
+        guard let host = VigilRemote.shared.host(device), let directory = VigilRemote.shared.sourceDirectory(device),
+              let whole = directory.live.first(where: { $0.name == name }),
+              let source = part.map({ whole.only($0, of: anchor) }) ?? whole else { return nil }
+        let standing: BringDialogModel.Standing = host.error == nil
+            ? .live : .away(since: Self.away(host) ?? host.error ?? "out of reach")
+        return (Bring.Question(panes: directory.bringing(source, here: here), commit: false), standing)
+    }
+
+    /// `state/<pane>.work` of this Mac's pane (`PaneWork`, vigil-agent's);
+    /// nil when none is published or it does not read (said).
+    func paneWork(_ pane: String) -> PaneWork? {
+        guard let file = facts.files["state/\(pane).work"] else { return nil }
+        do { return try JSONDecoder().decode(PaneWork.self, from: file.data) } catch {
+            lifecycleLog.warn("work facts not read", ["pane": pane, "err": error])
+            return nil
         }
     }
 
@@ -1960,35 +2026,48 @@ extension VigilWorkspaces {
     func bringWithSheet(device: String, workspace name: String, anchor: String = "", part: Registry.Workspace.Part? = nil) {
         guard let host = VigilRemote.shared.host(device), let directory = VigilRemote.shared.sourceDirectory(device),
               let whole = directory.live.first(where: { $0.name == name }),
-              let source = part.map({ whole.only($0, of: anchor) }) ?? whole else { return }
+              let source = part.map({ whole.only($0, of: anchor) }) ?? whole else {
+            return lifecycleLog.error("bring: the workspace is not listed", ["workspace": name, "device": device])
+        }
         let here = FileManager.default.homeDirectoryForCurrentUser.path
         let hub = Local.Client(socket: VigilPaths.hub)
-        let read: @Sendable ([Bring.Need]) throws -> Bring.Answer = { needs in
-            let snapshot: Directory
-            if host.error != nil { snapshot = directory }
-            else { snapshot = try JSONDecoder().decode(Directory.self, from: hub.call(device: device, .moveSource(name))) }
-            guard let entry = snapshot.live.first(where: { $0.name == name }),
-                  let selected = part.map({ entry.only($0, of: anchor) }) ?? entry else {
-                throw WireError.refused("The source no longer lists the requested panes.")
-            }
-            return try hub.bring(.init(panes: snapshot.bringing(selected, here: here), commit: false, settle: needs.isEmpty ? nil : needs))
-        }
-        Task { @MainActor in
-            let lines: [Bring.Line]
-            do { lines = try await Task.detached(priority: .userInitiated) { try read([]).lines }.value }
-            catch { reportIncompleteMove(name, String(describing: error)); return }
-            let model = BringDialogModel(
-                workspace: name, anchor: anchor, part: part, mac: host.name, target: nil, what: Self.moving(source.label, part),
-                away: Self.away(host), home: here, lines: lines, read: read)
-            present(model, source: device, sourceHome: directory.home, targetHome: here) { revision in
-                Task { @MainActor in
-                    let reply = await VigilSessionControl.transact(.bring(name, from: device, anchor: anchor, part: part, checkoutRevision: revision))
-                    guard !reply.ok || reply.code == "copied" else { return }
-                    let alert = NSAlert()
-                    alert.messageText = reply.ok ? "\(source.label) was copied" : "\(source.label) was not brought"
-                    alert.informativeText = reply.message
-                    alert.runModal()
+        // The source's directory as this Mac follows it, this Mac's own
+        // facts as vigil-agent watches them, and the source asked once.
+        let live = host.error == nil
+        let sources = BringDialogModel.Sources(
+            question: { VigilWorkspaces.shared.moveQuestion(home: device, workspace: name, anchor: anchor, part: part) },
+            heard: VigilRemote.shared.$hosts.map { _ in () }.eraseToAnyPublisher(),
+            // Each read takes the source's directory fresh from it while it
+            // answers (`moveSource`, what the move itself commits against),
+            // else the question as this Mac last heard it.
+            read: { question, needs in
+                let settle = needs.isEmpty ? nil : needs
+                guard live else {
+                    var question = question
+                    question.settle = settle
+                    return try hub.bring(question)
                 }
+                let snapshot = try JSONDecoder().decode(Directory.self, from: hub.call(device: device, .moveSource(name)))
+                guard let entry = snapshot.live.first(where: { $0.name == name }),
+                      let selected = part.map({ entry.only($0, of: anchor) }) ?? entry else {
+                    throw WireError.refused("The source no longer lists the requested panes.")
+                }
+                return try hub.bring(.init(panes: snapshot.bringing(selected, here: here), commit: false, settle: settle))
+            },
+            changes: { hub.bringChanges($0) },
+            askSource: { try hub.workRead(device: device, panes: $0) })
+        let model = BringDialogModel(
+            workspace: name, anchor: anchor, part: part, mac: host.name, target: nil, what: Self.moving(source.label, part),
+            home: here, sources: sources)
+        guard model.open() else { return lifecycleLog.error("bring: the workspace is not listed", ["workspace": name, "from": host.name]) }
+        present(model, source: device, sourceHome: directory.home, targetHome: here) { revision in
+            Task { @MainActor in
+                let reply = await VigilSessionControl.transact(.bring(name, from: device, anchor: anchor, part: part, checkoutRevision: revision))
+                guard !reply.ok || reply.code == "copied" else { return }
+                let alert = NSAlert()
+                alert.messageText = reply.ok ? "\(source.label) was copied" : "\(source.label) was not brought"
+                alert.informativeText = reply.message
+                alert.runModal()
             }
         }
     }
