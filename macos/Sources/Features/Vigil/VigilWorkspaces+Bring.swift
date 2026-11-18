@@ -1265,10 +1265,11 @@ extension VigilWorkspaces {
                             ? NotificationCenter.default.publisher(for: VigilWorkspaces.stateDidChange).map { _ in () }.eraseToAnyPublisher()
                             : VigilRemote.shared.$hosts.map { _ in () }.eraseToAnyPublisher(),
                         read: { _, _ in try hub.bringSheet(device: device, ask) },
+                        // The target reads its sheet from its own kept
+                        // directory: a read asked of the source from here
+                        // would change nothing the target reads.
                         changes: nil,
-                        askSource: homeDevice.map { source -> @Sendable ([String]) throws -> WorkRead.Answer in
-                            { try hub.workRead(device: source, panes: $0) }
-                        })
+                        askSource: nil)
                     let model = BringDialogModel(
                         workspace: workspace, anchor: anchor, part: part, mac: sourceHost?.name ?? "this Mac", target: target.name,
                         what: Self.moving(label, part), home: targetHome ?? "/", sources: sources)
