@@ -616,7 +616,7 @@ extension VigilFixtureView {
 /// conversation opened as the app opens one (pushed onto a navigation
 /// stack, the snapshot landing mid-slide), then "fixture drawn". The
 /// snapshot is a real one when `/tmp/vigil-fixture-feed.json` holds it
-/// (`vigil-agent feed <pane> --once > …`: a person's conversation, so a
+/// (`vigil conversation follow <pane> --json --once > …`: a person's conversation, so a
 /// file on the Mac, never in the repository), else made-up rows.
 private struct ArrivingFixture: View {
     @State private var conversation = Conversation(ref: VigilFixtureView.pane)
