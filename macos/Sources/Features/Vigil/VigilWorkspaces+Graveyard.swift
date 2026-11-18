@@ -325,7 +325,6 @@ extension VigilWorkspaces {
             let was = workspaces[origin.workspace]
             workspaces[origin.workspace] = home
             guard commit(origin.workspace, was: was) else { return .saveFailed }
-            for id in burial.tabs.flatMap(\.paneIds) { chown(id, to: origin.workspace) }
             reconcileViews(of: origin.workspace)
             revive(burial.tabs.flatMap(\.paneIds))
             persist()
@@ -381,6 +380,15 @@ extension VigilWorkspaces {
         return graveyard[name] == nil
     }
 
+    private func keepUnverifiedMove(_ name: String, session: Workspace) {
+        graveyardDeadlines[name] = .distantFuture
+        if let destination = session.movedTo {
+            reportIncompleteMove(session.label, "The source changed or its latest conversation could not be verified on \(destination). It is kept in Recently Closed here. Undo restores it; End Now closes it.")
+        }
+        graveyardLog.warn("moved panes changed during the grace period; kept for Undo or End Now", ["workspace": name])
+        persist()
+    }
+
     /// The grace ran out: now the death actually happens. The burial's
     /// registry names every daemon; its held runtimes release (views free
     /// synchronously, a leaked view elsewhere changes nothing); then the
@@ -395,8 +403,9 @@ extension VigilWorkspaces {
             return
         }
         withheldReaps.remove(name)
+        let needsTip = !refreshed && session.moveCheckpoint?.transcripts?.keys.contains(where: ids.contains) == true
         if !repairInvalid, session.closing == nil, session.movedTo != nil,
-           !ids.allSatisfy({ pane in
+           needsTip || !ids.allSatisfy({ pane in
                guard let expected = session.moveRevisions?[pane] else { return false }
                if let files = session.moveTranscripts?[pane],
                   !files.allSatisfy({ Bring.fileVersion($0.key) == $0.value }) { return false }
@@ -410,17 +419,16 @@ extension VigilWorkspaces {
                     verifyingMoves.remove(name)
                     guard let now = graveyard[name], now.moveCheckpoint == move, ownedPaneIds(now) == ids,
                           graveyardDeadlines[name] == deadline, now.closing == nil else { return }
-                    if let files { graveyard[name]?.moveTranscripts = files }
-                    reapIfExpired(name, refreshed: true)
+                    if let files {
+                        graveyard[name]?.moveTranscripts = files
+                        reapIfExpired(name, refreshed: true)
+                    } else {
+                        keepUnverifiedMove(name, session: now)
+                    }
                 }
                 return
             }
-            graveyardDeadlines[name] = .distantFuture
-            if let destination = session.movedTo {
-                reportIncompleteMove(session.label, "The source changed or its latest conversation could not be verified on \(destination). It is kept in Recently Closed here. Undo restores it; End Now closes it.")
-            }
-            graveyardLog.warn("moved panes changed during the grace period; kept for Undo or End Now", ["workspace": name])
-            persist()
+            keepUnverifiedMove(name, session: session)
             return
         }
         // The close begins: from here the burial is no undo (a

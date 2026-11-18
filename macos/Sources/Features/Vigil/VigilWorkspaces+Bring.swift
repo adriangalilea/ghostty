@@ -79,7 +79,7 @@ extension VigilWorkspaces {
         // must use the same shell-only path as an opening at home.
         do {
             for pane in (entry.tabs ?? []).flatMap(\.members) {
-                if let end = pane.from?.facts?.ended {
+                if let end = pane.from?.ended {
                     try Durable.replace(VigilPaths.panes.appendingPathComponent(pane.id + ".ended"), with: JSONEncoder().encode(end))
                 }
             }
@@ -180,18 +180,23 @@ extension VigilWorkspaces {
     /// closed and undoable for its grace, then ended), each burial saying
     /// where they went. All of the workspace's panes: the workspace. Panes
     /// born here since that Mac last heard are not named and stay.
-    nonisolated static func compareMoveTranscripts(_ proofs: [String: Bring.TranscriptProof], destination: String? = nil) async -> [String: [String: String]]? {
+    nonisolated static func compareMoveTranscripts(_ proofs: [String: Bring.TranscriptProof], destination: String? = nil, checkpointOnly: Bool = false) async -> [String: [String: String]]? {
         await Task.detached(priority: .utility) {
             let panes = proofs.map { pane, proof in
                 Bring.Pane(pane: pane, agent: proof.agent, conversation: proof.start, cwd: NSHomeDirectory(), name: nil)
             }
-            guard let answer = try? Local.Client(socket: VigilPaths.hub).bring(.init(panes: panes, commit: false, compareTranscripts: true)),
+            guard let answer = try? Local.Client(socket: VigilPaths.hub).bring(.init(panes: panes, commit: false, compareTranscripts: true, checkpoints: checkpointOnly ? proofs : nil)),
                   answer.failed.isEmpty else { return nil }
             var result: [String: [String: String]] = [:]
             for line in answer.lines {
                 guard let original = proofs[line.pane], let current = line.proof,
                       current.agent == original.agent, current.start == original.start,
                       let files = line.checkedFiles, !files.isEmpty else { return nil }
+                if checkpointOnly {
+                    guard current.digest == original.digest, original.latest == nil || current.latest == original.latest else { return nil }
+                    result[line.pane] = files
+                    continue
+                }
                 guard current.confirms(original, read: { ask in
                     guard let destination else { return nil }
                     let hub = Local.Client(socket: VigilPaths.hub)
@@ -211,8 +216,7 @@ extension VigilWorkspaces {
             Reply(id: request.id, ok: true, code: "committed", message: message, revision: workspaces[request.session]?.layoutRevision, session: request.session)
         }
         guard let session = workspaces[request.session] else { return done("Nothing of it is open here.") }
-        guard Set(checked.keys) == Set((moved.transcripts ?? [:]).keys),
-              checked.values.allSatisfy({ files in files.allSatisfy { Bring.fileVersion($0.key) == $0.value } }) else {
+        guard Set(checked.keys) == Set((moved.transcripts ?? [:]).keys) else {
             return .failure(request, "source_changed", "The source transcript changed during its comparison. Both copies were kept.")
         }
         var revisions: [String: String] = [:]
@@ -272,12 +276,12 @@ extension VigilWorkspaces {
             var changed = false
             for t in tabs.indices {
                 for p in tabs[t].panes.indices where started.contains(tabs[t].panes[p].id) && tabs[t].panes[p].dormant == true {
-                    tabs[t].panes[p].dormant = nil
+                    tabs[t].panes[p].startedHere()
                     changed = true
                 }
                 guard var dock = tabs[t].dock else { continue }
                 for p in dock.panes.indices where started.contains(dock.panes[p].id) && dock.panes[p].dormant == true {
-                    dock.panes[p].dormant = nil
+                    dock.panes[p].startedHere()
                     changed = true
                 }
                 tabs[t].dock = dock

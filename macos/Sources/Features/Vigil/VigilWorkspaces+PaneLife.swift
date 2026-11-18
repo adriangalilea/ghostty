@@ -44,7 +44,7 @@ extension VigilWorkspaces {
 
     private func unanswered(_ end: PaneEnd, in pane: String) -> Bool {
         guard let entry = registered(pane) else { return false }
-        return entry.reopened != end.run && !(entry.dormant == true && entry.from?.facts?.ended == end)
+        return entry.reopened != end.run && !(entry.dormant == true && entry.from?.ended == end)
     }
 
     /// The record speaks first: a birth takes it off the disk before it
@@ -173,7 +173,7 @@ extension VigilWorkspaces {
             return VigilPaneNote(says: "Not connected", offers: "Reconnect", explains: "This pane's daemon runs and this view has no connection to it. What you type does not reach it.", symbol: "wifi.slash")
         case .died:
             let why = said ?? "its daemon is gone"
-            return VigilPaneNote(says: "Not running", offers: "Try again", explains: "This pane's daemon is gone and was not started again: \(why). Recovery resumes a verified conversation or opens a shell. A command that may already have run stays in its recipe.", symbol: "bolt.slash")
+            return VigilPaneNote(says: "Not running", offers: "Try again", explains: "This pane's daemon is gone and was not started again: \(why). Recovery resumes a verified conversation when possible. Otherwise it restarts the saved program or login shell.", symbol: "bolt.slash")
         case .unborn:
             return VigilPaneNote(says: "Not started", offers: "Start it", explains: "This pane has no daemon: \(said ?? "no reason was given"). Starting it runs what the pane was made for, in its folder.", symbol: "bolt.slash")
         case .ended(let end):

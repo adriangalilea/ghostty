@@ -821,7 +821,6 @@ class VigilWorkspaces {
             guard let taken = takePane(id) else { continue }
             carried.append(taken.pane)
             names.append((taken.name, taken.from))
-            chown(id, to: name)
         }
         let (panes, layout) = capture(controller.surfaceTree, carrying: carried)
         var tab = Registry.Tab(
@@ -1241,7 +1240,6 @@ class VigilWorkspaces {
             }
             carried.append(taken.pane)
             names.append((taken.name, id, taken.from))
-            chown(id, to: name)
             registryLog.info("pane claimed", ["pane": id, "workspace": name])
         }
 
@@ -1320,15 +1318,7 @@ class VigilWorkspaces {
         bury(buried)
     }
 
-    /// The reboot mirror of ownership: the daemon's spec carries its
-    /// owner (VIGIL_WORKSPACE for `vigild restore`), rewritten at every
-    /// claim. Write-only from here; never read back to second-guess the
-    /// registry.
-    func chown(_ id: String, to owner: String) {
-        runFireAndForget(Self.vigildBin, ["chown", id, owner])
-    }
-
-    /// THE vigild path: every spawn (chown, sendraw, restore) derives it
+    /// THE vigild path: every spawn (sendraw, restore) derives it
     /// here (`VigilDictation` reads the same `VigilPaths.vigild`).
     nonisolated static let vigildBin = VigilPaths.vigild.path
 

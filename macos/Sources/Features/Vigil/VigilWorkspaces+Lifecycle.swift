@@ -856,9 +856,6 @@ extension VigilWorkspaces {
             registerMember(controller, name: absorberName)
         }
         let absorbed = workspaces[other]!
-        for tab in absorbed.tabs {
-            for id in tab.paneIds { chown(id, to: absorberName) }
-        }
         workspaces[absorberName]!.tabs += absorbed.tabs
         for index in workspaces[absorberName]!.tabs.indices
         where !leaving.isDisjoint(with: workspaces[absorberName]!.tabs[index].paneIds) {
@@ -882,7 +879,7 @@ extension VigilWorkspaces {
     //
     // Moving panes/tabs/workspaces is a REGISTRY operation: a pane's entry
     // leaves one session's tabs and lands in another's. Daemons never
-    // notice (the owner mirror is rewritten by chown); live views release
+    // notice until their next restore; live views release
     // first (the daemon holds their exact state) and the target mounts
     // them lazily on click, or splits live when it is on screen.
 
@@ -1009,7 +1006,6 @@ extension VigilWorkspaces {
         let warm = takeWarm(moved, from: source)
         workspaces[target]!.held += warm
         workspaces[target]!.tabs.append(moved)
-        for id in moved.paneIds { chown(id, to: target) }
         if let view = liveView(attachId: anchor),
            let controller = view.window?.windowController as? TerminalController {
             settleVacatedController(controller, movedTo: target)
@@ -1092,7 +1088,6 @@ extension VigilWorkspaces {
             moveLog.error("pane move refused: pane registered nowhere", ["pane": paneId])
             return
         }
-        chown(paneId, to: target)
 
         if isDock {
             // Stays a dock tenant. Mounted target: live append (native
@@ -1339,9 +1334,6 @@ extension VigilWorkspaces {
         }
         workspaces[target]!.tabs.append(contentsOf: moving)
         workspaces[source]!.tabs = []
-        for tab in moving {
-            for id in tab.paneIds { chown(id, to: target) }
-        }
         for member in ms {
             dockMap.object(forKey: member)?.unmount()
             dockMap.removeObject(forKey: member)

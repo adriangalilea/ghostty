@@ -275,7 +275,7 @@ extension VigilWorkspaces {
     func applySessionCommand(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
         if request.operation == "bring" { return await bring(request) }
         if request.operation == "retire_move", let proofs = request.moved?.transcripts, !proofs.isEmpty {
-            guard let files = await Self.compareMoveTranscripts(proofs, destination: request.moved?.device) else {
+            guard let files = await Self.compareMoveTranscripts(proofs, checkpointOnly: true) else {
                 return .failure(request, "source_changed", "The Macs could not verify identical conversation histories. Both copies were kept.")
             }
             return moved(request, checked: files)
