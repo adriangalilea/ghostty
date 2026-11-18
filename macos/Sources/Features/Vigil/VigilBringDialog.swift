@@ -85,16 +85,17 @@ final class BringDialogModel: ObservableObject {
     ///   heard, as `VigilRemote` holds them.
     /// - `heard`: an element each time the source's directory changes.
     /// - `read`: the sheet for a question, with what to settle here first.
-    /// - `changes`: an element each time the sheet may read differently on
-    ///   the Mac it moves to (this Mac's `BringWatch`; nil: that Mac is
-    ///   another, which keeps no watch for this dialog).
+    /// - `changes`: the watch of what the sheet reads on the Mac it moves to
+    ///   (this Mac's `BringWatch`): `ready` once it stands, `changed` at each
+    ///   fact that may have moved, `ended` with why; nil: that Mac is
+    ///   another, which keeps no watch for this dialog.
     /// - `askSource`: a read asked of the source (nil: the source is this
     ///   Mac, whose work book keeps its facts current).
     struct Sources {
         var question: @MainActor () -> (question: Bring.Question, standing: Standing)?
         var heard: AnyPublisher<Void, Never>
         var read: @Sendable (Bring.Question, [Bring.Need]) throws -> Bring.Answer
-        var changes: (@Sendable (Bring.Question) -> AsyncStream<Void>)?
+        var changes: (@Sendable (Bring.Question) -> AsyncStream<Local.BringStep>)?
         var askSource: (@Sendable ([String]) throws -> WorkRead.Answer)?
     }
 
@@ -139,11 +140,33 @@ final class BringDialogModel: ObservableObject {
         heard = sources.heard.receive(on: DispatchQueue.main).sink { [weak self] in
             MainActor.assumeIsolated { self?.sourceMoved() }
         }
-        rewatch()
-        reload()
+        // With a watch here, the sheet is read once it stands (`ready`):
+        // nothing that moves in between goes unseen. With none, now.
+        if !rewatch() { reload() }
         askSourceNow()
         return true
     }
+
+    /// Each pane's work as the source said it last: by the source's own
+    /// clock (`PaneWork.at`), the directory's copy or the answer to the read
+    /// asked of it, whichever changed later. The answer can come before the
+    /// directory carries the same file, and the directory can carry a
+    /// change made after the answer.
+    private func newest(_ asked: Bring.Question) -> Bring.Question {
+        var question = asked
+        for p in question.panes.indices {
+            guard let answered = answers[question.panes[p].pane] else { continue }
+            if (question.panes[p].work?.at ?? -.infinity) < answered.at { question.panes[p].work = answered }
+        }
+        return question
+    }
+
+    /// What the source answered when asked to read again, by pane.
+    private var answers: [String: PaneWork] = [:]
+
+    /// The watch here ended (the hub went, or refused): why, until it is
+    /// made again.
+    @Published private(set) var watchLost: String?
 
     /// Everything it follows let go (the dialog closed).
     func stop() {
@@ -166,16 +189,32 @@ final class BringDialogModel: ObservableObject {
         // Back in reach: the facts it publishes from now are current; ask
         // once more for when.
         if wasAway, source == .live { askSourceNow() }
-        guard now.question.panes != question?.panes else { return }
-        question = now.question
-        rewatch()
-        reload()
+        let next = newest(now.question)
+        // A watch here that ended is made again at the next word of the
+        // hubs (this Mac's hub back up republishes its Macs).
+        let rewatched = rewatch(for: next)
+        guard next.panes != question?.panes else { return }
+        // A pane's last activity moves with every turn there and is no fact
+        // this Mac reads: it is carried onto the lines, never a re-read (a
+        // sheet read is a few git runs per repository, ~3 s measured on a
+        // busy Mac, 2026-11-18).
+        let still = { (panes: [Bring.Pane]) in panes.map { var pane = $0; pane.active = nil; return pane } }
+        let onlyActivity = question.map { still($0.panes) == still(next.panes) } ?? false
+        question = next
+        if onlyActivity {
+            let active = Dictionary(next.panes.map { ($0.pane, $0.active) }, uniquingKeysWith: { first, _ in first })
+            lines = lines.map { var line = $0; line.active = active[line.pane] ?? line.active; return line }
+            return
+        }
+        if !rewatched { reload() }
     }
 
     /// The watch on the Mac it moves to, made again when what it watches
-    /// changes (a repository, a folder, a conversation of another pane).
-    private func rewatch() {
-        guard let changes = sources.changes, let question else { return }
+    /// changes (a repository, a folder, a conversation of another pane) or
+    /// after it ended; whether one was made (its `ready` reads the sheet).
+    @discardableResult
+    private func rewatch(for asked: Bring.Question? = nil) -> Bool {
+        guard let changes = sources.changes, let question = asked ?? question else { return false }
         var wanted = Set<String>()
         for pane in question.panes {
             wanted.insert(pane.cwd)
@@ -184,18 +223,28 @@ final class BringDialogModel: ObservableObject {
             let unread: [String] = pane.work?.unread?.map(\.root) ?? []
             wanted.formUnion(repos + unread)
         }
-        guard wanted != watching else { return }
+        guard wanted != watching || watchLost != nil else { return false }
         watching = wanted
         watch?.cancel()
-        // Followed on the main actor: each change reads the sheet again for
-        // the question as it stands then.
+        watchLost = nil
+        // Followed on the main actor: each step reads the sheet again for
+        // the question as it stands then; an end is said and kept until the
+        // watch is made again.
         let stream = changes(question)
+        let named = workspace
         watch = Task { [weak self] in
-            for await _ in stream {
+            for await step in stream {
                 guard let self else { return }
-                self.reload()
+                switch step {
+                case .ready, .changed:
+                    self.reload()
+                case .ended(let why):
+                    self.watchLost = why
+                    lifecycleLog.warn("bring: this Mac's facts are no longer followed", ["workspace": named, "why": why])
+                }
             }
         }
+        return true
     }
 
     /// Every distinct need with the panes it holds back, in the order a
@@ -273,14 +322,18 @@ final class BringDialogModel: ObservableObject {
     }
 
     /// The source asked to read its panes' work now: only where it is heard
-    /// and runs a vigil that answers (`PaneWork.watched`); else said why not.
+    /// and every pane's facts come from a vigil that answers
+    /// (`PaneWork.answersReads`: a Mac that published none, or an older one,
+    /// is never asked); else said why not.
     func askSourceNow() {
         guard let ask = sources.askSource, let question else { return }
         guard source == .live else { return }
         let works = question.panes.compactMap(\.work)
-        guard works.isEmpty || works.allSatisfy(\.watched) else {
+        guard works.count == question.panes.count, works.allSatisfy(\.answersReads) else {
             asked = .older
-            lifecycleLog.info("bring: the source runs an older vigil, not asked to read again", ["workspace": workspace, "mac": mac])
+            lifecycleLog.info("bring: the source runs an older vigil or published no work, not asked to read again", [
+                "workspace": workspace, "mac": mac, "published": works.count, "panes": question.panes.count,
+            ])
             return
         }
         asked = .asking
@@ -296,6 +349,17 @@ final class BringDialogModel: ObservableObject {
                         lifecycleLog.info("bring: the source read its work again", [
                             "workspace": self.workspace, "mac": self.mac, "read": answer.works.count, "changed": answer.changed,
                         ])
+                        // Its answer is the source's word as of the read: the
+                        // sheet takes it at once where it is newer than what
+                        // the directory has brought.
+                        self.answers.merge(answer.works) { _, new in new }
+                        if let question = self.question {
+                            let next = self.newest(question)
+                            if next.panes != question.panes {
+                                self.question = next
+                                self.reload()
+                            }
+                        }
                     case .failure(let error):
                         let said = "\(error)"
                         self.asked = said.contains(Open.unknownOp) ? .older : .failed(said)
@@ -377,21 +441,28 @@ final class BringDialogModel: ObservableObject {
     /// Where the source's facts stand, in one sentence.
     var currencySaid: String? {
         let facts = currency
-        let since = facts.changed.map { Self.clock(Date(timeIntervalSince1970: $0)) }
-        switch (source, facts.watched) {
-        case (.here, _): return nil
-        case (.away(let heard), _): return "\(mac) is away: this is what it said as of \(heard)."
-        case (.live, false) where facts.changed == nil: return nil
-        case (.live, false):
-            return "\(mac) runs an older vigil: its counts are bare (noise included) and kept only at a command or a commit, last changed \(since ?? "?"). It cannot be asked to read again."
-        case (.live, true):
+        guard let changed = facts.changed else { return nil }
+        let since = Self.clock(Date(timeIntervalSince1970: changed))
+        var said: String
+        switch source {
+        case .here: said = ""
+        case .away(let heard): said = "\(mac) is away: this is what it said as of \(heard). "
+        case .live: said = ""
+        }
+        if source != .here {
+            said += "\(mac): " + Bring.Currency.said(facts, since: since) + "."
             switch asked {
-            case .answered(let at, _): return "\(mac) keeps these current, and read them again at \(Self.clock(at))."
-            case .asking: return "\(mac) keeps these current; asking it to read them again…"
-            case .failed(let why): return "\(mac) keeps these current (unchanged since \(since ?? "?")), but did not read them again: \(why)"
-            case .older, nil: return "\(mac) keeps these current: unchanged since \(since ?? "?")."
+            case .answered(let at, _): said += " Read again there at \(Self.clock(at))."
+            case .asking: said += " Asking it to read them again…"
+            case .failed(let why): said += " It did not read them again: \(why)"
+            case .older, nil: break
             }
         }
+        // This Mac's half: followed while the watch stands.
+        if let lost = watchLost, settles {
+            said += (said.isEmpty ? "" : " ") + "What this Mac holds is no longer followed (\(lost)): as of the last read."
+        }
+        return said.isEmpty ? nil : said
     }
 
     static func clock(_ date: Date) -> String {
@@ -545,7 +616,7 @@ struct BringDialog: View {
     private var currencySymbol: String {
         switch model.source {
         case .away: "moon.zzz"
-        case .here, .live: model.currency.watched ? "checkmark.circle" : "clock.badge.exclamationmark"
+        case .here, .live: model.currency.watched && model.watchLost == nil ? "checkmark.circle" : "clock.badge.exclamationmark"
         }
     }
 
