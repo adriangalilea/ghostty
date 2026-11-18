@@ -112,13 +112,32 @@ final class BringDialogModel: ObservableObject {
     /// (the app: the Changes view over the hub).
     var changes: ((Bring.Group) -> AnyView)?
 
-    private var question: Bring.Question?
+    private var question: Bring.Question? {
+        didSet { if oldValue.map({ Self.asRead($0.panes) }) != question.map({ Self.asRead($0.panes) }) { questionRevision += 1 } }
+    }
+    /// The panes as the sheet reads them: a pane's last activity moves with
+    /// every turn there and is no fact this Mac reads.
+    private static func asRead(_ panes: [Bring.Pane]) -> [Bring.Pane] {
+        panes.map { var pane = $0; pane.active = nil; return pane }
+    }
+    /// Counts the questions the dialog has asked, by what the sheet reads of
+    /// them: a read answers the one it was made for (`readFor`), and only a
+    /// read of the current one lets a move be asked.
+    private var questionRevision = 0
+    @Published private(set) var readFor = -1
+    /// Reads made and not yet applied, plain and settling alike: while one
+    /// is out, the sheet on screen may already be older than the facts.
+    @Published private(set) var readsOut = 0
+    /// Every read runs on this one queue and is applied on main in the order
+    /// made: a settle's read and a plain one never land out of order.
+    private let reads = DispatchQueue(label: "vigil.bring-dialog.reads", qos: .userInitiated)
     /// What the watch on the Mac it moves to watches: a new set of folders
     /// and conversations is a new watch.
     private var watching: Set<String>?
     private var watch: Task<Void, Never>?
     private var heard: AnyCancellable?
-    /// One read in flight; another asked meanwhile runs after it.
+    /// One plain read in flight; another asked meanwhile runs after it, for
+    /// the question as it stands then.
     private var reading = false
     private var again = false
 
@@ -145,7 +164,7 @@ final class BringDialogModel: ObservableObject {
         }
         // Read now, and again once the watch here stands (`ready`): what
         // moves in between is in the second read. Nothing can be brought
-        // until a read has answered (`sheetRead`).
+        // until a read of the question as it stands has answered (`canMove`).
         rewatch()
         reload()
         askSourceNow()
@@ -158,9 +177,10 @@ final class BringDialogModel: ObservableObject {
     /// directory has caught up with it (`caughtUp`).
     private var answers: [String: PaneWork] = [:]
 
-    /// Every answered pane's work is what the directory now carries.
+    /// Every answered pane's work is what the directory now carries; false
+    /// while nothing has answered.
     var caughtUp: Bool {
-        guard let question else { return false }
+        guard let question, !answers.isEmpty else { return false }
         return answers.allSatisfy { pane, answered in
             question.panes.first { $0.pane == pane }?.work.map { $0.same(as: answered) || $0.at > answered.at } ?? false
         }
@@ -170,12 +190,30 @@ final class BringDialogModel: ObservableObject {
     /// until then nothing can be brought (Return takes nothing).
     @Published private(set) var sheetRead = false
 
-    /// The move can be asked: a sheet read, its last read answered.
-    var canMove: Bool { sheetRead && readError == nil }
+    /// The move can be asked: the sheet on screen answers the question as it
+    /// stands, no read is out that may change it, the last read answered,
+    /// and the source still lists the workspace.
+    var canMove: Bool {
+        sheetRead && readError == nil && sourceGone == nil && readsOut == 0 && readFor == questionRevision
+    }
+
+    /// Why a move cannot be asked now, for its button's help.
+    var cannotMove: String {
+        if let gone = sourceGone { return gone }
+        if !sheetRead { return "Reading the sheet…" }
+        if readError != nil { return "The sheet did not read again: nothing can be moved until it does" }
+        return "Reading the sheet again for what changed…"
+    }
+
+    /// The source no longer lists the workspace: why, until it lists it again.
+    @Published private(set) var sourceGone: String?
 
     /// The watch here ended (the hub went, or refused): why, until it is
     /// made again.
     @Published private(set) var watchLost: String?
+    /// The watch here has said `ready`: an end before it means the sheet
+    /// was read only once, before anything was followed, and is read again.
+    private var watchReady = false
 
     /// Everything it follows let go (the dialog closed).
     func stop() {
@@ -189,9 +227,15 @@ final class BringDialogModel: ObservableObject {
     /// says of these panes did.
     private func sourceMoved() {
         guard let now = sources.question() else {
-            readError = "\(mac) no longer lists it"
-            lifecycleLog.warn("bring: the source no longer lists the workspace", ["workspace": workspace, "mac": mac])
+            if sourceGone == nil {
+                sourceGone = "\(mac) no longer lists it: nothing can be moved unless it lists it again"
+                lifecycleLog.warn("bring: the source no longer lists the workspace", ["workspace": workspace, "mac": mac])
+            }
             return
+        }
+        if sourceGone != nil {
+            sourceGone = nil
+            lifecycleLog.info("bring: the source lists the workspace again", ["workspace": workspace, "mac": mac])
         }
         let wasAway = source != .live
         source = now.standing
@@ -201,21 +245,24 @@ final class BringDialogModel: ObservableObject {
         let next = now.question
         // A watch here that ended is made again at the next word of the
         // hubs (this Mac's hub back up republishes its Macs).
-        let rewatched = rewatch(for: next)
+        rewatch(for: next)
         guard next.panes != question?.panes else { return }
         // A pane's last activity moves with every turn there and is no fact
         // this Mac reads: it is carried onto the lines, never a re-read (a
         // sheet read is a few git runs per repository, ~3 s measured on a
         // busy Mac, 2026-11-18).
-        let still = { (panes: [Bring.Pane]) in panes.map { var pane = $0; pane.active = nil; return pane } }
-        let onlyActivity = question.map { still($0.panes) == still(next.panes) } ?? false
+        let onlyActivity = question.map { Self.asRead($0.panes) == Self.asRead(next.panes) } ?? false
+        // The same question in every fact the sheet reads keeps its
+        // revision: its read still answers it.
         question = next
         if onlyActivity {
             let active = Dictionary(next.panes.map { ($0.pane, $0.active) }, uniquingKeysWith: { first, _ in first })
             lines = lines.map { var line = $0; line.active = active[line.pane] ?? line.active; return line }
             return
         }
-        if !rewatched { reload() }
+        // Read now, whatever a new watch's `ready` will read too: a move is
+        // never asked on a sheet of the question before.
+        reload()
     }
 
     /// The watch on the Mac it moves to, made again when what it watches
@@ -236,6 +283,7 @@ final class BringDialogModel: ObservableObject {
         watching = wanted
         watch?.cancel()
         watchLost = nil
+        watchReady = false
         // Followed on the main actor: each step reads the sheet again for
         // the question as it stands then; an end is said and kept until the
         // watch is made again.
@@ -243,13 +291,19 @@ final class BringDialogModel: ObservableObject {
         let named = workspace
         watch = Task { [weak self] in
             for await step in stream {
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { return }
                 switch step {
-                case .ready, .changed:
+                case .ready:
+                    self.watchReady = true
+                    self.reload()
+                case .changed:
                     self.reload()
                 case .ended(let why):
                     self.watchLost = why
                     lifecycleLog.warn("bring: this Mac's facts are no longer followed", ["workspace": named, "why": why])
+                    // Ended before it stood: what moved since the first read
+                    // was never followed, so it is read once more.
+                    if !self.watchReady { self.reload() }
                 }
             }
         }
@@ -283,16 +337,21 @@ final class BringDialogModel: ObservableObject {
             return
         }
         if needs.isEmpty { reading = true }
+        readsOut += 1
         let read = sources.read
-        DispatchQueue.global(qos: .userInitiated).async {
+        let revision = questionRevision
+        // One queue, in the order asked; each answer hopped to main in that
+        // same order.
+        reads.async {
             let result = Result { try read(question, needs) }
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self.read(result, settled: needs, plain: needs.isEmpty) }
+                MainActor.assumeIsolated { self.read(result, settled: needs, plain: needs.isEmpty, for: revision) }
             }
         }
     }
 
-    private func read(_ result: Result<Bring.Answer, any Error>, settled needs: [Bring.Need], plain: Bool) {
+    private func read(_ result: Result<Bring.Answer, any Error>, settled needs: [Bring.Need], plain: Bool, for revision: Int) {
+        readsOut -= 1
         for need in needs { working[need.text] = nil }
         switch result {
         case .success(let answer):
@@ -301,6 +360,7 @@ final class BringDialogModel: ObservableObject {
             readError = nil
             sheetRead = true
             lastRead = Date()
+            readFor = revision
         case .failure(let error):
             // Said, and nothing can be brought on a sheet that did not read.
             readError = "\(target ?? "vigil-agent") did not answer, so nothing can be moved until it does: \(error)"
@@ -571,6 +631,9 @@ struct BringDialog: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if let gone = model.sourceGone {
+                        Label(gone, systemImage: "xmark.octagon.fill").font(.system(size: 11)).foregroundStyle(.red)
+                    }
                     if let error = model.readError {
                         Label(error, systemImage: "xmark.octagon.fill").font(.system(size: 11)).foregroundStyle(.red)
                     }
@@ -632,10 +695,10 @@ struct BringDialog: View {
                 Spacer()
                 Button("Cancel") { model.answer(.cancel) }.keyboardShortcut(.cancelAction)
                 if !model.canMove {
-                    // No sheet read, or the last read failed: there is nothing
-                    // to accept, so nothing to bring.
-                    Button(model.verb) {}.disabled(true)
-                        .help(model.sheetRead ? "The sheet did not read again: nothing can be moved until it does" : "Reading the sheet…")
+                    // No sheet of the question as it stands, a read still out,
+                    // the last read failed, or the source lists it no more:
+                    // there is nothing to accept, so nothing to bring.
+                    Button(model.verb) {}.disabled(true).help(model.cannotMove)
                 } else if model.standing.isEmpty {
                     Button(model.verb) { model.answer(.bring(checkoutRevision: "")) }.keyboardShortcut(.defaultAction)
                 } else {
