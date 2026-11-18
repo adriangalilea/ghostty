@@ -248,7 +248,8 @@ extension NSApplication {
             }
             return nil
         } catch let pending as VigilWorkspaces.UnconfirmedWorkspace {
-            return ["name": pending.name, "pane": pending.pane.id, "running": false] as NSDictionary
+            return ["name": pending.name, "label": VigilWorkspaces.shared.workspaces[pending.name]?.label ?? pending.name,
+                    "pane": pending.pane.id, "running": false] as NSDictionary
         } catch {
             command.scriptErrorNumber = errAECoercionFail
             command.scriptErrorString = error.localizedDescription

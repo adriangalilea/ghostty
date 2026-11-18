@@ -185,9 +185,13 @@
     <record-type name="workspace" code="GSsn" description="A vigil workspace identity: the opaque id and its human label.">
       <property name="name" code="GSsN" type="text" description="The workspace id (random adjective-noun, the identity)."/>
       <property name="label" code="GSsL" type="text" description="The human label."/>
+      <property name="pane id" code="GSsP" type="text" description="The reserved identity of the first pane.">
+        <cocoa key="pane"/>
+      </property>
+      <property name="running" code="GSsR" type="boolean" description="Whether the home Mac confirmed the pane started."/>
     </record-type>
 
-    <command name="new workspace" code="GhstNSes" description="Create a vigil workspace: it exists AND runs from this moment — its daemon-backed pane spawns at birth and survives window close, quit and reboot. The command, if any, is the pane's process, never typed.">
+    <command name="new workspace" code="GhstNSes" description="Create a workspace and await its first pane. The result identifies the workspace even when the start is unconfirmed. The command, if any, is the pane's process, never typed.">
       <parameter name="label" code="GSlb" type="text" optional="yes" description="Human label (the id stays the identity).">
         <cocoa key="label"/>
       </parameter>

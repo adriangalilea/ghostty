@@ -273,6 +273,13 @@ extension VigilWorkspaces {
     /// so the edit is checked against the revision asked for once the pane
     /// runs, and a pane born for an edit that no longer applies is closed.
     func applySessionCommand(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
+        if request.operation == "bring" { return await bring(request) }
+        if request.operation == "retire_move", let proofs = request.moved?.transcripts, !proofs.isEmpty {
+            guard let files = await Self.compareMoveTranscripts(proofs) else {
+                return .failure(request, "source_changed", "The Macs could not verify identical conversation histories. Both copies were kept.")
+            }
+            return moved(request, checked: files)
+        }
         guard Self.birthOperations.contains(request.operation) else { return applySessionEdit(request) }
         refreshWorkspaceRevisions()
         switch request.operation {
@@ -478,9 +485,6 @@ extension VigilWorkspaces {
             return Reply(id: request.id, ok: true, code: "committed", message: "Back on its Mac.",
                          revision: workspaces[back]?.layoutRevision, session: back)
         }
-        // A workspace of another Mac, brought here as itself: `session` names
-        // it there, never a workspace of this registry.
-        if request.operation == "bring" { return bring(request) }
         // Panes of a workspace here that another Mac brought: they close.
         if request.operation == "retire_move" { return moved(request) }
         guard var session = workspaces[request.session] else {

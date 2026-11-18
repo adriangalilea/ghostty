@@ -62,6 +62,7 @@ extension VigilWorkspaces {
         session.movedTo = movingTo
         let members = ownedPaneIds(session)
         session.moveRevisions = movingRevisions?.filter { members.contains($0.key) }
+        session.moveTranscripts = movingTranscripts?.filter { members.contains($0.key) }
         graveyard[name] = session
         graveyardDeadlines[name] = Date().addingTimeInterval(Self.killGrace)
 
@@ -333,6 +334,7 @@ extension VigilWorkspaces {
         burial.buriedFrom = nil
         burial.movedTo = nil
         burial.moveRevisions = nil
+        burial.moveTranscripts = nil
         burial.layoutShape = ""
         workspaces[name] = burial
         guard commit(name, was: nil) else { return .saveFailed }
@@ -394,6 +396,8 @@ extension VigilWorkspaces {
         if !repairInvalid, session.closing == nil, session.movedTo != nil,
            !ids.allSatisfy({ pane in
                guard let expected = session.moveRevisions?[pane] else { return false }
+               if let files = session.moveTranscripts?[pane],
+                  !files.allSatisfy({ Bring.fileVersion($0.key) == $0.value }) { return false }
                return Self.moveRevision(pane) == expected
            }) {
             graveyardDeadlines[name] = .distantFuture

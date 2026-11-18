@@ -10,7 +10,7 @@ import VigilWire
 /// starts: its daemon reads the resume pointer vigil-agent sealed for it.
 extension VigilWorkspaces {
     /// The `bring` workspace command, from the sidebar or `vigil move`.
-    func bring(_ request: VigilSessionControl.Request) -> VigilSessionControl.Reply {
+    func bring(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
         guard let device = request.from, let host = VigilRemote.shared.host(device), let directory = host.directory,
               let whole = directory.live.first(where: { $0.name == request.session }) else {
             return .failure(request, "not_found", "This Mac has not heard that workspace from that Mac.")
@@ -56,8 +56,11 @@ extension VigilWorkspaces {
         } catch {
             return .failure(request, "allocation_failed", "This Mac could not reserve the arriving panes: \(error)")
         }
+        let arrivals = Set(entry.paneIds)
+        births.formUnion(arrivals)
         var retainFiles = false
         defer {
+            births.subtract(arrivals)
             if !retainFiles {
                 for pane in entry.paneIds {
                     for suffix in [".ended", ".resume", ".resume.seal"] {
@@ -84,8 +87,10 @@ extension VigilWorkspaces {
         // start can find what it resumes.
         let lines: [Bring.Line]
         do {
-            let answer = try Local.Client(socket: VigilPaths.hub).bring(
-                Bring.Question(panes: directory.bringing(source, as: entry, here: here), commit: true))
+            let question = Bring.Question(panes: directory.bringing(source, as: entry, here: here), commit: true)
+            let answer = try await Task.detached(priority: .utility) {
+                try Local.Client(socket: VigilPaths.hub).bring(question)
+            }.value
             guard answer.failed.isEmpty else { return .failure(request, "resume_failed", answer.failed.values.sorted().joined(separator: "\n")) }
             lines = answer.lines
         } catch {
@@ -121,14 +126,15 @@ extension VigilWorkspaces {
             "lacking": lines.filter { !$0.lacks.isEmpty }.count,
         ])
         if lines.contains(where: { line in
-            line.conversation != nil && (!line.folderHere || line.transcriptHere != true || line.needs.contains { $0.kind == .transcript })
+            line.conversation != nil && (line.proof == nil || !line.folderHere || line.transcriptHere != true || line.needs.contains { $0.kind == .transcript })
         }) {
             return .init(id: request.id, ok: true, code: "copied", message: "Copied here. The source stays open because its conversation could not be transferred in full.", session: entry.name)
         }
         // Its Mac is told: those panes close there, so the conversation is
         // written on one Mac. Kept by the hub while that Mac is away.
+        let proofs = Dictionary(uniqueKeysWithValues: lines.compactMap { line in line.proof.map { (line.pane, $0) } })
         let told = WorkspaceCommand.Request.moved(
-            source.name, panes: (source.tabs ?? []).flatMap(\.paneIds), to: Host.current().localizedName ?? "another Mac", digest: digest)
+            source.name, panes: (source.tabs ?? []).flatMap(\.paneIds), to: Host.current().localizedName ?? "another Mac", digest: digest, transcripts: proofs.isEmpty ? nil : proofs)
         DispatchQueue.global(qos: .utility).async {
             do {
                 _ = try Local.Client(socket: VigilPaths.hub).call(device: device, .session(try told.line))
@@ -137,7 +143,7 @@ extension VigilWorkspaces {
                 lifecycleLog.error("its Mac not told of the move: the workspace stays open there too", ["workspace": source.name, "mac": host.name, "err": error])
             }
         }
-        return VigilSessionControl.Reply(id: request.id, ok: true, code: "committed", message: "Brought here; nothing runs until a pane is opened.",
+        return VigilSessionControl.Reply(id: request.id, ok: true, code: "committed", message: "Saved here. The source closes when it verifies this move. Nothing runs here until a pane is opened.",
                                          revision: workspaces[entry.name]?.layoutRevision, session: entry.name)
     }
 
@@ -162,17 +168,40 @@ extension VigilWorkspaces {
     /// closed and undoable for its grace, then ended), each burial saying
     /// where they went. All of the workspace's panes: the workspace. Panes
     /// born here since that Mac last heard are not named and stay.
-    func moved(_ request: VigilSessionControl.Request) -> VigilSessionControl.Reply {
+    nonisolated static func compareMoveTranscripts(_ proofs: [String: Bring.TranscriptProof]) async -> [String: [String: String]]? {
+        await Task.detached(priority: .utility) {
+            let panes = proofs.map { pane, proof in
+                Bring.Pane(pane: pane, agent: proof.agent, conversation: proof.start, cwd: NSHomeDirectory(), name: nil)
+            }
+            guard let answer = try? Local.Client(socket: VigilPaths.hub).bring(.init(panes: panes, commit: false, compareTranscripts: true)),
+                  answer.failed.isEmpty else { return nil }
+            var result: [String: [String: String]] = [:]
+            for line in answer.lines {
+                guard let proof = proofs[line.pane], proof == line.proof, let files = line.checkedFiles, !files.isEmpty else { return nil }
+                result[line.pane] = files
+            }
+            return Set(result.keys) == Set(proofs.keys) ? result : nil
+        }.value
+    }
+
+    func moved(_ request: VigilSessionControl.Request, checked: [String: [String: String]] = [:]) -> VigilSessionControl.Reply {
         typealias Reply = VigilSessionControl.Reply
         guard let moved = request.moved else { return .failure(request, "invalid_request", "A move names the panes that left.") }
         func done(_ message: String) -> Reply {
             Reply(id: request.id, ok: true, code: "committed", message: message, revision: workspaces[request.session]?.layoutRevision, session: request.session)
         }
         guard let session = workspaces[request.session] else { return done("Nothing of it is open here.") }
+        guard Set(checked.keys) == Set((moved.transcripts ?? [:]).keys),
+              checked.values.allSatisfy({ files in files.allSatisfy { Bring.fileVersion($0.key) == $0.value } }) else {
+            return .failure(request, "source_changed", "The source transcript changed during its comparison. Both copies were kept.")
+        }
         var revisions: [String: String] = [:]
         for pane in moved.panes {
             guard let revision = Self.moveRevision(pane) else {
                 return .failure(request, "source_unknown", "A pane could not be checked. The workspace is still here.")
+            }
+            if revision.split(separator: "/")[3] != "-", checked[pane] == nil {
+                return .failure(request, "source_unknown", "The destination did not confirm the source conversation. Both copies were kept.")
             }
             revisions[pane] = revision
         }
@@ -185,7 +214,8 @@ extension VigilWorkspaces {
         guard !leaving.isEmpty else { return done("None of those panes is open here.") }
         movingTo = moved.mac
         movingRevisions = revisions
-        defer { movingTo = nil; movingRevisions = nil }
+        movingTranscripts = checked
+        defer { movingTo = nil; movingRevisions = nil; movingTranscripts = nil }
         lifecycleLog.info("panes brought to another Mac close here", ["workspace": request.session, "to": moved.mac, "panes": leaving.sorted()])
         if leaving == Set(session.tabs.flatMap(\.paneIds)) {
             kill(name: request.session)
@@ -352,14 +382,15 @@ extension VigilWorkspaces {
         let model = BringDialogModel(
             workspace: name, anchor: anchor, part: part, mac: host.name, target: nil, what: Self.moving(source.label, part),
             away: Self.away(host), home: here, lines: lines, read: read)
-        present(model, source: device, sourceHome: directory.home, targetHome: here) { [weak self] in
-            guard let self else { return }
-            let reply = self.applySessionEdit(.bring(name, from: device, anchor: anchor, part: part))
-            guard !reply.ok || reply.code == "copied" else { return }
-            let failed = NSAlert()
-            failed.messageText = reply.ok ? "\(source.label) was copied" : "\(source.label) was not brought"
-            failed.informativeText = reply.message
-            failed.runModal()
+        present(model, source: device, sourceHome: directory.home, targetHome: here) {
+            Task { @MainActor in
+                let reply = await VigilSessionControl.transact(.bring(name, from: device, anchor: anchor, part: part))
+                guard !reply.ok || reply.code == "copied" else { return }
+                let alert = NSAlert()
+                alert.messageText = reply.ok ? "\(source.label) was copied" : "\(source.label) was not brought"
+                alert.informativeText = reply.message
+                alert.runModal()
+            }
         }
     }
 

@@ -422,6 +422,7 @@ class VigilWorkspaces {
         /// A burial of panes brought to another Mac: that Mac's name.
         var movedTo: String?
         var moveRevisions: [String: String]?
+        var moveTranscripts: [String: [String: String]]?
         /// A burial whose close began: its panes not yet fenced, and no
         /// undo (`Registry.Workspace.closing`).
         var closing: [String]?
@@ -486,6 +487,7 @@ class VigilWorkspaces {
     /// (`moved`): that Mac's name, stamped on each burial they make.
     var movingTo: String?
     var movingRevisions: [String: String]?
+    var movingTranscripts: [String: [String: String]]?
 
     /// Most recently active workspaces, newest first: the successor order
     /// when the session you are in dies (the tab-close semantic: the
@@ -1433,7 +1435,7 @@ class VigilWorkspaces {
             Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, front: $0.front)
         }
         entries += graveyard.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, moveRevisions: $0.moveRevisions, closing: $0.closing)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, moveRevisions: $0.moveRevisions, moveTranscripts: $0.moveTranscripts, closing: $0.closing)
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
@@ -1807,6 +1809,7 @@ class VigilWorkspaces {
                 session.buriedFrom = entry.buriedFrom
                 session.movedTo = entry.movedTo
                 session.moveRevisions = entry.moveRevisions
+                session.moveTranscripts = entry.moveTranscripts
                 // Its close's progress from the marks, not only from what was
                 // saved.
                 session.closing = entry.reconciled(mark: memberMark).closing
