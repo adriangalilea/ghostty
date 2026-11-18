@@ -310,6 +310,7 @@ extension VigilWorkspaces {
                 return false
             }
             try? FileManager.default.removeItem(at: dumpsDir(name))
+            resumeForks(for: ownedPaneIds(previous))
             return true
         }
         if let origin = burial.buriedFrom, var home = workspaces[origin.workspace] {
@@ -669,7 +670,7 @@ extension VigilWorkspaces {
             try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).seen"))
         }
         if !done.isEmpty {
-            DispatchQueue.main.async { VigilWorkspaces.shared.resumeClosedForks(for: Set(done)) }
+            DispatchQueue.main.async { VigilWorkspaces.shared.resumeForks(for: Set(done)) }
         }
         if open.isEmpty {
             graveyardLog.success("panes closed, verified", ["panes": sorted, "why": why])

@@ -157,20 +157,21 @@ extension VigilWorkspaces {
 
     func showMoveNote(_ pane: String) {
         let arrival = registered(pane)?.from
-        if let id = arrival?.ticket, let ticket = incomingMoves[id], canTakeOver(ticket), ticket.peerClosed == true {
+        let ticket = moveTicket(for: pane)
+        if let ticket, canTakeOver(ticket), ticket.peerClosed == true {
             note(pane, VigilPaneNote(says: "The other Mac closed its fork", offers: "Open saved conversation…",
                  explains: "The returned history is preserved. This pane can resume its local checkpoint.", symbol: "arrow.right", takeover: true))
             return
         }
-        if let id = arrival?.ticket, let ticket = incomingMoves[id], canTakeOver(ticket), let since = moveOffline[ticket.source] {
+        if let ticket, canTakeOver(ticket), let since = moveOffline[ticket.source] {
             let mac = arrival?.mac ?? "the source"
             note(pane, VigilPaneNote(says: "First failed check for " + mac, offers: "Take over here…",
                  explains: unpairedMoves.contains(ticket.source) ? "Contact failed before the pairing was removed. This Mac can no longer check the source. Both copies may run." : "The source may still be writing. Recovery opens the verified local history.", symbol: "arrow.right", takeover: true, lastContact: since))
             return
         }
-        let why = arrival?.ticket.flatMap { incomingMoves[$0]?.refusal }
-        let released = arrival?.ticket.flatMap { incomingMoves[$0]?.released } != nil
-        let recovering = arrival?.ticket.flatMap { incomingMoves[$0]?.takeover } == true
+        let why = ticket?.refusal
+        let released = ticket?.released != nil
+        let recovering = ticket?.takeover == true
         let stage = recovering ? "Opening this Mac's saved conversation" : released ? "Receiving the stopped pane's history" : "Moving from \(arrival?.mac ?? "another Mac")"
         note(pane, VigilPaneNote(says: why == nil ? stage : "Move refused",
              offers: why == nil ? "Check move" : "Show source", explains: why ?? arrival?.ticket.flatMap { moveWaiting[$0] } ?? (recovering ? "Opening from a verified local checkpoint. The other Mac may still be writing." : "This pane will open when its source stops and its final conversation is here."), symbol: "arrow.right"))
@@ -300,7 +301,7 @@ extension VigilWorkspaces {
         guard let pane = view.vigilAttachId else { return }
         if waitingForMove(pane), let arrival = registered(pane)?.from {
             if view.vigilHost == nil, view.vigilNote?.takeover == true {
-                guard let id = arrival.ticket, let ticket = incomingMoves[id], canTakeOver(ticket) else { showMoveNote(pane); return }
+                guard let ticket = moveTicket(for: pane), canTakeOver(ticket) else { showMoveNote(pane); return }
                 let since = view.vigilNote?.lastContact
                 guard since == nil ? ticket.peerClosed == true : moveOffline[arrival.device] == since else { showMoveNote(pane); return }
                 let alert = NSAlert()
@@ -320,7 +321,7 @@ extension VigilWorkspaces {
                 }
                 return
             }
-            if let ticket = arrival.ticket, incomingMoves[ticket]?.refusal != nil {
+            if moveTicket(for: pane)?.refusal != nil {
                 _ = openRemotePane(device: arrival.device, pane: arrival.pane)
                 return
             }
