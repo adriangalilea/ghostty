@@ -201,9 +201,10 @@ extension VigilWorkspaces {
     /// The first pane among `panes` whose conversation is in conflict and
     /// whose opening would start it (no daemon holds it): the sheet is asked
     /// before it resumes one copy silently. Not asked when this Mac's copy
-    /// is the only one that went on: resuming it is what there is to do; nor
-    /// while that Mac's copy is still arriving (`worn`), whose part past the
-    /// shared one is not known yet.
+    /// is the only one that went on: resuming it is what there is to do.
+    /// Asked too while that Mac's copy is still arriving (`worn`): its part
+    /// past the shared one is not known, so the sheet offers only this
+    /// Mac's copy to continue, or Not Now.
     func conflictToAsk(among panes: [String]) -> String? {
         panes.first { pane in paneConflict(pane)?.worn == true && !Self.daemonAlive(pane) }
     }
