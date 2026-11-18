@@ -214,6 +214,11 @@ final class BringDialogModel: ObservableObject {
     /// The watch here has said `ready`: an end before it means the sheet
     /// was read only once, before anything was followed, and is read again.
     private var watchReady = false
+    /// A watch that ended after standing was made again once since the
+    /// last that stood a whole read through.
+    private var remadeAfterEnd = false
+    /// The source's re-reads, asked one at a time and answered in order.
+    private let asks = DispatchQueue(label: "vigil.bring-dialog.asks", qos: .userInitiated)
 
     /// Everything it follows let go (the dialog closed).
     func stop() {
@@ -297,6 +302,7 @@ final class BringDialogModel: ObservableObject {
                     self.watchReady = true
                     self.reload()
                 case .changed:
+                    self.remadeAfterEnd = false
                     self.reload()
                 case .ended(let why):
                     self.watchLost = why
@@ -304,6 +310,13 @@ final class BringDialogModel: ObservableObject {
                     // Ended before it stood: what moved since the first read
                     // was never followed, so it is read once more.
                     if !self.watchReady { self.reload() }
+                    // A watch that stood and ended is made again at once,
+                    // once; one that ends again waits for the next word of
+                    // the hubs (this Mac's hub back up republishes its Macs).
+                    if self.watchReady, !self.remadeAfterEnd {
+                        self.remadeAfterEnd = true
+                        self.rewatch()
+                    }
                 }
             }
         }
@@ -411,7 +424,8 @@ final class BringDialogModel: ObservableObject {
         asked = .asking
         let panes = question.panes.map(\.pane)
         lifecycleLog.info("bring: asking the source to read its work again", ["workspace": workspace, "mac": mac, "panes": panes.count])
-        DispatchQueue.global(qos: .userInitiated).async {
+        // One queue: an earlier ask's answer never lands after a later one's.
+        asks.async {
             let result = Result { try ask(panes) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
