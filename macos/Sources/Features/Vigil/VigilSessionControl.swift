@@ -53,6 +53,7 @@ enum VigilSessionControl {
         var status: Status?
         var released: [String: Bring.TranscriptProof]?
         var page: Bring.Page?
+        var successors: [String: VigilWorkspaces.MoveSuccessor]?
 
         static func failure(_ request: Request?, _ code: String, _ message: String) -> Self {
             .init(id: request?.id, ok: false, code: code, message: message)
@@ -139,7 +140,7 @@ enum VigilSessionControl {
             if let newline = bytes[start...].firstIndex(of: 10) {
                 guard newline < maxBytes,
                       let request = try? JSONDecoder().decode(Request.self, from: bytes.prefix(upTo: newline)),
-                      newline < 65536 || ["release_move", "ack_move"].contains(request.operation) else {
+                      newline < 65536 || ["release_move_v2", "ack_move_v2"].contains(request.operation) else {
                     send(.failure(nil, "invalid_request", "Expected one workspace command JSON line."), to: fd)
                     return
                 }
@@ -185,7 +186,7 @@ enum VigilSessionControl {
         if let why = request.refusal { return .failure(request, "invalid_request", why) }
         let age = Date().timeIntervalSince1970 - request.issuedAt
         // No request may outlive the receipt that prevents repeating it.
-        guard age >= -300, age < lifetime || ["retire_move", "release_move", "ack_move"].contains(request.operation) else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
+        guard age >= -300, age < lifetime || ["retire_move", "release_move_v2", "ack_move_v2"].contains(request.operation) else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
         if request.operation == "inspect-input" {
             let views = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
                 .filter { request.anchor.isEmpty || $0.vigilAttachId == request.anchor }
@@ -197,7 +198,7 @@ enum VigilSessionControl {
         }
         // A handoff reads or advances one durable transfer. A retry after a lost reply
         // must see its current phase, including a release made before an app restart.
-        if ["release_move", "ack_move"].contains(request.operation) {
+        if ["release_move_v2", "ack_move_v2"].contains(request.operation) {
             return await VigilWorkspaces.shared.handoffCommand(request)
         }
         if request.operation == "describe" { return VigilWorkspaces.shared.applySessionEdit(request) }

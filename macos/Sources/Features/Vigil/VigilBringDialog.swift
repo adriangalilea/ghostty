@@ -47,7 +47,7 @@ final class BringDialogModel: ObservableObject {
 
     /// How the dialog ends: brought or not, or toward a pane on the other Mac.
     var close: (Outcome) -> Void = { _ in }
-    enum Outcome { case cancel, bring, open(pane: String) }
+    enum Outcome { case cancel, bring(checkoutRevision: String), open(pane: String) }
 
     /// The repository whose changes the dialog shows in the list's place;
     /// nil: the list.
@@ -246,11 +246,12 @@ struct BringDialog: View {
                 Spacer()
                 Button("Cancel") { model.close(.cancel) }.keyboardShortcut(.cancelAction)
                 if model.standing.isEmpty {
-                    Button(model.verb) { model.close(.bring) }.keyboardShortcut(.defaultAction)
+                    Button(model.verb) { model.close(.bring(checkoutRevision: "")) }.keyboardShortcut(.defaultAction)
                 } else {
                     // Never the default while something stands: Return must
                     // not leave work behind on the other Mac.
-                    Button(model.settles ? "Bring Anyway" : "Move Anyway") { model.close(.bring) }
+                    let revision = Bring.checkoutRevision(model.lines)
+                    Button(model.settles ? "Bring Anyway" : "Move Anyway") { model.close(.bring(checkoutRevision: revision)) }
                         .help("Move it though \(model.destination) lacks what is listed")
                 }
             }
@@ -347,7 +348,7 @@ struct BringDialog: View {
         switch kind {
         case .clone: "arrow.down.circle.fill"
         case .fetch: "arrow.triangle.2.circlepath.circle.fill"
-        case .thereOnly: "exclamationmark.triangle.fill"
+        case .thereOnly, .position: "exclamationmark.triangle.fill"
         case .folder: "folder.badge.questionmark"
         case .transcript: "text.bubble"
         case .running: "bolt.fill"
@@ -356,7 +357,7 @@ struct BringDialog: View {
 
     private static func tint(_ kind: Bring.Need.Kind) -> Color {
         switch kind {
-        case .clone, .fetch, .thereOnly, .folder: .orange
+        case .clone, .fetch, .position, .thereOnly, .folder: .orange
         case .transcript, .running: .secondary
         }
     }

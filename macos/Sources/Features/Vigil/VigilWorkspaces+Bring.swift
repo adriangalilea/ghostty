@@ -11,23 +11,28 @@ import VigilWire
 extension VigilWorkspaces {
     /// The `bring` workspace command, from the sidebar or `vigil move`.
     func bring(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
-        guard let device = request.from, let host = VigilRemote.shared.host(device), let directory = VigilRemote.shared.sourceDirectory(device),
-              let whole = directory.live.first(where: { $0.name == request.session }) else {
+        guard let device = request.from, let host = VigilRemote.shared.host(device),
+              let held = VigilRemote.shared.sourceDirectory(device) else {
             return .failure(request, "not_found", "This Mac has not heard that workspace from that Mac.")
         }
-        guard let source = request.part.map({ whole.only($0, of: request.anchor) }) ?? whole else {
-            return .failure(request, "not_found", "That workspace has no such pane on that Mac.")
+        let reading: Bring.Source
+        do {
+            reading = try await Bring.source(in: held, request: request, unavailable: host.error) {
+                try await Task.detached(priority: .utility) {
+                    let bytes = try Local.Client(socket: VigilPaths.hub).call(device: device, .moveSource(request.session))
+                    return try JSONDecoder().decode(Directory.self, from: bytes)
+                }.value
+            }
+        } catch {
+            return .failure(request, "source_unknown", String(describing: error))
         }
+        let directory = reading.directory, whole = reading.whole, source = reading.selected
         let here = FileManager.default.homeDirectoryForCurrentUser.path
         let names = directory.conversationNames(of: source)
-        let members = Set(source.paneIds)
-        let revisions = directory.panes.filter { members.contains($0.key) }.compactMapValues { facts in
-            facts.moveRevision.map { Registry.Workspace.moveIdentity($0, glance: facts.glance) }
-        }
-        guard Set(revisions.keys) == members,
-              let digest = try? Registry.Workspace.moveDigest(label: whole.label, emoji: whole.emoji, cwd: whole.cwd, pinned: whole.pinned ?? false, revision: whole.layoutRevision,
-                                                               tabs: whole.tabs ?? [], facts: revisions) else {
-            return .failure(request, "source_unknown", "The home Mac has not published a complete version of these panes. Refresh it before moving them.")
+        let revisions = reading.revisions
+        guard let digest = try? Registry.Workspace.moveDigest(label: whole.label, emoji: whole.emoji, cwd: whole.cwd, pinned: whole.pinned ?? false,
+                                                               revision: whole.layoutRevision, tabs: whole.tabs ?? [], facts: revisions) else {
+            return .failure(request, "source_unknown", "Could not encode the source workspace for transfer.")
         }
         for entry in (source.tabs ?? []).flatMap(\.members) {
             let pane = entry.id
@@ -44,6 +49,18 @@ extension VigilWorkspaces {
         guard !(source.tabs ?? []).flatMap(\.members).contains(where: { $0.from?.ticket != nil && $0.dormant == true && $0.from?.accepted != true }) else {
             return .failure(request, "moving", "A pane is still waiting for its previous move.")
         }
+        func overlapsPendingMove() -> Bool {
+            let originals = Set(source.paneIds)
+            if (Array(workspaces.values) + Array(graveyard.values)).contains(where: { entry in
+                entry.tabs.flatMap(\.members).contains { pane in
+                    pane.from.map { $0.device == device && originals.contains($0.pane) && $0.accepted == true } == true
+                }
+            }) { return true }
+            return incomingMoves.values.contains {
+                $0.source == device && $0.refusal == nil && !originals.isDisjoint(with: $0.panes.keys)
+            }
+        }
+        guard !overlapsPendingMove() else { return .failure(request, "moving", "A move of these panes is already staged here.") }
         let receiver = try? await moveDevice()
         guard let receiver else { return .failure(request, "unavailable", "This Mac cannot identify itself to the source.") }
         let name = newWorkspaceId()
@@ -101,6 +118,13 @@ extension VigilWorkspaces {
             }.value
             guard answer.failed.isEmpty else { return .failure(request, "resume_failed", answer.failed.values.sorted().joined(separator: "\n")) }
             lines = answer.lines
+            let revision = Bring.checkoutRevision(lines)
+            if !revision.isEmpty && revision != request.revision {
+                let differences = Bring.standing(lines).filter { item in
+                    item.panes.contains { $0.checkoutNeeds.contains(item.need) }
+                }.map(\.need.text).joined(separator: "\n")
+                return .failure(request, "checkout_changed", differences + "\nReview the move and choose Bring Anyway, or use --without to accept the destination checkout.")
+            }
         } catch {
             lifecycleLog.error("not brought: vigil-agent did not write its resume pointers", ["workspace": source.name, "from": host.name, "err": error])
             return .failure(request, "agent_unreachable", "vigil-agent did not answer, so nothing was brought (\(error)).")
@@ -114,20 +138,28 @@ extension VigilWorkspaces {
             return .failure(request, "commit_failed", "The destination differs: " + difference)
         }
         let proofs = Dictionary(uniqueKeysWithValues: lines.compactMap { line in line.proof.map { (line.pane, $0) } })
-        guard Set(lines.map(\.pane)) == members,
+        guard Set(lines.map(\.pane)) == Set(source.paneIds),
               lines.allSatisfy({ $0.conversation == nil || ($0.folderHere && $0.proof?.files?.isEmpty == false) }) else {
             return .failure(request, "copy_incomplete", "The destination has no usable checkpoint for every conversation. The source is still open.")
         }
+        let conversations = Set(proofs.values.flatMap { proof in (proof.files ?? [:]).keys.map { proof.agent + "/" + $0 } })
+        guard !incomingMoves.values.contains(where: { ticket in
+            ticket.refusal == nil && (ticket.request.moved?.transcripts ?? [:]).contains { original, proof in
+                guard let local = ticket.panes[original] else { return true }
+                if ticket.accepted && locate(local) == nil && memberMark(local) == .clean { return false }
+                return (proof.files ?? [:]).keys.contains { conversations.contains(proof.agent + "/" + $0) }
+            }
+        }) else { return .failure(request, "moving", "A transfer of this conversation is already in progress here.") }
         var move = WorkspaceCommand.Request.Moved(panes: source.paneIds, mac: Host.current().localizedName ?? "another Mac", transcripts: proofs)
         move.device = receiver
         move.arrival = name
         move.ticket = request.id
         let mapping = Dictionary(uniqueKeysWithValues: session.tabs.flatMap(\.members).compactMap { pane in pane.from.map { ($0.pane, pane.id) } })
         move.arrivals = mapping
-        let release = WorkspaceCommand.Request(id: request.id, session: source.name, revision: digest, operation: "release_move", anchor: "", moved: move)
+        let release = WorkspaceCommand.Request(id: request.id, session: source.name, revision: digest, operation: "release_move_v2", anchor: "", moved: move)
         let folders = Dictionary(uniqueKeysWithValues: session.tabs.flatMap(\.members).map { ($0.id, $0.cwd) })
-        var ticket = IncomingMove(source: device, request: release, panes: mapping, folders: folders)
-        ticket.seenAt = host.received
+        let ticket = IncomingMove(source: device, request: release, panes: mapping, folders: folders)
+        guard !overlapsPendingMove() else { return .failure(request, "moving", "A move of these panes is already staged here.") }
         do { try ticket.save() } catch { return .failure(request, "commit_failed", "The handoff request could not be saved: \(error)") }
         guard admit(session, "brought") else {
             return .failure(request, "commit_failed", "This Mac's registry already lists that workspace's name or one of its panes; nothing was brought.")
@@ -158,7 +190,7 @@ extension VigilWorkspaces {
     /// restarting and a lost reply. Only the source can release these exact pane ids.
     struct IncomingMove: Codable {
         let source: String
-        let request: WorkspaceCommand.Request
+        var request: WorkspaceCommand.Request
         let panes: [String: String]
         let folders: [String: String]
         var requested = false
@@ -171,9 +203,10 @@ extension VigilWorkspaces {
         var cursor: Int?
         var page: Bring.Page?
         var finalPage: Bool?
-        var seenAt: Date?
-        var lastReply: Date?
         var granted: Bool?
+        var parent: UUID?
+        var withdrawals: [Withdrawal]?
+        static func completion(_ id: UUID) -> URL { folder.appendingPathComponent(id.uuidString + ".done") }
         func openFile(_ pane: String) -> URL { Self.folder.appendingPathComponent(request.id.uuidString + "." + pane + ".open") }
         static var folder: URL { VigilPaths.root.appendingPathComponent("incoming-moves") }
         var file: URL { Self.folder.appendingPathComponent(request.id.uuidString + ".json") }
@@ -183,25 +216,143 @@ extension VigilWorkspaces {
         }
     }
 
+    struct MoveSuccessor: Codable, Sendable, Equatable {
+        let device: String
+        let workspace: String
+        let pane: String
+        let ticket: UUID
+
+        var valid: Bool { [device, workspace, pane].allSatisfy(Open.validPane) }
+    }
+
+    struct Withdrawal: Codable {
+        let id: UUID
+        let old: String
+        let next: MoveSuccessor
+    }
+
+    private static var successorsFolder: URL { VigilPaths.root.appendingPathComponent("move-successors") }
+
+    /// A pane id is never reused. Keep its first onward grant even after the
+    /// source burial is acknowledged. A later withdrawal follows that same
+    /// chain until it reaches the pane that actually inherited the work.
+    private func successors(of move: WorkspaceCommand.Request.Moved, recording: Bool) throws -> [String: MoveSuccessor] {
+        guard let device = move.device, let workspace = move.arrival, let ticket = move.ticket,
+              let arrivals = move.arrivals else { throw WireError.invalid("missing onward pane identities") }
+        var next: [String: MoveSuccessor] = [:]
+        let folder = Self.successorsFolder
+        if recording { try Durable.folder(folder) }
+        for pane in move.panes {
+            guard let arrival = arrivals[pane], Open.validPane(pane) else { throw WireError.invalid("missing onward pane") }
+            let intended = MoveSuccessor(device: device, workspace: workspace, pane: arrival, ticket: ticket)
+            let file = folder.appendingPathComponent(pane)
+            if recording, try Durable.decode(MoveSuccessor.self, file).get() == nil {
+                try Durable.replace(file, with: JSONEncoder().encode(intended))
+            }
+            guard let edge = try Durable.decode(MoveSuccessor.self, file).get(), edge.valid else {
+                throw WireError.refused("The source has no durable onward receipt for " + pane)
+            }
+            if edge.device != device || edge.pane != arrival { next[pane] = edge }
+        }
+        return next
+    }
+
     func loadIncomingMoves() {
         do {
             try Durable.folder(IncomingMove.folder)
             for file in try FileManager.default.contentsOfDirectory(at: IncomingMove.folder, includingPropertiesForKeys: nil) where file.pathExtension == "json" {
                 do {
-                    let ticket = try JSONDecoder().decode(IncomingMove.self, from: Data(contentsOf: file))
+                    var ticket = try JSONDecoder().decode(IncomingMove.self, from: Data(contentsOf: file))
+                    if ticket.request.operation == "release_move", var move = ticket.request.moved {
+                        let old = ticket.request
+                        move.arrivals = ticket.panes
+                        ticket.request = .init(id: old.id, issuedAt: old.issuedAt, session: old.session, revision: old.revision,
+                                               operation: "release_move_v2", anchor: "", moved: move)
+                        guard ticket.file.lastPathComponent == file.lastPathComponent, ticket.request.refusal == nil, move.ticket == old.id else {
+                            throw WireError.invalid("Unreadable identities in the saved handoff.")
+                        }
+                        try ticket.save()
+                    }
                     guard ticket.file.lastPathComponent == file.lastPathComponent,
-                          ticket.request.operation == "release_move", ticket.request.refusal == nil,
+                          ticket.request.operation == "release_move_v2", ticket.request.refusal == nil,
                           ticket.request.moved?.ticket == ticket.request.id else {
                         lifecycleLog.error("invalid incoming move", ["file": file.path, "why": ticket.request.refusal ?? "ticket identity"])
                         continue
                     }
-                    if !ticket.requested, registryRead == .current, ticket.panes.values.allSatisfy({ locate($0) == nil }) {
+                    if ticket.parent == nil, (!ticket.requested || ticket.refusal != nil), registryRead == .current,
+                       ticket.panes.values.allSatisfy({ locate($0) == nil }) {
+                        for pane in ticket.panes.values { try Durable.remove(ticket.openFile(pane)) }
                         try Durable.remove(ticket.file)
                     } else { incomingMoves[ticket.request.id] = ticket }
                 } catch { lifecycleLog.error("unreadable incoming move", ["file": file.path, "err": error]) }
             }
         } catch { lifecycleLog.error("incoming moves could not be loaded", ["err": error]) }
-        for device in Set(incomingMoves.values.map(\.source)) { resumeMoves(from: device) }
+        let sources = Set(incomingMoves.values.map(\.source))
+        for device in sources.union(graveyard.values.compactMap { $0.moveCheckpoint?.device }) {
+            if !moveReachable(device) { moveContact(device, waiting: true) }
+        }
+        for device in sources { resumeMoves(from: device) }
+    }
+
+    func moveContact(_ device: String, waiting: Bool = false) {
+        if !waiting { moveProbes[device] = nil; setMoveOffline(device, false); return }
+        guard incomingMoves.values.contains(where: { $0.source == device }) ||
+                graveyard.values.contains(where: { $0.moveCheckpoint?.device == device }) else { return }
+        guard moveOffline[device] == nil, moveProbes[device] == nil else { return }
+        let token = UUID()
+        moveProbes[device] = token
+        Task { @MainActor in
+            let offline: Bool
+            do { try await probeMove(device); offline = false }
+            catch WireError.offline { offline = true }
+            catch { offline = false }
+            guard moveProbes[device] == token else { return }
+            moveProbes[device] = nil
+            setMoveOffline(device, offline)
+        }
+    }
+
+    private func setMoveOffline(_ device: String, _ offline: Bool) {
+        guard (moveOffline[device] != nil) != offline else { return }
+        moveOffline[device] = offline ? Date() : nil
+        for ticket in incomingMoves.values where ticket.source == device {
+            if !offline { moveWaiting[ticket.request.id] = nil }
+            updateMoveNotes(ticket)
+        }
+        NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+    }
+
+    private func updateMoveNotes(_ ticket: IncomingMove) {
+        for pane in ticket.panes.values where waitingForMove(pane) { showMoveNote(pane) }
+    }
+
+    func canTakeOver(_ ticket: IncomingMove) -> Bool {
+        guard moveOffline[ticket.source] != nil, !ticket.accepted, ticket.takeover != true,
+              ticket.released == nil, ticket.refusal == nil, ticket.superseded != true else { return false }
+        let originals = Set(ticket.panes.keys)
+        return !incomingMoves.values.contains { other in
+            other.request.id != ticket.request.id && other.source == ticket.source && other.refusal == nil &&
+                !originals.isDisjoint(with: other.panes.keys) &&
+                (other.requested || other.panes.values.contains { locate($0)?.buried == false })
+        }
+    }
+
+    func canTakeBack(_ burial: Workspace) -> Bool {
+        guard let move = burial.moveCheckpoint, let device = move.device, moveOffline[device] != nil,
+              move.forcedWithdrawal != true, move.returnOf == nil, move.arrivals != nil,
+              !recoveredMoveBurials.contains(burial.name) else { return false }
+        return ownedPaneIds(burial).allSatisfy { memberMark($0) == .clean && !Self.daemonAlive($0) }
+    }
+
+    /// Re-probe after confirmation. Any positive contact while it was open
+    /// invalidates the original offline episode, even if a later dial fails.
+    func stillOffline(_ device: String, since: Date) async -> Bool {
+        guard moveOffline[device] == since else { return false }
+        do { try await probeMove(device) }
+        catch WireError.offline { return moveOffline[device] == since }
+        catch {}
+        moveContact(device)
+        return false
     }
 
     func resumeMoves(from device: String) {
@@ -228,6 +379,7 @@ extension VigilWorkspaces {
                 }
                 guard moveEpoch[id] == epoch, let pending = incomingMoves[id], pending.refusal == nil,
                       pending.requested || matchesArrival(pending) else { return }
+                if pending.withdrawals?.contains(where: { incomingMoves[$0.id] != nil }) == true { return }
                 // A disconnected peer wakes this work on its next directory.
                 // An unanswered RPC or a replica still catching up while online
                 // retries only this outstanding transfer, with a bounded backoff.
@@ -245,6 +397,9 @@ extension VigilWorkspaces {
     private func matchesArrival(_ ticket: IncomingMove) -> Bool {
         guard !ticket.panes.isEmpty, !conflictingOwnership(Set(ticket.panes.values)), Set(ticket.panes.keys) == Set(ticket.request.moved?.panes ?? []),
               Set(ticket.panes.values).count == ticket.panes.count else { return false }
+        if ticket.parent != nil {
+            return ticket.request.moved?.priorGrant != nil && ticket.takeover == true && ticket.granted == true && ticket.accepted
+        }
         return ticket.panes.allSatisfy { old, new in
             guard let pane = registered(new) else { return ticket.requested && PaneFence.provesClose(memberMark(new)) }
             guard let from = pane.from else { return false }
@@ -266,6 +421,11 @@ extension VigilWorkspaces {
             try current()
             try ticket.save()
             incomingMoves[request.id] = ticket
+            updateMoveNotes(ticket)
+        }
+        func command(_ command: WorkspaceCommand.Request) async throws -> VigilSessionControl.Reply {
+            if ticket.parent != nil, ticket.source == request.moved?.device { return await handoffCommand(command) }
+            return try await moveCommand(ticket.source, command)
         }
         let staged = request.moved?.transcripts ?? [:]
         func panes(_ proofs: [String: Bring.TranscriptProof]) throws -> [Bring.Pane] {
@@ -292,9 +452,16 @@ extension VigilWorkspaces {
                     var query = request
                     query.offset = ticket.cursor
                     query.takenOver = forced ? true : nil
-                    let reply = try await moveCommand(ticket.source, query)
+                    query.conflictBase = forced ? ticket.localCheckpoint : nil
+                    let reply: VigilSessionControl.Reply
+                    do {
+                        reply = try await command(query)
+                    } catch WireError.offline {
+                        moveContact(ticket.source, waiting: true)
+                        throw WireError.offline
+                    }
+                    moveContact(ticket.source)
                     try current()
-                    ticket.lastReply = Date()
                     if ["source_changed", "unsupported_operation", "invalid_request"].contains(reply.code) {
                         ticket.refusal = reply.message
                         try save()
@@ -326,16 +493,24 @@ extension VigilWorkspaces {
                 }
             }
         }
-        if !forced && !ticket.accepted { try await receive() }
+        if !forced && !ticket.accepted {
+            if ticket.released == nil && !staged.isEmpty {
+                var preflight = Bring.Question(panes: [], commit: false, checkpoints: staged)
+                preflight.handoff = .prepare
+                let prepared = try await readMove(preflight)
+                guard prepared.failed.isEmpty else { throw WireError.refused(prepared.failed.values.joined(separator: ", ")) }
+                try current()
+            }
+            try await receive()
+        }
         if !ticket.accepted {
-            if forced, ticket.localCheckpoint == nil, !staged.isEmpty {
+            if forced, !staged.isEmpty {
                 let observed = try await readMove(.init(panes: try panes(staged), commit: false, compareTranscripts: true, requireStoppedWriter: true))
                 let here = Dictionary(uniqueKeysWithValues: observed.lines.compactMap { line in line.proof.map { (line.pane, $0) } })
                 guard observed.failed.isEmpty, Set(here.keys) == Set(staged.keys), here.allSatisfy({ pane, proof in
                     proof.valid && proof.agent == staged[pane]?.agent && proof.start == staged[pane]?.start
                 }) else { throw WireError.refused("This Mac has no complete local conversation to take over.") }
                 ticket.localCheckpoint = here
-                try save()
             }
             let final = forced ? ticket.localCheckpoint ?? [:] : ticket.released ?? [:]
             if !final.isEmpty {
@@ -345,6 +520,12 @@ extension VigilWorkspaces {
                 guard answer.failed.isEmpty, Set(answer.lines.map(\.pane)) == Set(final.keys),
                       answer.lines.allSatisfy({ $0.folderHere && $0.proof == final[$0.pane] })
                 else { throw WireError.refused("The saved conversation could not be verified on this Mac.") }
+            }
+            if !forced && !final.isEmpty {
+                var accepted = Bring.Question(panes: [], commit: false, checkpoints: final)
+                accepted.handoff = .acceptSource(ticket.source)
+                let answer = try await readMove(accepted)
+                guard answer.failed.isEmpty else { throw WireError.refused(answer.failed.values.joined(separator: ", ")) }
             }
             ticket.accepted = true
             try save()
@@ -383,15 +564,63 @@ extension VigilWorkspaces {
         }
         if forced && (ticket.released == nil || ticket.finalPage == false || ticket.page != nil) { try await receive() }
         try current()
-        var ack = WorkspaceCommand.Request(session: request.session, revision: request.revision, operation: "ack_move", anchor: "", moved: request.moved)
-        ack.takenOver = ticket.takeover
-        let reply = try await moveCommand(ticket.source, ack)
-        guard reply.ok, reply.id == ack.id, reply.code == "acknowledged" else { throw WireError.refused(reply.message) }
+        if ticket.withdrawals == nil {
+            var ack = WorkspaceCommand.Request(session: request.session, revision: request.revision, operation: "ack_move_v2", anchor: "", moved: request.moved)
+            ack.takenOver = ticket.takeover
+            let reply = try await command(ack)
+            moveContact(ticket.source)
+            try current()
+            guard reply.ok, reply.id == ack.id, reply.code == "acknowledged" else { throw WireError.refused(reply.message) }
+            let onward = reply.successors ?? [:]
+            guard (forced || onward.isEmpty), onward.allSatisfy({ ticket.panes[$0.key] != nil && $0.value.valid }) else {
+                throw WireError.invalid("unexpected onward grant")
+            }
+            ticket.withdrawals = onward.map { Withdrawal(id: UUID(), old: $0.key, next: $0.value) }
+            try save()
+        }
+        for leg in ticket.withdrawals ?? [] {
+            if Durable.read(IncomingMove.completion(leg.id), limit: 0) == .data(Data()) { continue }
+            if incomingMoves[leg.id] == nil {
+                guard let destination = ticket.panes[leg.old], let home = request.moved else { throw WireError.invalid("missing withdrawal destination") }
+                let next = leg.next
+                var move = WorkspaceCommand.Request.Moved(panes: [next.pane], mac: home.mac)
+                move.arrival = home.arrival
+                move.device = home.device
+                move.arrivals = [next.pane: destination]
+                move.ticket = leg.id
+                move.priorGrant = next.ticket
+                var order = WorkspaceCommand.Request(id: leg.id, session: next.workspace, revision: request.revision, operation: "release_move_v2", anchor: "", moved: move)
+                order.takenOver = true
+                var downstream = IncomingMove(source: next.device, request: order, panes: [next.pane: destination], folders: [:])
+                downstream.parent = request.id
+                downstream.requested = true
+                downstream.takeover = true
+                downstream.accepted = true
+                downstream.granted = true
+                try downstream.save()
+                incomingMoves[leg.id] = downstream
+            }
+            resumeMoves(from: leg.next.device)
+            throw WireError.refused("Waiting for the onward copy to retire.")
+        }
+        if forced, let claim = ticket.localCheckpoint, !claim.isEmpty {
+            var release = Bring.Question(panes: [], commit: false, checkpoints: claim)
+            release.handoff = .relinquish(request.id)
+            let answer = try await readMove(release)
+            guard answer.failed.isEmpty else { throw WireError.refused("Could not release the completed takeover reservation.") }
+        }
+        try current()
+        if ticket.parent != nil { try Durable.replace(IncomingMove.completion(request.id), with: Data()) }
+        for pane in ticket.panes.values { try Durable.remove(ticket.openFile(pane)) }
         try Durable.remove(ticket.file)
         incomingMoves[request.id] = nil
         moveDelay[request.id] = nil
         moveWaiting[request.id] = nil
         moveEpoch[request.id] = nil
+        for leg in ticket.withdrawals ?? [] { try Durable.remove(IncomingMove.completion(leg.id)) }
+        if let parent = ticket.parent, let home = incomingMoves[parent]?.source {
+            Task { @MainActor in resumeMoves(from: home) }
+        }
     }
 
     func queueMoveOpen(_ pane: String) {
@@ -403,18 +632,14 @@ extension VigilWorkspaces {
         catch { lifecycleLog.error("could not save queued open", ["pane": pane, "err": error]) }
     }
 
-    func takeOverHere(_ pane: String) {
+    func takeOverHere(_ pane: String, since: Date) async {
+        guard let source = registered(pane)?.from?.device, await stillOffline(source, since: since) else { return }
         guard let id = registered(pane)?.from?.ticket, var ticket = incomingMoves[id],
-              ticket.superseded != true, !ticket.accepted, matchesArrival(ticket), locate(pane)?.buried == false else { return }
+              canTakeOver(ticket), matchesArrival(ticket), locate(pane)?.buried == false else { return }
         do {
             queueMoveOpen(pane)
             ticket.takeover = true
             ticket.localCheckpoint = nil
-            ticket.refusal = nil
-            ticket.released = nil
-            ticket.finalPage = nil
-            ticket.page = nil
-            ticket.cursor = nil
             try ticket.save()
             incomingMoves[id] = ticket
             moveEpoch[id] = UUID()
@@ -423,11 +648,14 @@ extension VigilWorkspaces {
         } catch { reportIncompleteMove(ticket.request.session, String(describing: error)) }
     }
 
-    func recoverStoppedMove(_ name: String) async throws {
+    func recoverStoppedMove(_ name: String, since: Date) async throws {
+        guard let device = graveyard[name]?.moveCheckpoint?.device, await stillOffline(device, since: since) else {
+            throw WireError.refused("The destination is no longer confirmed offline.")
+        }
         guard let burial = graveyard[name], let sent = burial.moveCheckpoint, let original = sent.ticket,
               let device = sent.device, let remoteName = sent.arrival, let arrivals = sent.arrivals,
               Set(arrivals.keys) == ownedPaneIds(burial), !conflictingOwnership(ownedPaneIds(burial)),
-              !recoveredMoveBurials.contains(name), ownedPaneIds(burial).allSatisfy({ memberMark($0) == .clean && !Self.daemonAlive($0) }),
+              canTakeBack(burial),
               acceptingMove.insert(original).inserted else { throw WireError.refused("The source transfer is busy or its panes have not stopped.") }
         defer { acceptingMove.remove(original) }
         let id = UUID()
@@ -470,7 +698,7 @@ extension VigilWorkspaces {
         }
         let answer = try await readMove(.init(panes: questions, commit: true, compareTranscripts: true, requireStoppedWriter: true))
         let proofs = Dictionary(uniqueKeysWithValues: answer.lines.compactMap { line in line.proof.map { (line.pane, $0) } })
-        guard answer.failed.isEmpty, Set(proofs.keys) == Set(questions.map(\.pane)), graveyard[name]?.moveCheckpoint == sent
+        guard answer.failed.isEmpty, Set(proofs.keys) == Set(questions.map(\.pane)), graveyard[name]?.moveCheckpoint == sent, moveOffline[device] == since
         else { throw WireError.refused("Could not recover the stopped conversations.") }
         var move = WorkspaceCommand.Request.Moved(panes: mapping.keys.sorted(), mac: Host.current().localizedName ?? "another Mac", transcripts: proofs)
         move.device = me
@@ -478,7 +706,10 @@ extension VigilWorkspaces {
         move.arrivals = mapping
         move.returnOf = original
         move.ticket = id
-        let request = WorkspaceCommand.Request(id: id, session: remoteName, revision: String(repeating: "0", count: 64), operation: "release_move", anchor: "", moved: move)
+        let request = WorkspaceCommand.Request(id: id, session: remoteName, revision: String(repeating: "0", count: 64), operation: "release_move_v2", anchor: "", moved: move)
+        // The original ids must still lead to their first grant if a third
+        // Mac reports an offline decision after this return.
+        _ = try successors(of: sent, recording: true)
         var ticket = IncomingMove(source: device, request: request, panes: mapping, folders: folders)
         ticket.takeover = true
         try ticket.save()
@@ -557,6 +788,7 @@ extension VigilWorkspaces {
         let owners = Set(ids.compactMap { locate($0)?.owner })
         var saved = move
         saved.histories = histories
+        saved.forcedWithdrawal = true
         var withdrawn: [Registry.Tab] = []
         var ends: [String: PaneEnd] = [:]
         for pane in ids {
@@ -629,6 +861,7 @@ extension VigilWorkspaces {
         guard let move = request.moved, let ticket = move.ticket, move.final == nil else {
             return .failure(request, "invalid_request", "A handoff requires a ticket.")
         }
+        if let caller = move.device { moveContact(caller) }
         guard acceptingMove.insert(ticket).inserted else { return .failure(request, "busy", "This handoff is in progress.") }
         defer { acceptingMove.remove(ticket) }
         func record() -> Workspace? {
@@ -639,9 +872,12 @@ extension VigilWorkspaces {
             saved?.final = nil
             saved?.ends = nil
             saved?.histories = nil
+            saved?.forcedWithdrawal = nil
+            if saved?.arrivals == nil { saved?.arrivals = move.arrivals }
             return saved == move && ownedPaneIds(session) == Set(move.panes)
         }
-        if request.operation == "ack_move" {
+        if request.operation == "ack_move_v2" {
+            let onward: [String: MoveSuccessor]
             if let record = record() {
                 guard same(record), record.moveCheckpoint?.final != nil,
                       !conflictingOwnership(ownedPaneIds(record)), ownedPaneIds(record).allSatisfy({ memberMark($0) == .clean }) else {
@@ -650,7 +886,6 @@ extension VigilWorkspaces {
                 var releases: [UUID: [String: Bring.TranscriptProof]] = [:]
                 for pane in record.tabs.flatMap(\.members) {
                     if let proof = record.moveCheckpoint?.final?[pane.id] {
-                        if let owner = pane.from?.ticket { releases[owner, default: [:]][pane.id] = proof }
                         if request.takenOver == true { releases[ticket, default: [:]][pane.id] = proof }
                     }
                 }
@@ -661,19 +896,27 @@ extension VigilWorkspaces {
                         return .failure(request, "waiting", "The source transcript reservation could not be released.")
                     }
                 }
+                do { onward = try successors(of: move, recording: true) }
+                catch { return .failure(request, "waiting", String(describing: error)) }
                 dropBurial(record.name)
+            } else {
+                do { onward = try successors(of: move, recording: false) }
+                catch { return .failure(request, "waiting", String(describing: error)) }
             }
             guard persist(publish: false, durable: true) else { return .failure(request, "waiting", "Could not save acknowledgement.") }
             if let original = move.returnOf, let previous = incomingMoves[original], previous.superseded == true {
                 do { try Durable.remove(previous.file); incomingMoves[original] = nil }
                 catch { return .failure(request, "waiting", "The superseded transfer receipt could not be removed.") }
             }
-            return .init(id: request.id, ok: true, code: "acknowledged", message: "Transfer acknowledged.")
+            return .init(id: request.id, ok: true, code: "acknowledged", message: "Transfer acknowledged.", successors: onward.isEmpty ? nil : onward)
         }
         if record() == nil {
             guard request.id == ticket, request.takenOver == true || workspaces[request.session].map({ Set(move.panes).isSubset(of: ownedPaneIds($0)) }) == true else {
                 return .failure(request, "source_changed", "This workspace no longer owns the requested panes.")
             }
+            if let prior = move.priorGrant, !move.panes.allSatisfy({ pane in
+                registered(pane)?.from?.ticket == prior || (locate(pane) == nil && memberMark(pane) == .clean)
+            }) { return .failure(request, "source_changed", "The onward pane does not belong to the stated grant.") }
             if let original = move.returnOf {
                 guard request.takenOver == true, move.panes.allSatisfy({ pane in
                     guard let from = registered(pane)?.from else { return memberMark(pane) == .clean }
@@ -687,7 +930,22 @@ extension VigilWorkspaces {
                 }
             }
             var histories: [String: WorkspaceCommand.Request.Moved.History] = [:]
-            do { for pane in move.panes { histories[pane] = try historyAtHome(pane) } }
+            do {
+                var forwarded = Set<String>()
+                for pane in move.panes {
+                    if request.takenOver == true, locate(pane) == nil, memberMark(pane) == .clean,
+                       let onward = try Durable.decode(MoveSuccessor.self, Self.successorsFolder.appendingPathComponent(pane)).get() {
+                        guard onward.valid, !Self.daemonAlive(pane) else { throw WireError.refused("Invalid onward grant for " + pane) }
+                        forwarded.insert(pane)
+                    } else { histories[pane] = try historyAtHome(pane) }
+                }
+                // Already transferred in full. The onward owner now holds the
+                // stopped history and any later work. A native transcript on
+                // this Mac may since belong to an unrelated writer.
+                if forwarded.count == move.panes.count {
+                    return .init(id: request.id, ok: true, code: "released", message: "The panes already left this Mac.", released: [:])
+                }
+            }
             catch { return .failure(request, "waiting", "The source could not read its conversation identities.") }
             if request.takenOver == true {
                 do { try withdrawTakenOver(request, move: move, histories: histories) }
@@ -705,10 +963,11 @@ extension VigilWorkspaces {
                         return .failure(request, "checkpoint_unavailable", "The source could not read the staged conversation checkpoint.")
                     }
                     for line in answer.lines {
-                        guard let proof = line.proof, let original = proofs[line.pane],
-                              proof.files == original.files, proof.digest == original.digest, proof.start == original.start,
-                              let files = line.checkedFiles else {
+                        guard let proof = line.proof, let original = proofs[line.pane], let files = line.checkedFiles else {
                             return .failure(request, "checkpoint_unavailable", "The source could not verify the staged conversation prefix.")
+                        }
+                        guard proof.files == original.files, proof.digest == original.digest, proof.start == original.start else {
+                            return .failure(request, "source_changed", "The source history differs from the staged checkpoint. The source stays open.")
                         }
                         checked[line.pane] = files
                     }
@@ -729,6 +988,15 @@ extension VigilWorkspaces {
         }
         guard let session = record(), same(session), !recoveredMoveBurials.contains(session.name),
               !conflictingOwnership(ownedPaneIds(session)) else { return .failure(request, "waiting", "No matching committed source transfer.") }
+        if request.takenOver == true && session.moveCheckpoint?.forcedWithdrawal != true {
+            graveyard[session.name]?.moveCheckpoint?.forcedWithdrawal = true
+            guard persist(publish: false, durable: true) else {
+                graveyard[session.name]?.moveCheckpoint?.forcedWithdrawal = nil
+                return .failure(request, "waiting", "Could not save the takeover decision.")
+            }
+        } else if session.moveCheckpoint?.forcedWithdrawal == true && request.takenOver != true {
+            return .failure(request, "source_changed", "This move is completing an explicit takeover.")
+        }
         stopForHandoff(session.name)
         guard move.panes.allSatisfy({ memberMark($0) == .clean && !Self.daemonAlive($0) }) else {
             return .failure(request, "waiting", "Waiting for the source processes to stop.")
@@ -749,15 +1017,18 @@ extension VigilWorkspaces {
             }
             guard Set(final.keys) == Set(histories.keys), let now = record(), same(now) else { return .failure(request, "waiting", "The source transfer changed.") }
             graveyard[session.name]?.moveCheckpoint?.final = final
+            guard persist(publish: false, durable: true) else {
+                graveyard[session.name]?.moveCheckpoint?.final = nil
+                return .failure(request, "waiting", "Could not save the final handoff receipt.")
+            }
         }
-        guard persist(publish: false, durable: true) else { return .failure(request, "waiting", "Could not save the final handoff receipt.") }
         guard let final = graveyard[session.name]?.moveCheckpoint?.final else { return .failure(request, "waiting", "Final record missing.") }
         var reply = VigilSessionControl.Reply(id: request.id, ok: true, code: "released", message: "The source is stopped.", released: final)
         if !final.isEmpty {
             let panes = final.map { Bring.Pane(pane: $0.key, agent: $0.value.agent, conversation: $0.value.start, cwd: NSHomeDirectory(), name: nil) }
             var q = Bring.Question(panes: panes, commit: false, checkpoints: final)
             do {
-                if request.takenOver == true {
+                if request.takenOver == true && (request.offset ?? 0) == 0 {
                     q.handoff = .holdOrigin(ticket)
                     let result = try await readMove(q)
                     guard result.failed.isEmpty else { throw WireError.refused("Could not reserve the stopped history.") }
@@ -770,12 +1041,7 @@ extension VigilWorkspaces {
                         let kept = try await readMove(q)
                         guard kept.failed.isEmpty else { throw WireError.refused(kept.failed.values.joined(separator: ", ")) }
                     }
-                    from = from.mapValues { old in
-                        var base = old
-                        let matching = final.values.first { $0.agent == old.agent && $0.start == old.start }
-                        base.files = old.files?.filter { matching?.files?[$0.key] == $0.value }
-                        return base
-                    }
+                    from = request.conflictBase ?? [:]
                 }
                 q.handoff = .page(from: from, offset: request.offset ?? 0, archive: request.takenOver == true ? ticket : nil)
                 let answer = try await readMove(q)
@@ -1000,8 +1266,8 @@ extension VigilWorkspaces {
                             workspace: workspace, anchor: anchor, part: part, mac: sourceHost?.name ?? "this Mac", target: target.name,
                             what: Self.moving(label, part), away: Self.away(sourceHost), home: targetHome ?? "/",
                             lines: answer.lines, read: { _ in try hub.bringSheet(device: device, ask) })
-                        manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) {
-                            guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, anchor: anchor, part: part) else {
+                        manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) { revision in
+                            guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, anchor: anchor, part: part, checkoutRevision: revision) else {
                                 return lifecycleLog.error("move: no order", ["workspace": workspace, "to": target.name])
                             }
                             manager.ask(RowHome(device: device, workspace: workspace), order.request, failing: "\(label) was not moved to \(target.name)")
@@ -1059,9 +1325,9 @@ extension VigilWorkspaces {
         let model = BringDialogModel(
             workspace: name, anchor: anchor, part: part, mac: host.name, target: nil, what: Self.moving(source.label, part),
             away: Self.away(host), home: here, lines: lines, read: read)
-        present(model, source: device, sourceHome: directory.home, targetHome: here) {
+        present(model, source: device, sourceHome: directory.home, targetHome: here) { revision in
             Task { @MainActor in
-                let reply = await VigilSessionControl.transact(.bring(name, from: device, anchor: anchor, part: part))
+                let reply = await VigilSessionControl.transact(.bring(name, from: device, anchor: anchor, part: part, checkoutRevision: revision))
                 guard !reply.ok || reply.code == "copied" else { return }
                 let alert = NSAlert()
                 alert.messageText = reply.ok ? "\(source.label) was copied" : "\(source.label) was not brought"
@@ -1077,7 +1343,7 @@ extension VigilWorkspaces {
     /// workspace's Mac (nil: this one), where what is only there is opened
     /// and read.
     private func present(_ model: BringDialogModel, source: String?, sourceHome: String?, targetHome: String?,
-                         move: @escaping () -> Void) {
+                         move: @escaping (String) -> Void) {
         // The sheet names a folder as the target would; its own Mac reads it
         // under its own home.
         model.there = { root in
@@ -1108,8 +1374,8 @@ extension VigilWorkspaces {
                 } else {
                     self.activatePane(name: workspace, paneId: pane, in: parent?.windowController as? TerminalController)
                 }
-            case .bring:
-                move()
+            case .bring(let revision):
+                move(revision)
             }
         }
         if let parent {
