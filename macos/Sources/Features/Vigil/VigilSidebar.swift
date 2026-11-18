@@ -364,6 +364,10 @@ final class VigilSidebarModel: ObservableObject {
             }
             rows = fresh
         }
+        let histories = VigilWorkspaces.shared.savedMoveHistories.values.sorted { $0.id.uuidString < $1.id.uuidString }
+        if histories != moveHistories { moveHistories = histories }
+        let warnings = VigilWorkspaces.shared.pendingMoveWarnings
+        if warnings != moveWarnings { moveWarnings = warnings }
         let freshBurials = VigilWorkspaces.shared.sidebarBurials()
         if freshBurials != burials { burials = freshBurials }
         let hint = VigilWorkspaces.shared.nextAskHint()
@@ -375,6 +379,8 @@ final class VigilSidebarModel: ObservableObject {
     @Published private(set) var followHint: VigilWorkspaces.AskHint?
 
     /// The sticky bottom tray: killed sessions living out their grace.
+    @Published private(set) var moveHistories: [VigilWorkspaces.SavedMoveHistory] = []
+    @Published private(set) var moveWarnings: [String] = []
     @Published private(set) var burials: [VigilWorkspaces.SidebarBurial] = []
 
     /// The tray's per-second countdown, and nothing else: re-derive the

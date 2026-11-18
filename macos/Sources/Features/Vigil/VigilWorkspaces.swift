@@ -493,6 +493,9 @@ class VigilWorkspaces {
     /// Only a failed dial reported by tether can establish an offline episode.
     var moveOffline: [String: Date] = [:]
     var moveProbes: [String: UUID] = [:]
+    var unpairedMoves = Set<String>()
+    var firstFailedProbe: [String: Date] = [:]
+    var moveOutagesFile: URL { VigilPaths.root.appendingPathComponent("move-outages.json") }
     var probeMove: (String) async throws -> Void = { device in
         try await Task.detached(priority: .utility) {
             try Local.Client(socket: VigilPaths.hub).probe(device)
@@ -516,6 +519,13 @@ class VigilWorkspaces {
     var stoppingMoves = Set<String>()
     var moveDelay: [UUID: UInt64] = [:]
     var moveWaiting: [UUID: String] = [:]
+    struct SavedMoveHistory: Codable, Equatable, Identifiable {
+        let id: UUID
+        let workspace: String
+        var files: [String]
+    }
+    var savedMoveHistories: [UUID: SavedMoveHistory] = [:]
+    var savedMoveHistoriesFile: URL { VigilPaths.root.appendingPathComponent("saved-move-histories.json") }
     var recoveredMoveBurials = Set<String>()
     var movingCheckpoint: WorkspaceCommand.Request.Moved?
     var verifyingMoves = Set<String>()

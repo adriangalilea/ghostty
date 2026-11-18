@@ -144,7 +144,10 @@ extension VigilWorkspaces {
                 id: burial.name, name: burial.name, emoji: burial.emoji, label: burial.label,
                 remaining: max(0, Int(deadline.timeIntervalSinceNow)), waiting: deadline == .distantFuture,
                 conflict: !conflicts.isDisjoint(with: ownedPaneIds(burial)),
-                from: from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }, device: nil, mac: nil,
+                from: burial.moveCheckpoint?.ticket == nil
+                    ? from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }
+                    : "Waiting for " + (burial.movedTo ?? "the destination") + " to acknowledge this transfer",
+                device: nil, mac: nil,
                 closing: burial.closing != nil, recoverableMove: canTakeBack(burial))
         }
         let elsewhere = VigilRemote.shared.hosts.flatMap { host -> [SidebarBurial] in
@@ -486,10 +489,24 @@ extension VigilWorkspaces {
             persist()
             return
         }
+        if session.movedTo == nil {
+            do {
+                for pane in ids {
+                    let receipt = Self.closedHereFile(pane)
+                    try Durable.folder(receipt.deletingLastPathComponent())
+                    try Durable.create(receipt, with: Data())
+                }
+            } catch {
+                graveyardLog.error("could not record the completed local close", ["workspace": name, "err": error])
+                graveyardDeadlines[name] = Date().addingTimeInterval(Self.fenceRetry)
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.fenceRetry + 1) { [weak self] in self?.reapIfExpired(name) }
+                return
+            }
+        }
         dropBurial(name)
         graveyardLog.info("reaped", ["workspace": name, "panes": ids.sorted()])
         killDaemons(ids)
-        persist()
+        if persist(durable: true) { discardUndispatchedMoves(for: ids) }
     }
 
     /// The lifecycle service observes the first fence and may stop its daemon at once.

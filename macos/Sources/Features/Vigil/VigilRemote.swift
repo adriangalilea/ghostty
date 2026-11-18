@@ -163,7 +163,6 @@ final class VigilRemote: ObservableObject {
 
     private func unfollowAll() {
         for fd in following.values { shutdown(fd, SHUT_RDWR) }
-        for device in following.keys { VigilWorkspaces.shared.moveContact(device) }
         followIDs.removeAll()
         following.removeAll()
         for fd in followingMachine.values { shutdown(fd, SHUT_RDWR) }
@@ -323,9 +322,11 @@ final class VigilRemote: ObservableObject {
 
     private func peers(_ peers: [Local.Peer]) {
         let wanted = Set(peers.map(\.id))
+        for device in Set(hosts.map(\.device)).symmetricDifference(wanted) {
+            VigilWorkspaces.shared.moveContact(device, waiting: true, recheck: true)
+        }
         receivedDirectories = receivedDirectories.filter { wanted.contains($0.key) }
         for (device, fd) in following where !wanted.contains(device) {
-            VigilWorkspaces.shared.moveContact(device)
             followIDs[device] = nil
             following[device] = nil
             shutdown(fd, SHUT_RDWR)
@@ -381,7 +382,6 @@ final class VigilRemote: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.followIDs[device] == generation else { return }
                 self.followIDs[device] = nil
-                VigilWorkspaces.shared.moveContact(device)
                 self.following[device] = nil
                 self.failed(device, "this Mac's vigil-agent stopped")
             }

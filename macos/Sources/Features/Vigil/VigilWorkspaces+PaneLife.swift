@@ -159,15 +159,16 @@ extension VigilWorkspaces {
         let arrival = registered(pane)?.from
         if let id = arrival?.ticket, let ticket = incomingMoves[id], canTakeOver(ticket), let since = moveOffline[ticket.source] {
             let mac = arrival?.mac ?? "the source"
-            note(pane, VigilPaneNote(says: "Lost contact with " + mac, offers: "Take over here…",
-                 explains: "Resume this copy while the source is out of reach.", symbol: "arrow.right", takeover: true, lastContact: since))
+            note(pane, VigilPaneNote(says: "First failed check for " + mac, offers: "Take over here…",
+                 explains: unpairedMoves.contains(ticket.source) ? "Contact failed before the pairing was removed. This Mac can no longer check the source. Both copies may run." : "The source may still be writing. Recovery opens the verified local history.", symbol: "arrow.right", takeover: true, lastContact: since))
             return
         }
         let why = arrival?.ticket.flatMap { incomingMoves[$0]?.refusal }
         let released = arrival?.ticket.flatMap { incomingMoves[$0]?.released } != nil
-        let stage = released ? "Receiving the stopped pane's history" : "Moving from \(arrival?.mac ?? "another Mac")"
+        let recovering = arrival?.ticket.flatMap { incomingMoves[$0]?.takeover } == true
+        let stage = recovering ? "Opening this Mac's saved conversation" : released ? "Receiving the stopped pane's history" : "Moving from \(arrival?.mac ?? "another Mac")"
         note(pane, VigilPaneNote(says: why == nil ? stage : "Move refused",
-             offers: why == nil ? "Check move" : "Show source", explains: why ?? arrival?.ticket.flatMap { moveWaiting[$0] } ?? "This pane will open when its source stops and its final conversation is here.", symbol: "arrow.right"))
+             offers: why == nil ? "Check move" : "Show source", explains: why ?? arrival?.ticket.flatMap { moveWaiting[$0] } ?? (recovering ? "Opening from a verified local checkpoint. The other Mac may still be writing." : "This pane will open when its source stops and its final conversation is here."), symbol: "arrow.right"))
     }
 
     private static let opens = "Open a shell"
@@ -300,6 +301,9 @@ extension VigilWorkspaces {
                 alert.messageText = "Take over from " + arrival.mac + "?"
                 alert.informativeText = "This Mac cannot reach the source. It may still be working. Open the saved copy here and stop its other copy when contact returns? A running turn or tool can be interrupted. Later history from the other copy will be kept separately."
                 alert.addButton(withTitle: "Cancel")
+                if unpairedMoves.contains(arrival.device) {
+                    alert.informativeText = "Contact failed before this Mac lost its pairing. Its current state cannot be checked. Both copies may be writing until you pair the Macs again and the other copy retires."
+                }
                 alert.addButton(withTitle: "Take over here")
                 if alert.runModal() == .alertSecondButtonReturn {
                     Task { @MainActor in await takeOverHere(pane, since: since) }

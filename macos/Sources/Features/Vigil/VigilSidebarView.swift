@@ -358,6 +358,14 @@ struct VigilSidebarView: View {
                 }
             }
             .help("Do nothing: it waits in the queue (the orange keycap, the badge, ⌘⇧J). Summon it: a permission prompt or a question mid-turn brings the floating terminal in on that pane; answering moves to the next. Jump to it: this window switches to anything waiting that you haven't seen.")
+            ForEach(model.moveHistories) { history in
+                Button("Show preserved history for " + history.workspace) { VigilWorkspaces.shared.inspectMoveHistory(history) }
+                    .help("Open the saved files in Finder. A transfer interrupted between pages can contain a partial transcript.")
+            }
+            ForEach(model.moveWarnings, id: \.self) { warning in
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption).fixedSize(horizontal: false, vertical: true)
+            }
             VigilAsksRow()
         }
         .padding(.horizontal, 11)
@@ -424,6 +432,9 @@ struct VigilSidebarView: View {
                     alert.messageText = "Take this move back here?"
                     alert.informativeText = "The other Mac may still be working. This Mac will resume its saved history. When the other Mac returns its moved panes will stop and its later history will be kept separately."
                     alert.addButton(withTitle: "Cancel")
+                    if app.unpairedMoves.contains(device) {
+                        alert.informativeText = "Contact failed before this Mac lost its pairing. The destination may still be writing. Both copies may run until you pair the Macs again and their histories are reconciled."
+                    }
                     alert.addButton(withTitle: "Take back here")
                     guard alert.runModal() == .alertSecondButtonReturn else { return }
                     Task { @MainActor in
