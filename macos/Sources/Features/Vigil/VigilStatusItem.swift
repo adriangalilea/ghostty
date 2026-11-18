@@ -181,12 +181,12 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             let holder = NSMenuItem(title: "Conversations in Conflict (\(unheld.count))", action: nil, keyEquivalent: "")
             holder.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: nil)
             let list = NSMenu()
-            for conflict in unheld {
-                let item = NSMenuItem(title: "\(conflict.agentName) \(conflict.conversation.prefix(8)) · \(conflict.mac)…",
+            for entry in unheld {
+                let item = NSMenuItem(title: "\(entry.agent) \(entry.conversation.prefix(8)) · \(entry.mac)…",
                                       action: #selector(openConflict(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = conflict.conversation
-                item.toolTip = conflict.headline()
+                item.representedObject = entry.conversation
+                item.toolTip = entry.conflict?.headline() ?? "\(entry.mac)'s copy is not kept here"
                 list.addItem(item)
             }
             holder.submenu = list
@@ -234,10 +234,18 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func openConflict(_ sender: NSMenuItem) {
         guard let conversation = sender.representedObject as? String,
-              let conflict = VigilWorkspaces.shared.unheldConflicts()?.first(where: { $0.conversation == conversation }) else {
+              let entry = VigilWorkspaces.shared.unheldConflicts()?.first(where: { $0.conversation == conversation }) else {
             return lifecycleLog.warn("conflict no longer stands", ["conversation": sender.representedObject as? String ?? ""])
         }
         NSApp.activate()
+        guard let conflict = entry.conflict else {
+            // Nothing to show side by side: said, with where to read it.
+            let alert = NSAlert()
+            alert.messageText = "\(entry.mac)'s copy of \(entry.conversation.prefix(8)) is not kept here"
+            alert.informativeText = "The conversation stands in conflict, but this Mac holds no copy of \(entry.mac)'s to compare with yet. `vigil conflicts` lists it."
+            alert.runModal()
+            return
+        }
         VigilWorkspaces.shared.conflictSheet(conflict, pane: nil)
     }
 

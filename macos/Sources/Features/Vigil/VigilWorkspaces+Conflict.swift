@@ -116,7 +116,7 @@ extension VigilWorkspaces {
     /// The conflicts no pane here holds (`StandingConflicts`, vigil-agent's
     /// list), read when the menu opens; nil when the list does not read,
     /// which is said.
-    func unheldConflicts() -> [PaneConflict]? {
+    func unheldConflicts() -> [StandingConflicts.Entry]? {
         do { return try StandingConflicts.read().unheld } catch {
             lifecycleLog.error("conflicts list not read: the menu lists none", ["err": error])
             return nil
@@ -132,18 +132,19 @@ extension VigilWorkspaces {
         let columns = NSHostingView(rootView: ConflictColumns(conflict: conflict))
         columns.frame = NSRect(origin: .zero, size: NSSize(width: ConflictColumns.width, height: min(columns.fittingSize.height, 380)))
         alert.accessoryView = columns
-        // The first button is what Return takes: the copy that went on,
-        // when only one did.
-        var choices: [ConflictKeep] = conflict.obvious == .there ? [.there, .here] : [.here, .there]
+        // The first button is what Return takes: the copy that went further,
+        // when one did.
+        var choices: [ConflictKeep] = (conflict.obvious ?? conflict.leaning) == .there ? [.there, .here] : [.here, .there]
         for keep in choices {
             switch keep {
             case .here: alert.addButton(withTitle: "Continue This Mac's")
             default: alert.addButton(withTitle: "Continue \(conflict.mac)'s").isEnabled = conflict.whole
             }
         }
-        // Two conversations can both be kept; a copy with nothing more of
-        // the conversation would be the same one filed twice.
-        if conflict.both, conflict.writers == .both {
+        // Both can be kept whenever each holds words of the conversation the
+        // other lacks; a copy with nothing more of it would be the same one
+        // filed twice.
+        if conflict.both, conflict.obvious == nil {
             alert.addButton(withTitle: "Keep Both").isEnabled = conflict.whole
             choices.append(.both)
         }
