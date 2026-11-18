@@ -195,7 +195,13 @@ extension Ghostty {
                     VStack {
                         HStack {
                             Button { VigilWorkspaces.shared.noteAsked(surfaceView) } label: {
-                                Label("\(note.says) · \(note.offers)", systemImage: note.symbol)
+                                VStack(alignment: .leading) {
+                                    if let since = note.lastContact {
+                                        HStack { Text(note.says); Text(since, style: .relative); Text("ago") }
+                                        Label(note.offers, systemImage: note.symbol)
+                                    } else { Label("\(note.says) · \(note.offers)", systemImage: note.symbol) }
+                                    if note.takeover { Text(note.explains).fixedSize(horizontal: false, vertical: true) }
+                                }
                             }
                             Spacer()
                         }

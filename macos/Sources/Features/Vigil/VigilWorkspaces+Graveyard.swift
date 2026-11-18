@@ -128,6 +128,7 @@ extension VigilWorkspaces {
         let mac: String?
         /// Its close began: no undo, only waiting for it to finish (U2).
         let closing: Bool
+        var recoverableMove = false
     }
 
     func sidebarBurials() -> [SidebarBurial] {
@@ -144,7 +145,7 @@ extension VigilWorkspaces {
                 remaining: max(0, Int(deadline.timeIntervalSinceNow)), waiting: deadline == .distantFuture,
                 conflict: !conflicts.isDisjoint(with: ownedPaneIds(burial)),
                 from: from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }, device: nil, mac: nil,
-                closing: burial.closing != nil)
+                closing: burial.closing != nil, recoverableMove: burial.moveCheckpoint?.arrivals != nil && ownedPaneIds(burial).allSatisfy { memberMark($0) == .clean })
         }
         let elsewhere = VigilRemote.shared.hosts.flatMap { host -> [SidebarBurial] in
             let listed = host.directory?.workspaces ?? []
@@ -411,7 +412,7 @@ extension VigilWorkspaces {
         withheldReaps.remove(name)
         if session.moveCheckpoint?.ticket != nil {
             // Keep membership and transcript offers until the receiving Mac acknowledges.
-            if session.moveCheckpoint?.final == nil { stopForHandoff(name) }
+            if session.moveCheckpoint?.final == nil { stopForHandoff(name, repairInvalid: repairInvalid) }
             return
         }
         let needsTip = !refreshed && session.moveCheckpoint?.transcripts?.keys.contains(where: ids.contains) == true
@@ -424,6 +425,8 @@ extension VigilWorkspaces {
            }) {
             if !refreshed, let move = session.moveCheckpoint, let device = move.device, let proofs = move.transcripts,
                !proofs.isEmpty, ids.allSatisfy({ Self.moveRevision($0) == session.moveRevisions?[$0] }) {
+                // The returning directory resumes expired transfers for this Mac.
+                if !moveReachable(device) { return }
                 guard verifyingMoves.insert(name).inserted else { return }
                 Task { @MainActor in
                     let files = await Self.compareMoveTranscripts(proofs.filter { ids.contains($0.key) }, destination: device)
@@ -473,6 +476,7 @@ extension VigilWorkspaces {
         // with no stop decision accepted in its place. It stays, said as a
         // close not finished, tried again in a while.
         // Every member, each time (a fence already there is synced again).
+        destroyBuriedViews(session, ids: ids)
         let unfenced = fence(ids, repairInvalid: repairInvalid)
         graveyard[name]?.closing = unfenced.sorted()
         guard unfenced.isEmpty else {
@@ -482,19 +486,17 @@ extension VigilWorkspaces {
             persist()
             return
         }
-        for runtime in session.held { runtime.dock?.unmount() }
         dropBurial(name)
-        // Death is explicit for the surfaces too: every view attached to a
-        // reaped pane is destroyed BEFORE its daemon dies (the UAF order),
-        // whoever still holds the Swift object. Left to ARC, an unknown
-        // retainer kept reaped panes' surfaces running for days and the
-        // leak tripwire said so thousands of times.
-        let doomed = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
-            .filter { $0.vigilHost == nil && $0.vigilAttachId.map(ids.contains) == true }
-        for view in doomed { view.vigilDestroySurface() }
-        graveyardLog.info("reaped", ["workspace": name, "surfaces": doomed.count, "panes": ids.sorted()])
+        graveyardLog.info("reaped", ["workspace": name, "panes": ids.sorted()])
         killDaemons(ids)
         persist()
+    }
+
+    /// The lifecycle service observes the first fence and may stop its daemon at once.
+    func destroyBuriedViews(_ session: Workspace, ids: Set<String>) {
+        for runtime in session.held { runtime.dock?.unmount() }
+        for view in Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
+            where view.vigilHost == nil && view.vigilAttachId.map(ids.contains) == true { view.vigilDestroySurface() }
     }
 
     /// Kill pane daemons, deterministically: the lifecycle service's close

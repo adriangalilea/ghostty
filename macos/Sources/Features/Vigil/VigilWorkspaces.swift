@@ -486,6 +486,13 @@ class VigilWorkspaces {
     static let killGrace: TimeInterval = 120
     /// While panes that another Mac brought are being closed here
     /// (`moved`): that Mac's name, stamped on each burial they make.
+    var moveReachable: (String) -> Bool = {
+        guard let host = VigilRemote.shared.host($0) else { return false }
+        return host.directory != nil && host.error == nil
+    }
+    var moveDevice: () async throws -> String = {
+        try await Task.detached { try Local.Client(socket: VigilPaths.hub).me() }.value
+    }
     var moveCommand: (String, VigilSessionControl.Request) async throws -> VigilSessionControl.Reply = {
         try await VigilRemote.shared.command($0, request: $1)
     }
@@ -495,6 +502,7 @@ class VigilWorkspaces {
     var incomingMoves: [UUID: IncomingMove] = [:]
     var activeMoves = Set<UUID>()
     var moveRetry: [UUID: Task<Void, Never>] = [:]
+    var moveEpoch: [UUID: UUID] = [:]
     var waitingToOpen = Set<String>()
     var acceptingMove = Set<UUID>()
     var stoppingMoves = Set<String>()

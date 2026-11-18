@@ -594,30 +594,10 @@ extension VigilWorkspaces {
             closedFromDock = !tab.panes.contains { $0.id == request.anchor }
             removed = (tab.panes + (tab.dock?.panes ?? [])).filter { $0.id == request.anchor }
             let ids = Set(removed.map(\.id))
-            let previous = tab.panes
-            tab.panes.removeAll { ids.contains($0.id) }
-            let mapping = Dictionary(uniqueKeysWithValues: tab.panes.enumerated().map { ($0.element.id, $0.offset) })
-            func prune(_ node: Registry.Layout) -> Registry.Layout? {
-                switch node {
-                case .leaf(let i):
-                    guard previous.indices.contains(i), let next = mapping[previous[i].id] else { return nil }
-                    return .leaf(next)
-                case .h(let ratio, let l, let r):
-                    let left = prune(l), right = prune(r)
-                    if let left, let right { return .h(ratio, left, right) }
-                    return left ?? right
-                case .v(let ratio, let l, let r):
-                    let left = prune(l), right = prune(r)
-                    if let left, let right { return .v(ratio, left, right) }
-                    return left ?? right
-                }
+            guard let remaining = Self.select(tab, keeping: Set(tab.paneIds).subtracting(ids)) else {
+                return .failure(request, "source_changed", "This tab has no remaining member.")
             }
-            tab.layout = prune(Self.completeLayout(session.tabs[index]))
-            if var dock = tab.dock {
-                dock.panes.removeAll { ids.contains($0.id) }
-                dock.active = min(dock.active, max(0, dock.panes.count - 1))
-                tab.dock = dock.panes.isEmpty ? nil : dock
-            }
+            tab = remaining
             session.tabs[index] = tab
         default:
             return .failure(request, "unsupported_operation", "vigil on that Mac can't do this; update it.")
@@ -796,6 +776,40 @@ extension VigilWorkspaces {
         ])
         return VigilSessionControl.Reply(id: request.id, ok: true, code: "committed", message: "Workspace created on its Mac.",
                                          revision: workspaces[birth.name]?.layoutRevision, pane: birth.pane.id, session: birth.name)
+    }
+
+    static func select(_ original: Registry.Tab, keeping ids: Set<String>) -> Registry.Tab? {
+        var tab = original
+        tab.panes = original.panes.filter { ids.contains($0.id) }
+        let mapping = Dictionary(uniqueKeysWithValues: tab.panes.enumerated().map { ($0.element.id, $0.offset) })
+        func prune(_ node: Registry.Layout) -> Registry.Layout? {
+            switch node {
+            case .leaf(let i):
+                guard original.panes.indices.contains(i), let next = mapping[original.panes[i].id] else { return nil }
+                return .leaf(next)
+            case .h(let ratio, let l, let r):
+                let left = prune(l), right = prune(r)
+                if let left, let right { return .h(ratio, left, right) }
+                return left ?? right
+            case .v(let ratio, let l, let r):
+                let left = prune(l), right = prune(r)
+                if let left, let right { return .v(ratio, left, right) }
+                return left ?? right
+            }
+        }
+        tab.layout = prune(completeLayout(original))
+        if var dock = original.dock {
+            let active = dock.panes.indices.contains(dock.active) ? dock.panes[dock.active].id : nil
+            dock.panes.removeAll { !ids.contains($0.id) }
+            dock.active = dock.panes.firstIndex { $0.id == active } ?? min(dock.active, max(0, dock.panes.count - 1))
+            if tab.panes.isEmpty, !dock.panes.isEmpty {
+                tab.panes = [dock.panes.remove(at: dock.active)]
+                tab.layout = nil
+                dock.active = min(dock.active, max(0, dock.panes.count - 1))
+            }
+            tab.dock = dock.panes.isEmpty ? nil : dock
+        }
+        return tab.panes.isEmpty ? nil : tab
     }
 
     static func completeLayout(_ tab: Registry.Tab) -> Registry.Layout {

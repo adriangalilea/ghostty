@@ -52,6 +52,7 @@ enum VigilSessionControl {
         var input: [InputDiagnostic]?
         var status: Status?
         var released: [String: Bring.TranscriptProof]?
+        var page: Bring.Page?
 
         static func failure(_ request: Request?, _ code: String, _ message: String) -> Self {
             .init(id: request?.id, ok: false, code: code, message: message)

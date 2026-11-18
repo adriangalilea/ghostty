@@ -29,7 +29,8 @@ final class VigilRemote: ObservableObject {
         /// was last heard (kept on disk across launches, `KeptDirectory`).
         var received: Date?
         /// Out of reach with a directory still held: drawn as it last was.
-        var away: Bool { error != nil && directory != nil }
+        var withheld = false
+        var away: Bool { !withheld && error != nil && directory != nil }
         /// Its power, disk and heat as its app last wrote them
         /// (`Open.machine`), followed beside its directory.
         var machine: MachineState?
@@ -410,18 +411,26 @@ final class VigilRemote: ObservableObject {
     private func stepped(_ device: String, _ step: Local.Following) {
         switch step.step {
         case .open: remoteLog.info("following", ["host": host(device)?.name ?? device])
+        case .current:
+            if host(device)?.error != nil, let held = receivedDirectories[device] { apply(device, held) }
         case .directory: if let directory = step.directory { apply(device, directory) }
         // The panes that moved, onto the directory held (it is whole: a
         // follower always gets a whole document first).
         case .changes:
             guard let changes = step.changes, let held = host(device)?.directory else { return }
             apply(device, held.applying(changes))
+        case .withheld:
+            guard let i = hosts.firstIndex(where: { $0.device == device }) else { return }
+            hosts[i].withheld = true
+            hosts[i].error = step.reason ?? "Waiting for approval"
+            NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
         case .waiting: failed(device, step.reason ?? "out of reach")
         }
     }
 
     private func failed(_ device: String, _ why: String) {
         guard let index = hosts.firstIndex(where: { $0.device == device }), hosts[index].error != why else { return }
+        hosts[index].withheld = false
         remoteLog.warn("out of reach", ["host": hosts[index].name, "why": why])
         // Away since now, when it was reachable until now: a quiet Mac's
         // last document can be hours old while it was here all along.
@@ -494,6 +503,7 @@ final class VigilRemote: ObservableObject {
         VigilWorkspaces.shared.remoteDirectoryChanged(device)
         VigilWorkspaces.shared.syncOwnerGrids()
         hosts[index].error = nil
+        hosts[index].withheld = false
         if before == nil || wasAway { VigilWorkspaces.shared.resumeMoves(from: device) }
         if before.map({ $0 != shape }) ?? true {
             remoteLog.info("directory", [

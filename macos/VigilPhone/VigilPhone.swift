@@ -181,6 +181,7 @@ final class VigilPhone: ObservableObject {
         var since: Date
         var reason: String
         var attempts: Int
+        var withheld = false
     }
     private(set) var down: [String: Down] = [:] { didSet { rebuildTree() } }
 
@@ -401,6 +402,8 @@ final class VigilPhone: ObservableObject {
                     }
                     self.down[host.id] = nil
                     VigilAgents.learnNoteKey(of: host.id, node: node)
+                case .current:
+                    self.down[host.id] = nil
                 case .directory, .changes:
                     // The panes that moved apply onto the directory held (a
                     // follower always gets a whole document first).
@@ -423,12 +426,17 @@ final class VigilPhone: ObservableObject {
                     }
                     self.directories[host.id] = dir
                     self.keepSoon(host.id)
+                case .withheld:
+                    let why = step.reason ?? "Waiting for approval"
+                    self.down[host.id] = Down(since: Date(), reason: why, attempts: 0, withheld: true)
+                    self.receipts.info("dir", "connected, directory withheld", ["mac": host.name, "why": why])
                 case .waiting:
                     // Every attempt is a receipt: a repeat is evidence (how
                     // long, how often), never noise to fold away.
                     let why = step.reason ?? "out of reach"
                     let wentAway = self.down[host.id] == nil
                     var now = self.down[host.id] ?? Down(since: Date(), reason: why, attempts: 0)
+                    now.withheld = false
                     now.attempts += 1
                     now.reason = why
                     self.down[host.id] = now
@@ -985,6 +993,7 @@ final class VigilPhone: ObservableObject {
             // Out of reach with a directory on screen: that directory is as
             // old as the outage, and the row says from when.
             let subtitle: String? = down[host.id].map { d in
+                if d.withheld { return d.reason }
                 let attempt = "attempt \(d.attempts)"
                 return dir == nil ? "\(d.reason) · \(attempt)" : "\(Self.awaySince(d.since)) · \(d.reason) · \(attempt)"
             } ?? (dir == nil ? "connecting…" : nil)

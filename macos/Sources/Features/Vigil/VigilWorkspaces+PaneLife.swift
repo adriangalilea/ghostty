@@ -15,6 +15,8 @@ struct VigilPaneNote: Equatable {
     let explains: String
     let symbol: String
     var shellOnly = false
+    var takeover = false
+    var lastContact: Date?
 }
 
 /// A pane's life has one owner on its Mac: this. A view dials a daemon and
@@ -155,6 +157,17 @@ extension VigilWorkspaces {
 
     func showMoveNote(_ pane: String) {
         let arrival = registered(pane)?.from
+        if let id = arrival?.ticket, let ticket = incomingMoves[id], ticket.superseded != true, !ticket.accepted {
+            let mac = arrival?.mac ?? "the source"
+            let since = [ticket.lastReply, VigilRemote.shared.host(ticket.source)?.received, ticket.seenAt].compactMap { $0 }.max()
+            let last = since ?? Date(timeIntervalSince1970: ticket.request.issuedAt)
+            let says = since == nil ? "No reply to this move from \(mac)" : "Last heard from \(mac)"
+            let risk = "Opens the saved panes here. \(mac) may still be working. When it returns its moved panes will stop and its later history will be kept separately. A running turn or tool can be interrupted."
+            let detail = (ticket.refusal ?? moveWaiting[id]).map { $0 + "\n" } ?? ""
+            note(pane, VigilPaneNote(says: says, offers: ticket.takeover == true ? "Retry takeover" : "Take over here",
+                 explains: detail + risk, symbol: "arrow.right", takeover: true, lastContact: last))
+            return
+        }
         let why = arrival?.ticket.flatMap { incomingMoves[$0]?.refusal }
         note(pane, VigilPaneNote(says: why == nil ? "Moving from \(arrival?.mac ?? "another Mac")" : "Move refused",
              offers: why == nil ? "Check move" : "Show source", explains: why ?? arrival?.ticket.flatMap { moveWaiting[$0] } ?? "This pane will open when its source stops and its final conversation is here.", symbol: "arrow.right"))
@@ -229,7 +242,7 @@ extension VigilWorkspaces {
             return .unknown
         }
         if waitingForMove(pane) {
-            if asked || !views(of: pane).isEmpty { waitingToOpen.insert(pane) }
+            if asked || !views(of: pane).isEmpty { queueMoveOpen(pane) }
             showMoveNote(pane)
             return .waiting
         }
@@ -283,11 +296,12 @@ extension VigilWorkspaces {
     func noteAsked(_ view: Ghostty.SurfaceView) {
         guard let pane = view.vigilAttachId else { return }
         if waitingForMove(pane), let arrival = registered(pane)?.from {
+            if view.vigilHost == nil, view.vigilNote?.takeover == true { takeOverHere(pane); return }
             if let ticket = arrival.ticket, incomingMoves[ticket]?.refusal != nil {
                 _ = openRemotePane(device: arrival.device, pane: arrival.pane)
                 return
             }
-            waitingToOpen.insert(pane)
+            queueMoveOpen(pane)
             resumeMoves(from: arrival.device)
             return
         }
@@ -489,7 +503,7 @@ extension VigilWorkspaces {
         guard let at = locate(pane), !at.buried else { return "no workspace of this Mac lists it" }
         if waitingForMove(pane) {
             if let id = registered(pane)?.from?.ticket, let refusal = incomingMoves[id]?.refusal { return refusal }
-            waitingToOpen.insert(pane)
+            queueMoveOpen(pane)
             showMoveNote(pane)
             return "Open queued until the source has stopped and the conversation is here."
         }

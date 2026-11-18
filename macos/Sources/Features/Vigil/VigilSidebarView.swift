@@ -415,6 +415,20 @@ struct VigilSidebarView: View {
                 }
             }
             Spacer(minLength: 4)
+            if burial.recoverableMove && !burial.conflict {
+                Button("Take back here…") {
+                    let alert = NSAlert()
+                    alert.messageText = "Take this move back here?"
+                    alert.informativeText = "The other Mac may still be working. This Mac will resume its saved history. When the other Mac returns its moved panes will stop and its later history will be kept separately."
+                    alert.addButton(withTitle: "Cancel")
+                    alert.addButton(withTitle: "Take back here")
+                    guard alert.runModal() == .alertSecondButtonReturn else { return }
+                    Task { @MainActor in
+                        do { try await VigilWorkspaces.shared.recoverStoppedMove(burial.name) }
+                        catch { VigilWorkspaces.shared.reportIncompleteMove(burial.name, String(describing: error)) }
+                    }
+                }
+            }
             // A close begun has no grace left to count: it is closing.
             Text(burial.conflict ? "ownership conflict" : burial.closing ? "closing" : burial.waiting ? "recovered" : "\(burial.remaining)s")
                 .font(.system(size: 9 * scale))
