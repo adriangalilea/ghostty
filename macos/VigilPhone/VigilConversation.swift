@@ -21,10 +21,15 @@ import VigilWire
 @MainActor
 final class Conversation: ObservableObject {
     let ref: PaneRef
+    /// The conversation as one fold over its feed (VigilWire's `FeedState`):
+    /// the rows, the broker's facts, the queue, and the rules every drawing
+    /// of a conversation shares (what a call with no result is, whether a
+    /// reply can be sent now). This screen draws it and holds nothing else.
+    @Published private(set) var state = FeedState()
     /// The rows, oldest first; an id already held replaces its row.
-    @Published private(set) var entries: [FeedEntry] = []
+    var entries: [FeedEntry] { state.entries }
     /// What the pane does now, from the broker.
-    @Published private(set) var live: FeedLive?
+    var live: FeedLive? { state.live }
     /// Older rows exist on the Mac (paged when the top is reached).
     @Published private(set) var earlier = false
     /// Why nothing arrives now (out of reach, refused, no conversation);
@@ -51,8 +56,8 @@ final class Conversation: ObservableObject {
     var visible: ArraySlice<FeedEntry> { entries.suffix(drawn) }
     /// Rows older than those drawn exist, here or on the Mac.
     var more: Bool { entries.count > drawn || earlier }
-    private var conversation: String?
-    private var index: [String: Int] = [:]
+    private var conversation: String? { state.conversation }
+    private var index: [String: Int] { state.index }
     private var task: Task<Void, Never>?
 
     init(ref: PaneRef) { self.ref = ref }
@@ -62,8 +67,7 @@ final class Conversation: ObservableObject {
          reply: Reply? = nil, queued: [FeedQueued] = []) {
         self.ref = ref
         self.reply = reply
-        self.queued = queued
-        self.live = live
+        self.state = FeedState(live: live, queued: queued)
         self.earlier = earlier
         self.waiting = waiting
         self.offer = live?.request.flatMap { request in offer.map { (request.id, $0) } }
@@ -178,42 +182,33 @@ final class Conversation: ObservableObject {
                 VigilPhone.shared.receipts.warn("feed", "unknown schema", ["pane": ref.pane, "schema": snapshot.schema])
                 return
             }
-            conversation = snapshot.conversation
             earlier = snapshot.earlier
-            live = snapshot.live
-            queued = snapshot.queued ?? []
+            state.apply(message)
             readOffer()
             pageError = nil
-            replace(snapshot.entries)
+            drawn = Self.page
+            revision += 1
             opened = true
             VigilPhone.shared.receipts.info("feed", "snapshot", [
                 "pane": ref.pane, "agent": snapshot.agent, "entries": snapshot.entries.count, "earlier": snapshot.earlier,
             ])
         case .entries(let changed, _):
-            for entry in changed {
-                if let at = index[entry.id] {
-                    entries[at] = entry
-                } else {
-                    index[entry.id] = entries.count
-                    entries.append(entry)
-                }
-            }
-            if let reply, reply.failed == nil, changed.contains(where: { Self.carries($0, reply.text) }) { self.reply = nil }
+            state.apply(message)
+            if let reply, reply.failed == nil, changed.contains(where: { FeedState.carries($0, reply.text) }) { self.reply = nil }
             revision += 1
-        case .live(let now):
-            live = now
+        case .live:
+            state.apply(message)
             readOffer()
             revision += 1
         case .queued(let now):
-            queued = now
-            if let reply, reply.failed == nil, now.contains(where: { Self.same($0.text, reply.text) }) { self.reply = nil }
+            state.apply(message)
+            if let reply, reply.failed == nil, now.contains(where: { FeedState.same($0.text, reply.text) }) { self.reply = nil }
             revision += 1
         }
     }
 
     private func replace(_ rows: [FeedEntry]) {
-        entries = rows
-        index = Dictionary(rows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { _, last in last })
+        state.replace(rows)
         drawn = Self.page
         revision += 1
     }
@@ -237,13 +232,11 @@ final class Conversation: ObservableObject {
             let page = try await VigilPhone.shared.feedEarlier(ref, FeedEarlier(conversation: conversation, before: first.id))
             // Another conversation arrived meanwhile: this page is not its.
             guard self.conversation == conversation else { return false }
-            let fresh = page.entries.filter { index[$0.id] == nil }
-            entries = fresh + entries
-            index = Dictionary(entries.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { _, last in last })
-            drawn += fresh.count
+            let fresh = state.prepend(page.entries)
+            drawn += fresh
             earlier = page.earlier
-            VigilPhone.shared.receipts.info("feed", "earlier page", ["pane": ref.pane, "entries": fresh.count, "more": page.earlier])
-            return !fresh.isEmpty
+            VigilPhone.shared.receipts.info("feed", "earlier page", ["pane": ref.pane, "entries": fresh, "more": page.earlier])
+            return fresh > 0
         } catch {
             pageError = VigilLink.reason(error)
             VigilPhone.shared.receipts.warn("feed", "earlier page not read", ["pane": ref.pane, "err": error])
@@ -282,7 +275,7 @@ final class Conversation: ObservableObject {
     func missingSeen() { focusMissing = nil }
 
     /// Where a tool call with no result stands, by the broker's word.
-    enum Pending { case waiting, running, unfinished }
+    typealias Pending = FeedState.Pending
 
     // MARK: A reply
 
@@ -296,20 +289,11 @@ final class Conversation: ObservableObject {
 
     /// What was sent while it worked and it has not taken yet: its own
     /// queue, as its transcript says (`FeedMessage.queued`).
-    @Published private(set) var queued: [FeedQueued] = []
+    var queued: [FeedQueued] { state.queued }
 
-    /// Why a reply cannot be typed now (nil: it can, any time the prompt is
-    /// its input box: while it works, the agent queues it itself). A dialog
-    /// standing in the terminal would take the words as its answer.
-    var replyRefusal: String? {
-        // The placeholder of the reply box: one short line.
-        guard let live else { return nil }
-        switch live.state {
-        case .blocked where live.flavor == .ask: return nil
-        case .blocked: return "Answer its request first"
-        case .done, .idle, .working, .interrupting, .unknown: return nil
-        }
-    }
+    /// Why a reply cannot be typed now (`FeedState.replyRefusal`): the
+    /// placeholder of the reply box, one short line.
+    var replyRefusal: String? { state.replyRefusal }
 
     /// The placeholder: what a reply does now.
     var replyHint: String {
@@ -368,38 +352,14 @@ final class Conversation: ObservableObject {
 
     /// What the person sent in the conversation as far as the feed reads it,
     /// the newest first, each once: the reply box's history.
-    var sent: [String] {
-        var seen: Set<String> = []
-        let typed = entries.reversed().compactMap { entry -> String? in
-            guard case .prompt(let prompt) = entry.body, prompt.origin == .typed || prompt.origin == .queued else { return nil }
-            return prompt.text.text
-        }
-        return (queued.reversed().map(\.text) + typed)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && seen.insert($0).inserted }
-    }
+    var sent: [String] { state.sent }
 
-    private static func carries(_ entry: FeedEntry, _ text: String) -> Bool {
-        guard case .prompt(let prompt) = entry.body else { return false }
-        return same(prompt.text.text, text) || prompt.text.text.contains(text.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
+    static func same(_ a: String, _ b: String) -> Bool { FeedState.same(a, b) }
 
-    static func same(_ a: String, _ b: String) -> Bool {
-        a.trimmingCharacters(in: .whitespacesAndNewlines) == b.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    /// The standing request names no row held here: it is answered under the rows.
+    var requestUnplaced: Bool { state.requestUnplaced }
 
-    /// The standing request names no row held here (a dialog with no
-    /// tool, or its call not read yet): it is answered under the rows.
-    var requestUnplaced: Bool {
-        guard let request = live?.request else { return false }
-        return request.toolUse.map { index[$0] == nil } ?? true
-    }
-
-    func pending(_ call: ToolCall, turn: String?) -> Pending? {
-        guard call.result == nil else { return nil }
-        if live?.request?.toolUse == call.id { return .waiting }
-        if let state = live?.state, state == .working || state == .interrupting, turn == entries.last?.turn { return .running }
-        return .unfinished
-    }
+    func pending(_ call: ToolCall, turn: String?) -> Pending? { state.pending(call, turn: turn) }
 }
 
 // MARK: - The screen
@@ -763,6 +723,9 @@ private struct PromptRow: View {
         case .typed, .other, .queued: nil
         case .task: "From a task"
         case .system: "From the system"
+        // Another sender's words, named as its envelope named it.
+        case .message: prompt.from.map { "Message from \($0)" } ?? "A message"
+        case .agent: prompt.from.map { "From \($0)" } ?? "From another agent"
         }
     }
 
