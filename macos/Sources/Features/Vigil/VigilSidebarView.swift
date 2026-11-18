@@ -359,8 +359,12 @@ struct VigilSidebarView: View {
             }
             .help("Do nothing: it waits in the queue (the orange keycap, the badge, ⌘⇧J). Summon it: a permission prompt or a question mid-turn brings the floating terminal in on that pane; answering moves to the next. Jump to it: this window switches to anything waiting that you haven't seen.")
             ForEach(model.moveHistories) { history in
-                Button("Show preserved history for " + history.workspace) { VigilWorkspaces.shared.inspectMoveHistory(history) }
-                    .help("Open the saved files in Finder. A transfer interrupted between pages can contain a partial transcript.")
+                HStack {
+                    Button("Show preserved history for " + history.workspace) { VigilWorkspaces.shared.inspectMoveHistory(history) }
+                        .help("Show the preserved files in Finder. An interrupted transfer can contain a partial transcript.")
+                    Button("Dismiss") { VigilWorkspaces.shared.dismissMoveHistory(history) }
+                        .help("Dismiss this notice. The saved files remain on disk.")
+                }
             }
             ForEach(model.moveWarnings, id: \.self) { warning in
                 Label(warning, systemImage: "exclamationmark.triangle")
@@ -427,13 +431,18 @@ struct VigilSidebarView: View {
                 Button("Take back here…") {
                     let app = VigilWorkspaces.shared
                     guard let entry = app.graveyard[burial.name], app.canTakeBack(entry),
-                          let device = entry.moveCheckpoint?.device, let since = app.moveOffline[device] else { return }
+                          let device = entry.moveCheckpoint?.device else { return }
+                    let surrendered = app.peerClosedFork(entry)
+                    let since = surrendered ? nil : app.moveOffline[device]
                     let alert = NSAlert()
                     alert.messageText = "Take this move back here?"
                     alert.informativeText = "The other Mac may still be working. This Mac will resume its saved history. When the other Mac returns its moved panes will stop and its later history will be kept separately."
                     alert.addButton(withTitle: "Cancel")
                     if app.unpairedMoves.contains(device) {
                         alert.informativeText = "Contact failed before this Mac lost its pairing. The destination may still be writing. Both copies may run until you pair the Macs again and their histories are reconciled."
+                    }
+                    if surrendered {
+                        alert.informativeText = "The other Mac confirmed that its fork closed. Open this Mac's saved conversation here?"
                     }
                     alert.addButton(withTitle: "Take back here")
                     guard alert.runModal() == .alertSecondButtonReturn else { return }
