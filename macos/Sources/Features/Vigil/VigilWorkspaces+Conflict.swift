@@ -128,12 +128,14 @@ extension VigilWorkspaces {
     func conflictSheet(_ conflict: PaneConflict, pane: String?) -> Bool {
         let alert = NSAlert()
         alert.messageText = conflict.headline()
-        alert.informativeText = conflict.meaning() + " Whichever goes on, the other is kept aside (vigil conflicts --kept)."
+        // A choice says why it starts where it does.
+        alert.informativeText = conflict.meaning() + (conflict.obvious == nil ? " " + conflict.leaningWhy() : "")
+            + " Whichever goes on, the other is kept aside (vigil conflicts --kept)."
         let columns = NSHostingView(rootView: ConflictColumns(conflict: conflict))
         columns.frame = NSRect(origin: .zero, size: NSSize(width: ConflictColumns.width, height: min(columns.fittingSize.height, 380)))
         alert.accessoryView = columns
-        // The first button is what Return takes: the copy that went further,
-        // when one did.
+        // The first button is what Return takes: the obvious copy, else the
+        // one holding more of the conversation.
         var choices: [ConflictKeep] = (conflict.obvious ?? conflict.leaning) == .there ? [.there, .here] : [.here, .there]
         for keep in choices {
             switch keep {
@@ -141,11 +143,12 @@ extension VigilWorkspaces {
             default: alert.addButton(withTitle: "Continue \(conflict.mac)'s").isEnabled = conflict.whole
             }
         }
-        // Both can be kept whenever each holds words of the conversation the
-        // other lacks; a copy with nothing more of it would be the same one
-        // filed twice.
-        if conflict.both, conflict.obvious == nil {
-            alert.addButton(withTitle: "Keep Both").isEnabled = conflict.whole
+        // Both can be kept once both copies are here and each holds words of
+        // the conversation the other lacks; a copy with nothing more of it
+        // would be the same one filed twice, and one still arriving is not
+        // judged yet.
+        if conflict.both, conflict.choice {
+            alert.addButton(withTitle: "Keep Both")
             choices.append(.both)
         }
         alert.addButton(withTitle: "Not Now")
