@@ -1229,10 +1229,15 @@ extension VigilWorkspaces {
                     q.readWork = true
                     do {
                         let answer = try await readMove(q)
-                        let actual = try Dictionary(uniqueKeysWithValues: answer.lines.compactMap { line -> (String, String)? in
-                            try line.work.map { (line.pane, try Bring.sourceWorkRevision($0)) }
-                        })
-                        guard actual == expected else {
+                        // Compared at the strength each was recorded at: a
+                        // destination that held a trimmed `.work` recorded
+                        // only what it said.
+                        let fresh = Dictionary(answer.lines.compactMap { line in line.work.map { (line.pane, $0) } },
+                                               uniquingKeysWith: { first, _ in first })
+                        let same = try Set(fresh.keys) == Set(expected.keys) && expected.allSatisfy { pane, recorded in
+                            try fresh[pane].map { try Bring.sourceWorkMatches(recorded: recorded, fresh: $0) } ?? false
+                        }
+                        guard same else {
                             return .failure(request, "source_changed", "The source checkout changed. Review a fresh move sheet. Its panes remain here.")
                         }
                     } catch { return .failure(request, "waiting", "The source checkout could not be checked.") }
