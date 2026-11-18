@@ -89,6 +89,10 @@ final class VigilRemote: ObservableObject {
 
     /// Macs whose directory moved since it was last written to disk.
     private var unkept = Set<String>()
+    private var receivedDirectories: [String: Directory] = [:]
+
+    func sourceDirectory(_ device: String) -> Directory? { receivedDirectories[device] ?? host(device)?.directory }
+
     private var keeping: DispatchWorkItem?
 
     /// A live directory moves several times a second: it is written when
@@ -110,7 +114,7 @@ final class VigilRemote: ObservableObject {
     }
 
     private func keep(_ device: String) {
-        guard unkept.remove(device) != nil, let host = host(device), let directory = host.directory, let received = host.received
+        guard unkept.remove(device) != nil, let host = host(device), let directory = sourceDirectory(device), let received = host.received
         else { return }
         let kept = KeptDirectory(device: device, name: host.name, received: received.timeIntervalSince1970, directory: directory)
         DispatchQueue.global(qos: .utility).async {
@@ -126,7 +130,8 @@ final class VigilRemote: ObservableObject {
         var host = Host(device: peer.id, name: peer.name)
         do {
             guard let kept = try KeptDirectory.read(peer.id, in: VigilPaths.away) else { return host }
-            host.directory = kept.directory
+            receivedDirectories[peer.id] = kept.directory
+            host.directory = kept.directory.projected
             host.received = Date(timeIntervalSince1970: kept.received)
             host.error = "not heard yet"
             remoteLog.info("kept directory read", [
@@ -314,6 +319,7 @@ final class VigilRemote: ObservableObject {
 
     private func peers(_ peers: [Local.Peer]) {
         let wanted = Set(peers.map(\.id))
+        receivedDirectories = receivedDirectories.filter { wanted.contains($0.key) }
         for (device, fd) in following where !wanted.contains(device) {
             following[device] = nil
             shutdown(fd, SHUT_RDWR)
@@ -455,6 +461,7 @@ final class VigilRemote: ObservableObject {
     /// when something changed.
     private func apply(_ device: String, _ received: Directory) {
         guard let index = hosts.firstIndex(where: { $0.device == device }) else { return }
+        receivedDirectories[device] = received
         let dir = received.projected
         guard hosts[index].directory != dir || hosts[index].error != nil else { return }
         // A glance that did not travel or did not read: said once per
@@ -472,6 +479,13 @@ final class VigilRemote: ObservableObject {
         arrivals = arrivals.filter { entry in
             guard let split = Self.split(entry.key), split.device == device else { return true }
             return dir.panes[split.name] != nil
+        }
+        for burial in dir.workspaces where burial.buriedUntil == .distantFuture {
+            guard let arrival = burial.moveCheckpoint?.arrival,
+                  let local = VigilWorkspaces.shared.workspaces[arrival],
+                  local.tabs.flatMap(\.members).contains(where: { $0.from?.device == device && burial.moveCheckpoint?.panes.contains($0.from?.pane ?? "") == true }),
+                  hosts[index].directory?.workspaces.first(where: { $0.name == burial.name })?.buriedUntil != .distantFuture else { continue }
+            VigilWorkspaces.shared.reportIncompleteMove(local.label, "The source on \(hosts[index].name) changed or could not confirm its conversation here. Its panes remain in Recently Closed there.")
         }
         hosts[index].directory = dir
         hosts[index].received = Date()
@@ -535,7 +549,7 @@ final class VigilRemote: ObservableObject {
                             forkedFrom: truth?.meaning?.forkedFrom,
                             member: truth?.meaning?.member,
                             background: truth?.meaning?.background,
-                            ended: truth?.ended,
+                            ended: truth?.abnormalEnd,
                             refused: truth?.meaning?.refused,
                             outdated: truth?.meaning?.outdated,
                             conflict: truth?.conflict)

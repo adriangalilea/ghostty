@@ -60,6 +60,7 @@ extension VigilWorkspaces {
         setOcclusion(false, session.held)
         var session = session
         session.movedTo = movingTo
+        session.moveCheckpoint = movingCheckpoint
         let members = ownedPaneIds(session)
         session.moveRevisions = movingRevisions?.filter { members.contains($0.key) }
         session.moveTranscripts = movingTranscripts?.filter { members.contains($0.key) }
@@ -335,6 +336,7 @@ extension VigilWorkspaces {
         burial.movedTo = nil
         burial.moveRevisions = nil
         burial.moveTranscripts = nil
+        burial.moveCheckpoint = nil
         burial.layoutShape = ""
         workspaces[name] = burial
         guard commit(name, was: nil) else { return .saveFailed }
@@ -384,7 +386,7 @@ extension VigilWorkspaces {
     /// synchronously, a leaked view elsewhere changes nothing); then the
     /// daemons are killed AND VERIFIED dead. No deferral, no sweep, no
     /// dependence on what ARC happens to hold.
-    func reapIfExpired(_ name: String, repairInvalid: Bool = false) {
+    func reapIfExpired(_ name: String, repairInvalid: Bool = false, refreshed: Bool = false) {
         guard let deadline = graveyardDeadlines[name], Date() >= deadline,
               let session = graveyard[name] else { return }
         let ids = ownedPaneIds(session)
@@ -400,7 +402,23 @@ extension VigilWorkspaces {
                   !files.allSatisfy({ Bring.fileVersion($0.key) == $0.value }) { return false }
                return Self.moveRevision(pane) == expected
            }) {
+            if !refreshed, let move = session.moveCheckpoint, let device = move.device, let proofs = move.transcripts,
+               !proofs.isEmpty, ids.allSatisfy({ Self.moveRevision($0) == session.moveRevisions?[$0] }) {
+                guard verifyingMoves.insert(name).inserted else { return }
+                Task { @MainActor in
+                    let files = await Self.compareMoveTranscripts(proofs.filter { ids.contains($0.key) }, destination: device)
+                    verifyingMoves.remove(name)
+                    guard let now = graveyard[name], now.moveCheckpoint == move, ownedPaneIds(now) == ids,
+                          graveyardDeadlines[name] == deadline, now.closing == nil else { return }
+                    if let files { graveyard[name]?.moveTranscripts = files }
+                    reapIfExpired(name, refreshed: true)
+                }
+                return
+            }
             graveyardDeadlines[name] = .distantFuture
+            if let destination = session.movedTo {
+                reportIncompleteMove(session.label, "The source changed or its latest conversation could not be verified on \(destination). It is kept in Recently Closed here. Undo restores it; End Now closes it.")
+            }
             graveyardLog.warn("moved panes changed during the grace period; kept for Undo or End Now", ["workspace": name])
             persist()
             return

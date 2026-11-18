@@ -275,7 +275,7 @@ extension VigilWorkspaces {
     func applySessionCommand(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
         if request.operation == "bring" { return await bring(request) }
         if request.operation == "retire_move", let proofs = request.moved?.transcripts, !proofs.isEmpty {
-            guard let files = await Self.compareMoveTranscripts(proofs) else {
+            guard let files = await Self.compareMoveTranscripts(proofs, destination: request.moved?.device) else {
                 return .failure(request, "source_changed", "The Macs could not verify identical conversation histories. Both copies were kept.")
             }
             return moved(request, checked: files)
@@ -361,9 +361,9 @@ extension VigilWorkspaces {
             case .answered(let reply) where reply.outcomes.first?.outcome == "collision":
                 return .failure(request, "id_in_use", "The reserved pane identity is already in use.")
             case .answered(let reply) where reply.outcomes.first?.outcome == "indeterminate":
-                return .failure(request, "spawn_unknown", "Its birth outcome is unknown. Its cancellation was requested.")
+                return .failure(request, "spawn_unknown", "Its birth outcome is unknown. Cancellation was requested. Check Recovered panes on the home Mac before retrying.")
             case .indeterminate:
-                return .failure(request, "spawn_unknown", "The home Mac could not confirm the birth. Its cancellation was requested.")
+                return .failure(request, "spawn_unknown", "The home Mac could not confirm the birth. Cancellation was requested. Check Recovered panes on the home Mac before retrying.")
             default:
                 return .failure(request, "spawn_failed", "The home Mac could not start this pane.")
             }
@@ -436,7 +436,8 @@ extension VigilWorkspaces {
                 return refused("not_forkable", "That pane holds no conversation its agent can fork.")
             }
             command = birth.program
-            born = birth.line
+            guard let shell = getpwuid(getuid())?.pointee.pw_shell else { return refused("no_shell", "The login shell could not be read.") }
+            born = Fork.recipe(birth, shell: String(cString: shell))
             sessionLog.info("fork", [
                 "id": request.id.uuidString, "workspace": request.session, "anchor": anchor.id,
                 "harness": source.harness, "conversation": source.conversation, "folder": folder,

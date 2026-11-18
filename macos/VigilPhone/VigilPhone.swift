@@ -1010,7 +1010,7 @@ final class VigilPhone: ObservableObject {
                                 dots: truth?.dots ?? [],
                                 flavor: truth?.shown == .blocked ? truth?.token?.flavor : nil,
                                 alive: alive,
-                                ended: alive ? nil : truth?.ended,
+                                ended: alive ? nil : truth?.abnormalEnd,
                                 conflict: truth?.conflict,
                                 agent: alive && Program.runsAgent(truth?.tree ?? []),
                                 face: PaneFace.of(emoji: p.emoji, program: alive ? Program.agent(in: truth?.tree ?? []) : nil),

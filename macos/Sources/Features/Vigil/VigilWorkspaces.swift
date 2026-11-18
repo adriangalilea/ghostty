@@ -422,6 +422,7 @@ class VigilWorkspaces {
         /// A burial of panes brought to another Mac: that Mac's name.
         var movedTo: String?
         var moveRevisions: [String: String]?
+        var moveCheckpoint: WorkspaceCommand.Request.Moved?
         var moveTranscripts: [String: [String: String]]?
         /// A burial whose close began: its panes not yet fenced, and no
         /// undo (`Registry.Workspace.closing`).
@@ -485,6 +486,16 @@ class VigilWorkspaces {
     static let killGrace: TimeInterval = 120
     /// While panes that another Mac brought are being closed here
     /// (`moved`): that Mac's name, stamped on each burial they make.
+    var movingCheckpoint: WorkspaceCommand.Request.Moved?
+    var verifyingMoves = Set<String>()
+    var reportIncompleteMove: (String, String) -> Void = { label, why in
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "Move of \(label) incomplete"
+            alert.informativeText = why
+            if let window = NSApp.keyWindow { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        }
+    }
     var movingTo: String?
     var movingRevisions: [String: String]?
     var movingTranscripts: [String: [String: String]]?
@@ -672,6 +683,11 @@ class VigilWorkspaces {
                      "Ghostty-Info.plist's VigilPaneLifeVersion is not PaneLife.version \(PaneLife.version)")
         do { try load() } catch {
             registryLog.error("registry unavailable; original files preserved", ["err": error])
+            let alert = NSAlert()
+            alert.messageText = "Vigil could not open the workspace registry"
+            alert.informativeText = "\(error)\n\nYour pane files are untouched. The registry and backup are in \(persistURL.deletingLastPathComponent().path)."
+            alert.addButton(withTitle: "Quit")
+            alert.runModal()
             exit(EXIT_FAILURE)
         }
         for session in workspaces.values {
@@ -1111,15 +1127,11 @@ class VigilWorkspaces {
     /// capture is a rewrite and would otherwise erase what the view does
     /// not know about.
     private func capturedPane(_ view: Ghostty.SurfaceView, id: String, previous: Registry.Pane?) -> Registry.Pane {
-        Registry.Pane(
-            id: id,
-            cwd: view.pwd ?? previous?.cwd ?? view.vigilBirthFolder ?? FileManager.default.homeDirectoryForCurrentUser.path,
-            title: capturedTitle(of: view) ?? previous?.title,
-            label: previous?.label,
-            emoji: previous?.emoji,
-            command: view.vigilCommand ?? previous?.command,
-            priority: previous?.priority,
-            reopened: previous?.reopened)
+        var pane = previous ?? Registry.Pane(id: id, cwd: view.vigilBirthFolder ?? FileManager.default.homeDirectoryForCurrentUser.path)
+        if let folder = view.pwd { pane.cwd = folder }
+        if let title = capturedTitle(of: view) { pane.title = title }
+        if let command = view.vigilCommand { pane.command = command }
+        return pane
     }
 
     /// A live tree as registry panes (DFS leaf order) + split shape.
@@ -1435,7 +1447,7 @@ class VigilWorkspaces {
             Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, front: $0.front)
         }
         entries += graveyard.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, moveRevisions: $0.moveRevisions, moveTranscripts: $0.moveTranscripts, closing: $0.closing)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, moveRevisions: $0.moveRevisions, moveTranscripts: $0.moveTranscripts, moveCheckpoint: $0.moveCheckpoint, closing: $0.closing)
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
@@ -1810,6 +1822,7 @@ class VigilWorkspaces {
                 session.movedTo = entry.movedTo
                 session.moveRevisions = entry.moveRevisions
                 session.moveTranscripts = entry.moveTranscripts
+                session.moveCheckpoint = entry.moveCheckpoint
                 // Its close's progress from the marks, not only from what was
                 // saved.
                 session.closing = entry.reconciled(mark: memberMark).closing

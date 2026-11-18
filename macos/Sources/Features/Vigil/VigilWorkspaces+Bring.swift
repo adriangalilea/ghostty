@@ -11,7 +11,7 @@ import VigilWire
 extension VigilWorkspaces {
     /// The `bring` workspace command, from the sidebar or `vigil move`.
     func bring(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
-        guard let device = request.from, let host = VigilRemote.shared.host(device), let directory = host.directory,
+        guard let device = request.from, let host = VigilRemote.shared.host(device), let directory = VigilRemote.shared.sourceDirectory(device),
               let whole = directory.live.first(where: { $0.name == request.session }) else {
             return .failure(request, "not_found", "This Mac has not heard that workspace from that Mac.")
         }
@@ -21,7 +21,9 @@ extension VigilWorkspaces {
         let here = FileManager.default.homeDirectoryForCurrentUser.path
         let names = directory.conversationNames(of: source)
         let members = Set(source.paneIds)
-        let revisions = directory.panes.filter { members.contains($0.key) }.compactMapValues(\.moveRevision)
+        let revisions = directory.panes.filter { members.contains($0.key) }.compactMapValues { facts in
+            facts.moveRevision.map { Registry.Workspace.moveIdentity($0, glance: facts.glance) }
+        }
         guard Set(revisions.keys) == members,
               let digest = try? Registry.Workspace.moveDigest(label: whole.label, emoji: whole.emoji, cwd: whole.cwd, pinned: whole.pinned ?? false, revision: whole.layoutRevision,
                                                                tabs: whole.tabs ?? [], facts: revisions) else {
@@ -32,8 +34,8 @@ extension VigilWorkspaces {
                 return .failure(request, "source_unknown", "The source pane facts are unavailable.")
             }
             let fields = version.split(separator: "/")
-            guard fields.count == 10, fields[2] == "-" || facts.ended != nil,
-                  fields[3] == "-" || facts.meaning?.conversation != nil,
+            guard fields.count == 5, fields[1] == "-" || facts.ended != nil,
+                  fields[3] == "-", fields[2] == "-" || facts.meaning?.conversation != nil,
                   facts.glanceError == nil, facts.conflict == nil else {
                 return .failure(request, "source_unknown", "The end or conversation of \(pane) could not be transferred with certainty. The source stays open.")
             }
@@ -47,7 +49,7 @@ extension VigilWorkspaces {
             var floor = 0
             entry = try source.brought(as: name, from: device, mac: host.name, at: Date().timeIntervalSince1970,
                                        home: directory.home, here: here, order: (workspaces.values.map(\.order).max() ?? 0) + 1,
-                                       names: names) {
+                                       names: names, facts: directory.panes) {
                 let index = try PaneLife.reserve(workspace: name, startingAt: floor, owned: owned,
                                                  panes: VigilPaths.panes, agent: VigilPaths.agent, arrival: true)
                 floor = index + 1
@@ -75,9 +77,9 @@ extension VigilWorkspaces {
         // An end belongs to the imported pane too. Its first opening
         // must use the same shell-only path as an opening at home.
         do {
-            for (old, new) in zip(source.paneIds, entry.paneIds) {
-                if let end = directory.panes[old]?.ended {
-                    try Durable.replace(VigilPaths.panes.appendingPathComponent(new + ".ended"), with: JSONEncoder().encode(end))
+            for pane in (entry.tabs ?? []).flatMap(\.members) {
+                if let end = pane.from?.facts?.ended {
+                    try Durable.replace(VigilPaths.panes.appendingPathComponent(pane.id + ".ended"), with: JSONEncoder().encode(end))
                 }
             }
         } catch {
@@ -133,15 +135,16 @@ extension VigilWorkspaces {
         // Its Mac is told: those panes close there, so the conversation is
         // written on one Mac. Kept by the hub while that Mac is away.
         let proofs = Dictionary(uniqueKeysWithValues: lines.compactMap { line in line.proof.map { (line.pane, $0) } })
+        let receiver = try? await Task.detached(priority: .utility) { try Local.Client(socket: VigilPaths.hub).me() }.value
         let told = WorkspaceCommand.Request.moved(
-            source.name, panes: (source.tabs ?? []).flatMap(\.paneIds), to: Host.current().localizedName ?? "another Mac", digest: digest, transcripts: proofs.isEmpty ? nil : proofs)
-        DispatchQueue.global(qos: .utility).async {
-            do {
+            source.name, panes: (source.tabs ?? []).flatMap(\.paneIds), to: Host.current().localizedName ?? "another Mac", digest: digest, device: receiver, arrival: entry.name, transcripts: proofs.isEmpty ? nil : proofs)
+        do {
+            try await Task.detached(priority: .utility) {
                 _ = try Local.Client(socket: VigilPaths.hub).call(device: device, .session(try told.line))
+            }.value
                 lifecycleLog.info("its Mac told of the move (delivered, or kept until it is back)", ["workspace": source.name, "mac": host.name, "request": told.id])
-            } catch {
-                lifecycleLog.error("its Mac not told of the move: the workspace stays open there too", ["workspace": source.name, "mac": host.name, "err": error])
-            }
+        } catch {
+            return .init(id: request.id, ok: true, code: "copied", message: "Saved here. The retirement request could not be confirmed on \(host.name): \(error). Check the source before opening this copy.", session: entry.name)
         }
         return VigilSessionControl.Reply(id: request.id, ok: true, code: "committed", message: "Saved here. The source closes when it verifies this move. Nothing runs here until a pane is opened.",
                                          revision: workspaces[entry.name]?.layoutRevision, session: entry.name)
@@ -150,7 +153,7 @@ extension VigilWorkspaces {
     static func moveRevision(_ pane: String) -> String? {
         let root = VigilPaths.panes.deletingLastPathComponent()
         var revision = ""
-        for (folder, ext) in [("panes","up"), ("panes","pid"), ("panes","ended"), ("panes","resume"), ("panes","command"), ("state","state"), ("state","glance"), ("panes","tree"), ("state","conflict"), ("state","work")] {
+        for (folder, ext) in [("panes","up"), ("panes","ended"), ("panes","resume"), ("state","conflict")] {
             var info = stat()
             let file = root.appendingPathComponent(folder).appendingPathComponent(pane + "." + ext)
             if stat(file.path, &info) == 0 {
@@ -160,7 +163,15 @@ extension VigilWorkspaces {
                 revision += "-/"
             } else { return nil }
         }
-        return revision
+        let glance: PaneGlance?
+        switch Durable.read(root.appendingPathComponent("state/" + pane + ".glance"), limit: 512 * 1024) {
+        case .absent: glance = nil
+        case .unreadable: return nil
+        case .data(let bytes):
+            guard let read = try? JSONDecoder().decode(PaneGlance.self, from: bytes) else { return nil }
+            glance = read
+        }
+        return Registry.Workspace.moveIdentity(revision, glance: glance)
     }
 
     /// The conditional move-completion, from the Mac that brought panes of a
@@ -168,7 +179,7 @@ extension VigilWorkspaces {
     /// closed and undoable for its grace, then ended), each burial saying
     /// where they went. All of the workspace's panes: the workspace. Panes
     /// born here since that Mac last heard are not named and stay.
-    nonisolated static func compareMoveTranscripts(_ proofs: [String: Bring.TranscriptProof]) async -> [String: [String: String]]? {
+    nonisolated static func compareMoveTranscripts(_ proofs: [String: Bring.TranscriptProof], destination: String? = nil) async -> [String: [String: String]]? {
         await Task.detached(priority: .utility) {
             let panes = proofs.map { pane, proof in
                 Bring.Pane(pane: pane, agent: proof.agent, conversation: proof.start, cwd: NSHomeDirectory(), name: nil)
@@ -177,7 +188,15 @@ extension VigilWorkspaces {
                   answer.failed.isEmpty else { return nil }
             var result: [String: [String: String]] = [:]
             for line in answer.lines {
-                guard let proof = proofs[line.pane], proof == line.proof, let files = line.checkedFiles, !files.isEmpty else { return nil }
+                guard let original = proofs[line.pane], let current = line.proof,
+                      current.agent == original.agent, current.start == original.start,
+                      let files = line.checkedFiles, !files.isEmpty else { return nil }
+                guard current.confirms(original, read: { ask in
+                    guard let destination else { return nil }
+                    let hub = Local.Client(socket: VigilPaths.hub)
+                    guard let bytes = try? hub.call(device: destination, .transcript(ask)) else { return nil }
+                    return try? JSONDecoder().decode(TranscriptAnswer.self, from: bytes)
+                }) else { return nil }
                 result[line.pane] = files
             }
             return Set(result.keys) == Set(proofs.keys) ? result : nil
@@ -200,7 +219,7 @@ extension VigilWorkspaces {
             guard let revision = Self.moveRevision(pane) else {
                 return .failure(request, "source_unknown", "A pane could not be checked. The workspace is still here.")
             }
-            if revision.split(separator: "/")[3] != "-", checked[pane] == nil {
+            if revision.split(separator: "/")[2] != "-", checked[pane] == nil {
                 return .failure(request, "source_unknown", "The destination did not confirm the source conversation. Both copies were kept.")
             }
             revisions[pane] = revision
@@ -215,7 +234,8 @@ extension VigilWorkspaces {
         movingTo = moved.mac
         movingRevisions = revisions
         movingTranscripts = checked
-        defer { movingTo = nil; movingRevisions = nil; movingTranscripts = nil }
+        movingCheckpoint = moved
+        defer { movingTo = nil; movingRevisions = nil; movingTranscripts = nil; movingCheckpoint = nil }
         lifecycleLog.info("panes brought to another Mac close here", ["workspace": request.session, "to": moved.mac, "panes": leaving.sorted()])
         if leaving == Set(session.tabs.flatMap(\.paneIds)) {
             kill(name: request.session)
@@ -352,7 +372,7 @@ extension VigilWorkspaces {
     /// what this Mac knows about each pane, then the move. On a tab or a
     /// pane row: that much of it (`part` of the pane `anchor`).
     func bringWithSheet(device: String, workspace name: String, anchor: String = "", part: Registry.Workspace.Part? = nil) {
-        guard let host = VigilRemote.shared.host(device), let directory = host.directory,
+        guard let host = VigilRemote.shared.host(device), let directory = VigilRemote.shared.sourceDirectory(device),
               let whole = directory.live.first(where: { $0.name == name }),
               let source = part.map({ whole.only($0, of: anchor) }) ?? whole else { return }
         let here = FileManager.default.homeDirectoryForCurrentUser.path

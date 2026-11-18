@@ -42,6 +42,11 @@ extension VigilWorkspaces {
         case lost
     }
 
+    private func unanswered(_ end: PaneEnd, in pane: String) -> Bool {
+        guard let entry = registered(pane) else { return false }
+        return entry.reopened != end.run && !(entry.dormant == true && entry.from?.facts?.ended == end)
+    }
+
     /// The record speaks first: a birth takes it off the disk before it
     /// forks, so a record on disk is the last run's and no run came after,
     /// whatever else is still there (a daemon on its way out holds its lock
@@ -241,7 +246,7 @@ extension VigilWorkspaces {
             }
             bear(entry, in: at.owner, why: why)
             return .accepted
-        case .ended(let end) where end.clean && !asked && registered(pane)?.reopened != end.run:
+        case .ended(let end) where end.clean && !asked && unanswered(end, in: pane):
             closeFinished([pane])
             return .accepted
         case .ended, .lost:
@@ -335,7 +340,7 @@ extension VigilWorkspaces {
                 openAsked.remove(pane)
                 note(pane, nil)
                 redial([pane])
-            case .ended(let end) where end.clean && !openAsked.contains(pane) && said[pane] == nil && registered(pane)?.reopened != end.run:
+            case .ended(let end) where end.clean && !openAsked.contains(pane) && said[pane] == nil && unanswered(end, in: pane):
                 // Born and over already (a one-shot command). Never the end
                 // of the run before, standing because this birth was
                 // refused: that one says why below.
@@ -575,7 +580,7 @@ extension VigilWorkspaces {
                     guard !births.contains(id), !openAsked.contains(id), let end = Self.endOnDisk(id), end.clean,
                           // An end the person already answered by opening
                           // the pane again closes it no more.
-                          registered(id)?.reopened != end.run else { return nil }
+                          unanswered(end, in: id) else { return nil }
                     return (id, end)
                 }
                 guard !ends.isEmpty else { break }
