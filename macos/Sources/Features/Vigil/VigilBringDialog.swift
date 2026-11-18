@@ -214,8 +214,8 @@ final class BringDialogModel: ObservableObject {
     /// The watch here has said `ready`: an end before it means the sheet
     /// was read only once, before anything was followed, and is read again.
     private var watchReady = false
-    /// A watch that ended after standing was made again once since the
-    /// last that stood a whole read through.
+    /// A watch that ended after standing was made again, and the new one
+    /// has not stood yet (`ready`): one that ends before it is not remade.
     private var remadeAfterEnd = false
     /// The source's re-reads, asked one at a time and answered in order.
     private let asks = DispatchQueue(label: "vigil.bring-dialog.asks", qos: .userInitiated)
@@ -299,10 +299,12 @@ final class BringDialogModel: ObservableObject {
                 guard let self, !Task.isCancelled else { return }
                 switch step {
                 case .ready:
+                    // A watch that stands again may be made again once more
+                    // if it ends: each remake needs one that stood.
                     self.watchReady = true
+                    self.remadeAfterEnd = false
                     self.reload()
                 case .changed:
-                    self.remadeAfterEnd = false
                     self.reload()
                 case .ended(let why):
                     self.watchLost = why
