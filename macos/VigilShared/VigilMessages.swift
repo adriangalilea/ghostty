@@ -510,10 +510,11 @@ struct VigilThreadConversation: View {
 
 /// The messages of a thread that wait on the person's yes or no on their
 /// delivery, above the composer: each with how long it has waited and where
-/// its card in Authz stands (the mailbox's own words, `Record.said`), and
-/// the same answer the card gives (Allow, Refuse), plus Ask again once its
-/// card lapsed. Answered here or in Authz, whichever comes first; the
-/// mailbox takes the card down.
+/// it stands (the mailbox's own words, `Record.said`). Refuse; Allow, a plain
+/// yes where its urgency takes one (`allowNeedsPresence`, WIP: a stop is
+/// confirmed on its card in Authz, with the fingerprint); and Allow This
+/// Pair, which puts its card up in Authz where a standing yes is given.
+/// Nothing is offered on an older Mac's records (`answerable`).
 struct VigilDeliveryAsks: View {
     let items: [MessageThread.Item]
     let act: (Message.Act) -> Void
@@ -523,15 +524,24 @@ struct VigilDeliveryAsks: View {
         if !waiting.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(waiting, id: \.id) { item in
+                    let message = item.record.message
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(item.record.said()).inkText(.detail).lineLimit(3)
                         Spacer(minLength: 8)
-                        if item.record.ask?.stage == .notAsked {
-                            Button("Ask Again") { act(.ask(item.id)) }
+                        // An older Mac takes no answer from here (`answerable`),
+                        // and a yes that needs the fingerprint is given on its
+                        // card (`allowNeedsPresence`): its words say where.
+                        if item.record.answerable == true {
+                            Button("Refuse") { act(.refuse(item.id)) }
+                            if !message.declared.allowNeedsPresence, item.record.ask?.stage != .asking {
+                                if message.from.kind == .agent, message.from.root == nil, message.from.conversation != nil,
+                                   message.to.conversation != nil {
+                                    Button("Allow This Pair…") { act(.allowPair(item.id)) }
+                                }
+                                // Never a default button: Return is the composer's.
+                                Button("Allow") { act(.allow(item.id)) }
+                            }
                         }
-                        Button("Refuse") { act(.refuse(item.id)) }
-                        // Never a default button: Return is the composer's.
-                        Button("Allow") { act(.allow(item.id)) }
                     }
                 }
             }
