@@ -29,13 +29,14 @@ extension VigilWorkspaces {
                                                                tabs: whole.tabs ?? [], facts: revisions) else {
             return .failure(request, "source_unknown", "The home Mac has not published a complete version of these panes. Refresh it before moving them.")
         }
-        for pane in members {
+        for entry in (source.tabs ?? []).flatMap(\.members) {
+            let pane = entry.id
             guard let facts = directory.panes[pane], let version = revisions[pane] else {
                 return .failure(request, "source_unknown", "The source pane facts are unavailable.")
             }
             let fields = version.split(separator: "/")
             guard fields.count == 5, fields[1] == "-" || facts.ended != nil,
-                  fields[3] == "-", fields[2] == "-" || facts.meaning?.conversation != nil,
+                  fields[3] == "-", fields[2] == "-" || directory.moveConversation(of: entry)?.conversation != nil,
                   facts.glanceError == nil, facts.conflict == nil else {
                 return .failure(request, "source_unknown", "The end or conversation of \(pane) could not be transferred with certainty. The source stays open.")
             }
