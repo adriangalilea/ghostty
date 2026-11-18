@@ -176,6 +176,13 @@ extension VigilWorkspaces {
         let mapping = Dictionary(uniqueKeysWithValues: session.tabs.flatMap(\.members).compactMap { pane in pane.from.map { ($0.pane, pane.id) } })
         move.arrivals = mapping
         let release = WorkspaceCommand.Request(id: request.id, session: source.name, revision: digest, operation: "release_move_v2", anchor: "", moved: move)
+        // The rule the source's hub and app ask of this release, asked here
+        // before anything is archived, saved or admitted: a release they
+        // would refuse is never half done on this Mac.
+        if let why = release.refusal {
+            lifecycleLog.error("bring: the release this Mac would send is malformed; nothing was admitted", ["workspace": source.name, "why": why])
+            return .failure(request, "commit_failed", "The move could not be asked of the source (\(why)); nothing was brought.")
+        }
         let folders = Dictionary(uniqueKeysWithValues: session.tabs.flatMap(\.members).map { ($0.id, $0.cwd) })
         let ticket = IncomingMove(source: device, request: release, panes: mapping, folders: folders)
         if !proofs.isEmpty {
@@ -1230,7 +1237,10 @@ extension VigilWorkspaces {
                 if let expected = move.sourceWork, expected.values.contains(where: Bring.recordedBefore) {
                     return .failure(request, "source_changed", "This move was asked by an earlier vigil, whose record of the source checkout this one cannot check. Review a fresh move sheet. Its panes remain here.")
                 }
-                if let expected = move.sourceWork, !expected.isEmpty {
+                // A pane recorded `untold` binds nothing: its work is not
+                // read again (a repository there that cannot be read would
+                // refuse a move that never depended on it).
+                if let expected = move.sourceWork?.filter({ Bring.WorkRevision($0.value) != .untold }), !expected.isEmpty {
                     let members = workspaces[request.session]?.tabs.flatMap(\.members) ?? []
                     let panes = members.filter { expected[$0.id] != nil }.map {
                         Bring.Pane(pane: $0.id, agent: nil, conversation: nil, cwd: $0.cwd, name: nil)
