@@ -160,6 +160,7 @@ extension VigilWorkspaces {
         let panes: [String: String]
         let folders: [String: String]
         var requested = false
+        var released: [String: Bring.TranscriptProof]?
         var accepted = false
         var refusal: String?
         static var folder: URL { VigilPaths.root.appendingPathComponent("incoming-moves") }
@@ -214,7 +215,8 @@ extension VigilWorkspaces {
                 moveDelay[id] = pause
                 moveRetry[id] = Task { @MainActor in
                     do { try await Task.sleep(for: .seconds(pause)) } catch { return }
-                    guard VigilRemote.shared.host(device)?.away != true else { return }
+                    let verifyingHere = pending.released != nil && !pending.accepted
+                    guard verifyingHere || VigilRemote.shared.host(device)?.away != true else { return }
                     resumeMoves(from: device)
                 }
             }
@@ -243,19 +245,25 @@ extension VigilWorkspaces {
                 try ticket.save()
                 incomingMoves[request.id] = ticket
             }
-            let released = try await moveCommand(ticket.source, request)
-            if ["source_changed", "unsupported_operation", "invalid_request"].contains(released.code) {
-                var refused = ticket
-                refused.refusal = released.message
-                try refused.save()
-                incomingMoves[request.id] = refused
-                for pane in ticket.panes.values where waitingForMove(pane) { showMoveNote(pane) }
-                reportIncompleteMove(request.session, released.message)
-                return
+            if ticket.released == nil {
+                let released = try await moveCommand(ticket.source, request)
+                if ["source_changed", "unsupported_operation", "invalid_request"].contains(released.code) {
+                    var refused = ticket
+                    refused.refusal = released.message
+                    try refused.save()
+                    incomingMoves[request.id] = refused
+                    for pane in ticket.panes.values where waitingForMove(pane) { showMoveNote(pane) }
+                    reportIncompleteMove(request.session, released.message)
+                    return
+                }
+                guard released.ok, released.id == request.id, released.code == "released", let final = released.released,
+                      Set(final.keys) == Set(request.moved?.transcripts?.keys.map { $0 } ?? []),
+                      matchesArrival(ticket) else { throw WireError.refused(released.message) }
+                ticket.released = final
+                try ticket.save()
+                incomingMoves[request.id] = ticket
             }
-            guard released.ok, released.id == request.id, released.code == "released", let final = released.released,
-                  Set(final.keys) == Set(request.moved?.transcripts?.keys.map { $0 } ?? []),
-                  matchesArrival(ticket) else { throw WireError.refused(released.message) }
+            guard let final = ticket.released else { throw WireError.refused("missing source release") }
             let checks = final.compactMap { old, proof -> Bring.Pane? in
                 guard let new = ticket.panes[old], let folder = ticket.folders[new] else { return nil }
                 let arriving = registered(new) == nil || PaneFence.provesClose(memberMark(new)) ? "" : new
