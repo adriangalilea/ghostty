@@ -11,23 +11,28 @@ import VigilWire
 extension VigilWorkspaces {
     /// The `bring` workspace command, from the sidebar or `vigil move`.
     func bring(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
-        guard let device = request.from, let host = VigilRemote.shared.host(device), let directory = VigilRemote.shared.sourceDirectory(device),
-              let whole = directory.live.first(where: { $0.name == request.session }) else {
+        guard let device = request.from, let host = VigilRemote.shared.host(device),
+              let held = VigilRemote.shared.sourceDirectory(device) else {
             return .failure(request, "not_found", "This Mac has not heard that workspace from that Mac.")
         }
-        guard let source = request.part.map({ whole.only($0, of: request.anchor) }) ?? whole else {
-            return .failure(request, "not_found", "That workspace has no such pane on that Mac.")
+        let reading: Bring.Source
+        do {
+            reading = try await Bring.source(in: held, request: request, unavailable: host.error) {
+                try await Task.detached(priority: .utility) {
+                    let bytes = try Local.Client(socket: VigilPaths.hub).call(device: device, .moveSource(request.session))
+                    return try JSONDecoder().decode(Directory.self, from: bytes)
+                }.value
+            }
+        } catch {
+            return .failure(request, "source_unknown", String(describing: error))
         }
+        let directory = reading.directory, whole = reading.whole, source = reading.selected
         let here = FileManager.default.homeDirectoryForCurrentUser.path
         let names = directory.conversationNames(of: source)
-        let members = Set(source.paneIds)
-        let revisions = directory.panes.filter { members.contains($0.key) }.compactMapValues { facts in
-            facts.moveRevision.map { Registry.Workspace.moveIdentity($0, glance: facts.glance) }
-        }
-        guard Set(revisions.keys) == members,
-              let digest = try? Registry.Workspace.moveDigest(label: whole.label, emoji: whole.emoji, cwd: whole.cwd, pinned: whole.pinned ?? false, revision: whole.layoutRevision,
-                                                               tabs: whole.tabs ?? [], facts: revisions) else {
-            return .failure(request, "source_unknown", "The home Mac has not published a complete version of these panes. Refresh it before moving them.")
+        let revisions = reading.revisions
+        guard let digest = try? Registry.Workspace.moveDigest(label: whole.label, emoji: whole.emoji, cwd: whole.cwd, pinned: whole.pinned ?? false,
+                                                               revision: whole.layoutRevision, tabs: whole.tabs ?? [], facts: revisions) else {
+            return .failure(request, "source_unknown", "Could not encode the source workspace for transfer.")
         }
         for entry in (source.tabs ?? []).flatMap(\.members) {
             let pane = entry.id
@@ -101,6 +106,13 @@ extension VigilWorkspaces {
             }.value
             guard answer.failed.isEmpty else { return .failure(request, "resume_failed", answer.failed.values.sorted().joined(separator: "\n")) }
             lines = answer.lines
+            let revision = Bring.checkoutRevision(lines)
+            if !revision.isEmpty && revision != request.revision {
+                let differences = Bring.standing(lines).filter { item in
+                    item.panes.contains { $0.checkoutNeeds.contains(item.need) }
+                }.map(\.need.text).joined(separator: "\n")
+                return .failure(request, "checkout_changed", differences + "\nReview the move and choose Bring Anyway, or use --without to accept the destination checkout.")
+            }
         } catch {
             lifecycleLog.error("not brought: vigil-agent did not write its resume pointers", ["workspace": source.name, "from": host.name, "err": error])
             return .failure(request, "agent_unreachable", "vigil-agent did not answer, so nothing was brought (\(error)).")
@@ -114,7 +126,7 @@ extension VigilWorkspaces {
             return .failure(request, "commit_failed", "The destination differs: " + difference)
         }
         let proofs = Dictionary(uniqueKeysWithValues: lines.compactMap { line in line.proof.map { (line.pane, $0) } })
-        guard Set(lines.map(\.pane)) == members,
+        guard Set(lines.map(\.pane)) == Set(source.paneIds),
               lines.allSatisfy({ $0.conversation == nil || ($0.folderHere && $0.proof?.files?.isEmpty == false) }) else {
             return .failure(request, "copy_incomplete", "The destination has no usable checkpoint for every conversation. The source is still open.")
         }
@@ -1000,8 +1012,8 @@ extension VigilWorkspaces {
                             workspace: workspace, anchor: anchor, part: part, mac: sourceHost?.name ?? "this Mac", target: target.name,
                             what: Self.moving(label, part), away: Self.away(sourceHost), home: targetHome ?? "/",
                             lines: answer.lines, read: { _ in try hub.bringSheet(device: device, ask) })
-                        manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) {
-                            guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, anchor: anchor, part: part) else {
+                        manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) { revision in
+                            guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, anchor: anchor, part: part, checkoutRevision: revision) else {
                                 return lifecycleLog.error("move: no order", ["workspace": workspace, "to": target.name])
                             }
                             manager.ask(RowHome(device: device, workspace: workspace), order.request, failing: "\(label) was not moved to \(target.name)")
@@ -1059,9 +1071,9 @@ extension VigilWorkspaces {
         let model = BringDialogModel(
             workspace: name, anchor: anchor, part: part, mac: host.name, target: nil, what: Self.moving(source.label, part),
             away: Self.away(host), home: here, lines: lines, read: read)
-        present(model, source: device, sourceHome: directory.home, targetHome: here) {
+        present(model, source: device, sourceHome: directory.home, targetHome: here) { revision in
             Task { @MainActor in
-                let reply = await VigilSessionControl.transact(.bring(name, from: device, anchor: anchor, part: part))
+                let reply = await VigilSessionControl.transact(.bring(name, from: device, anchor: anchor, part: part, checkoutRevision: revision))
                 guard !reply.ok || reply.code == "copied" else { return }
                 let alert = NSAlert()
                 alert.messageText = reply.ok ? "\(source.label) was copied" : "\(source.label) was not brought"
@@ -1077,7 +1089,7 @@ extension VigilWorkspaces {
     /// workspace's Mac (nil: this one), where what is only there is opened
     /// and read.
     private func present(_ model: BringDialogModel, source: String?, sourceHome: String?, targetHome: String?,
-                         move: @escaping () -> Void) {
+                         move: @escaping (String) -> Void) {
         // The sheet names a folder as the target would; its own Mac reads it
         // under its own home.
         model.there = { root in
@@ -1108,8 +1120,8 @@ extension VigilWorkspaces {
                 } else {
                     self.activatePane(name: workspace, paneId: pane, in: parent?.windowController as? TerminalController)
                 }
-            case .bring:
-                move()
+            case .bring(let revision):
+                move(revision)
             }
         }
         if let parent {
