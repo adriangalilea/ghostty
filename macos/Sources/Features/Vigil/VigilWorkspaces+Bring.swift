@@ -125,7 +125,11 @@ extension VigilWorkspaces {
                 let differences = Bring.standing(lines).filter { item in
                     item.panes.contains { $0.checkoutNeeds.contains(item.need) }
                 }.map(\.need.text).joined(separator: "\n")
-                return .failure(request, "checkout_changed", differences + "\nReview the move and choose Bring Anyway, or use --without to accept the destination checkout.")
+                // Only a digest of what was accepted is kept, so what moved
+                // is said as what it may be: the words below can read as
+                // before when only the paths they sample, or their status,
+                // changed.
+                return .failure(request, "checkout_changed", "This Mac's checkout differs from the sheet you accepted: a need came or went, or the changed paths behind one of these (which paths, or their status) are not the ones you saw.\n" + differences + "\nReview the move and choose Bring Anyway, or use --without to accept the destination checkout.")
             }
         } catch {
             lifecycleLog.error("not brought: vigil-agent did not write its resume pointers", ["workspace": source.name, "from": host.name, "err": error])
@@ -159,7 +163,10 @@ extension VigilWorkspaces {
         var move = WorkspaceCommand.Request.Moved(panes: source.paneIds, mac: Host.current().localizedName ?? "another Mac", transcripts: proofs)
         do {
             move.sourceWork = try Dictionary(uniqueKeysWithValues: source.paneIds.map { pane in
-                let work = directory.panes[pane]?.work ?? PaneWork(repos: [], at: 0)
+                // A source that never published its work: the sheet said
+                // "not known" and the person accepted that, so it binds
+                // nothing, as a `.work` cut to no repository does.
+                guard let work = directory.panes[pane]?.work else { return (pane, Bring.WorkStrength.untold.rawValue) }
                 return (pane, try Bring.sourceWorkRevision(work))
             })
         } catch { return .failure(request, "source_unknown", "The source checkout facts could not be recorded.") }
@@ -1219,6 +1226,9 @@ extension VigilWorkspaces {
                 guard workspaces[request.session] != nil,
                       move.panes.allSatisfy({ memberMark($0) == .none && (move.returnOf != nil || !waitingForMove($0)) }) else {
                     return .failure(request, "source_changed", "A source pane is already closing or awaiting its own transfer.")
+                }
+                if let expected = move.sourceWork, expected.values.contains(where: Bring.recordedBefore) {
+                    return .failure(request, "source_changed", "This move was asked by an earlier vigil, whose record of the source checkout this one cannot check. Review a fresh move sheet. Its panes remain here.")
                 }
                 if let expected = move.sourceWork, !expected.isEmpty {
                     let members = workspaces[request.session]?.tabs.flatMap(\.members) ?? []
