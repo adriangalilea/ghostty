@@ -379,6 +379,7 @@ struct VigilThreadConversation: View {
         .onChange(of: thread?.items.filter { $0.record.unread }.map(\.id), initial: true) { markRead() }
         .onChange(of: front) { markRead() }
         .onContinuousHover { _ in markRead() }
+        VigilDeliveryAsks(items: items) { act($0, on: $0.id!) }
         InkComposer(
             text: $draft, prompt: "Message \(people.title(of: key))",
             replying: replying.flatMap { id in messages.first { $0.id == id } }.map { InkChat.Answered($0, people: people.all) },
@@ -503,6 +504,39 @@ struct VigilThreadConversation: View {
             Task {
                 do { _ = try await run(.read(ids), root) } catch { marking.subtract(ids) }
             }
+        }
+    }
+}
+
+/// The messages of a thread that wait on the person's yes or no on their
+/// delivery, above the composer: each with how long it has waited and where
+/// its card in Authz stands (the mailbox's own words, `Record.said`), and
+/// the same answer the card gives (Allow, Refuse), plus Ask again once its
+/// card lapsed. Answered here or in Authz, whichever comes first; the
+/// mailbox takes the card down.
+struct VigilDeliveryAsks: View {
+    let items: [MessageThread.Item]
+    let act: (Message.Act) -> Void
+
+    var body: some View {
+        let waiting = items.flatMap(\.every).filter { $0.record.awaitsYou }
+        if !waiting.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(waiting, id: \.id) { item in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(item.record.said()).inkText(.detail).lineLimit(3)
+                        Spacer(minLength: 8)
+                        if item.record.ask?.stage == .lapsed {
+                            Button("Ask Again") { act(.ask(item.id)) }
+                        }
+                        Button("Refuse") { act(.refuse(item.id)) }
+                        // Never a default button: Return is the composer's.
+                        Button("Allow") { act(.allow(item.id)) }
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
         }
     }
 }
