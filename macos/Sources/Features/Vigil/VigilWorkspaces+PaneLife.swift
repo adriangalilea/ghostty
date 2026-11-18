@@ -145,6 +145,21 @@ extension VigilWorkspaces {
         for view in views(of: pane) where view.vigilNote != said { view.vigilNote = said }
     }
 
+    func waitingForMove(_ pane: String) -> Bool {
+        guard let arrival = registered(pane)?.from, arrival.ticket != nil else { return false }
+        switch Durable.read(VigilPaths.agent.appendingPathComponent("panes-minted/" + pane), limit: 7) {
+        case .data(let mark): return !mark.isEmpty && mark != Data("arrival".utf8)
+        default: return true
+        }
+    }
+
+    func showMoveNote(_ pane: String) {
+        let arrival = registered(pane)?.from
+        let why = arrival?.ticket.flatMap { incomingMoves[$0]?.refusal }
+        note(pane, VigilPaneNote(says: why == nil ? "Moving from \(arrival?.mac ?? "another Mac")" : "Move refused",
+             offers: why == nil ? "Check move" : "Show source", explains: why ?? arrival?.ticket.flatMap { moveWaiting[$0] } ?? "This pane will open when its source stops and its final conversation is here.", symbol: "arrow.right"))
+    }
+
     private static let opens = "Open a shell"
 
     /// Its agent left a resume pointer: a shell born for this pane types it.
@@ -213,6 +228,11 @@ extension VigilWorkspaces {
             awaitingRegistry.insert(pane)
             return .unknown
         }
+        if waitingForMove(pane) {
+            if asked || !views(of: pane).isEmpty { waitingToOpen.insert(pane) }
+            showMoveNote(pane)
+            return .waiting
+        }
         if births.contains(pane) {
             if asked { openAsked.insert(pane) }
             return .waiting
@@ -262,6 +282,15 @@ extension VigilWorkspaces {
     /// pane is opened at its home (`open_pane`), which owns its life.
     func noteAsked(_ view: Ghostty.SurfaceView) {
         guard let pane = view.vigilAttachId else { return }
+        if waitingForMove(pane), let arrival = registered(pane)?.from {
+            if let ticket = arrival.ticket, incomingMoves[ticket]?.refusal != nil {
+                _ = openRemotePane(device: arrival.device, pane: arrival.pane)
+                return
+            }
+            waitingToOpen.insert(pane)
+            resumeMoves(from: arrival.device)
+            return
+        }
         daemonLog.info("pane's note pressed", ["pane": pane, "offered": view.vigilNote?.offers, "host": view.vigilHost])
         guard let device = view.vigilHost else {
             if view.vigilNote?.shellOnly == true {
@@ -458,6 +487,12 @@ extension VigilWorkspaces {
     /// birth in flight meanwhile (`births`), so nothing else starts it.
     func openNow(_ pane: String, why: String, shellOnly: Bool = false) async -> String? {
         guard let at = locate(pane), !at.buried else { return "no workspace of this Mac lists it" }
+        if waitingForMove(pane) {
+            if let id = registered(pane)?.from?.ticket, let refusal = incomingMoves[id]?.refusal { return refusal }
+            waitingToOpen.insert(pane)
+            showMoveNote(pane)
+            return "Open queued until the source has stopped and the conversation is here."
+        }
         guard !births.contains(pane) else { return "it is being started" }
         let entry: Registry.Pane
         switch Self.standing(pane) {

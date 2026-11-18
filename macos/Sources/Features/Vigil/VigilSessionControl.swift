@@ -51,13 +51,15 @@ enum VigilSessionControl {
         var session: String?
         var input: [InputDiagnostic]?
         var status: Status?
+        var released: [String: Bring.TranscriptProof]?
 
         static func failure(_ request: Request?, _ code: String, _ message: String) -> Self {
             .init(id: request?.id, ok: false, code: code, message: message)
         }
     }
 
-    static let maxBytes = 65536
+    // Up to 256 panes with 16 named SHA-256 checkpoints apiece.
+    static let maxBytes = 2 << 20
     static let lifetime: TimeInterval = 86400
     static var directory: URL {
         VigilPaths.root
@@ -131,10 +133,12 @@ enum VigilSessionControl {
         while bytes.count <= maxBytes {
             let count = read(fd, &buffer, buffer.count)
             guard count > 0 else { close(fd); return }
+            let start = bytes.endIndex
             bytes.append(contentsOf: buffer.prefix(count))
-            if let newline = bytes.firstIndex(of: 10) {
+            if let newline = bytes[start...].firstIndex(of: 10) {
                 guard newline < maxBytes,
-                      let request = try? JSONDecoder().decode(Request.self, from: bytes.prefix(upTo: newline)) else {
+                      let request = try? JSONDecoder().decode(Request.self, from: bytes.prefix(upTo: newline)),
+                      newline < 65536 || ["release_move", "ack_move"].contains(request.operation) else {
                     send(.failure(nil, "invalid_request", "Expected one workspace command JSON line."), to: fd)
                     return
                 }
@@ -145,7 +149,7 @@ enum VigilSessionControl {
                 return
             }
         }
-        send(.failure(nil, "request_too_large", "Workspace command exceeds 64 KiB."), to: fd)
+        send(.failure(nil, "request_too_large", "Workspace command exceeds the handoff limit of 2 MiB."), to: fd)
     }
 
     private static func send(_ reply: Reply, to fd: Int32) {
@@ -180,7 +184,7 @@ enum VigilSessionControl {
         if let why = request.refusal { return .failure(request, "invalid_request", why) }
         let age = Date().timeIntervalSince1970 - request.issuedAt
         // No request may outlive the receipt that prevents repeating it.
-        guard age >= -300, age < lifetime || request.operation == "retire_move" else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
+        guard age >= -300, age < lifetime || ["retire_move", "release_move", "ack_move"].contains(request.operation) else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
         if request.operation == "inspect-input" {
             let views = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
                 .filter { request.anchor.isEmpty || $0.vigilAttachId == request.anchor }
@@ -189,6 +193,11 @@ enum VigilSessionControl {
         }
         if request.operation == "status" {
             return .init(id: request.id, ok: true, code: "ok", message: "App status.", status: VigilWorkspaces.shared.status())
+        }
+        // A handoff reads or advances one durable transfer. A retry after a lost reply
+        // must see its current phase, including a release made before an app restart.
+        if ["release_move", "ack_move"].contains(request.operation) {
+            return await VigilWorkspaces.shared.handoffCommand(request)
         }
         if request.operation == "describe" { return VigilWorkspaces.shared.applySessionEdit(request) }
         guard !underWay.contains(request.id) else {

@@ -274,11 +274,8 @@ extension VigilWorkspaces {
     /// runs, and a pane born for an edit that no longer applies is closed.
     func applySessionCommand(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
         if request.operation == "bring" { return await bring(request) }
-        if request.operation == "retire_move", let proofs = request.moved?.transcripts, !proofs.isEmpty {
-            guard let files = await Self.compareMoveTranscripts(proofs, checkpointOnly: true) else {
-                return .failure(request, "source_changed", "The Macs could not verify identical conversation histories. Both copies were kept.")
-            }
-            return moved(request, checked: files)
+        if request.operation == "retire_move" {
+            return .failure(request, "upgrade_required", "Update the destination and move again. This source requires a handoff before another Mac can open the pane.")
         }
         guard Self.birthOperations.contains(request.operation) else { return applySessionEdit(request) }
         refreshWorkspaceRevisions()
@@ -487,7 +484,6 @@ extension VigilWorkspaces {
                          revision: workspaces[back]?.layoutRevision, session: back)
         }
         // Panes of a workspace here that another Mac brought: they close.
-        if request.operation == "retire_move" { return moved(request) }
         guard var session = workspaces[request.session] else {
             return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
         }

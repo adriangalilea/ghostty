@@ -61,10 +61,16 @@ extension VigilWorkspaces {
         var session = session
         session.movedTo = movingTo
         session.moveCheckpoint = movingCheckpoint
+        if movingCheckpoint?.ticket != nil { session.closing = ownedPaneIds(session).sorted() }
         let members = ownedPaneIds(session)
         session.moveRevisions = movingRevisions?.filter { members.contains($0.key) }
         session.moveTranscripts = movingTranscripts?.filter { members.contains($0.key) }
         graveyard[name] = session
+        if movingCheckpoint?.ticket != nil {
+            graveyardDeadlines[name] = .distantPast
+            DispatchQueue.main.async { [weak self] in self?.reapIfExpired(name) }
+            return
+        }
         graveyardDeadlines[name] = Date().addingTimeInterval(Self.killGrace)
 
         if let appDelegate = NSApp.delegate as? AppDelegate {
@@ -403,6 +409,11 @@ extension VigilWorkspaces {
             return
         }
         withheldReaps.remove(name)
+        if session.moveCheckpoint?.ticket != nil {
+            // Keep membership and transcript offers until the receiving Mac acknowledges.
+            if session.moveCheckpoint?.final == nil { stopForHandoff(name) }
+            return
+        }
         let needsTip = !refreshed && session.moveCheckpoint?.transcripts?.keys.contains(where: ids.contains) == true
         if !repairInvalid, session.closing == nil, session.movedTo != nil,
            needsTip || !ids.allSatisfy({ pane in
@@ -422,6 +433,10 @@ extension VigilWorkspaces {
                     if let files {
                         graveyard[name]?.moveTranscripts = files
                         reapIfExpired(name, refreshed: true)
+                    } else if proofs.values.allSatisfy({ $0.files?.isEmpty == false && $0.latest != nil }) {
+                        graveyardDeadlines[name] = Date().addingTimeInterval(60)
+                        persist()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 61) { [weak self] in self?.reapIfExpired(name) }
                     } else {
                         keepUnverifiedMove(name, session: now)
                     }

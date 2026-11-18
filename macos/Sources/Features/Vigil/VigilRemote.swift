@@ -462,6 +462,7 @@ final class VigilRemote: ObservableObject {
     private func apply(_ device: String, _ received: Directory) {
         guard let index = hosts.firstIndex(where: { $0.device == device }) else { return }
         receivedDirectories[device] = received
+        let wasAway = hosts[index].error != nil
         let dir = received.projected
         guard hosts[index].directory != dir || hosts[index].error != nil else { return }
         // A glance that did not travel or did not read: said once per
@@ -493,6 +494,7 @@ final class VigilRemote: ObservableObject {
         VigilWorkspaces.shared.remoteDirectoryChanged(device)
         VigilWorkspaces.shared.syncOwnerGrids()
         hosts[index].error = nil
+        if before == nil || wasAway { VigilWorkspaces.shared.resumeMoves(from: device) }
         if before.map({ $0 != shape }) ?? true {
             remoteLog.info("directory", [
                 "host": hosts[index].name, "home": dir.host, "workspaces": dir.workspaces.count, "panes": dir.panes.count,

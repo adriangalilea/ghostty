@@ -486,6 +486,21 @@ class VigilWorkspaces {
     static let killGrace: TimeInterval = 120
     /// While panes that another Mac brought are being closed here
     /// (`moved`): that Mac's name, stamped on each burial they make.
+    var moveCommand: (String, VigilSessionControl.Request) async throws -> VigilSessionControl.Reply = {
+        try await VigilRemote.shared.command($0, request: $1)
+    }
+    var readMove: (Bring.Question) async throws -> Bring.Answer = { question in
+        try await Task.detached(priority: .utility) { try Local.Client(socket: VigilPaths.hub).bring(question) }.value
+    }
+    var incomingMoves: [UUID: IncomingMove] = [:]
+    var activeMoves = Set<UUID>()
+    var moveRetry: [UUID: Task<Void, Never>] = [:]
+    var waitingToOpen = Set<String>()
+    var acceptingMove = Set<UUID>()
+    var stoppingMoves = Set<String>()
+    var moveDelay: [UUID: UInt64] = [:]
+    var moveWaiting: [UUID: String] = [:]
+    var recoveredMoveBurials = Set<String>()
     var movingCheckpoint: WorkspaceCommand.Request.Moved?
     var verifyingMoves = Set<String>()
     var reportIncompleteMove: (String, String) -> Void = { label, why in
@@ -699,6 +714,7 @@ class VigilWorkspaces {
         closeFinished(workspaces.values.flatMap(ownedPaneIds))
         collectOrphans()
         finishPendingCloses()
+        loadIncomingMoves()
         // Publish revisions for older registries without changing their
         // saved login-restoration intent before any windows are restored.
         shutdownForeground = Dictionary(uniqueKeysWithValues: workspaces.values.map { ($0.name, $0.foreground) })
@@ -1820,6 +1836,7 @@ class VigilWorkspaces {
                 if fromBackup || deadline == .distantFuture {
                     graveyardDeadlines[entry.name] = .distantFuture
                     if fromBackup {
+                        if entry.moveCheckpoint?.ticket != nil { recoveredMoveBurials.insert(entry.name) }
                         session.closing = entry.paneIds.contains { PaneFence.provesClose(memberMark($0)) } ? session.closing : nil
                         graveyard[entry.name] = session
                         registryLog.warn("burial recovered from backup; waiting for a fresh decision", ["workspace": entry.name])
