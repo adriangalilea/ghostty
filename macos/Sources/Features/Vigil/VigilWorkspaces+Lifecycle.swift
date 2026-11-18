@@ -60,6 +60,11 @@ extension VigilWorkspaces {
 
     /// A workspace born through the api: its id, its one pane, and whether
     /// that pane's daemon started.
+    struct UnconfirmedWorkspace: Error {
+        let name: String
+        let pane: Registry.Pane
+    }
+
     struct Birth {
         let name: String
         let pane: Registry.Pane
@@ -75,7 +80,10 @@ extension VigilWorkspaces {
     /// Adrian's hands is never touched.
     @discardableResult
     func apiNewWorkspace(label: String?, emoji: String? = nil, cwd: String?, command: String?, openWindow: Bool) async -> Birth? {
-        guard let made = try? apiCreate(label: label, emoji: emoji, cwd: cwd, command: command) else { return nil }
+        let made: (name: String, pane: Registry.Pane)
+        do { made = try apiCreate(label: label, emoji: emoji, cwd: cwd, command: command) }
+        catch let pending as UnconfirmedWorkspace { return Birth(name: pending.name, pane: pending.pane, running: false) }
+        catch { return nil }
         let running = await startDaemon(pane: made.pane, session: made.name)
         return apiStarted(made, label: label, running: running, openWindow: openWindow)
     }
@@ -95,6 +103,7 @@ extension VigilWorkspaces {
         let panes = workspaces[name]!.tabs.flatMap(\.panes)
         assert(panes.count == 1, "a workspace is born with one pane")
         guard persist(durable: true) else {
+            if registryInstallUncertain { throw UnconfirmedWorkspace(name: name, pane: panes[0]) }
             fresh.remove(panes[0].id)
             workspaces[name] = nil
             throw Durable.Failure("workspace could not be committed", persistURL.path, EIO)

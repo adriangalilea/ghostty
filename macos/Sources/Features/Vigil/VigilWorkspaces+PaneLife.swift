@@ -49,7 +49,7 @@ extension VigilWorkspaces {
     /// its spec).
     nonisolated static func standing(_ pane: String) -> PaneStanding {
         let record = VigilPaths.panes.appendingPathComponent(pane + ".ended")
-        switch Durable.read(record, limit: 64 * 1024) {
+        switch Durable.read(record, limit: 512 * 1024) {
         case .absent: break
         case .unreadable: return .lost
         case .data(let bytes):
@@ -110,6 +110,7 @@ extension VigilWorkspaces {
                 let result = PaneLifeClient.settle(.abort(pane, birth: request.id))
                 if case .answered(let reply) = result, reply.ok { done.resume(); return }
                 daemonLog.error("provisional birth cancellation unconfirmed", ["pane": pane, "birth": request.id])
+                DispatchQueue.main.async { VigilWorkspaces.shared.collectOrphans() }
                 done.resume()
             }
         }
@@ -167,7 +168,7 @@ extension VigilWorkspaces {
             return VigilPaneNote(says: "Not connected", offers: "Reconnect", explains: "This pane's daemon runs and this view has no connection to it. What you type does not reach it.", symbol: "wifi.slash")
         case .died:
             let why = said ?? "its daemon is gone"
-            return VigilPaneNote(says: "Not running", offers: "Try again", explains: "This pane's daemon is gone and was not started again: \(why). What ran in it does not come back; started again, it runs what the pane was made for.", symbol: "bolt.slash")
+            return VigilPaneNote(says: "Not running", offers: "Try again", explains: "This pane's daemon is gone and was not started again: \(why). Recovery resumes a verified conversation or opens a shell. A command that may already have run stays in its recipe.", symbol: "bolt.slash")
         case .unborn:
             return VigilPaneNote(says: "Not started", offers: "Start it", explains: "This pane has no daemon: \(said ?? "no reason was given"). Starting it runs what the pane was made for, in its folder.", symbol: "bolt.slash")
         case .ended(let end):
@@ -233,7 +234,7 @@ extension VigilWorkspaces {
             // the app made (or one brought here and not opened yet). For
             // any other its files are missing, which is no leave to run
             // what the registry says it ran.
-            guard fresh.contains(pane) || dormantPanes.contains(pane), let entry = registered(pane) else {
+            guard PaneLife.awaitsFirstStart(pane, agent: VigilPaths.agent) || dormantPanes.contains(pane), let entry = registered(pane) else {
                 if asked { return reopen(pane, why: why) }
                 note(pane, Self.note(for: .lost, said: nil))
                 return .noted
@@ -296,7 +297,7 @@ extension VigilWorkspaces {
         // nearest existing parent), never this process's working directory.
         var shell: String?
         var argv: [String]?
-        if let cmd = pane.command {
+        if pane.from == nil, let cmd = pane.command {
             if cmd.hasPrefix("direct:") {
                 // ghostty's command syntax: `direct:` argv, space-separated.
                 argv = cmd.dropFirst("direct:".count).split(separator: " ").map(String.init)
@@ -470,7 +471,7 @@ extension VigilWorkspaces {
             entry = shell
         case .unborn:
             guard let listed = registered(pane) else { return "no workspace of this Mac lists it" }
-            if !shellOnly && (fresh.contains(pane) || dormantPanes.contains(pane)) {
+            if !shellOnly && (PaneLife.awaitsFirstStart(pane, agent: VigilPaths.agent) || dormantPanes.contains(pane)) {
                 entry = listed
             } else {
                 guard let shell = madeShell(pane, why: why) else { return "the shell could not be saved" }

@@ -421,6 +421,7 @@ class VigilWorkspaces {
         var front: String?
         /// A burial of panes brought to another Mac: that Mac's name.
         var movedTo: String?
+        var moveRevisions: [String: String]?
         /// A burial whose close began: its panes not yet fenced, and no
         /// undo (`Registry.Workspace.closing`).
         var closing: [String]?
@@ -484,6 +485,7 @@ class VigilWorkspaces {
     /// While panes that another Mac brought are being closed here
     /// (`moved`): that Mac's name, stamped on each burial they make.
     var movingTo: String?
+    var movingRevisions: [String: String]?
 
     /// Most recently active workspaces, newest first: the successor order
     /// when the session you are in dies (the tab-close semantic: the
@@ -666,7 +668,15 @@ class VigilWorkspaces {
         // reads the former to pair an agent with this app.
         precondition(Bundle.main.object(forInfoDictionaryKey: "VigilPaneLifeVersion") as? Int == PaneLife.version,
                      "Ghostty-Info.plist's VigilPaneLifeVersion is not PaneLife.version \(PaneLife.version)")
-        load()
+        do { try load() } catch {
+            registryLog.error("registry unavailable; original files preserved", ["err": error])
+            exit(EXIT_FAILURE)
+        }
+        for session in workspaces.values {
+            for pane in session.tabs.flatMap(\.members) where pane.dormant != true && PaneLife.awaitsFirstStart(pane.id, agent: VigilPaths.agent) {
+                tend(pane.id, why: "its committed first start is pending")
+            }
+        }
         respawnMachineKilledDaemons()
         closeFinished(workspaces.values.flatMap(ownedPaneIds))
         collectOrphans()
@@ -1392,6 +1402,7 @@ class VigilWorkspaces {
     private var saveScheduled = false
     private var persisting = false
     private var lastSaved: Data?
+    private(set) var registryInstallUncertain = false
 
     /// One save per runloop turn however many edits it held; a save's own
     /// bookkeeping (refreshLiveFacts) never schedules another.
@@ -1413,6 +1424,7 @@ class VigilWorkspaces {
     /// it was not.
     @discardableResult
     func persist(publish: Bool = true, onlyIfChanged: Bool = false, durable: Bool = false) -> Bool {
+        registryInstallUncertain = false
         persisting = true
         if publish { refreshLiveFacts() }
         refreshWorkspaceRevisions()
@@ -1421,7 +1433,7 @@ class VigilWorkspaces {
             Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, front: $0.front)
         }
         entries += graveyard.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, closing: $0.closing)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, moveRevisions: $0.moveRevisions, closing: $0.closing)
         }
         entries.sort { $0.name < $1.name }
         guard let data = try? JSONEncoder().encode(entries) else {
@@ -1440,20 +1452,24 @@ class VigilWorkspaces {
         // Only a previous version that decodes becomes the backup: an
         // unreadable one would put the evidence of an incomplete read over
         // the one good copy. It is kept aside instead, once.
-        if let previous = try? Data(contentsOf: persistURL), !previous.isEmpty {
-            if (try? JSONDecoder().decode([Registry.Workspace].self, from: previous)) != nil {
-                try? previous.write(to: persistBackupURL, options: .atomic)
-            } else {
-                let aside = persistURL.deletingLastPathComponent().appendingPathComponent("vigil.json.unreadable-\(Int(Date().timeIntervalSince1970))")
-                try? previous.write(to: aside, options: .atomic)
-                registryLog.error("!! the registry on disk did not decode; kept aside, never made the backup", ["aside": aside.path])
-            }
-        }
         do {
-            if durable {
-                try Durable.replace(persistURL, with: data)
-            } else {
-                try data.write(to: persistURL, options: .atomic)
+            switch Durable.read(persistURL) {
+            case .absent: break
+            case .unreadable(let why):
+                throw Durable.Failure("existing registry cannot be read: " + why, persistURL.path)
+            case .data(let previous):
+                if (try? JSONDecoder().decode([Registry.Workspace].self, from: previous)) != nil {
+                    if previous != data { try Durable.replace(persistBackupURL, with: previous) }
+                } else {
+                    let aside = persistURL.deletingLastPathComponent().appendingPathComponent("vigil-unreadable-" + UUID().uuidString + ".json")
+                    try Durable.create(aside, with: previous, exclusive: true)
+                }
+            }
+            do { try Durable.replace(persistURL, with: data) } catch let error as Durable.Failure where error.installed {
+                do { try Durable.syncFolder(persistURL.deletingLastPathComponent().path) } catch {
+                    registryInstallUncertain = true
+                    throw error
+                }
             }
         } catch {
             registryLog.error("registry not saved", ["err": error, "durable": durable])
@@ -1706,26 +1722,32 @@ class VigilWorkspaces {
         return maxIndex
     }
 
-    private func load() {
+    private func load() throws {
         // The backup is a fallback, never a merge: whichever file decodes
         // is the workspace. A live file that decodes always wins, even if
         // the backup is newer, because the backup IS an older live file.
         // How it was read decides what its silence proves (`registryRead`):
         // only the live file read whole says a pane it does not list is no
         // one's.
-        let files = FileManager.default
-        var payload = try? Data(contentsOf: persistURL)
-        var decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Workspace].self, from: $0) }
+        func candidate(_ file: URL) throws -> (exists: Bool, entries: [Registry.Workspace]?) {
+            switch Durable.read(file) {
+            case .absent: return (false, nil)
+            case .unreadable(let why):
+                throw Durable.Failure("registry read failed: " + why, file.path)
+            case .data(let bytes):
+                return (true, try? JSONDecoder().decode([Registry.Workspace].self, from: bytes))
+            }
+        }
+        let primary = try candidate(persistURL)
+        var decoded = primary.entries
         registryRead = .current
         if decoded == nil {
-            payload = try? Data(contentsOf: persistBackupURL)
-            decoded = payload.flatMap { try? JSONDecoder().decode([Registry.Workspace].self, from: $0) }
+            let backup = try candidate(persistBackupURL)
+            decoded = backup.entries
             if decoded != nil {
                 registryRead = .recovered
-                registryLog.error("registry unreadable; recovered from backup: nothing is closed as no one's this run")
-            } else if files.fileExists(atPath: persistURL.path) || files.fileExists(atPath: persistBackupURL.path) {
-                registryRead = .unreadable
-                registryLog.error("!! registry and backup unreadable: nothing is closed as no one's this run")
+            } else if primary.exists || backup.exists {
+                throw Durable.Failure("neither registry decodes; repair a copy before opening", persistURL.path, EINVAL)
             } else {
                 registryRead = .absent
             }
@@ -1741,8 +1763,7 @@ class VigilWorkspaces {
         guard let entries = decoded else { return }
         var workspaceKeys = Set<String>()
         for entry in entries where !workspaceKeys.insert(entry.name).inserted {
-            registryLog.error("duplicate workspace key; registry preserved, startup stopped", ["name": entry.name])
-            exit(EXIT_FAILURE)
+            throw Durable.Failure("duplicate workspace key " + entry.name, persistURL.path, EINVAL)
         }
         // One daemon = ONE pane: a registry claiming an id twice would
         // attach two surfaces to one socket (frames interleave into
@@ -1785,6 +1806,7 @@ class VigilWorkspaces {
                 // daemons are still out there), reap immediately if spent.
                 session.buriedFrom = entry.buriedFrom
                 session.movedTo = entry.movedTo
+                session.moveRevisions = entry.moveRevisions
                 // Its close's progress from the marks, not only from what was
                 // saved.
                 session.closing = entry.reconciled(mark: memberMark).closing

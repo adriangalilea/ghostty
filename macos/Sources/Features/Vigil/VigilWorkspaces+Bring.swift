@@ -20,6 +20,24 @@ extension VigilWorkspaces {
         }
         let here = FileManager.default.homeDirectoryForCurrentUser.path
         let names = directory.conversationNames(of: source)
+        let members = Set(source.paneIds)
+        let revisions = directory.panes.filter { members.contains($0.key) }.compactMapValues(\.moveRevision)
+        guard Set(revisions.keys) == members,
+              let digest = try? Registry.Workspace.moveDigest(label: whole.label, emoji: whole.emoji, cwd: whole.cwd, pinned: whole.pinned ?? false, revision: whole.layoutRevision,
+                                                               tabs: whole.tabs ?? [], facts: revisions) else {
+            return .failure(request, "source_unknown", "The home Mac has not published a complete version of these panes. Refresh it before moving them.")
+        }
+        for pane in members {
+            guard let facts = directory.panes[pane], let version = revisions[pane] else {
+                return .failure(request, "source_unknown", "The source pane facts are unavailable.")
+            }
+            let fields = version.split(separator: "/")
+            guard fields.count == 10, fields[2] == "-" || facts.ended != nil,
+                  fields[3] == "-" || facts.meaning?.conversation != nil,
+                  facts.glanceError == nil, facts.conflict == nil else {
+                return .failure(request, "source_unknown", "The end or conversation of \(pane) could not be transferred with certainty. The source stays open.")
+            }
+        }
         let name = newWorkspaceId()
         let owned = (Array(workspaces.values) + Array(graveyard.values)).reduce(into: Set<String>()) {
             $0.formUnion(ownedPaneIds($1))
@@ -31,19 +49,45 @@ extension VigilWorkspaces {
                                        home: directory.home, here: here, order: (workspaces.values.map(\.order).max() ?? 0) + 1,
                                        names: names) {
                 let index = try PaneLife.reserve(workspace: name, startingAt: floor, owned: owned,
-                                                 panes: VigilPaths.panes, agent: VigilPaths.agent)
+                                                 panes: VigilPaths.panes, agent: VigilPaths.agent, arrival: true)
                 floor = index + 1
                 return index
             }
         } catch {
             return .failure(request, "allocation_failed", "This Mac could not reserve the arriving panes: \(error)")
         }
+        var retainFiles = false
+        defer {
+            if !retainFiles {
+                for pane in entry.paneIds {
+                    for suffix in [".ended", ".resume", ".resume.seal"] {
+                        let file = VigilPaths.panes.appendingPathComponent(pane + suffix)
+                        do { try Durable.remove(file) } catch {
+                            lifecycleLog.error("could not remove an uncommitted arrival file", ["file": file.path, "err": error])
+                        }
+                    }
+                }
+            }
+        }
+        // An end belongs to the imported pane too. Its first opening
+        // must use the same shell-only path as an opening at home.
+        do {
+            for (old, new) in zip(source.paneIds, entry.paneIds) {
+                if let end = directory.panes[old]?.ended {
+                    try Durable.replace(VigilPaths.panes.appendingPathComponent(new + ".ended"), with: JSONEncoder().encode(end))
+                }
+            }
+        } catch {
+            return .failure(request, "end_unavailable", "The source is still open. Its end record could not be saved here.")
+        }
         // The pointers first: a pane is in the registry only once its first
         // start can find what it resumes.
         let lines: [Bring.Line]
         do {
-            lines = try Local.Client(socket: VigilPaths.hub).bring(
-                Bring.Question(panes: directory.bringing(source, as: entry, here: here), commit: true)).lines
+            let answer = try Local.Client(socket: VigilPaths.hub).bring(
+                Bring.Question(panes: directory.bringing(source, as: entry, here: here), commit: true))
+            guard answer.failed.isEmpty else { return .failure(request, "resume_failed", answer.failed.values.sorted().joined(separator: "\n")) }
+            lines = answer.lines
         } catch {
             lifecycleLog.error("not brought: vigil-agent did not write its resume pointers", ["workspace": source.name, "from": host.name, "err": error])
             return .failure(request, "agent_unreachable", "vigil-agent did not answer, so nothing was brought (\(error)).")
@@ -53,27 +97,38 @@ extension VigilWorkspaces {
         session.paneSeq = entry.paneSeq ?? session.tabs.flatMap(\.members).count
         session.pinned = entry.pinned ?? false
         session.layoutShape = VigilSessionControl.revision(session.tabs)
+        if let difference = source.differs(fromBrought: entry, names: names) {
+            return .failure(request, "commit_failed", "The destination differs: " + difference)
+        }
         guard admit(session, "brought") else {
             return .failure(request, "commit_failed", "This Mac's registry already lists that workspace's name or one of its panes; nothing was brought.")
         }
-        guard persist(durable: true), let data = try? Data(contentsOf: persistURL),
+        guard persist(publish: false, durable: true) else {
+            retainFiles = registryInstallUncertain
+            if !retainFiles { workspaces[entry.name] = nil }
+            return .init(id: request.id, ok: false, code: "commit_unknown", message: "The copy \(entry.name) could not be confirmed. The source stays open.", session: entry.name)
+        }
+        retainFiles = true
+        guard let data = try? Data(contentsOf: persistURL),
               let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
               let kept = saved.first(where: { $0.name == entry.name && $0.buriedUntil == nil }), kept.tabs == entry.tabs else {
-            return .failure(request, "commit_failed", "The brought workspace could not be confirmed in this Mac's registry.")
+            return .init(id: request.id, ok: false, code: "commit_unknown", message: "The destination \(entry.name) was written but could not be verified. The source stays open.", session: entry.name)
         }
-        // The proof is the two registries compared, never an eye.
-        if let difference = source.differs(fromBrought: kept, names: names) {
-            return .failure(request, "commit_failed", "The destination differs: " + difference)
-        }
+        persist()
         lifecycleLog.info("brought", [
             "workspace": entry.name, "from": host.name, "was": source.name, "tabs": session.tabs.count,
             "panes": session.tabs.flatMap(\.members).count, "resuming": lines.filter { $0.transcriptHere == true && $0.folderHere }.count,
             "lacking": lines.filter { !$0.lacks.isEmpty }.count,
         ])
+        if lines.contains(where: { line in
+            line.conversation != nil && (!line.folderHere || line.transcriptHere != true || line.needs.contains { $0.kind == .transcript })
+        }) {
+            return .init(id: request.id, ok: true, code: "copied", message: "Copied here. The source stays open because its conversation could not be transferred in full.", session: entry.name)
+        }
         // Its Mac is told: those panes close there, so the conversation is
         // written on one Mac. Kept by the hub while that Mac is away.
         let told = WorkspaceCommand.Request.moved(
-            source.name, panes: (source.tabs ?? []).flatMap(\.paneIds), to: Host.current().localizedName ?? "another Mac")
+            source.name, panes: (source.tabs ?? []).flatMap(\.paneIds), to: Host.current().localizedName ?? "another Mac", digest: digest)
         DispatchQueue.global(qos: .utility).async {
             do {
                 _ = try Local.Client(socket: VigilPaths.hub).call(device: device, .session(try told.line))
@@ -86,7 +141,23 @@ extension VigilWorkspaces {
                                          revision: workspaces[entry.name]?.layoutRevision, session: entry.name)
     }
 
-    /// The `moved` workspace command, from the Mac that brought panes of a
+    static func moveRevision(_ pane: String) -> String? {
+        let root = VigilPaths.panes.deletingLastPathComponent()
+        var revision = ""
+        for (folder, ext) in [("panes","up"), ("panes","pid"), ("panes","ended"), ("panes","resume"), ("panes","command"), ("state","state"), ("state","glance"), ("panes","tree"), ("state","conflict"), ("state","work")] {
+            var info = stat()
+            let file = root.appendingPathComponent(folder).appendingPathComponent(pane + "." + ext)
+            if stat(file.path, &info) == 0 {
+                let time = info.st_mtimespec
+                revision += "\(info.st_ino)-\(time.tv_sec * 1_000_000_000 + time.tv_nsec)/"
+            } else if errno == ENOENT {
+                revision += "-/"
+            } else { return nil }
+        }
+        return revision
+    }
+
+    /// The conditional move-completion, from the Mac that brought panes of a
     /// workspace here: those panes close here as any pane closes (recently
     /// closed and undoable for its grace, then ended), each burial saying
     /// where they went. All of the workspace's panes: the workspace. Panes
@@ -98,13 +169,27 @@ extension VigilWorkspaces {
             Reply(id: request.id, ok: true, code: "committed", message: message, revision: workspaces[request.session]?.layoutRevision, session: request.session)
         }
         guard let session = workspaces[request.session] else { return done("Nothing of it is open here.") }
+        var revisions: [String: String] = [:]
+        for pane in moved.panes {
+            guard let revision = Self.moveRevision(pane) else {
+                return .failure(request, "source_unknown", "A pane could not be checked. The workspace is still here.")
+            }
+            revisions[pane] = revision
+        }
+        guard let digest = try? Registry.Workspace.moveDigest(label: session.label, emoji: session.emoji, cwd: session.cwd, pinned: session.pinned,
+                                                              revision: session.layoutRevision, tabs: session.tabs, facts: revisions),
+              digest == request.revision else {
+            return .failure(request, "source_changed", "The source changed after the destination saw it. Both copies were kept.")
+        }
         let leaving = Set(moved.panes).intersection(session.tabs.flatMap(\.paneIds))
         guard !leaving.isEmpty else { return done("None of those panes is open here.") }
         movingTo = moved.mac
-        defer { movingTo = nil }
+        movingRevisions = revisions
+        defer { movingTo = nil; movingRevisions = nil }
         lifecycleLog.info("panes brought to another Mac close here", ["workspace": request.session, "to": moved.mac, "panes": leaving.sorted()])
         if leaving == Set(session.tabs.flatMap(\.paneIds)) {
             kill(name: request.session)
+            guard persist(publish: false, durable: true) else { return .failure(request, "commit_unknown", "The source burial could not be confirmed.") }
             return done("Closed here: it is on \(moved.mac) now.")
         }
         // Tab by tab from the registry as it stands: a tab that left whole
@@ -270,9 +355,9 @@ extension VigilWorkspaces {
         present(model, source: device, sourceHome: directory.home, targetHome: here) { [weak self] in
             guard let self else { return }
             let reply = self.applySessionEdit(.bring(name, from: device, anchor: anchor, part: part))
-            guard !reply.ok else { return }
+            guard !reply.ok || reply.code == "copied" else { return }
             let failed = NSAlert()
-            failed.messageText = "\(source.label) was not brought"
+            failed.messageText = reply.ok ? "\(source.label) was copied" : "\(source.label) was not brought"
             failed.informativeText = reply.message
             failed.runModal()
         }

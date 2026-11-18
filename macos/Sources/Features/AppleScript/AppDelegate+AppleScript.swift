@@ -239,11 +239,16 @@ extension NSApplication {
             // pane that does not start says so on its views.
             let vigil = VigilWorkspaces.shared
             let made = try vigil.apiCreate(label: label, emoji: emoji, cwd: cwd, command: program)
+            command.suspendExecution()
             Task { @MainActor in
                 let running = await vigil.startDaemon(pane: made.pane, session: made.name)
-                _ = vigil.apiStarted(made, label: label, running: running, openWindow: openWindow)
+                let birth = vigil.apiStarted(made, label: label, running: running, openWindow: openWindow)
+                command.resumeExecution(withResult: ["name": made.name, "label": label ?? made.name,
+                                                     "pane": made.pane.id, "running": birth.running] as NSDictionary)
             }
-            return ["name": made.name, "label": label ?? made.name] as NSDictionary
+            return nil
+        } catch let pending as VigilWorkspaces.UnconfirmedWorkspace {
+            return ["name": pending.name, "pane": pending.pane.id, "running": false] as NSDictionary
         } catch {
             command.scriptErrorNumber = errAECoercionFail
             command.scriptErrorString = error.localizedDescription

@@ -59,7 +59,9 @@ extension VigilWorkspaces {
         // its renderers must not.
         setOcclusion(false, session.held)
         var session = session
-        if session.movedTo == nil { session.movedTo = movingTo }
+        session.movedTo = movingTo
+        let members = ownedPaneIds(session)
+        session.moveRevisions = movingRevisions?.filter { members.contains($0.key) }
         graveyard[name] = session
         graveyardDeadlines[name] = Date().addingTimeInterval(Self.killGrace)
 
@@ -281,9 +283,21 @@ extension VigilWorkspaces {
     @discardableResult
     func exhume(_ name: String) -> Exhumation {
         // A close begun is no undo (U2): its fenced panes are closed for good.
-        guard undoAllowed(burial: name), var burial = graveyard.removeValue(forKey: name) else { return .refused }
+        guard undoAllowed(burial: name), let previous = graveyard[name] else { return .refused }
+        let deadline = graveyardDeadlines[name]
+        var burial = previous
+        graveyard[name] = nil
         graveyardDeadlines[name] = nil
-        try? FileManager.default.removeItem(at: dumpsDir(name))
+        func commit(_ destination: String, was: Workspace?) -> Bool {
+            guard persist(publish: false, durable: true) else {
+                workspaces[destination] = was
+                graveyard[name] = previous
+                graveyardDeadlines[name] = deadline
+                return false
+            }
+            try? FileManager.default.removeItem(at: dumpsDir(name))
+            return true
+        }
         if let origin = burial.buriedFrom, var home = workspaces[origin.workspace] {
             for tab in burial.tabs {
                 if let beside = origin.beside, let at = home.tabs.firstIndex(where: { $0.paneIds.contains(beside) }) {
@@ -302,23 +316,27 @@ extension VigilWorkspaces {
                 } else {
                     home.tabs.insert(tab, at: min(origin.tab, home.tabs.count))
                 }
-                for id in tab.paneIds { chown(id, to: origin.workspace) }
             }
             // A tab buried warm comes back warm: a click adopts its views.
             home.held += burial.held
             home.layoutShape = "" // a new revision, even for a shape seen before
+            let was = workspaces[origin.workspace]
             workspaces[origin.workspace] = home
+            guard commit(origin.workspace, was: was) else { return .saveFailed }
+            for id in burial.tabs.flatMap(\.paneIds) { chown(id, to: origin.workspace) }
             reconcileViews(of: origin.workspace)
             revive(burial.tabs.flatMap(\.paneIds))
-            guard persist() else { return .saveFailed }
+            persist()
             graveyardLog.info("exhumed into its workspace", ["burial": name, "workspace": origin.workspace, "tab": origin.tab, "beside": origin.beside])
             return .restored(origin.workspace)
         }
         burial.buriedFrom = nil
+        burial.movedTo = nil
+        burial.moveRevisions = nil
         burial.layoutShape = ""
         workspaces[name] = burial
+        guard commit(name, was: nil) else { return .saveFailed }
         revive(burial.tabs.flatMap(\.paneIds))
-        guard persist() else { return .saveFailed }
         open(name: name)
         graveyardLog.info("exhumed as itself", ["workspace": name])
         return .restored(name)
@@ -373,6 +391,16 @@ extension VigilWorkspaces {
             return
         }
         withheldReaps.remove(name)
+        if !repairInvalid, session.closing == nil, session.movedTo != nil,
+           !ids.allSatisfy({ pane in
+               guard let expected = session.moveRevisions?[pane] else { return false }
+               return Self.moveRevision(pane) == expected
+           }) {
+            graveyardDeadlines[name] = .distantFuture
+            graveyardLog.warn("moved panes changed during the grace period; kept for Undo or End Now", ["workspace": name])
+            persist()
+            return
+        }
         // The close begins: from here the burial is no undo (a
         // pane fenced is closed for good, and the service finishes a mark
         // the moment it is written), saved as such before the first fence.
@@ -667,7 +695,10 @@ extension VigilWorkspaces {
             daemonLog.warn("orphan collection skipped: another instance of this bundle is running")
             return
         }
+        recoverUnlistedPanes()
+    }
 
+    func recoverUnlistedPanes() {
         var owned = Set<String>()
         for session in workspaces.values { owned.formUnion(ownedPaneIds(session)) }
         for session in graveyard.values { owned.formUnion(ownedPaneIds(session)) }
@@ -691,7 +722,7 @@ extension VigilWorkspaces {
         let live = ids(".lock").filter { !owned.contains($0) && Self.daemonAlive($0) }
         // A pane something on disk still speaks of (its end, its resume
         // pointer) is accounted for like one with a recipe.
-        let evidence = ids(".ended").union(ids(".resume"))
+        let evidence = ids(".ended").union(ids(".resume")).union(ids(".pid")).union(ids(".up"))
         // A pane is closed or cleaned here only on the proof of a removal,
         // its close's mark. Absence from a registry that decoded
         // proves nothing, a provisional record proves nothing (its edit may
@@ -702,34 +733,32 @@ extension VigilWorkspaces {
         })
         let closed = Set(states.filter { PaneFence.provesClose($0.value) }.keys)
         let unreadable = Set(states.filter { if case .unreadable = $0.value { return true } else { return false } }.keys)
-        let unlisted = PaneLife.Unlisted(owned: owned, specs: specs, live: live, evidence: evidence, fenced: closed,
-                                         provisional: provisional, unreadable: unreadable)
+        let unlisted = PaneLife.Unlisted(owned: owned.union(births), specs: specs, live: live, evidence: evidence, fenced: closed,
+                                         provisional: provisional.subtracting(births), unreadable: unreadable)
         if !unlisted.closes.isEmpty {
             daemonLog.warn("closes no registry lists, finished", ["panes": unlisted.closes.sorted()])
             Self.closeQueue.async { Self.closePanes(unlisted.closes, why: "unlisted, fenced") }
         }
-        if !unlisted.uncertain.isEmpty {
-            // Born provisional and never adopted: whether their edit
-            // committed is not known, so they are kept, as they
-            // are, until a person or a mark says otherwise.
-            daemonLog.error("!! provisional panes no registry lists: their edit may have committed; kept as they are", [
-                "panes": unlisted.uncertain.sorted(), "read": registryRead.rawValue,
-            ])
+        let recovered = unlisted.lost.union(unlisted.uncertain).union(unlisted.unknown)
+        var listed = owned
+        if !recovered.isEmpty {
+            let name = newWorkspaceId()
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            var workspace = Workspace(name: name, label: "Recovered panes", cwd: home)
+            workspace.tabs = recovered.sorted().map { pane in
+                let recipe = VigilPaths.panes.appendingPathComponent(pane + ".spec")
+                let cwd = (try? String(contentsOf: recipe, encoding: .utf8))?.components(separatedBy: "\n").first
+                return Registry.Tab(panes: [.init(id: pane, cwd: cwd ?? home)], layout: nil)
+            }
+            if admit(workspace, "recovered panes"), persist(publish: false, durable: true) {
+                listed.formUnion(recovered)
+                daemonLog.info("unlisted panes recovered into workspace", ["workspace": name, "panes": recovered.sorted()])
+            } else {
+                daemonLog.error("could not commit recovered pane ownership", ["panes": recovered.sorted()])
+            }
         }
-        // Provisional births the registry holds: the app's (a save that came
-        // after its edit, or a crash before the adoption reached the
-        // service).
-        let adopted = provisional.intersection(owned)
+        let adopted = provisional.intersection(listed)
         if !adopted.isEmpty { Self.adopt(adopted) }
-        if !unlisted.unknown.isEmpty {
-            daemonLog.error("!! panes whose close's mark cannot be read: nothing is decided about them", ["panes": unlisted.unknown.sorted()])
-        }
-        if !unlisted.lost.isEmpty {
-            // Kept as they are: running, or restorable by the service.
-            daemonLog.error("!! panes on disk no registry lists, never closed: kept as they are", [
-                "panes": unlisted.lost.sorted(), "read": registryRead.rawValue,
-            ])
-        }
         if unlisted.settled, registryRead != .current, registryRead != .absent {
             // Nothing on disk depends on what the incomplete read missed.
             do {

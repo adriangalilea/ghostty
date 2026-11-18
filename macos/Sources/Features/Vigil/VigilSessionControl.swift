@@ -179,9 +179,8 @@ enum VigilSessionControl {
         // sender (this Mac's own included).
         if let why = request.refusal { return .failure(request, "invalid_request", why) }
         let age = Date().timeIntervalSince1970 - request.issuedAt
-        // A move stays true however late its Mac hears it (it waited while
-        // that Mac was away); anything else acts on a moment that has passed.
-        guard age >= -300, age < lifetime || request.operation == "moved" else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
+        // No request may outlive the receipt that prevents repeating it.
+        guard age >= -300, age < lifetime || request.operation == "retire_move" else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
         if request.operation == "inspect-input" {
             let views = Ghostty.SurfaceView.vigilAttachSurfaces.allObjects
                 .filter { request.anchor.isEmpty || $0.vigilAttachId == request.anchor }
@@ -200,8 +199,11 @@ enum VigilSessionControl {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         do {
-            try FileManager.default.createDirectory(at: receipts, withIntermediateDirectories: true)
-            if let previous = try? Data(contentsOf: file) {
+            try Durable.folder(receipts)
+            switch Durable.read(file) {
+            case .unreadable(let why): return .failure(request, "receipt_failed", "Its previous outcome cannot be read: " + why)
+            case .absent: break
+            case .data(let previous):
                 let receipt = try JSONDecoder().decode(Receipt.self, from: previous)
                 guard try encoder.encode(receipt.request) == encoder.encode(request) else {
                     return .failure(request, "id_reused", "Command ID was already used for different arguments.")
@@ -212,20 +214,24 @@ enum VigilSessionControl {
             let files = try FileManager.default.contentsOfDirectory(at: receipts, includingPropertiesForKeys: nil)
             var count = 0
             for old in files where old.pathExtension == "json" {
-                if let data = try? Data(contentsOf: old),
-                   let receipt = try? JSONDecoder().decode(Receipt.self, from: data),
-                   Date().timeIntervalSince1970 - receipt.request.issuedAt >= lifetime {
-                    try FileManager.default.removeItem(at: old)
-                } else { count += 1 }
+                guard let data = try? Data(contentsOf: old), let receipt = try? JSONDecoder().decode(Receipt.self, from: data) else {
+                    count += 1
+                    continue
+                }
+                if receipt.request.operation == "retire_move" { continue }
+                if Date().timeIntervalSince1970 - receipt.request.issuedAt >= lifetime { try FileManager.default.removeItem(at: old) }
+                else { count += 1 }
             }
             guard count < 4096 else { return .failure(request, "busy", "Too many workspace commands are on record; try again shortly.") }
             // Write intent before any side effect. A crash can leave an
             // indeterminate receipt but a retry cannot create another pane.
-            try encoder.encode(Receipt(request: request, reply: nil)).write(to: file, options: .atomic)
+            try Durable.create(file, with: encoder.encode(Receipt(request: request, reply: nil)), exclusive: true)
             underWay.insert(request.id)
             defer { underWay.remove(request.id) }
             let reply = await VigilWorkspaces.shared.applySessionCommand(request)
-            try encoder.encode(Receipt(request: request, reply: reply)).write(to: file, options: .atomic)
+            do { try Durable.replace(file, with: encoder.encode(Receipt(request: request, reply: reply))) } catch {
+                return .init(id: request.id, ok: false, code: "indeterminate", message: "The command was taken. Its outcome could not be recorded. Check the workspace before acting again.", pane: reply.pane, session: reply.session)
+            }
             return reply
         } catch {
             return .failure(request, "receipt_failed", "Cannot durably record command: \(error.localizedDescription)")

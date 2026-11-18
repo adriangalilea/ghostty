@@ -353,6 +353,8 @@ extension VigilWorkspaces {
             switch attempt.result {
             case .answered(let reply) where reply.outcomes.first?.outcome == "collision":
                 return .failure(request, "id_in_use", "The reserved pane identity is already in use.")
+            case .answered(let reply) where reply.outcomes.first?.outcome == "indeterminate":
+                return .failure(request, "spawn_unknown", "Its birth outcome is unknown. Its cancellation was requested.")
             case .indeterminate:
                 return .failure(request, "spawn_unknown", "The home Mac could not confirm the birth. Its cancellation was requested.")
             default:
@@ -467,7 +469,7 @@ extension VigilWorkspaces {
             case .refused:
                 return .failure(request, "closing", "Its close began on its Mac, or whether it did cannot be read: it cannot be undone.")
             case .saveFailed:
-                return .failure(request, "commit_failed", "The pane ownership changed in memory but its Mac could not save the registry.")
+                return .failure(request, "commit_failed", "Undo could not be committed. The burial was kept.")
             case .restored(let workspace): back = workspace
             }
             sessionLog.info("session command committed", [
@@ -480,7 +482,7 @@ extension VigilWorkspaces {
         // it there, never a workspace of this registry.
         if request.operation == "bring" { return bring(request) }
         // Panes of a workspace here that another Mac brought: they close.
-        if request.operation == "moved" { return moved(request) }
+        if request.operation == "retire_move" { return moved(request) }
         guard var session = workspaces[request.session] else {
             return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
         }
@@ -780,12 +782,12 @@ extension VigilWorkspaces {
     private func birthReply(_ request: VigilSessionControl.Request, _ birth: Birth?) -> VigilSessionControl.Reply {
         guard let birth else { return .failure(request, "create_failed", "The home Mac could not reserve and save this workspace before starting its program.") }
         guard birth.running else {
-            return .failure(request, "spawn_failed", "No workspace was created on its Mac: its terminal did not start, and its log says why (mise run log).")
+            return .init(id: request.id, ok: false, code: "created_unavailable", message: "Workspace \(birth.name) was created. Its terminal start is unconfirmed. Open this workspace to continue.", pane: birth.pane.id, session: birth.name)
         }
         guard let data = try? Data(contentsOf: persistURL),
               let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
               saved.contains(where: { $0.name == birth.name && $0.tabs?.first?.panes.first?.id == birth.pane.id }) else {
-            return .failure(request, "commit_failed", "The new workspace could not be confirmed on its Mac.")
+            return .init(id: request.id, ok: false, code: "created_unavailable", message: "The start of \(birth.name) was accepted. Its current ownership is unconfirmed. Check this workspace before taking further action.", pane: birth.pane.id, session: birth.name)
         }
         sessionLog.info("session command committed", [
             "id": request.id.uuidString, "operation": request.operation, "workspace": birth.name,
