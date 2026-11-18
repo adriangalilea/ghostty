@@ -10,6 +10,17 @@ import VigilWire
 /// is dormant until its first mount, which starts it as any captured pane
 /// starts: its daemon reads the resume pointer vigil-agent sealed for it.
 extension VigilWorkspaces {
+    func reservesConversation(_ conversations: Set<String>) -> Bool {
+        incomingMoves.values.contains(where: { ticket in
+            ticket.refusal == nil && (ticket.requested || ticket.panes.values.contains { locate($0) != nil }) &&
+                (ticket.request.moved?.transcripts ?? [:]).contains { original, proof in
+                guard let local = ticket.panes[original] else { return true }
+                if ticket.accepted && locate(local) == nil && memberMark(local) == .clean { return false }
+                return (proof.files ?? [:]).keys.contains { conversations.contains(proof.agent + "/" + $0) }
+            }
+        })
+    }
+
     /// The `bring` workspace command, from the sidebar or `vigil move`.
     func bring(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
         guard let device = request.from, let host = VigilRemote.shared.host(device),
@@ -149,17 +160,7 @@ extension VigilWorkspaces {
             return .failure(request, "copy_incomplete", "The destination has no usable checkpoint for every conversation. The source is still open.")
         }
         let conversations = Set(proofs.values.flatMap { proof in (proof.files ?? [:]).keys.map { proof.agent + "/" + $0 } })
-        func overlapsConversation() -> Bool {
-            incomingMoves.values.contains(where: { ticket in
-                ticket.refusal == nil && (ticket.requested || ticket.panes.values.contains { locate($0) != nil }) &&
-                    (ticket.request.moved?.transcripts ?? [:]).contains { original, proof in
-                    guard let local = ticket.panes[original] else { return true }
-                    if ticket.accepted && locate(local) == nil && memberMark(local) == .clean { return false }
-                    return (proof.files ?? [:]).keys.contains { conversations.contains(proof.agent + "/" + $0) }
-                }
-            })
-        }
-        guard !overlapsConversation() else { return .failure(request, "moving", "A transfer of this conversation is already in progress here.") }
+        guard !reservesConversation(conversations) else { return .failure(request, "moving", "A transfer of this conversation is already in progress here.") }
         var move = WorkspaceCommand.Request.Moved(panes: source.paneIds, mac: Host.current().localizedName ?? "another Mac", transcripts: proofs)
         do {
             move.sourceWork = try Dictionary(uniqueKeysWithValues: source.paneIds.map { pane in
@@ -197,7 +198,7 @@ extension VigilWorkspaces {
             } catch { return .failure(request, "checkpoint_unavailable", "The local history could not be saved before moving: \(error)") }
         }
         guard !overlapsPendingMove() else { return .failure(request, "moving", "A move of these panes is already staged here.") }
-        guard !overlapsConversation() else { return .failure(request, "moving", "A transfer of this conversation is already in progress here.") }
+        guard !reservesConversation(conversations) else { return .failure(request, "moving", "A transfer of this conversation is already in progress here.") }
         do { try ticket.save() } catch { return .failure(request, "commit_failed", "The handoff request could not be saved: \(error)") }
         guard admit(session, "brought") else {
             return .failure(request, "commit_failed", "This Mac's registry already lists that workspace's name or one of its panes; nothing was brought.")
@@ -276,6 +277,7 @@ extension VigilWorkspaces {
         /// and original checkpoint. Its own receipt answers just those panes.
         var stagedGrant: UUID?
         var birthGrant: UUID { stagedGrant ?? request.id }
+        var awaitingSavedOpen: Bool { peerClosed == true && !accepted && takeover != true }
         static func completion(_ id: UUID) -> URL { folder.appendingPathComponent(id.uuidString + ".done") }
         func openFile(_ pane: String) -> URL { Self.folder.appendingPathComponent(request.id.uuidString + "." + pane + ".open") }
         static var folder: URL { VigilPaths.root.appendingPathComponent("incoming-moves") }
@@ -347,7 +349,7 @@ extension VigilWorkspaces {
     }
 
     func resumeForks(for panes: Set<String>) {
-        for source in Set(incomingMoves.values.filter { !panes.isDisjoint(with: $0.panes.values) && $0.takeover == true }.map(\.source)) {
+        for source in Set(incomingMoves.values.filter { !panes.isDisjoint(with: $0.panes.values) && ($0.takeover == true || $0.awaitingSavedOpen) }.map(\.source)) {
             resumeMoves(from: source)
         }
     }
@@ -476,6 +478,7 @@ extension VigilWorkspaces {
     func canTakeOver(_ ticket: IncomingMove) -> Bool {
         guard ticket.peerClosed == true || moveOffline[ticket.source] != nil, !ticket.accepted, ticket.takeover != true,
               (ticket.peerClosed == true || ticket.released == nil || ticket.finalPage == false || ticket.page != nil), ticket.refusal == nil, ticket.superseded != true else { return false }
+        if ticket.awaitingSavedOpen && ticket.panes.values.contains(where: personallyClosed) { return false }
         let originals = Set(ticket.panes.keys)
         return !incomingMoves.values.contains { other in
             other.request.id != ticket.request.id && other.source == ticket.source && other.refusal == nil &&
@@ -537,6 +540,7 @@ extension VigilWorkspaces {
             Task { @MainActor in
                 defer { if moveEpoch[id] == epoch { activeMoves.remove(id) } }
                 do {
+                    guard moveEpoch[id] == epoch else { return }
                     try await advanceIncoming(ticket)
                 } catch {
                     guard moveEpoch[id] == epoch else { return }
@@ -550,7 +554,8 @@ extension VigilWorkspaces {
                 }
                 guard moveEpoch[id] == epoch, let pending = incomingMoves[id], pending.superseded != true,
                       pending.refusal == nil || closedFork(pending), pending.requested || matchesArrival(pending) || closedFork(pending) else { return }
-                if pending.peerClosed == true && !pending.accepted && pending.takeover != true { return }
+                let localClose = pending.awaitingSavedOpen && !reapedStagedPanes(pending).isEmpty
+                if pending.awaitingSavedOpen && !localClose { return }
                 if pending.withdrawals?.contains(where: { incomingMoves[$0.id] != nil }) == true { return }
                 // A disconnected peer wakes this work on its next directory.
                 // An unanswered RPC or a replica still catching up while online
@@ -559,7 +564,7 @@ extension VigilWorkspaces {
                 moveDelay[id] = pause
                 moveRetry[id] = Task { @MainActor in
                     do { try await Task.sleep(for: .seconds(pause)) } catch { return }
-                    guard moveReachable(device) else { return }
+                    guard localClose || moveReachable(device) else { return }
                     resumeMoves(from: device)
                 }
             }
@@ -579,8 +584,50 @@ extension VigilWorkspaces {
         }
     }
 
+    private func reapedStagedPanes(_ ticket: IncomingMove) -> Set<String> {
+        guard registryRead == .current else { return [] }
+        return Set(ticket.panes.compactMap { old, pane in
+            locate(pane) == nil && personallyClosed(pane) && memberMark(pane) == .clean && !Self.daemonAlive(pane) ? old : nil
+        })
+    }
+
+    /// The peer has already surrendered. Closing an unopened checkpoint is
+    /// local: preserve its private files before releasing the Bring reservation.
+    private func closeStagedReturn(_ saved: IncomingMove, reaped: Set<String>) throws {
+        var ticket = saved
+        let id = ticket.request.id
+        let files = try SavedMoveHistory.stagedFiles(ticket.birthGrant, in: VigilPaths.root)
+        try recordMoveHistory(files, id: ticket.birthGrant, workspace: ticket.request.session)
+        for (old, pane) in ticket.panes where reaped.contains(old) { try Durable.remove(ticket.openFile(pane)) }
+        let remaining = Set(ticket.panes.keys).subtracting(reaped)
+        if remaining.isEmpty {
+            try Durable.remove(ticket.file)
+            incomingMoves[id] = nil
+        } else {
+            ticket.keep(remaining)
+            try ticket.save()
+            incomingMoves[id] = ticket
+            updateMoveNotes(ticket)
+        }
+        moveRetry.removeValue(forKey: id)?.cancel()
+        moveDelay[id] = nil
+        moveWaiting[id] = nil
+        NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+    }
+
     func advanceIncoming(_ saved: IncomingMove) async throws {
         var ticket = saved
+        if ticket.awaitingSavedOpen {
+            let reaped = reapedStagedPanes(ticket)
+            if !reaped.isEmpty {
+                try closeStagedReturn(ticket, reaped: reaped)
+                return
+            }
+            if ticket.panes.values.contains(where: personallyClosed) {
+                throw WireError.refused("Close pending here. Undo during grace, or wait for the staged pane to finish closing.")
+            }
+            throw WireError.refused("The other Mac closed its fork. Open the saved conversation here to resume.")
+        }
         let request = ticket.request
         let epoch = moveEpoch[request.id]
         let closed = Set(ticket.panes.filter { personallyClosed($0.value) && ticket.takeover == true }.keys)
@@ -708,9 +755,6 @@ extension VigilWorkspaces {
                     incomingMoves[request.id] = ticket
                 }
             }
-        }
-        if ticket.peerClosed == true && !forced && !ticket.accepted {
-            throw WireError.refused("The other Mac closed its fork. Open the saved conversation here to resume.")
         }
         if !forced && !ticket.accepted {
             if !ticket.requested && ticket.released == nil && !staged.isEmpty {
@@ -1243,7 +1287,7 @@ extension VigilWorkspaces {
            let id = glance.conversation { return .init(glance.agent, id) }
         if let arrival = registered(pane)?.from {
             if let from = arrival.continuation, let id = from.conversation { return .init(from.agent, id) }
-            if let ticket = arrival.ticket, let proof = incomingMoves[ticket]?.request.moved?.transcripts?[arrival.pane] {
+            if let proof = moveTicket(for: pane)?.request.moved?.transcripts?[arrival.pane] {
                 return .init(proof.agent, proof.start)
             }
         }
