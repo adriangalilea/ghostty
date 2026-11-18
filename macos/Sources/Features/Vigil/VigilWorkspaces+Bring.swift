@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Ink
 import SwiftUI
 import VigilWire
@@ -980,35 +981,74 @@ extension VigilWorkspaces {
         let homeDevice = home.device
         lifecycleLog.info("move: reading the sheet there", ["workspace": workspace, "to": target.name, "part": part?.rawValue ?? "all"])
         DispatchQueue.global(qos: .userInitiated).async {
-            let read = Result { () throws -> (from: String, answer: Bring.Answer) in
-                let from = try homeDevice ?? hub.me()
-                return (from, try hub.bringSheet(device: device, Move.Ask(from: from, workspace: workspace, anchor: anchor, part: part)))
-            }
+            let me = Result { try homeDevice ?? hub.me() }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let manager = VigilWorkspaces.shared
-                    switch read {
-                    case .failure(let error):
-                        lifecycleLog.error("move sheet not read", ["workspace": workspace, "to": target.name, "err": error])
-                        let alert = NSAlert()
-                        alert.messageText = "Can't move \(label) to \(target.name)"
-                        alert.informativeText = "\(target.name) did not answer: \(error)"
-                        alert.runModal()
-                    case .success(let (from, answer)):
-                        let ask = Move.Ask(from: from, workspace: workspace, anchor: anchor, part: part)
-                        let model = BringDialogModel(
-                            workspace: workspace, anchor: anchor, part: part, mac: sourceHost?.name ?? "this Mac", target: target.name,
-                            what: Self.moving(label, part), away: Self.away(sourceHost), home: targetHome ?? "/",
-                            lines: answer.lines, read: { _ in try hub.bringSheet(device: device, ask) })
-                        manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) {
-                            guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, anchor: anchor, part: part) else {
-                                return lifecycleLog.error("move: no order", ["workspace": workspace, "to": target.name])
-                            }
-                            manager.ask(RowHome(device: device, workspace: workspace), order.request, failing: "\(label) was not moved to \(target.name)")
+                    guard case .success(let from) = me else {
+                        if case .failure(let error) = me { lifecycleLog.error("move: this Mac's hub did not name it", ["err": error]) }
+                        return
+                    }
+                    let ask = Move.Ask(from: from, workspace: workspace, anchor: anchor, part: part)
+                    // The target reads it from what it heard of the source:
+                    // asked again whenever the source moves as this Mac hears
+                    // it (that Mac hears it too), each ask said in its log.
+                    let sources = BringDialogModel.Sources(
+                        question: { manager.moveQuestion(home: homeDevice, workspace: workspace, anchor: anchor, part: part) },
+                        heard: homeDevice == nil
+                            ? NotificationCenter.default.publisher(for: VigilWorkspaces.stateDidChange).map { _ in () }.eraseToAnyPublisher()
+                            : VigilRemote.shared.$hosts.map { _ in () }.eraseToAnyPublisher(),
+                        read: { _, _ in try hub.bringSheet(device: device, ask) },
+                        changes: nil,
+                        askSource: homeDevice.map { source -> @Sendable ([String]) throws -> WorkRead.Answer in
+                            { try hub.workRead(device: source, panes: $0) }
+                        })
+                    let model = BringDialogModel(
+                        workspace: workspace, anchor: anchor, part: part, mac: sourceHost?.name ?? "this Mac", target: target.name,
+                        what: Self.moving(label, part), home: targetHome ?? "/", sources: sources)
+                    guard model.open() else {
+                        return lifecycleLog.error("move: the workspace is not listed", ["workspace": workspace, "to": target.name])
+                    }
+                    manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) {
+                        guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, anchor: anchor, part: part) else {
+                            return lifecycleLog.error("move: no order", ["workspace": workspace, "to": target.name])
                         }
+                        manager.ask(RowHome(device: device, workspace: workspace), order.request, failing: "\(label) was not moved to \(target.name)")
                     }
                 }
             }
+        }
+    }
+
+    /// A move's panes as the source says them now (this Mac's registry and
+    /// work facts, or another Mac's directory as heard here), and how that
+    /// Mac stands; nil when it no longer lists them.
+    func moveQuestion(home device: String?, workspace name: String, anchor: String, part: Registry.Workspace.Part?)
+        -> (question: Bring.Question, standing: BringDialogModel.Standing)? {
+        let here = FileManager.default.homeDirectoryForCurrentUser.path
+        guard let device else {
+            guard let session = workspaces[name] else { return nil }
+            let tabs = part == nil ? session.tabs : session.tabs.filter { $0.members.contains { $0.id == anchor } }
+            let members = part == .pane ? tabs.flatMap(\.members).filter { $0.id == anchor } : tabs.flatMap(\.members)
+            return (Bring.Question(panes: members.map { pane in
+                Bring.Pane(pane: pane.id, agent: nil, conversation: nil, cwd: pane.cwd, name: pane.name, work: paneWork(pane.id))
+            }, commit: false), .here)
+        }
+        guard let host = VigilRemote.shared.host(device), let directory = VigilRemote.shared.sourceDirectory(device),
+              let whole = directory.live.first(where: { $0.name == name }),
+              let source = part.map({ whole.only($0, of: anchor) }) ?? whole else { return nil }
+        let standing: BringDialogModel.Standing = host.error == nil
+            ? .live : .away(since: Self.away(host) ?? host.error ?? "out of reach")
+        return (Bring.Question(panes: directory.bringing(source, here: here), commit: false), standing)
+    }
+
+    /// `state/<pane>.work` of this Mac's pane (`PaneWork`, vigil-agent's);
+    /// nil when none is published or it does not read (said).
+    func paneWork(_ pane: String) -> PaneWork? {
+        guard let file = facts.files["state/\(pane).work"] else { return nil }
+        do { return try JSONDecoder().decode(PaneWork.self, from: file.data) } catch {
+            lifecycleLog.warn("work facts not read", ["pane": pane, "err": error])
+            return nil
         }
     }
 
@@ -1031,34 +1071,27 @@ extension VigilWorkspaces {
     func bringWithSheet(device: String, workspace name: String, anchor: String = "", part: Registry.Workspace.Part? = nil) {
         guard let host = VigilRemote.shared.host(device), let directory = VigilRemote.shared.sourceDirectory(device),
               let whole = directory.live.first(where: { $0.name == name }),
-              let source = part.map({ whole.only($0, of: anchor) }) ?? whole else { return }
+              let source = part.map({ whole.only($0, of: anchor) }) ?? whole else {
+            return lifecycleLog.error("bring: the workspace is not listed", ["workspace": name, "device": device])
+        }
         let here = FileManager.default.homeDirectoryForCurrentUser.path
         let hub = Local.Client(socket: VigilPaths.hub)
-        let lines: [Bring.Line]
-        do {
-            lines = try hub.bring(Bring.Question(panes: directory.bringing(source, here: here), commit: false)).lines
-        } catch {
-            lifecycleLog.error("bring sheet not read", ["workspace": name, "from": host.name, "err": error])
-            let alert = NSAlert()
-            alert.messageText = "Can't bring \(source.label) here"
-            alert.informativeText = "vigil-agent did not answer: \(error)"
-            alert.runModal()
-            return
-        }
-        // Read again from the directory as this Mac holds it then.
-        let read: @Sendable ([Bring.Need]) throws -> Bring.Answer = { needs in
-            let question: Bring.Question? = DispatchQueue.main.sync { MainActor.assumeIsolated {
-                guard let directory = VigilRemote.shared.host(device)?.directory,
-                      let whole = directory.live.first(where: { $0.name == name }),
-                      let source = part.map({ whole.only($0, of: anchor) }) ?? whole else { return nil }
-                return Bring.Question(panes: directory.bringing(source, here: here), commit: false, settle: needs.isEmpty ? nil : needs)
-            } }
-            guard let question else { throw WireError.refused("\(host.name) no longer lists it") }
-            return try hub.bring(question)
-        }
+        // The source's directory as this Mac follows it, this Mac's own
+        // facts as vigil-agent watches them, and the source asked once.
+        let sources = BringDialogModel.Sources(
+            question: { VigilWorkspaces.shared.moveQuestion(home: device, workspace: name, anchor: anchor, part: part) },
+            heard: VigilRemote.shared.$hosts.map { _ in () }.eraseToAnyPublisher(),
+            read: { question, needs in
+                var question = question
+                question.settle = needs.isEmpty ? nil : needs
+                return try hub.bring(question)
+            },
+            changes: { hub.bringChanges($0) },
+            askSource: { try hub.workRead(device: device, panes: $0) })
         let model = BringDialogModel(
             workspace: name, anchor: anchor, part: part, mac: host.name, target: nil, what: Self.moving(source.label, part),
-            away: Self.away(host), home: here, lines: lines, read: read)
+            home: here, sources: sources)
+        guard model.open() else { return lifecycleLog.error("bring: the workspace is not listed", ["workspace": name, "from": host.name]) }
         present(model, source: device, sourceHome: directory.home, targetHome: here) {
             Task { @MainActor in
                 let reply = await VigilSessionControl.transact(.bring(name, from: device, anchor: anchor, part: part))
