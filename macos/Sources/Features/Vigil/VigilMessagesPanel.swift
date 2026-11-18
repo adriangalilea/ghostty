@@ -468,7 +468,11 @@ final class VigilMessageAlerts {
         let content = UNMutableNotificationContent()
         content.title = [pane.face, pane.said].compactMap { $0 }.joined(separator: " ")
         content.body = one.item.words
-        content.sound = .default
+        // Loud only as its urgency says (`Message.Urgency.rings`): an urgent
+        // message to the person rings; every other one is listed quietly.
+        let rings = message.declared.rings(mentionsPerson: true)
+        content.sound = rings ? .default : nil
+        content.interruptionLevel = rings ? .timeSensitive : .passive
         content.threadIdentifier = one.thread
         content.userInfo = [Self.threadKey: one.thread]
         let request = UNNotificationRequest(identifier: Self.identifier(one.item.id), content: content, trigger: nil)
