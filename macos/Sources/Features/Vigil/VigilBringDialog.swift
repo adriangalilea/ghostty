@@ -64,7 +64,10 @@ final class BringDialogModel: ObservableObject {
 
     /// How the dialog ends: brought or not, or toward a pane on the other Mac.
     var close: (Outcome) -> Void = { _ in }
-    enum Outcome { case cancel, bring, open(pane: String) }
+    /// `bring` carries the checkout differences the person saw and accepts
+    /// (`Bring.checkoutRevision` of the sheet on screen; empty when none
+    /// stood), which the commit checks its own sheet against.
+    enum Outcome { case cancel, bring(checkoutRevision: String), open(pane: String) }
 
     /// The workspace's Mac, as heard: here (live), out of reach since when
     /// (what it said then is what the sheet holds), or this Mac itself.
@@ -423,11 +426,11 @@ final class BringDialogModel: ObservableObject {
     /// The person's answer, said in the log with what it leaves standing.
     func answer(_ outcome: Outcome) {
         switch outcome {
-        case .bring:
+        case .bring(let revision):
             let standing = self.standing.map(\.need.text)
             lifecycleLog.info(standing.isEmpty ? "bring: brought" : "bring: brought anyway", [
                 "workspace": workspace, "mac": mac, "to": destination, "overrides": standing,
-                "unknown": lines.filter { $0.work == nil }.count,
+                "unknown": lines.filter { $0.work == nil }.count, "checkout": revision,
             ])
         case .cancel:
             lifecycleLog.info("bring: cancelled", ["workspace": workspace, "mac": mac, "to": destination])
@@ -600,11 +603,13 @@ struct BringDialog: View {
                 Spacer()
                 Button("Cancel") { model.answer(.cancel) }.keyboardShortcut(.cancelAction)
                 if model.standing.isEmpty {
-                    Button(model.verb) { model.answer(.bring) }.keyboardShortcut(.defaultAction)
+                    Button(model.verb) { model.answer(.bring(checkoutRevision: "")) }.keyboardShortcut(.defaultAction)
                 } else {
                     // Never the default while something stands: Return must
                     // not leave work behind on the other Mac.
-                    Button(model.settles ? "Bring Anyway" : "Move Anyway") { model.answer(.bring) }
+                    Button(model.settles ? "Bring Anyway" : "Move Anyway") {
+                        model.answer(.bring(checkoutRevision: Bring.checkoutRevision(model.lines)))
+                    }
                         .help("Move it though \(model.destination) lacks what is listed")
                 }
             }

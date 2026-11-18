@@ -145,7 +145,7 @@ extension VigilWorkspaces {
                 remaining: max(0, Int(deadline.timeIntervalSinceNow)), waiting: deadline == .distantFuture,
                 conflict: !conflicts.isDisjoint(with: ownedPaneIds(burial)),
                 from: from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }, device: nil, mac: nil,
-                closing: burial.closing != nil, recoverableMove: burial.moveCheckpoint?.arrivals != nil && ownedPaneIds(burial).allSatisfy { memberMark($0) == .clean })
+                closing: burial.closing != nil, recoverableMove: canTakeBack(burial))
         }
         let elsewhere = VigilRemote.shared.hosts.flatMap { host -> [SidebarBurial] in
             let listed = host.directory?.workspaces ?? []

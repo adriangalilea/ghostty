@@ -417,6 +417,9 @@ struct VigilSidebarView: View {
             Spacer(minLength: 4)
             if burial.recoverableMove && !burial.conflict {
                 Button("Take back here…") {
+                    let app = VigilWorkspaces.shared
+                    guard let entry = app.graveyard[burial.name], app.canTakeBack(entry),
+                          let device = entry.moveCheckpoint?.device, let since = app.moveOffline[device] else { return }
                     let alert = NSAlert()
                     alert.messageText = "Take this move back here?"
                     alert.informativeText = "The other Mac may still be working. This Mac will resume its saved history. When the other Mac returns its moved panes will stop and its later history will be kept separately."
@@ -424,7 +427,7 @@ struct VigilSidebarView: View {
                     alert.addButton(withTitle: "Take back here")
                     guard alert.runModal() == .alertSecondButtonReturn else { return }
                     Task { @MainActor in
-                        do { try await VigilWorkspaces.shared.recoverStoppedMove(burial.name) }
+                        do { try await VigilWorkspaces.shared.recoverStoppedMove(burial.name, since: since) }
                         catch { VigilWorkspaces.shared.reportIncompleteMove(burial.name, String(describing: error)) }
                     }
                 }
