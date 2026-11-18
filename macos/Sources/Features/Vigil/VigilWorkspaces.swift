@@ -490,6 +490,14 @@ class VigilWorkspaces {
         guard let host = VigilRemote.shared.host($0) else { return false }
         return host.directory != nil && host.error == nil
     }
+    /// Only a failed dial reported by tether can establish an offline episode.
+    var moveOffline: [String: Date] = [:]
+    var moveProbes: [String: UUID] = [:]
+    var probeMove: (String) async throws -> Void = { device in
+        try await Task.detached(priority: .utility) {
+            try Local.Client(socket: VigilPaths.hub).probe(device)
+        }.value
+    }
     var moveDevice: () async throws -> String = {
         try await Task.detached { try Local.Client(socket: VigilPaths.hub).me() }.value
     }

@@ -157,19 +157,16 @@ extension VigilWorkspaces {
 
     func showMoveNote(_ pane: String) {
         let arrival = registered(pane)?.from
-        if let id = arrival?.ticket, let ticket = incomingMoves[id], ticket.superseded != true, !ticket.accepted {
+        if let id = arrival?.ticket, let ticket = incomingMoves[id], canTakeOver(ticket), let since = moveOffline[ticket.source] {
             let mac = arrival?.mac ?? "the source"
-            let since = [ticket.lastReply, VigilRemote.shared.host(ticket.source)?.received, ticket.seenAt].compactMap { $0 }.max()
-            let last = since ?? Date(timeIntervalSince1970: ticket.request.issuedAt)
-            let says = since == nil ? "No reply to this move from \(mac)" : "Last heard from \(mac)"
-            let risk = "Opens the saved panes here. \(mac) may still be working. When it returns its moved panes will stop and its later history will be kept separately. A running turn or tool can be interrupted."
-            let detail = (ticket.refusal ?? moveWaiting[id]).map { $0 + "\n" } ?? ""
-            note(pane, VigilPaneNote(says: says, offers: ticket.takeover == true ? "Retry takeover" : "Take over here",
-                 explains: detail + risk, symbol: "arrow.right", takeover: true, lastContact: last))
+            note(pane, VigilPaneNote(says: "Lost contact with " + mac, offers: "Take over here…",
+                 explains: "Resume this copy while the source is out of reach.", symbol: "arrow.right", takeover: true, lastContact: since))
             return
         }
         let why = arrival?.ticket.flatMap { incomingMoves[$0]?.refusal }
-        note(pane, VigilPaneNote(says: why == nil ? "Moving from \(arrival?.mac ?? "another Mac")" : "Move refused",
+        let released = arrival?.ticket.flatMap { incomingMoves[$0]?.released } != nil
+        let stage = released ? "Receiving the stopped pane's history" : "Moving from \(arrival?.mac ?? "another Mac")"
+        note(pane, VigilPaneNote(says: why == nil ? stage : "Move refused",
              offers: why == nil ? "Check move" : "Show source", explains: why ?? arrival?.ticket.flatMap { moveWaiting[$0] } ?? "This pane will open when its source stops and its final conversation is here.", symbol: "arrow.right"))
     }
 
@@ -296,7 +293,19 @@ extension VigilWorkspaces {
     func noteAsked(_ view: Ghostty.SurfaceView) {
         guard let pane = view.vigilAttachId else { return }
         if waitingForMove(pane), let arrival = registered(pane)?.from {
-            if view.vigilHost == nil, view.vigilNote?.takeover == true { takeOverHere(pane); return }
+            if view.vigilHost == nil, view.vigilNote?.takeover == true {
+                guard let id = arrival.ticket, let ticket = incomingMoves[id], canTakeOver(ticket),
+                      let since = view.vigilNote?.lastContact, moveOffline[arrival.device] == since else { showMoveNote(pane); return }
+                let alert = NSAlert()
+                alert.messageText = "Take over from " + arrival.mac + "?"
+                alert.informativeText = "This Mac cannot reach the source. It may still be working. Open the saved copy here and stop its other copy when contact returns? A running turn or tool can be interrupted. Later history from the other copy will be kept separately."
+                alert.addButton(withTitle: "Cancel")
+                alert.addButton(withTitle: "Take over here")
+                if alert.runModal() == .alertSecondButtonReturn {
+                    Task { @MainActor in await takeOverHere(pane, since: since) }
+                }
+                return
+            }
             if let ticket = arrival.ticket, incomingMoves[ticket]?.refusal != nil {
                 _ = openRemotePane(device: arrival.device, pane: arrival.pane)
                 return

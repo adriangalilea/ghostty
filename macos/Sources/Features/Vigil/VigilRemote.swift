@@ -44,6 +44,7 @@ final class VigilRemote: ObservableObject {
     /// Each Mac's directory, followed by the hub (its socket to the hub):
     /// the hub keeps it alive across the Mac going out of reach, so the
     /// socket ends only with the hub itself.
+    private var followIDs: [String: UUID] = [:]
     private var following: [String: Int32] = [:]
     /// Each Mac's state, followed the same way (its socket to the hub).
     private var followingMachine: [String: Int32] = [:]
@@ -162,6 +163,8 @@ final class VigilRemote: ObservableObject {
 
     private func unfollowAll() {
         for fd in following.values { shutdown(fd, SHUT_RDWR) }
+        for device in following.keys { VigilWorkspaces.shared.moveContact(device) }
+        followIDs.removeAll()
         following.removeAll()
         for fd in followingMachine.values { shutdown(fd, SHUT_RDWR) }
         followingMachine.removeAll()
@@ -322,6 +325,8 @@ final class VigilRemote: ObservableObject {
         let wanted = Set(peers.map(\.id))
         receivedDirectories = receivedDirectories.filter { wanted.contains($0.key) }
         for (device, fd) in following where !wanted.contains(device) {
+            VigilWorkspaces.shared.moveContact(device)
+            followIDs[device] = nil
             following[device] = nil
             shutdown(fd, SHUT_RDWR)
         }
@@ -353,20 +358,30 @@ final class VigilRemote: ObservableObject {
         do { fd = try Self.hub.request(.directory(of: device)) } catch {
             return failed(device, "\(error)")
         }
+        let generation = UUID()
+        followIDs[device] = generation
         following[device] = fd
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let reader = Lines.Reader(fd: fd)
             do {
                 while let line = try reader.next() {
                     let step = try JSONDecoder().decode(Local.Following.self, from: line)
-                    Task { @MainActor [weak self] in self?.stepped(device, step) }
+                    DispatchQueue.main.async { [weak self] in
+                        guard self?.followIDs[device] == generation else { return }
+                        self?.stepped(device, step)
+                    }
                 }
             } catch {
-                Task { @MainActor [weak self] in self?.failed(device, "unreadable directory: \(error)") }
+                DispatchQueue.main.async { [weak self] in
+                    guard self?.followIDs[device] == generation else { return }
+                    self?.failed(device, "unreadable directory: \(error)")
+                }
             }
             close(fd)
-            Task { @MainActor [weak self] in
-                guard let self, self.following[device] == fd else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.followIDs[device] == generation else { return }
+                self.followIDs[device] = nil
+                VigilWorkspaces.shared.moveContact(device)
                 self.following[device] = nil
                 self.failed(device, "this Mac's vigil-agent stopped")
             }
@@ -402,6 +417,7 @@ final class VigilRemote: ObservableObject {
     }
 
     private func machine(_ device: String, _ machine: MachineState) {
+        VigilWorkspaces.shared.moveContact(device)
         guard let index = hosts.firstIndex(where: { $0.device == device }),
               hosts[index].machine.map({ !$0.same(as: machine) }) ?? true else { return }
         hosts[index].machine = machine
@@ -409,6 +425,7 @@ final class VigilRemote: ObservableObject {
     }
 
     private func stepped(_ device: String, _ step: Local.Following) {
+        VigilWorkspaces.shared.moveContact(device, waiting: step.step == .waiting)
         switch step.step {
         case .open: remoteLog.info("following", ["host": host(device)?.name ?? device])
         case .current:
