@@ -526,7 +526,7 @@ struct VigilDeliveryAsks: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(item.record.said()).inkText(.detail).lineLimit(3)
                         Spacer(minLength: 8)
-                        if item.record.ask?.stage == .lapsed {
+                        if item.record.ask?.stage == .notAsked {
                             Button("Ask Again") { act(.ask(item.id)) }
                         }
                         Button("Refuse") { act(.refuse(item.id)) }
