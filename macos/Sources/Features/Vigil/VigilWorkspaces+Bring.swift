@@ -423,6 +423,10 @@ extension VigilWorkspaces {
             incomingMoves[request.id] = ticket
             updateMoveNotes(ticket)
         }
+        func command(_ command: WorkspaceCommand.Request) async throws -> VigilSessionControl.Reply {
+            if ticket.parent != nil, ticket.source == request.moved?.device { return await handoffCommand(command) }
+            return try await moveCommand(ticket.source, command)
+        }
         let staged = request.moved?.transcripts ?? [:]
         func panes(_ proofs: [String: Bring.TranscriptProof]) throws -> [Bring.Pane] {
             try proofs.map { old, proof in
@@ -451,7 +455,7 @@ extension VigilWorkspaces {
                     query.conflictBase = forced ? ticket.localCheckpoint : nil
                     let reply: VigilSessionControl.Reply
                     do {
-                        reply = try await moveCommand(ticket.source, query)
+                        reply = try await command(query)
                     } catch WireError.offline {
                         moveContact(ticket.source, waiting: true)
                         throw WireError.offline
@@ -563,7 +567,7 @@ extension VigilWorkspaces {
         if ticket.withdrawals == nil {
             var ack = WorkspaceCommand.Request(session: request.session, revision: request.revision, operation: "ack_move_v2", anchor: "", moved: request.moved)
             ack.takenOver = ticket.takeover
-            let reply = try await moveCommand(ticket.source, ack)
+            let reply = try await command(ack)
             moveContact(ticket.source)
             try current()
             guard reply.ok, reply.id == ack.id, reply.code == "acknowledged" else { throw WireError.refused(reply.message) }
@@ -926,7 +930,22 @@ extension VigilWorkspaces {
                 }
             }
             var histories: [String: WorkspaceCommand.Request.Moved.History] = [:]
-            do { for pane in move.panes { histories[pane] = try historyAtHome(pane) } }
+            do {
+                var forwarded = Set<String>()
+                for pane in move.panes {
+                    if request.takenOver == true, locate(pane) == nil, memberMark(pane) == .clean,
+                       let onward = try Durable.decode(MoveSuccessor.self, Self.successorsFolder.appendingPathComponent(pane)).get() {
+                        guard onward.valid, !Self.daemonAlive(pane) else { throw WireError.refused("Invalid onward grant for " + pane) }
+                        forwarded.insert(pane)
+                    } else { histories[pane] = try historyAtHome(pane) }
+                }
+                // Already transferred in full. The onward owner now holds the
+                // stopped history and any later work. A native transcript on
+                // this Mac may since belong to an unrelated writer.
+                if forwarded.count == move.panes.count {
+                    return .init(id: request.id, ok: true, code: "released", message: "The panes already left this Mac.", released: [:])
+                }
+            }
             catch { return .failure(request, "waiting", "The source could not read its conversation identities.") }
             if request.takenOver == true {
                 do { try withdrawTakenOver(request, move: move, histories: histories) }
