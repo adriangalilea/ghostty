@@ -364,7 +364,7 @@ final class VigilSidebarModel: ObservableObject {
             }
             rows = fresh
         }
-        let histories = VigilWorkspaces.shared.savedMoveHistories.values.sorted { $0.id.uuidString < $1.id.uuidString }
+        let histories = VigilWorkspaces.shared.savedMoveHistories.values.filter { !$0.pending.isEmpty }.sorted { $0.id.uuidString < $1.id.uuidString }
         if histories != moveHistories { moveHistories = histories }
         let warnings = VigilWorkspaces.shared.pendingMoveWarnings
         if warnings != moveWarnings { moveWarnings = warnings }
@@ -379,7 +379,7 @@ final class VigilSidebarModel: ObservableObject {
     @Published private(set) var followHint: VigilWorkspaces.AskHint?
 
     /// The sticky bottom tray: killed sessions living out their grace.
-    @Published private(set) var moveHistories: [VigilWorkspaces.SavedMoveHistory] = []
+    @Published private(set) var moveHistories: [SavedMoveHistory] = []
     @Published private(set) var moveWarnings: [String] = []
     @Published private(set) var burials: [VigilWorkspaces.SidebarBurial] = []
 

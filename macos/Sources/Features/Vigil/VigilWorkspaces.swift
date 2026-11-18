@@ -519,13 +519,9 @@ class VigilWorkspaces {
     var stoppingMoves = Set<String>()
     var moveDelay: [UUID: UInt64] = [:]
     var moveWaiting: [UUID: String] = [:]
-    struct SavedMoveHistory: Codable, Equatable, Identifiable {
-        let id: UUID
-        let workspace: String
-        var files: [String]
-    }
     var savedMoveHistories: [UUID: SavedMoveHistory] = [:]
-    var savedMoveHistoriesFile: URL { VigilPaths.root.appendingPathComponent("saved-move-histories.json") }
+    var savedMoveHistoriesFile: URL { SavedMoveHistory.ledger(in: VigilPaths.root) }
+    var closedForkReceipts: [UUID: WorkspaceCommand.Request.Moved] = [:]
     var recoveredMoveBurials = Set<String>()
     var movingCheckpoint: WorkspaceCommand.Request.Moved?
     var verifyingMoves = Set<String>()

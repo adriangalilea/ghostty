@@ -169,7 +169,8 @@ extension VigilWorkspaces {
         move.arrivals = mapping
         let release = WorkspaceCommand.Request(id: request.id, session: source.name, revision: digest, operation: "release_move_v2", anchor: "", moved: move)
         let folders = Dictionary(uniqueKeysWithValues: session.tabs.flatMap(\.members).map { ($0.id, $0.cwd) })
-        let ticket = IncomingMove(source: device, request: release, panes: mapping, folders: folders)
+        var ticket = IncomingMove(source: device, request: release, panes: mapping, folders: folders)
+        ticket.sourceName = host.name
         if !proofs.isEmpty {
             let selected = directory.bringing(source, as: entry, here: here).filter { proofs[$0.pane] != nil }
             var checkpoint = Bring.Question(panes: selected, commit: false, checkpoints: proofs)
@@ -231,6 +232,10 @@ extension VigilWorkspaces {
         var seedArchive: UUID?
         var previousHold: UUID?
         var withdrawals: [Withdrawal]?
+        var closedFinal: [String: Bring.TranscriptProof]?
+        var closedOffset: Int?
+        var peerClosed: Bool?  // the peer positively surrendered its fork
+        var sourceName: String?
         static func completion(_ id: UUID) -> URL { folder.appendingPathComponent(id.uuidString + ".done") }
         func openFile(_ pane: String) -> URL { Self.folder.appendingPathComponent(request.id.uuidString + "." + pane + ".open") }
         static var folder: URL { VigilPaths.root.appendingPathComponent("incoming-moves") }
@@ -286,9 +291,31 @@ extension VigilWorkspaces {
         return next
     }
 
+    /// A move onward also leaves fenced ids. Only a person's ordinary burial
+    /// and its durable closed-here receipt relinquish this fork.
+    private func personallyClosed(_ pane: String) -> Bool {
+        if let at = locate(pane) { return at.buried && graveyard[at.owner]?.movedTo == nil && graveyard[at.owner]?.moveCheckpoint == nil }
+        return Durable.read(Self.closedHereFile(pane), limit: 0) == .data(Data())
+    }
+
+    private func closedFork(_ ticket: IncomingMove) -> Bool {
+        ticket.takeover == true && !ticket.panes.isEmpty && ticket.panes.values.allSatisfy(personallyClosed)
+    }
+
+    private func forkClosePending(_ ticket: IncomingMove) -> Bool {
+        ticket.takeover == true && ticket.panes.values.contains(where: personallyClosed)
+    }
+
+    func resumeClosedForks(for panes: Set<String>) {
+        for source in Set(incomingMoves.values.filter { !panes.isDisjoint(with: $0.panes.values) && closedFork($0) }.map(\.source)) {
+            resumeMoves(from: source)
+        }
+    }
+
     func discardUndispatchedMoves(for panes: Set<String>) {
         guard registryRead == .current else { return }
-        for (id, ticket) in incomingMoves where ticket.parent == nil && !ticket.requested &&
+        resumeClosedForks(for: panes)
+        for (id, ticket) in incomingMoves where ticket.parent == nil && !ticket.requested && ticket.takeover != true &&
             !panes.isDisjoint(with: ticket.panes.values) && ticket.panes.values.allSatisfy({ locate($0) == nil && memberMark($0) == .clean }) {
             do {
                 for pane in ticket.panes.values { try Durable.remove(ticket.openFile(pane)) }
@@ -329,7 +356,7 @@ extension VigilWorkspaces {
                         ticket.refusal = nil
                         try ticket.save()
                     }
-                    if ticket.parent == nil, (!ticket.requested || ticket.refusal != nil), registryRead == .current,
+                    if ticket.parent == nil, ticket.takeover != true, (!ticket.requested || ticket.refusal != nil), registryRead == .current,
                        ticket.panes.values.allSatisfy({ locate($0) == nil }) {
                         for pane in ticket.panes.values { try Durable.remove(ticket.openFile(pane)) }
                         try Durable.remove(ticket.file)
@@ -337,6 +364,11 @@ extension VigilWorkspaces {
                 } catch { lifecycleLog.error("unreadable incoming move", ["file": file.path, "err": error]) }
             }
         } catch { lifecycleLog.error("incoming moves could not be loaded", ["err": error]) }
+        for entry in graveyard.values {
+            guard let move = entry.moveCheckpoint, let id = move.ticket, let file = Self.abandonment(move) else { continue }
+            do { closedForkReceipts[id] = try Durable.decode(WorkspaceCommand.Request.Moved.self, file).get() }
+            catch { reportIncompleteMove(entry.name, String(describing: error)) }
+        }
         do { savedMoveHistories = try Durable.decode([UUID: SavedMoveHistory].self, savedMoveHistoriesFile).get() ?? [:] }
         catch { reportIncompleteMove("saved histories", String(describing: error)) }
         do { firstFailedProbe = try Durable.decode([String: Date].self, moveOutagesFile).get() ?? [:] }
@@ -402,8 +434,8 @@ extension VigilWorkspaces {
     }
 
     func canTakeOver(_ ticket: IncomingMove) -> Bool {
-        guard moveOffline[ticket.source] != nil, !ticket.accepted, ticket.takeover != true,
-              (ticket.released == nil || ticket.finalPage == false || ticket.page != nil), ticket.refusal == nil, ticket.superseded != true else { return false }
+        guard ticket.peerClosed == true || moveOffline[ticket.source] != nil, !ticket.accepted, ticket.takeover != true,
+              (ticket.peerClosed == true || ticket.released == nil || ticket.finalPage == false || ticket.page != nil), ticket.refusal == nil, ticket.superseded != true else { return false }
         let originals = Set(ticket.panes.keys)
         return !incomingMoves.values.contains { other in
             other.request.id != ticket.request.id && other.source == ticket.source && other.refusal == nil &&
@@ -412,8 +444,18 @@ extension VigilWorkspaces {
         }
     }
 
+    private static func abandonment(_ move: WorkspaceCommand.Request.Moved) -> URL? {
+        guard let device = move.device, Open.validPane(device), let id = move.ticket else { return nil }
+        return VigilPaths.root.appendingPathComponent("abandoned-moves").appendingPathComponent(device + "." + id.uuidString)
+    }
+
+    func peerClosedFork(_ burial: Workspace) -> Bool {
+        guard let move = burial.moveCheckpoint, let id = move.ticket, let proof = closedForkReceipts[id] else { return false }
+        return proof.device == move.device && proof.arrivals == move.arrivals && proof.arrival == move.arrival && proof.panes == move.panes
+    }
+
     func canTakeBack(_ burial: Workspace) -> Bool {
-        guard let move = burial.moveCheckpoint, let device = move.device, moveOffline[device] != nil,
+        guard let move = burial.moveCheckpoint, let device = move.device, peerClosedFork(burial) || moveOffline[device] != nil,
               move.arrivals != nil,
               !recoveredMoveBurials.contains(burial.name) else { return false }
         return ownedPaneIds(burial).allSatisfy { memberMark($0) == .clean && !Self.daemonAlive($0) }
@@ -447,7 +489,8 @@ extension VigilWorkspaces {
             && graveyardDeadlines[name].map({ $0 <= Date() }) == true {
             reapIfExpired(name)
         }
-        for (id, ticket) in incomingMoves where ticket.source == device && ticket.refusal == nil && !activeMoves.contains(id) {
+        for (id, ticket) in incomingMoves where ticket.source == device && ticket.superseded != true &&
+            (ticket.refusal == nil || closedFork(ticket)) && !activeMoves.contains(id) {
             moveRetry.removeValue(forKey: id)?.cancel()
             activeMoves.insert(id)
             let epoch = moveEpoch[id]
@@ -465,8 +508,9 @@ extension VigilWorkspaces {
                         for pane in ticket.panes.values where waitingForMove(pane) { showMoveNote(pane) }
                     }
                 }
-                guard moveEpoch[id] == epoch, let pending = incomingMoves[id], pending.refusal == nil,
-                      pending.requested || matchesArrival(pending) else { return }
+                guard moveEpoch[id] == epoch, let pending = incomingMoves[id], pending.superseded != true,
+                      pending.refusal == nil || closedFork(pending), pending.requested || matchesArrival(pending) || closedFork(pending) else { return }
+                if pending.peerClosed == true && !pending.accepted && pending.takeover != true { return }
                 if pending.withdrawals?.contains(where: { incomingMoves[$0.id] != nil }) == true { return }
                 // A disconnected peer wakes this work on its next directory.
                 // An unanswered RPC or a replica still catching up while online
@@ -499,9 +543,18 @@ extension VigilWorkspaces {
         var ticket = saved
         let request = ticket.request
         let epoch = moveEpoch[request.id]
+        if ticket.closedFinal != nil || forkClosePending(ticket) {
+            guard ticket.closedFinal != nil || closedFork(ticket) else {
+                throw WireError.refused("Part of the fork is closed here. Withdrawal is paused. Undo the close during its grace, or close the remaining fork panes to return their histories.")
+            }
+            try await abandonClosedFork(ticket)
+            return
+        }
         guard matchesArrival(ticket) else { throw WireError.refused("the local registry cannot account for this transfer") }
         func current() throws {
-            guard let saved = incomingMoves[request.id], moveEpoch[request.id] == epoch, saved.superseded != true, saved.refusal == nil, saved.takeover == ticket.takeover, matchesArrival(ticket) else {
+            guard let saved = incomingMoves[request.id], moveEpoch[request.id] == epoch, saved.superseded != true, saved.refusal == nil,
+                  saved.takeover == ticket.takeover, saved.peerClosed == ticket.peerClosed, saved.closedFinal == nil,
+                  !forkClosePending(ticket), matchesArrival(ticket) else {
                 throw WireError.refused("the transfer decision changed")
             }
         }
@@ -513,6 +566,7 @@ extension VigilWorkspaces {
             NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
         }
         func command(_ command: WorkspaceCommand.Request) async throws -> VigilSessionControl.Reply {
+            try current()
             if ticket.parent != nil, ticket.source == request.moved?.device { return await handoffCommand(command) }
             return try await moveCommand(ticket.source, command)
         }
@@ -608,6 +662,9 @@ extension VigilWorkspaces {
                     incomingMoves[request.id] = ticket
                 }
             }
+        }
+        if ticket.peerClosed == true && !forced && !ticket.accepted {
+            throw WireError.refused("The other Mac closed its fork. Open the saved conversation here to resume.")
         }
         if !forced && !ticket.accepted {
             if !ticket.requested && ticket.released == nil && !staged.isEmpty {
@@ -714,7 +771,8 @@ extension VigilWorkspaces {
             ticket.granted = true
             try save()
         }
-        if forced && (ticket.released == nil || ticket.finalPage == false || ticket.page != nil) { try await receive() }
+        if ticket.peerClosed == true { ticket.withdrawals = [] }
+        if forced && ticket.peerClosed != true && (ticket.released == nil || ticket.finalPage == false || ticket.page != nil) { try await receive() }
         try current()
         if ticket.withdrawals == nil {
             var ack = WorkspaceCommand.Request(session: request.session, revision: request.revision, operation: "ack_move_v2", anchor: "", moved: request.moved)
@@ -745,6 +803,7 @@ extension VigilWorkspaces {
                 order.takenOver = true
                 var downstream = IncomingMove(source: next.device, request: order, panes: [next.pane: destination], folders: [:])
                 downstream.parent = request.id
+                downstream.sourceName = VigilRemote.shared.host(next.device)?.name
                 downstream.seedArchive = ticket.seedArchive ?? request.id
                 if let base = ticket.localCheckpoint?[leg.old] { downstream.localCheckpoint = [next.pane: base] }
                 downstream.requested = true
@@ -779,28 +838,135 @@ extension VigilWorkspaces {
         }
     }
 
-    private func recordMoveHistory(_ paths: [String], for ticket: IncomingMove) throws {
-        guard !paths.isEmpty else { return }
+    /// Once the last fork pane is closed, this side only sends its history.
+    /// The old receipt is retained until every page arrives. The peer marks
+    /// this exact withdrawal spent before acknowledging even its first page.
+    private func abandonClosedFork(_ saved: IncomingMove) async throws {
+        var ticket = saved
         let id = ticket.request.id
+        let epoch = moveEpoch[id]
+        func current() throws {
+            guard incomingMoves[id] != nil, incomingMoves[id]?.superseded != true, moveEpoch[id] == epoch else {
+                throw WireError.refused("The closed fork's transfer has changed.")
+            }
+        }
+        try current()
+        guard registryRead == .current, ticket.panes.values.allSatisfy({ locate($0) == nil &&
+            memberMark($0) == .clean && !Self.daemonAlive($0) }) else {
+            throw WireError.refused("The fork is closed here. Withdrawal is paused during undo and until its panes stop.")
+        }
+        guard let move = ticket.request.moved else { throw WireError.invalid("missing transfer") }
+        if ticket.closedFinal == nil {
+            var panes: [Bring.Pane] = []
+            for (old, new) in ticket.panes {
+                let original = (ticket.localCheckpoint ?? move.transcripts)?[old]
+                let history = try historyAtHome(new) ?? original.map { .init($0.agent, $0.start) }
+                if let history {
+                    panes.append(.init(pane: old, agent: history.agent, conversation: history.start, cwd: ticket.folders[new] ?? NSHomeDirectory(), name: nil))
+                }
+            }
+            var proofs: [String: Bring.TranscriptProof] = [:]
+            if !panes.isEmpty {
+                let observed = try await readMove(.init(panes: panes, commit: false, compareTranscripts: true, requireStoppedWriter: true))
+                for line in observed.lines {
+                    guard let proof = line.proof, proof.valid else { throw WireError.refused("The closed fork's final history is unavailable.") }
+                    proofs[line.pane] = proof
+                }
+                guard observed.failed.isEmpty, Set(proofs.keys) == Set(panes.map(\.pane)) else { throw WireError.refused("Missing closed fork history.") }
+                var archive = Bring.Question(panes: panes, commit: false, checkpoints: proofs)
+                archive.handoff = .archive(id)
+                let kept = try await readMove(archive)
+                guard kept.failed.isEmpty else { throw WireError.refused("Could not preserve the closed fork.") }
+                try recordMoveHistory(kept.keptHistories ?? [], for: ticket)
+            }
+            try current()
+            ticket.closedFinal = proofs
+            try ticket.save()
+            incomingMoves[id] = ticket
+        }
+        // Release our own reservation even if the peer never returns.
+        let claim = ticket.localCheckpoint ?? move.transcripts ?? [:]
+        if !claim.isEmpty && ticket.parent == nil {
+            for owner in [ticket.previousHold, id].compactMap({ $0 }) {
+                var q = Bring.Question(panes: [], commit: false, checkpoints: claim)
+                q.handoff = .finishedWithdrawal(owner, source: ticket.source)
+                let result = try await readMove(q)
+                guard result.failed.isEmpty else { throw WireError.refused("Waiting to release the closed fork's reservation.") }
+            }
+        }
+        let final = ticket.closedFinal ?? [:]
+        let panes = final.map { Bring.Pane(pane: $0.key, agent: $0.value.agent, conversation: $0.value.start, cwd: NSHomeDirectory(), name: nil) }
+        while true {
+            let page: Bring.Page
+            if final.isEmpty { page = .init(home: NSHomeDirectory(), parts: [], more: false) }
+            else {
+                var q = Bring.Question(panes: panes, commit: false, checkpoints: final)
+                q.handoff = .page(from: [:], offset: ticket.closedOffset ?? 0, archive: id)
+                let answer = try await readMove(q)
+                guard answer.failed.isEmpty, let body = answer.page, !body.more || !body.parts.isEmpty else { throw WireError.refused("Cannot read the closed fork's history.") }
+                page = body
+            }
+            try current()
+            var notice = WorkspaceCommand.Request(id: id, session: ticket.request.session, revision: ticket.request.revision,
+                                                  operation: "abandon_move_v2", anchor: "", moved: move)
+            notice.closedFork = .init(final: final, page: page)
+            let reply: VigilSessionControl.Reply
+            if ticket.parent != nil && ticket.source == move.device { reply = await handoffCommand(notice) }
+            else { reply = try await moveCommand(ticket.source, notice) }
+            try current()
+            guard reply.ok, reply.id == id, reply.code == "abandoned" else { throw WireError.refused(reply.message) }
+            if !page.more { break }
+            ticket.closedOffset = (ticket.closedOffset ?? 0) + page.parts.reduce(0) { $0 + $1.bytes.count }
+            try ticket.save()
+            incomingMoves[id] = ticket
+        }
+        for leg in ticket.withdrawals ?? [] where incomingMoves[leg.id] != nil {
+            resumeMoves(from: leg.next.device)
+            throw WireError.refused("Waiting for the onward Mac to acknowledge the closed fork.")
+        }
+        if ticket.parent != nil { try Durable.replace(IncomingMove.completion(id), with: Data()) }
+        for pane in ticket.panes.values { try Durable.remove(ticket.openFile(pane)) }
+        try Durable.remove(ticket.file)
+        incomingMoves[id] = nil
+        moveWaiting[id] = nil
+        moveDelay[id] = nil
+        for leg in ticket.withdrawals ?? [] { try Durable.remove(IncomingMove.completion(leg.id)) }
+        if let parent = ticket.parent, let source = incomingMoves[parent]?.source { Task { @MainActor in resumeMoves(from: source) } }
+        NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+    }
+
+    private func recordMoveHistory(_ paths: [String], for ticket: IncomingMove) throws {
+        try recordMoveHistory(paths, id: ticket.request.id, workspace: ticket.request.session)
+    }
+
+    private func recordMoveHistory(_ paths: [String], id: UUID, workspace: String) throws {
+        guard !paths.isEmpty else { return }
         var all = try Durable.decode([UUID: SavedMoveHistory].self, savedMoveHistoriesFile).get() ?? [:]
-        let kept = Set((all[id]?.files ?? []) + paths).sorted()
-        all[id] = .init(id: id, workspace: ticket.request.session, files: kept)
+        var notice = all[id] ?? .init(id: id, workspace: workspace, files: [])
+        notice.record(paths, in: VigilPaths.root)
+        all[id] = notice
         try Durable.replace(savedMoveHistoriesFile, with: JSONEncoder().encode(all))
         savedMoveHistories = all
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
 
-    func inspectMoveHistory(_ history: SavedMoveHistory) {
-        let urls = history.files.map { URL(fileURLWithPath: $0) }
-        guard urls.allSatisfy({ FileManager.default.isReadableFile(atPath: $0.path) }) else {
-            reportIncompleteMove(history.workspace, "A preserved history cannot be opened. Its recorded location remains in the sidebar.")
-            return
+    func inspectMoveHistory(_ history: SavedMoveHistory, reveal: ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }) {
+        var urls: [URL] = [], missing: [String] = []
+        for recorded in history.pending {
+            if let path = try? SavedMoveHistory.visible(recorded, for: history.id, in: VigilPaths.root),
+               FileManager.default.isReadableFile(atPath: path) { urls.append(URL(fileURLWithPath: path)) }
+            else { missing.append(recorded) }
         }
-        NSWorkspace.shared.activateFileViewerSelecting(urls)
+        if !urls.isEmpty { reveal(urls) }
+        if !missing.isEmpty { reportIncompleteMove(history.workspace, "Could not open these saved files:\n" + missing.joined(separator: "\n")) }
+    }
+
+    func dismissMoveHistory(_ history: SavedMoveHistory) {
         do {
             var all = try Durable.decode([UUID: SavedMoveHistory].self, savedMoveHistoriesFile).get() ?? [:]
-            guard all[history.id]?.files == history.files else { return }
-            all[history.id] = nil
+            guard var notice = all[history.id] else { return }
+            notice.dismiss(history.pending, in: VigilPaths.root)
+            all[history.id] = notice
             try Durable.replace(savedMoveHistoriesFile, with: JSONEncoder().encode(all))
             savedMoveHistories = all
             NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
@@ -814,8 +980,17 @@ extension VigilWorkspaces {
                 guard let reason = ticket.refusal ?? moveWaiting[ticket.request.id] else { return nil }
                 return "\(ticket.request.session): \(reason)"
             }
-            let source = VigilRemote.shared.host(ticket.source)?.name ?? ticket.source
+            let source = VigilRemote.shared.host(ticket.source)?.name ?? ticket.sourceName
+                ?? ticket.panes.values.compactMap { registered($0)?.from }.first { $0.device == ticket.source }?.mac ?? ticket.source
+            if ticket.closedFinal != nil || closedFork(ticket) {
+                return "\(ticket.request.session): fork closed here. \(moveWaiting[ticket.request.id] ?? "Returning its history to " + source + ".")"
+            }
             let state = ticket.refusal ?? moveWaiting[ticket.request.id] ?? "Waiting for its final history."
+            if ticket.peerClosed == true { return "\(ticket.request.session): \(source) closed its fork. \(state)" }
+            if ticket.released != nil {
+                let phase = ticket.withdrawals?.isEmpty == false ? "following an onward grant" : "reconciling the release"
+                return "\(ticket.request.session): \(phase) from \(source). \(state)"
+            }
             return "\(ticket.request.session): a second writer may exist on \(source). \(state)"
         }.sorted()
     }
@@ -829,8 +1004,12 @@ extension VigilWorkspaces {
         catch { lifecycleLog.error("could not save queued open", ["pane": pane, "err": error]) }
     }
 
-    func takeOverHere(_ pane: String, since: Date) async {
-        guard let source = registered(pane)?.from?.device, await stillOffline(source, since: since) else {
+    func takeOverHere(_ pane: String, since: Date?) async {
+        guard let arrival = registered(pane)?.from, let original = arrival.ticket, let pending = incomingMoves[original] else { return }
+        let confirmed: Bool
+        if let since { confirmed = await stillOffline(arrival.device, since: since) }
+        else { confirmed = pending.peerClosed == true }
+        guard confirmed else {
             reportIncompleteMove(pane, "This Mac could not confirm that the source is still out of reach. The saved pane remains here.")
             showMoveNote(pane)
             return
@@ -859,8 +1038,13 @@ extension VigilWorkspaces {
         } catch { reportIncompleteMove(ticket.request.session, String(describing: error)) }
     }
 
-    func recoverStoppedMove(_ name: String, since: Date) async throws {
-        guard let device = graveyard[name]?.moveCheckpoint?.device, await stillOffline(device, since: since) else {
+    func recoverStoppedMove(_ name: String, since: Date?) async throws {
+        guard let before = graveyard[name], let device = before.moveCheckpoint?.device else { throw WireError.refused("The move changed.") }
+        let surrendered = peerClosedFork(before)
+        let confirmed: Bool
+        if let since { confirmed = await stillOffline(device, since: since) }
+        else { confirmed = surrendered }
+        guard confirmed else {
             throw WireError.refused("The destination is no longer confirmed offline.")
         }
         guard let burial = graveyard[name], let sent = burial.moveCheckpoint, let original = sent.ticket,
@@ -909,7 +1093,8 @@ extension VigilWorkspaces {
         }
         let answer = try await readMove(.init(panes: questions, commit: true, compareTranscripts: true, requireStoppedWriter: true))
         let proofs = Dictionary(uniqueKeysWithValues: answer.lines.compactMap { line in line.proof.map { (line.pane, $0) } })
-        guard answer.failed.isEmpty, Set(proofs.keys) == Set(questions.map(\.pane)), graveyard[name]?.moveCheckpoint == sent, moveOffline[device] == since
+        guard answer.failed.isEmpty, Set(proofs.keys) == Set(questions.map(\.pane)), graveyard[name]?.moveCheckpoint == sent,
+              surrendered || moveOffline[device] == since
         else { throw WireError.refused("Could not recover the stopped conversations.") }
         var move = WorkspaceCommand.Request.Moved(panes: mapping.keys.sorted(), mac: Host.current().localizedName ?? "another Mac", transcripts: proofs)
         move.device = me
@@ -923,6 +1108,8 @@ extension VigilWorkspaces {
         _ = try successors(of: sent, recording: true)
         var ticket = IncomingMove(source: device, request: request, panes: mapping, folders: folders)
         ticket.takeover = true
+        ticket.sourceName = sent.mac
+        ticket.peerClosed = surrendered
         if sent.forcedWithdrawal == true { ticket.previousHold = original }
         try ticket.save()
         var workspace = Workspace(name: local, label: staged.label, emoji: staged.emoji, cwd: staged.cwd, tabs: tabs, order: burial.order)
@@ -1091,6 +1278,64 @@ extension VigilWorkspaces {
             if saved?.arrivals == nil { saved?.arrivals = move.arrivals }
             return saved == move && ownedPaneIds(session) == Set(move.panes)
         }
+        func finishSuperseded(_ previous: IncomingMove) async throws {
+            let original = previous.request.id
+            if let proofs = previous.localCheckpoint ?? previous.request.moved?.transcripts, !proofs.isEmpty {
+                var release = Bring.Question(panes: [], commit: false, checkpoints: proofs)
+                release.handoff = .finishedWithdrawal(original, source: previous.source)
+                let answer = try await readMove(release)
+                guard answer.failed.isEmpty else { throw WireError.refused(answer.failed.values.joined(separator: "\n")) }
+            }
+            try Durable.remove(previous.file)
+            incomingMoves[original] = nil
+        }
+        guard let receipt = Self.abandonment(move) else { return .failure(request, "invalid_request", "Missing move identities.") }
+        do {
+            if request.operation == "abandon_move_v2", let closed = request.closedFork, let source = move.device {
+                if let stopped = record(), !same(stopped) { throw WireError.refused("A different move owns this burial.") }
+                try Durable.folder(receipt.deletingLastPathComponent())
+                try Durable.create(receipt, with: JSONEncoder().encode(move))
+                guard try Durable.decode(WorkspaceCommand.Request.Moved.self, receipt).get() == move else {
+                    throw WireError.refused("The closed fork names another move.")
+                }
+                if record() != nil { closedForkReceipts[ticket] = move }
+                if !closed.page.parts.isEmpty {
+                    var q = Bring.Question(panes: [], commit: false, checkpoints: closed.final)
+                    q.handoff = .receive(closed.page, conflict: .init(device: source, ticket: ticket))
+                    let answer = try await readMove(q)
+                    guard answer.failed.isEmpty else { throw WireError.refused("Could not keep the closed fork's history.") }
+                    try recordMoveHistory(answer.keptHistories ?? [], id: ticket, workspace: request.session)
+                }
+                if !closed.page.more, let original = move.returnOf, var prior = incomingMoves[original],
+                   prior.source == source, prior.panes.values.sorted() == move.panes.sorted() {
+                    if prior.superseded == true, record() != nil {
+                        // The reverse stop arrived first. Its source burial now
+                        // offers recovery, so the superseded claim can end.
+                        try await finishSuperseded(prior)
+                    } else if prior.peerClosed != true {
+                        // Its stopped source recovered, then closed that recovery.
+                        // The original local grant can finish, or the person may
+                        // open its staged checkpoint on this positive receipt.
+                        prior.superseded = nil
+                        prior.peerClosed = true
+                        prior.refusal = nil
+                        try prior.save()
+                        incomingMoves[original] = prior
+                        moveEpoch[original] = UUID()
+                        activeMoves.remove(original)
+                        updateMoveNotes(prior)
+                        resumeMoves(from: source)
+                    }
+                }
+                NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
+                return .init(id: request.id, ok: true, code: "abandoned", message: "The fork's close was recorded.")
+            }
+            switch Durable.read(receipt) {
+            case .absent: break
+            case .data: return .failure(request, "abandoned", "The destination closed its fork. This withdrawal has ended.")
+            case .unreadable(let why): throw WireError.refused(why)
+            }
+        } catch { return .failure(request, "waiting", String(describing: error)) }
         if let reverse = incomingMoves.values.first(where: {
             $0.request.moved?.returnOf == ticket && $0.superseded != true &&
                 ($0.granted == true || $0.panes.values.contains { locate($0) != nil })
@@ -1134,16 +1379,7 @@ extension VigilWorkspaces {
             }
             guard persist(publish: false, durable: true) else { return .failure(request, "waiting", "Could not save acknowledgement.") }
             if let original = move.returnOf, let previous = incomingMoves[original], previous.superseded == true {
-                do {
-                    if let proofs = previous.localCheckpoint ?? previous.request.moved?.transcripts, !proofs.isEmpty {
-                        var release = Bring.Question(panes: [], commit: false, checkpoints: proofs)
-                        release.handoff = .finishedWithdrawal(original, source: previous.source)
-                        let answer = try await readMove(release)
-                        guard answer.failed.isEmpty else { throw WireError.refused(answer.failed.values.joined(separator: "\n")) }
-                    }
-                    try Durable.remove(previous.file)
-                    incomingMoves[original] = nil
-                }
+                do { try await finishSuperseded(previous) }
                 catch { return .failure(request, "waiting", "The superseded transfer receipt could not be removed.") }
             }
             return .init(id: request.id, ok: true, code: "acknowledged", message: "Transfer acknowledged.", successors: onward.isEmpty ? nil : onward)

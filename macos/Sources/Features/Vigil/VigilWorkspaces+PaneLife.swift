@@ -157,6 +157,11 @@ extension VigilWorkspaces {
 
     func showMoveNote(_ pane: String) {
         let arrival = registered(pane)?.from
+        if let id = arrival?.ticket, let ticket = incomingMoves[id], canTakeOver(ticket), ticket.peerClosed == true {
+            note(pane, VigilPaneNote(says: "The other Mac closed its fork", offers: "Open saved conversation…",
+                 explains: "The returned history is preserved. This pane can resume its local checkpoint.", symbol: "arrow.right", takeover: true))
+            return
+        }
         if let id = arrival?.ticket, let ticket = incomingMoves[id], canTakeOver(ticket), let since = moveOffline[ticket.source] {
             let mac = arrival?.mac ?? "the source"
             note(pane, VigilPaneNote(says: "First failed check for " + mac, offers: "Take over here…",
@@ -295,8 +300,9 @@ extension VigilWorkspaces {
         guard let pane = view.vigilAttachId else { return }
         if waitingForMove(pane), let arrival = registered(pane)?.from {
             if view.vigilHost == nil, view.vigilNote?.takeover == true {
-                guard let id = arrival.ticket, let ticket = incomingMoves[id], canTakeOver(ticket),
-                      let since = view.vigilNote?.lastContact, moveOffline[arrival.device] == since else { showMoveNote(pane); return }
+                guard let id = arrival.ticket, let ticket = incomingMoves[id], canTakeOver(ticket) else { showMoveNote(pane); return }
+                let since = view.vigilNote?.lastContact
+                guard since == nil ? ticket.peerClosed == true : moveOffline[arrival.device] == since else { showMoveNote(pane); return }
                 let alert = NSAlert()
                 alert.messageText = "Take over from " + arrival.mac + "?"
                 alert.informativeText = "This Mac cannot reach the source. It may still be working. Open the saved copy here and stop its other copy when contact returns? A running turn or tool can be interrupted. Later history from the other copy will be kept separately."
@@ -304,7 +310,11 @@ extension VigilWorkspaces {
                 if unpairedMoves.contains(arrival.device) {
                     alert.informativeText = "Contact failed before this Mac lost its pairing. Its current state cannot be checked. Both copies may be writing until you pair the Macs again and the other copy retires."
                 }
-                alert.addButton(withTitle: "Take over here")
+                if ticket.peerClosed == true {
+                    alert.messageText = "Open the saved conversation here?"
+                    alert.informativeText = "The other Mac confirmed that it closed its fork. Any different returned history is listed in vigil conflicts."
+                }
+                alert.addButton(withTitle: ticket.peerClosed == true ? "Open here" : "Take over here")
                 if alert.runModal() == .alertSecondButtonReturn {
                     Task { @MainActor in await takeOverHere(pane, since: since) }
                 }

@@ -146,6 +146,8 @@ extension VigilWorkspaces {
                 conflict: !conflicts.isDisjoint(with: ownedPaneIds(burial)),
                 from: burial.moveCheckpoint?.ticket == nil
                     ? from(burial.buriedFrom, moved: burial.movedTo) { workspaces[$0]?.label }
+                    : peerClosedFork(burial) ? "The destination closed its fork"
+                    : burial.moveCheckpoint?.final == nil ? "Stopping panes and saving their final history"
                     : "Waiting for " + (burial.movedTo ?? "the destination") + " to acknowledge this transfer",
                 device: nil, mac: nil,
                 closing: burial.closing != nil, recoverableMove: canTakeBack(burial))
@@ -665,6 +667,9 @@ extension VigilWorkspaces {
         for id in done {
             try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).state"))
             try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).seen"))
+        }
+        if !done.isEmpty {
+            DispatchQueue.main.async { VigilWorkspaces.shared.resumeClosedForks(for: Set(done)) }
         }
         if open.isEmpty {
             graveyardLog.success("panes closed, verified", ["panes": sorted, "why": why])
