@@ -123,7 +123,7 @@ extension VigilWorkspaces {
         alert.messageText = "Kill \(label) on \(remote.name)?"
         alert.informativeText = (busy.isEmpty ? "" : "\(busy.joined(separator: ", ")) still running there. ")
             + "Its \(panes.count == 1 ? "pane ends" : "\(panes.count) panes end") on \(remote.name), "
-            + "which keeps the workspace in Recently closed for \(Int(Self.killGrace))s."
+            + "which keeps the workspace in Recently closed: \(Self.undoWords)."
         alert.addButton(withTitle: "Kill")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true

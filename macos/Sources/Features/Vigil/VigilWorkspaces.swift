@@ -483,7 +483,9 @@ class VigilWorkspaces {
     var graveyard: [String: Workspace] = [:] { didSet { savePending() } }
     var withheldReaps = Set<String>()
     var graveyardDeadlines: [String: Date] = [:] { didSet { savePending() } }
-    static let killGrace: TimeInterval = 120
+    /// What a close says of its undo (`Registry.closeGrace`, the burial's
+    /// length), for code outside this folder, which imports no VigilWire.
+    static var undoWords: String { "you can undo this for \(Registry.closeGraceWords)" }
     /// While panes that another Mac brought are being closed here
     /// (`moved`): that Mac's name, stamped on each burial they make.
     var moveReachable: (String) -> Bool = {
