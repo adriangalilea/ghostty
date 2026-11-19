@@ -119,7 +119,7 @@ extension VigilWorkspaces {
         guard !busy.isEmpty, let host else { proceed(); return }
         host.confirmClose(
             messageText: "Close \(what)?",
-            informativeText: "\(busy.joined(separator: ", ")) still running\(mac.map { " on \($0)" } ?? ""). Closing the \(what.lowercased()) kills it (undo keeps it for \(Int(Self.killGrace))s)."
+            informativeText: "\(busy.joined(separator: ", ")) still running\(mac.map { " on \($0)" } ?? ""). Closing the \(what.lowercased()) kills it (\(Self.undoWords))."
         ) { proceed() }
     }
 
