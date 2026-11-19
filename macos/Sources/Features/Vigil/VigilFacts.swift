@@ -299,7 +299,9 @@ final class VigilFacts: @unchecked Sendable {
         let background = (object["background"] as? [String: Any]).map { work in
             ["agents", "shells", "others", "left"].map { "\(work[$0] as? Int ?? 0)" }.joined(separator: " ") + " " + (work["title"] as? String ?? "")
         }
-        return ["agent", "conversation", "name"].map { object[$0] as? String ?? "" }
+        let receiver = object["receiver"] as? [String: String]
+        return [receiver?["status"] ?? "", receiver?["reason"] ?? ""]
+            + ["agent", "conversation", "name"].map { object[$0] as? String ?? "" }
             + [object["refused"] == nil ? "" : "refused", object["outdated"] == nil ? "" : "outdated", background ?? ""]
     }
 

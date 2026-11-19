@@ -575,12 +575,12 @@ final class VigilRemote: ObservableObject {
                             priority: pane.priority ?? .normal,
                             conversation: truth?.meaning?.conversation,
                             conversationName: truth?.meaning?.title,
+                            liveConversation: !host.away && host.error == nil && truth?.alive == true ? truth?.meaning?.reference : nil,
                             forkedFrom: truth?.meaning?.forkedFrom,
                             member: truth?.meaning?.member,
                             background: truth?.meaning?.background,
                             ended: truth?.abnormalEnd,
-                            refused: truth?.meaning?.refused,
-                            outdated: truth?.meaning?.outdated,
+                            problems: truth?.meaning?.problems ?? [],
                             conflict: truth?.conflict)
                     }
                     let anchor = all.first.map { Self.compositeId(host.device, $0.id) }

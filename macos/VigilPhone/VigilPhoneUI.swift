@@ -338,9 +338,7 @@ struct TreeNodeView: View {
     @EnvironmentObject private var model: VigilPhone
 
     private var folded: Bool { model.collapsed.contains(node.id) }
-    /// The conflict whose two copies are on screen (a tap on its mark: which
-    /// Mac, when each was last written, what each holds past what they share).
-    @State private var showingConflict: PaneConflict?
+
     /// The pane's watches, over the tree (its long press).
     @State private var showingWatches = false
     @ObservedObject private var watches = VigilPhoneWatches.shared.marks
@@ -396,18 +394,14 @@ struct TreeNodeView: View {
                 }
             }
             Spacer(minLength: 4)
-            if node.kind == .pane && !node.alive {
-                if let ended = node.ended {
-                    EndedMark(ends: [ended], sizes: Self.markSizes)
-                } else {
-                    Text("Not running").font(.caption2).foregroundStyle(.tertiary)
-                }
-            } else if node.kind != .pane && folded {
-                EndedMark(ends: node.ends, sizes: Self.markSizes)
+            if node.kind == .pane && !node.alive && node.ended == nil {
+                Text("Not running").font(.caption2).foregroundStyle(.tertiary)
             }
             if node.kind == .pane || folded {
-                ConflictMark(conflicts: node.conflicts, sizes: Self.markSizes) { showingConflict = $0 }
-                    .sheet(item: $showingConflict) { conflict in ConflictDetail(conflict: conflict) }
+                PhonePaneProblems(leaves: node.leaves) { ref in
+                    model.typeInto = ref
+                    model.opening = ref
+                }
             }
             // A glance row wears its state as its glyph.
             if node.glance == nil { cluster }
@@ -573,6 +567,41 @@ struct TreeNodeView: View {
     /// A row's marks, sized from a row's text (a point larger than the
     /// Mac's sidebar, for a finger's screen).
     static let markSizes = PaneMarkSizes(text: 12)
+}
+
+private struct PhonePaneProblems: View {
+    let leaves: [VigilPhone.Node]
+    let open: (PaneRef) -> Void
+    @EnvironmentObject private var model: VigilPhone
+    @State private var showingConflict: PaneConflict?
+
+    private var items: [PaneProblemItem] {
+        leaves.flatMap { leaf -> [PaneProblemItem] in
+            guard let id = leaf.followPane, let host = model.host(of: leaf) else { return [] }
+            let ref = leaf.pane ?? PaneRef(host: host, pane: id, title: leaf.path ?? leaf.title)
+            let glance = leaf.glance
+            let writers = glance.flatMap { g in g.conversation.flatMap { model.writerProblems[ConversationRef(agent: g.agent, id: $0)] } }
+            var items = ((glance?.problems ?? []) + [writers].compactMap { $0 }).map { issue in
+                PaneProblemItem(pane: ref.pane, problem: issue, button: "Open pane") { open(ref) }
+            }
+            if let ended = leaf.ended, !ended.clean {
+                items.append(PaneProblemItem(pane: id, problem: ended.problem, button: "Open pane", act: {
+                    Task { await model.openEnded(ref, end: ended) }
+                }, ended: ended))
+            }
+            if let conflict = leaf.conflict, conflict.worn {
+                items.append(PaneProblemItem(pane: ref.pane, problem: conflict.problem, button: "Review copies", act: {
+                    showingConflict = conflict
+                }, writers: conflict.writers))
+            }
+            return items
+        }
+    }
+
+    var body: some View {
+        PaneProblemsMark(items: items, sizes: TreeNodeView.markSizes)
+            .sheet(item: $showingConflict) { ConflictDetail(conflict: $0) }
+    }
 }
 
 // MARK: - A conflict's two copies
@@ -1322,7 +1351,7 @@ struct PaneScreen: View {
     init(ref: PaneRef) {
         self.ref = ref
         _current = State(initialValue: ref)
-        _mode = State(initialValue: Self.opens(ref))
+        _mode = State(initialValue: VigilPhone.shared.typeInto == ref ? .terminal : Self.opens(ref))
     }
 
     /// How a pane opens: its conversation when an agent runs in it.
@@ -1487,6 +1516,7 @@ struct PaneScreen: View {
                           tint: node?.alive == false ? .secondary : (node?.state ?? .idle).tint)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                if let node { PhonePaneProblems(leaves: [node]) { _ in setMode(.terminal) } }
                 // Conversation, changes, documents, messages, terminal: the
                 // others, for a pane with an agent (its repositories come
                 // from its conversation).

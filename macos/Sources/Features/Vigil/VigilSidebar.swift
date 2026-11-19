@@ -180,6 +180,7 @@ final class VigilSidebarCollapse: ObservableObject {
 @MainActor
 final class VigilSidebarModel: ObservableObject {
     @Published private(set) var rows: [VigilWorkspaces.SidebarWorkspaceRow] = []
+    private(set) var writerProblems: [ConversationRef: ConversationProblem] = [:]
     /// The keyboard CURSOR: the row enter/collapse/expand would hit. It is
     /// NOT "where you are" (that's the derived active chain in the rows);
     /// it renders only while the bar owns the keyboard (keyboardActive).
@@ -362,6 +363,11 @@ final class VigilSidebarModel: ObservableObject {
                 sidebarLog.info("dot", ["pane": pane.id, "was": before[pane.id]??.rawValue ?? "none",
                                          "now": pane.state?.rawValue ?? "none"])
             }
+            writerProblems = ConversationCards.writerProblems(fresh.flatMap { row in
+                row.tabs.flatMap(\.panes).compactMap { pane in
+                    pane.liveConversation.map { ($0, row.host?.name ?? "this Mac", pane.paneId ?? VigilRemote.split(pane.id)?.name ?? pane.id) }
+                }
+            })
             rows = fresh
         }
         let histories = VigilWorkspaces.shared.savedMoveHistories.values.filter { !$0.pending.isEmpty }.sorted { $0.id.uuidString < $1.id.uuidString }
