@@ -310,17 +310,20 @@ extension VigilWorkspaces {
             alert.informativeText += "\n\nThis handoff covers \(panes.count) panes: " + panes.sorted().joined(separator: ", ") + "."
         }
         let cancel = alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: peerClosed ? "Open here" : "Continue here").keyEquivalent = ""
+        let proceed = alert.addButton(withTitle: peerClosed ? "Open here" : "Continue here")
+        proceed.refusesFirstResponder = true
+        proceed.keyEquivalent = ""
         alert.window.defaultButtonCell = cancel.cell as? NSButtonCell
         return alert
     }
 
-    /// AppKit gives a button one key equivalent. During this alert both bare
-    /// Return and Escape cancel, including after focus has moved to Continue.
+    /// Return and Escape cancel. Space cannot press the affirmative button,
+    /// even if a first responder is assigned directly during presentation.
     static func runTakeoverAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {
-        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard NSApp.modalWindow === alert.window, event.window === alert.window,
-                  event.modifierFlags.intersection([.shift, .option, .control, .command]).isEmpty,
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+            guard NSApp.modalWindow === alert.window, event.window === alert.window else { return event }
+            if event.charactersIgnoringModifiers == " " { return nil }
+            guard event.type == .keyDown, event.modifierFlags.intersection([.shift, .option, .control, .command]).isEmpty,
                   let key = event.charactersIgnoringModifiers, ["\r", "\u{3}", "\u{1b}"].contains(key) else { return event }
             alert.buttons[0].performClick(nil)
             return nil
