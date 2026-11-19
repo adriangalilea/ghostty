@@ -245,6 +245,7 @@ final class VigilPhone: ObservableObject {
     }
 
     @Published private(set) var nodes: [Node] = []
+    private(set) var writerProblems: [ConversationRef: ConversationProblem] = [:]
     /// Nothing happens in this app without a receipt here.
     let receipts = VigilReceipts()
     /// vigil's tether node (the one its authz endpoint runs), once up.
@@ -536,10 +537,7 @@ final class VigilPhone: ObservableObject {
         var cluster: [PaneDot] {
             PaneDot.cluster(leaves.filter(\.alive).flatMap { $0.dots.isEmpty ? [.state(.idle)] : $0.dots })
         }
-        /// The ended panes under this one, the row's red mark when folded.
-        var ends: [PaneEnd] { leaves.compactMap(\.ended) }
-        /// The conflicts under this one, the row's mark when folded.
-        var conflicts: [PaneConflict] { leaves.compactMap(\.conflict) }
+
         /// Every pane node under this one.
         var leaves: [Node] {
             if kind == .pane { return [self] }
@@ -905,6 +903,26 @@ final class VigilPhone: ObservableObject {
         if busy.isEmpty { confirm(closing) } else { self.closing = closing }
     }
 
+    /// The person's Open pane on an abnormal end uses the home's normal
+    /// lifecycle command. A stale sheet cannot reopen a different end.
+    func openEnded(_ ref: PaneRef, end: PaneEnd) async {
+        guard let dir = directories[ref.host.id], reachable(ref.host), dir.panes[ref.pane]?.abnormalEnd == end,
+              dir.panes[ref.pane]?.alive == false, let place = dir.place(of: ref.pane),
+              let revision = place.workspace.layoutRevision else {
+            failure = .init(title: "Pane changed", message: "Check the current pane on " + ref.host.name + ".")
+            return
+        }
+        let request = WorkspaceCommand.Request(session: place.workspace.name, revision: revision, operation: "open_pane", anchor: ref.pane)
+        do {
+            let data = try await VigilLink.command(linked(), device: ref.host.id, try request.line)
+            let answer = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+            guard answer.ok else { throw CreateError.refused(answer.message) }
+            opening = ref
+        } catch {
+            failure = .init(title: "Open pane", message: VigilLink.reason(error) + ". Check the list before trying again.")
+        }
+    }
+
     /// Sends a close (asked, or nothing to ask).
     func confirm(_ closing: Closing) {
         let host = closing.host
@@ -964,6 +982,11 @@ final class VigilPhone: ObservableObject {
         if closed != burials { burials = closed }
         let fresh = deriveTree()
         guard fresh != nodes else { return }
+        writerProblems = ConversationCards.writerProblems(fresh.flatMap(\.leaves).compactMap { node in
+            guard let ref = node.pane, reachable(ref.host), node.alive,
+                  let glance = node.glance, let id = glance.conversation else { return nil }
+            return (ConversationRef(agent: glance.agent, id: id), ref.host.name, ref.pane)
+        })
         nodes = fresh
         indexTree()
         followTree()
@@ -1156,6 +1179,7 @@ final class VigilPhone: ObservableObject {
     /// Enter), as a reply typed at its keyboard would be.
     /// A `Git.Source` call on a pane's repository, answered by its Mac with
     /// GitKit's own value, encoded (harness/GIT-VIEW.md).
+
     func git(_ call: GitCall, in ref: PaneRef) async throws -> Data {
         let data = try await VigilLink.call(linked(), device: ref.host.id, .git(ref.pane, call))
         receipts.info("git", "answered", ["mac": ref.host.name, "pane": ref.pane, "kind": call.kind.rawValue, "bytes": data.count])

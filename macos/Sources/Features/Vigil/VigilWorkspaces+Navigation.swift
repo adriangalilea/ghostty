@@ -558,11 +558,16 @@ extension VigilWorkspaces {
             }
             // Born already, before this edit (`applySessionCommand`): the
             // edit only places it, against the revision it was asked for.
-            guard let pane = preborn else { preconditionFailure("a split, tab or fork is placed only once its pane was born") }
+            guard var pane = preborn else { preconditionFailure("a split, tab or fork is placed only once its pane was born") }
+            if request.operation == "split" {
+                pane.label = request.label
+                pane.emoji = request.emoji
+            }
             created = pane
             session.paneSeq = workspaces[request.session]!.paneSeq
             if asTab {
-                session.tabs.insert(Registry.Tab(panes: [pane], layout: nil), at: index + 1)
+                let newTab = Registry.Tab(panes: [pane], layout: nil, label: request.operation == "new_tab" ? request.label : nil, emoji: request.emoji)
+                session.tabs.insert(newTab, at: index + 1)
             } else {
                 let anchorIndex = tab.panes.firstIndex { $0.id == anchor.id }!
                 let newIndex = tab.panes.count

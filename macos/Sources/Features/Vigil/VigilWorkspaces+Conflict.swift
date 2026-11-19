@@ -15,6 +15,7 @@ import VigilWire
 struct ConflictColumns: View {
     static let width: CGFloat = 520
     let conflict: PaneConflict
+    var hereName = "This Mac"
 
     private static let gutter: CGFloat = 26
     private static let longest: CGFloat = 150
@@ -27,7 +28,7 @@ struct ConflictColumns: View {
                 Text(PaneConflict.size(conflict.shared)).inkText(.detail)
             }
             .padding(.bottom, 2)
-            branch("This Mac", conflict.here, whole: true, last: false)
+            branch(hereName, conflict.here, whole: true, last: false)
             branch(conflict.mac, conflict.there, whole: conflict.whole, last: true)
         }
         .frame(width: Self.width, alignment: .leading)

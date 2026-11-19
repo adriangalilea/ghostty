@@ -1180,16 +1180,7 @@ struct VigilSidebarView: View {
                         Label("Conflict…", systemImage: "arrow.triangle.branch")
                     }
                 }
-                // Its Claude predates the last update: what that costs and
-                // what ends it, for who does not hover its mark.
-                if pane.outdated != nil {
-                    Button {
-                        let alert = NSAlert()
-                        alert.messageText = "Started before vigil was last updated"
-                        alert.informativeText = PaneGlance.outdatedMeaning
-                        alert.runModal()
-                    } label: { Label("Started Before the Last Update…", systemImage: "exclamationmark.arrow.circlepath") }
-                }
+
                 // Any pane, whatever runs in it: an agent's stall or a
                 // command's end rings on the phone, as loud as its priority.
                 // Only with a phone registered here: following and priority
@@ -1337,7 +1328,7 @@ struct VigilSidebarView: View {
     /// WORLD.
     private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         HStack(spacing: marks.gap) {
-            if let ended = pane.ended { EndedMark(ends: [ended], sizes: marks) }
+
             // Messages for it that wait on its agent, or that you have not
             // read: a press opens its thread in the bar's Messages.
             if let pending = messages.pending(paneId: pane.paneId, id: pane.id) {
@@ -1351,20 +1342,7 @@ struct VigilSidebarView: View {
                 VigilWatchesPanel.show(paneId: pane.paneId, id: pane.id, title: pane.title, in: model.hostController)
             }
             if let arrived = pane.arrived { arrivedMark([arrived]) }
-            // On a pane of this Mac a press opens the sheet that settles it;
-            // another Mac's conflict is that Mac's to settle.
-            if let conflict = pane.conflict {
-                ConflictMark(
-                    conflicts: [conflict], sizes: marks,
-                    press: pane.paneId.map { id in { _ in VigilWorkspaces.shared.conflictSheet(pane: id) } })
-            }
-            if pane.outdated != nil {
-                mark("exclamationmark.arrow.circlepath", .secondary, PaneGlance.outdatedMeaning)
-            }
-            if let refused = pane.refused {
-                mark("person.2.slash.fill", .orange,
-                     "Another agent process reports under this pane and is refused, since \(Self.endTime.string(from: Date(timeIntervalSince1970: refused))): this row is not following its work. It is likely this conversation moved to the background; close that one, or resume it here.")
-            }
+            PaneProblemsMark(items: problemItems(pane), sizes: marks)
             // The shells its agent runs in the background, counted
             // (`PaneGlance.Background.jobs`); its agents are dots of their
             // own, what a turn left running the antenna's.
@@ -1404,11 +1382,42 @@ struct VigilSidebarView: View {
     @ViewBuilder
     private func foldedMarks(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
         GearsMark(backgrounds: panes.compactMap(\.background), sizes: marks)
-        EndedMark(ends: panes.compactMap(\.ended), sizes: marks)
+
         MessagesMark(pending: panes.compactMap { messages.pending(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         WatchMark(watches: panes.flatMap { watches.watches(paneId: $0.paneId, id: $0.id) }, sizes: marks)
-        ConflictMark(conflicts: panes.compactMap(\.conflict), sizes: marks)
+        PaneProblemsMark(items: panes.flatMap(problemItems), sizes: marks)
         lookerGlyphs(panes.flatMap(\.lookers))
+    }
+
+    private func problemItems(_ pane: VigilWorkspaces.SidebarPane) -> [PaneProblemItem] {
+        func visit() {
+            for row in model.rows {
+                for tab in row.tabs where tab.panes.contains(where: { $0.id == pane.id }) {
+                    model.go(to: .pane, of: .init(row: row, tab: tab, pane: pane))
+                    return
+                }
+            }
+        }
+        let writers = pane.liveConversation.flatMap { model.writerProblems[$0] }
+        var items = (pane.problems + [writers].compactMap { $0 }).map { issue in
+            PaneProblemItem(pane: pane.id, problem: issue, button: "Open pane", act: visit)
+        }
+        if let ended = pane.ended, !ended.clean {
+            items.append(PaneProblemItem(pane: pane.id, problem: ended.problem, button: "Open pane", act: visit, ended: ended))
+        }
+        if let conflict = pane.conflict, conflict.worn {
+            items.append(PaneProblemItem(pane: pane.id, problem: conflict.problem, button: "Review copies", act: {
+                if let local = pane.paneId { VigilWorkspaces.shared.conflictSheet(pane: local) }
+                else {
+                    let alert = NSAlert()
+                    alert.messageText = conflict.headline(here: "the pane’s Mac")
+                    alert.informativeText = conflict.meaning(here: "the pane’s Mac") + "\nChoose which copy continues on the pane’s Mac."
+                    alert.accessoryView = NSHostingView(rootView: ConflictColumns(conflict: conflict, hereName: "Pane’s Mac"))
+                    alert.runModal()
+                }
+            }, writers: conflict.writers))
+        }
+        return items
     }
 
     private static let endTime: DateFormatter = {

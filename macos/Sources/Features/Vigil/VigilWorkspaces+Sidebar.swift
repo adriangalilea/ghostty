@@ -53,6 +53,7 @@ extension VigilWorkspaces {
         /// name (what the agent's own UI calls it).
         var conversation: String?
         var conversationName: String?
+        var liveConversation: ConversationRef?
         /// The conversation its own was forked from, by id (its glance).
         var forkedFrom: String?
         /// The member it holds, as its Mac's tuples say (its glance): the
@@ -66,13 +67,9 @@ extension VigilWorkspaces {
         /// Brought from another Mac and not opened here yet: the pane it
         /// was there (`Registry.Arrival`).
         var arrived: Registry.Arrival?
-        /// Another agent process keeps reporting under this pane and is
-        /// refused, since then (its glance): what the row says is not
-        /// following that process's work.
-        var refused: Double?
-        /// Its Claude was started before vigil was last updated, since
-        /// then (its glance): its own state no longer reaches vigil.
-        var outdated: Double?
+        /// What its agent instance reports that needs the person's attention.
+        var problems: [ConversationProblem] = []
+
         /// Its conversation was written on its Mac and on another, and
         /// nobody has said which copy goes on (`PaneConflict`).
         var conflict: PaneConflict?
@@ -232,13 +229,13 @@ extension VigilWorkspaces {
                 priority: pane.priority ?? .normal,
                 conversation: meaning?.conversation,
                 conversationName: meaning?.title,
+                liveConversation: facts.alive ? meaning?.reference : nil,
                 forkedFrom: meaning?.forkedFrom,
                 member: meaning?.member,
                 background: meaning?.background,
                 ended: facts.ended,
                 arrived: pane.dormant == true ? pane.from : nil,
-                refused: meaning?.refused,
-                outdated: meaning?.outdated,
+                problems: meaning?.problems ?? [],
                 conflict: facts.conflict)
         }
 

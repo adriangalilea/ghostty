@@ -31,6 +31,64 @@ struct PaneMarkSizes {
     var gap: CGFloat { (text * 0.36).rounded() }
 }
 
+struct PaneProblemItem: Identifiable {
+    var id: String { pane + "/" + problem.kind.rawValue }
+    let pane: String
+    let problem: ConversationProblem
+    let button: String
+    let act: () -> Void
+    var ended: PaneEnd? = nil
+    var writers: PaneConflict.Writers? = nil
+}
+
+/// A row and its folded ancestors use the same mark. Keeping the contents
+/// derived from its current inputs also updates an already-open list.
+struct PaneProblemsMark: View {
+    let items: [PaneProblemItem]
+    let sizes: PaneMarkSizes
+    @State private var showing = false
+
+    private var tone: Color {
+        if items.contains(where: { $0.writers == .both || $0.problem.kind == .twoLive }) { return .red }
+        if items.allSatisfy({ $0.writers != nil }) { return .secondary }
+        return .orange
+    }
+
+    var body: some View {
+        if !items.isEmpty {
+            Button { showing = true } label: {
+                let ends = items.compactMap(\.ended)
+                if ends.isEmpty {
+                    Image(systemName: "exclamationmark.triangle.fill").font(sizes.symbol).foregroundStyle(tone)
+                } else {
+                    EndedMark(ends: ends, sizes: sizes)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(items.count) pane problems")
+            .help(items.map { $0.problem.title }.joined(separator: "\n"))
+            .popover(isPresented: $showing) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(items) { item in
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(item.problem.title).font(.headline)
+                                Text(item.pane).font(.caption).foregroundStyle(.secondary)
+                                Text(item.problem.says)
+                                ForEach(item.problem.fix, id: \.self) { Text($0).font(.callout) }
+
+                                Button(item.button) { showing = false; item.act() }
+                            }
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding()
+                }
+                .frame(idealWidth: 340, idealHeight: min(460, CGFloat(items.count) * 210))
+                .presentationCompactAdaptation(.sheet)
+            }
+        }
+    }
+}
+
 /// A row's dots, by swift-utils' `InkStateDotCluster`: a pane's own (each
 /// background agent not finished, then its main agent's state) or a folded
 /// row's. How a dot looks for what it says is here and nowhere else.
@@ -142,64 +200,6 @@ struct EndedMark: View {
     }
 }
 
-/// A conversation whose copy on another Mac differs, nobody having said
-/// which goes on: the other Mac's name (one pane) or how many (a folded
-/// row). Red when both copies went on, which is a choice only a person can
-/// make; quiet when only the other Mac's did, so this pane is behind it,
-/// which is a fact to know and nothing to decide in a hurry.
-/// `press`, when its owner can show both copies, makes one pane's mark the
-/// button that does; which copy goes on is said on the pane's own Mac.
-/// Nothing while there is none.
-struct ConflictMark: View {
-    /// The ones a row wears (`PaneConflict.worn`): a copy on another Mac
-    /// that only ends with its agent's own records is no mark (Adrian
-    /// 2026-11-16: a grey Mac name on a workspace he had closed there, for
-    /// two bookkeeping lines); a pane's menu and a Mac's sheet still open it.
-    let conflicts: [PaneConflict]
-    let sizes: PaneMarkSizes
-    var press: ((PaneConflict) -> Void)?
-
-    init(conflicts: [PaneConflict], sizes: PaneMarkSizes, press: ((PaneConflict) -> Void)? = nil) {
-        self.conflicts = conflicts.filter(\.worn)
-        self.sizes = sizes
-        self.press = press
-    }
-
-    private var forked: Bool { conflicts.contains { $0.writers == .both } }
-
-    var body: some View {
-        if let first = conflicts.first {
-            let mark = HStack(spacing: 1) {
-                Image(systemName: forked ? "arrow.triangle.branch" : "equal.circle").font(sizes.symbol)
-                Text(conflicts.count == 1 ? first.mac : forked ? "\(conflicts.count) written twice" : "\(conflicts.count) differ")
-                    .font(sizes.word).lineLimit(1)
-            }
-            .foregroundStyle(forked ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-            .fixedSize()
-            .help(said)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(said)
-            if let press, conflicts.count == 1 {
-                Button { press(first) } label: { mark }.buttonStyle(.plain)
-            } else {
-                mark
-            }
-        }
-    }
-
-    private var said: String {
-        guard conflicts.count == 1, let first = conflicts.first else {
-            return "\(conflicts.count) conversations here differ from their copy on another Mac. Unfold to see each."
-        }
-        return [
-            first.headline(here: "its pane's Mac") + ".",
-            "The same on both: \(PaneConflict.size(first.shared)).",
-            "Its pane's Mac: \(first.tail(first.here)).",
-            "\(first.mac): \(first.tail(first.there)).",
-            "Neither copy was touched." + (press == nil ? " It is settled on its own Mac." : " Press to see both."),
-        ].joined(separator: "\n")
-    }
-}
 
 /// Messages for the pane that you have not read, or that you wrote and wait
 /// to be handed to its agent (`MessageThreads.Pending`): an envelope and how
