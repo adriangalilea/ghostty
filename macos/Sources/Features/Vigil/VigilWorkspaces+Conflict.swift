@@ -126,13 +126,14 @@ extension VigilWorkspaces {
 
     /// The sheet for one conflict, held by `pane` or by none (the menu's).
     @discardableResult
-    func conflictSheet(_ conflict: PaneConflict, pane: String?) -> Bool {
+    func conflictSheet(_ conflict: PaneConflict, pane: String?, device: String? = nil) -> Bool {
+        let here = device == nil ? "this Mac" : "the pane’s Mac"
         let alert = NSAlert()
-        alert.messageText = conflict.headline()
+        alert.messageText = conflict.headline(here: here)
         // A choice says why it starts where it does.
-        alert.informativeText = conflict.meaning() + (conflict.obvious == nil ? " " + conflict.leaningWhy() : "")
+        alert.informativeText = conflict.meaning(here: here) + (conflict.obvious == nil ? " " + conflict.leaningWhy(here: here) : "")
             + " Whichever goes on, the other is kept aside (vigil conflicts --kept)."
-        let columns = NSHostingView(rootView: ConflictColumns(conflict: conflict))
+        let columns = NSHostingView(rootView: ConflictColumns(conflict: conflict, hereName: here.capitalized))
         columns.frame = NSRect(origin: .zero, size: NSSize(width: ConflictColumns.width, height: min(columns.fittingSize.height, 380)))
         alert.accessoryView = columns
         // The first button is what Return takes: the obvious copy, else the
@@ -159,9 +160,28 @@ extension VigilWorkspaces {
             return false
         }
         let keep = choices[answer]
+        let selection = conflict.selection(keep)
+        if let device {
+            Task { @MainActor in
+                let report = NSAlert()
+                do {
+                    let result = try await Task.detached {
+                        let data = try Local.Client(socket: VigilPaths.hub).call(device: device, .settleConflict(selection))
+                        return try JSONDecoder().decode(ConflictSettle.Outcome.self, from: data)
+                    }.value
+                    report.messageText = "Copies settled"
+                    report.informativeText = result.said
+                } catch {
+                    report.messageText = "Check the conversation on its Mac"
+                    report.informativeText = String(describing: error)
+                }
+                report.runModal()
+            }
+            return false
+        }
         let outcome: ConflictSettle.Outcome
         do {
-            outcome = try Local.Client(socket: VigilPaths.hub).settle(ConflictSettle(conversation: conflict.conversation, keep: keep))
+            outcome = try Local.Client(socket: VigilPaths.hub).settle(selection)
         } catch {
             lifecycleLog.error("conflict not settled", ["pane": pane ?? "none", "conversation": conflict.conversation, "keep": keep.rawValue, "err": error])
             let failed = NSAlert()
@@ -173,7 +193,7 @@ extension VigilWorkspaces {
         lifecycleLog.info("conflict settled", ["pane": pane ?? "none", "conversation": conflict.conversation, "keep": keep.rawValue, "aside": outcome.aside, "forked": outcome.forked])
         // Both, with no pane here holding it: the new conversation is said
         // with the line that opens it, for the person to run where they want.
-        if let line = outcome.opens, pane == nil {
+        if let line = outcome.opens, pane == nil || conflict.recoveredChild != nil {
             let told = NSAlert()
             told.messageText = "Both are kept"
             told.informativeText = "\(conflict.mac)'s copy is a conversation of its own now. Open it in any pane with:\n\n\(line)"
@@ -181,7 +201,7 @@ extension VigilWorkspaces {
         }
         // Both: that Mac's copy, a conversation of its own now, opens in a
         // tab beside this pane's.
-        if let line = outcome.opens, let pane, let workspace = owner(ofPane: pane) {
+        if conflict.recoveredChild == nil, let line = outcome.opens, let pane, let workspace = owner(ofPane: pane) {
             refreshWorkspaceRevisions()
             let request = VigilSessionControl.Request.birth(
                 in: workspace, revision: workspaces[workspace]?.layoutRevision ?? "", anchor: pane, split: nil, command: line)

@@ -194,6 +194,7 @@ extension VigilWorkspaces {
     /// a live view. Every registered row renders whether or not its view
     /// exists yet: nothing flashes while a tab mounts.
     func sidebarSnapshot() -> [SidebarWorkspaceRow] {
+        let continuations = offlineContinuations()
         let leases = watchLeases()
 
         /// A tab's panes (splits, then the dock) named by the one rule every
@@ -235,7 +236,7 @@ extension VigilWorkspaces {
                 background: meaning?.background,
                 ended: facts.ended,
                 arrived: pane.dormant == true ? pane.from : nil,
-                problems: meaning?.problems ?? [],
+                problems: (meaning?.problems ?? []) + [continuations[pane.id]?.problem].compactMap { $0 },
                 conflict: facts.conflict)
         }
 

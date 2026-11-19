@@ -307,7 +307,6 @@ extension VigilWorkspaces {
                 let alert = NSAlert()
                 alert.messageText = "Take over from " + arrival.mac + "?"
                 alert.informativeText = "This Mac cannot reach the source. It may still be working. Open the saved copy here and stop its other copy when contact returns? A running turn or tool can be interrupted. Later history from the other copy will be kept separately."
-                alert.addButton(withTitle: "Cancel")
                 if unpairedMoves.contains(arrival.device) {
                     alert.informativeText = "Contact failed before this Mac lost its pairing. Its current state cannot be checked. Both copies may be writing until you pair the Macs again and the other copy retires."
                 }
@@ -315,8 +314,9 @@ extension VigilWorkspaces {
                     alert.messageText = "Open the saved conversation here?"
                     alert.informativeText = "The other Mac confirmed that it closed its fork. Any different returned history is listed in vigil conflicts."
                 }
-                alert.addButton(withTitle: ticket.peerClosed == true ? "Open here" : "Take over here")
-                if alert.runModal() == .alertSecondButtonReturn {
+                alert.addButton(withTitle: ticket.peerClosed == true ? "Open here" : "Continue here")
+                alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+                if alert.runModal() == .alertFirstButtonReturn {
                     Task { @MainActor in await takeOverHere(pane, since: since) }
                 }
                 return

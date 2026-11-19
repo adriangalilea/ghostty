@@ -1408,12 +1408,8 @@ struct VigilSidebarView: View {
         if let conflict = pane.conflict, conflict.worn {
             items.append(PaneProblemItem(pane: pane.id, problem: conflict.problem, button: "Review copies", act: {
                 if let local = pane.paneId { VigilWorkspaces.shared.conflictSheet(pane: local) }
-                else {
-                    let alert = NSAlert()
-                    alert.messageText = conflict.headline(here: "the pane’s Mac")
-                    alert.informativeText = conflict.meaning(here: "the pane’s Mac") + "\nChoose which copy continues on the pane’s Mac."
-                    alert.accessoryView = NSHostingView(rootView: ConflictColumns(conflict: conflict, hereName: "Pane’s Mac"))
-                    alert.runModal()
+                else if let host = VigilRemote.split(pane.id)?.device {
+                    _ = VigilWorkspaces.shared.conflictSheet(conflict, pane: nil, device: host)
                 }
             }, writers: conflict.writers))
         }

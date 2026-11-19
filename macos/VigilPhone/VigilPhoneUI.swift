@@ -574,6 +574,7 @@ private struct PhonePaneProblems: View {
     let open: (PaneRef) -> Void
     @EnvironmentObject private var model: VigilPhone
     @State private var showingConflict: PaneConflict?
+    @State private var conflictHost: String?
 
     private var items: [PaneProblemItem] {
         leaves.flatMap { leaf -> [PaneProblemItem] in
@@ -581,7 +582,7 @@ private struct PhonePaneProblems: View {
             let ref = leaf.pane ?? PaneRef(host: host, pane: id, title: leaf.path ?? leaf.title)
             let glance = leaf.glance
             let writers = glance.flatMap { g in g.conversation.flatMap { model.writerProblems[ConversationRef(agent: g.agent, id: $0)] } }
-            var items = ((glance?.problems ?? []) + [writers].compactMap { $0 }).map { issue in
+            var items = ((glance?.problems ?? []) + [writers, leaf.continuation?.problem].compactMap { $0 }).map { issue in
                 PaneProblemItem(pane: ref.pane, problem: issue, button: "Open pane") { open(ref) }
             }
             if let ended = leaf.ended, !ended.clean {
@@ -591,6 +592,7 @@ private struct PhonePaneProblems: View {
             }
             if let conflict = leaf.conflict, conflict.worn {
                 items.append(PaneProblemItem(pane: ref.pane, problem: conflict.problem, button: "Review copies", act: {
+                    conflictHost = host.id
                     showingConflict = conflict
                 }, writers: conflict.writers))
             }
@@ -600,7 +602,12 @@ private struct PhonePaneProblems: View {
 
     var body: some View {
         PaneProblemsMark(items: items, sizes: TreeNodeView.markSizes)
-            .sheet(item: $showingConflict) { ConflictDetail(conflict: $0) }
+            .sheet(item: $showingConflict) { conflict in
+                ConflictDetail(conflict: conflict) { choice in
+                    guard let host = conflictHost else { throw WireError.refused("The pane’s Mac is unavailable.") }
+                    return try await model.settle(choice, on: host)
+                }
+            }
     }
 }
 
@@ -614,6 +621,10 @@ extension PaneConflict: @retroactive Identifiable {
 /// Both copies of a conflicted conversation, one under the other.
 struct ConflictDetail: View {
     let conflict: PaneConflict
+    let settle: (ConflictSettle) async throws -> ConflictSettle.Outcome
+    @State private var busy = false
+    @State private var answer: String?
+    @State private var complete = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -622,16 +633,38 @@ struct ConflictDetail: View {
                 Section {
                     Text(conflict.headline(here: "its Mac")).font(.callout.weight(.semibold))
                     Text(conflict.meaning(here: "its Mac")).font(.footnote).foregroundStyle(.secondary)
-                    Text("Which one goes on is said from its pane on the Mac: its mark there opens both.")
-                        .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section { LabeledContent("The same on both", value: PaneConflict.size(conflict.shared)) }
                 side("Its Mac", conflict.here, whole: true)
                 side(conflict.mac, conflict.there, whole: conflict.whole)
+                Section {
+                    if let answer { Text(answer) }
+                    if !complete, conflict.digest != nil {
+                        Button("Keep pane’s Mac copy") { choose(.here) }
+                        Button("Keep " + conflict.mac + "’s copy") { choose(.there) }
+                            .disabled(!conflict.whole || conflict.localVersion == nil)
+                        if conflict.both && conflict.choice { Button("Keep both") { choose(.both) } }
+                    } else if !complete {
+                        Text("This Mac has not supplied a verified checkpoint. Review the copies on the pane’s Mac.")
+                    }
+                }.disabled(busy)
             }
             .navigationTitle(conflict.writers == .both ? "Two conversations" : "Two copies")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+
+    private func choose(_ keep: ConflictKeep) {
+        guard !busy else { return }
+        busy = true
+        Task { @MainActor in
+            defer { busy = false }
+            do {
+                let outcome = try await settle(conflict.selection(keep))
+                answer = outcome.said
+                complete = true
+            } catch { answer = String(describing: error) }
         }
     }
 

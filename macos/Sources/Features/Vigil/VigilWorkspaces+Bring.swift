@@ -919,6 +919,7 @@ extension VigilWorkspaces {
         for pane in ticket.panes.values { try Durable.remove(ticket.openFile(pane)) }
         try Durable.remove(ticket.file)
         incomingMoves[request.id] = nil
+        if forced { persist(publish: false, onlyIfChanged: true) }
         NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
         moveDelay[request.id] = nil
         moveWaiting[request.id] = nil
@@ -1110,6 +1111,21 @@ extension VigilWorkspaces {
             }
             return "\(ticket.request.session): a second writer may exist on \(source). \(state)"
         }.sorted()
+    }
+
+    /// Project the outstanding claims for every view of these panes. Several
+    /// legs may lead onward; the root grant alone describes the person's act.
+    func offlineContinuations() -> [String: Registry.OfflineContinuation] {
+        var result: [String: Registry.OfflineContinuation] = [:]
+        for ticket in incomingMoves.values where ticket.parent == nil && ticket.takeover == true &&
+            ticket.accepted && ticket.peerClosed != true && ticket.superseded != true {
+            for (old, pane) in ticket.panes {
+                guard let proof = ticket.localCheckpoint?[old], let ids = proof.files?.keys else { continue }
+                result[pane] = .init(source: ticket.source, mac: ticket.sourceName ?? ticket.source,
+                                     conversations: ids.sorted().map { ConversationRef(agent: proof.agent, id: $0) })
+            }
+        }
+        return result
     }
 
     func moveTicket(for pane: String) -> IncomingMove? {

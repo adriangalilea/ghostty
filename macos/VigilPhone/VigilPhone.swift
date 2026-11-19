@@ -488,6 +488,7 @@ final class VigilPhone: ObservableObject {
         /// nobody has said which copy goes on (`PaneConflict`, the Mac
         /// sidebar's mark): settled on its Mac.
         var conflict: PaneConflict?
+        var continuation: Registry.OfflineContinuation?
         /// An agent (Claude, Codex) runs in the pane: it has a conversation
         /// to draw, and its screen opens on it.
         var agent: Bool = false
@@ -893,6 +894,11 @@ final class VigilPhone: ObservableObject {
     /// it: it waits in Recently closed, undoable, like a close made there.
     /// Asked first only when something runs in it; `done` once its Mac
     /// committed it.
+    func settle(_ choice: ConflictSettle, on device: String) async throws -> ConflictSettle.Outcome {
+        let data = try await VigilLink.call(linked(), device: device, .settleConflict(choice))
+        return try JSONDecoder().decode(ConflictSettle.Outcome.self, from: data)
+    }
+
     func bury(_ anchor: String, tab: Bool, on host: Host, done: @escaping @MainActor () -> Void = {}) {
         guard let dir = directories[host.id], let place = dir.place(of: anchor) else {
             failure = .init(title: "Not closed", message: "That pane is no longer in a workspace on \(host.name).")
@@ -1044,6 +1050,7 @@ final class VigilPhone: ObservableObject {
                                 alive: alive,
                                 ended: alive ? nil : truth?.abnormalEnd,
                                 conflict: truth?.conflict,
+                                continuation: s.offlineContinuations?[p.id],
                                 agent: alive && Program.runsAgent(truth?.tree ?? []),
                                 face: PaneFace.of(emoji: p.emoji, program: alive ? Program.agent(in: truth?.tree ?? []) : nil),
                                 glance: alive ? truth?.meaning : nil,

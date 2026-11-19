@@ -580,7 +580,7 @@ final class VigilRemote: ObservableObject {
                             member: truth?.meaning?.member,
                             background: truth?.meaning?.background,
                             ended: truth?.abnormalEnd,
-                            problems: truth?.meaning?.problems ?? [],
+                            problems: (truth?.meaning?.problems ?? []) + [session.offlineContinuations?[pane.id]?.problem].compactMap { $0 },
                             conflict: truth?.conflict)
                     }
                     let anchor = all.first.map { Self.compositeId(host.device, $0.id) }
