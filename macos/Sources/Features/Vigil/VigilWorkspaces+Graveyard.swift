@@ -71,19 +71,19 @@ extension VigilWorkspaces {
             DispatchQueue.main.async { [weak self] in self?.reapIfExpired(name) }
             return
         }
-        graveyardDeadlines[name] = Date().addingTimeInterval(Self.killGrace)
+        graveyardDeadlines[name] = Date().addingTimeInterval(Registry.closeGrace)
 
         if let appDelegate = NSApp.delegate as? AppDelegate {
             appDelegate.undoManager.registerUndo(
                 withTarget: self,
-                expiresAfter: .seconds(Int64(Self.killGrace))
+                expiresAfter: .seconds(Int64(Registry.closeGrace))
             ) { manager in
                 manager.exhume(name)
             }
             appDelegate.undoManager.setActionName("Kill Workspace")
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.killGrace + 1) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Registry.closeGrace + 1) { [weak self] in
             self?.reapIfExpired(name)
         }
     }
@@ -266,7 +266,7 @@ extension VigilWorkspaces {
         let session = workspaces[name]
         confirmKill(
             label: [session?.emoji, session?.label ?? name].compactMap { $0 }.joined(separator: " "),
-            info: "\(busy.joined(separator: ", ")) still running. Undo within \(Int(Self.killGrace))s.",
+            info: "\(busy.joined(separator: ", ")) still running. \(Self.undoWords.prefix(1).uppercased() + Self.undoWords.dropFirst()).",
             thumbnail: session?.thumbnail,
             doKill)
     }

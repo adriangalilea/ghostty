@@ -1415,7 +1415,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
             confirmClose(
                 messageText: "Close Tab?",
-                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tab kills it (undo keeps it for \(Int(VigilWorkspaces.killGrace))s)."
+                informativeText: "\(busy.joined(separator: ", ")) still running. Closing the tab kills it (\(VigilWorkspaces.undoWords))."
             ) {
                 VigilWorkspaces.shared.closeTabStructurally(self)
             }
