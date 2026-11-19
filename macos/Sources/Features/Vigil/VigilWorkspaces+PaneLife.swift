@@ -317,9 +317,11 @@ extension VigilWorkspaces {
                 if ticket.panes.count > 1 {
                     alert.informativeText += "\n\nThis handoff covers \(ticket.panes.count) panes: " + ticket.panes.values.sorted().joined(separator: ", ") + "."
                 }
-                alert.addButton(withTitle: ticket.peerClosed == true ? "Open here" : "Continue here")
-                alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-                if alert.runModal() == .alertFirstButtonReturn {
+                let cancel = alert.addButton(withTitle: "Cancel")
+                cancel.keyEquivalent = "\u{1b}"
+                alert.window.defaultButtonCell = cancel.cell as? NSButtonCell
+                alert.addButton(withTitle: ticket.peerClosed == true ? "Open here" : "Continue here").keyEquivalent = ""
+                if alert.runModal() == .alertSecondButtonReturn {
                     Task { @MainActor in await takeOverHere(pane, since: since) }
                 }
                 return
