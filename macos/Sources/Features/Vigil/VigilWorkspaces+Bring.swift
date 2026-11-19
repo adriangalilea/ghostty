@@ -40,6 +40,12 @@ extension VigilWorkspaces {
         }
         let directory = reading.directory, whole = reading.whole, source = reading.selected
         let here = FileManager.default.homeDirectoryForCurrentUser.path
+        if let expected = request.expectedConversation {
+            let panes = directory.bringing(source, here: here)
+            guard panes.count == 1, panes[0].agent == expected.agent, panes[0].conversation == expected.id else {
+                return .failure(request, "conversation_changed", "The source pane no longer holds the conversation you chose.")
+            }
+        }
         let names = directory.conversationNames(of: source)
         let revisions = reading.revisions
         guard let digest = try? Registry.Workspace.moveDigest(label: whole.label, emoji: whole.emoji, cwd: whole.cwd, pinned: whole.pinned ?? false,
@@ -2118,7 +2124,7 @@ extension VigilWorkspaces {
                         heard: homeDevice == nil
                             ? NotificationCenter.default.publisher(for: VigilWorkspaces.stateDidChange).map { _ in () }.eraseToAnyPublisher()
                             : VigilRemote.shared.$hosts.map { _ in () }.eraseToAnyPublisher(),
-                        read: { _, _ in try hub.bringSheet(device: device, ask) },
+                        read: { _, _, _ in try hub.bringSheet(device: device, ask) },
                         // The target reads its sheet from its own kept
                         // directory: a read asked of the source from here
                         // would change nothing the target reads.
@@ -2189,7 +2195,7 @@ extension VigilWorkspaces {
     /// The sidebar's Bring Here on a workspace of another Mac: the sheet of
     /// what this Mac knows about each pane, then the move. On a tab or a
     /// pane row: that much of it (`part` of the pane `anchor`).
-    func bringWithSheet(device: String, workspace name: String, anchor: String = "", part: Registry.Workspace.Part? = nil) {
+    func bringWithSheet(device: String, workspace name: String, anchor: String = "", part: Registry.Workspace.Part? = nil, expecting: ConversationRef? = nil) {
         guard let host = VigilRemote.shared.host(device), let directory = VigilRemote.shared.sourceDirectory(device),
               let whole = directory.live.first(where: { $0.name == name }),
               let source = part.map({ whole.only($0, of: anchor) }) ?? whole else {
@@ -2199,14 +2205,13 @@ extension VigilWorkspaces {
         let hub = Local.Client(socket: VigilPaths.hub)
         // The source's directory as this Mac follows it, this Mac's own
         // facts as vigil-agent watches them, and the source asked once.
-        let live = host.error == nil
         let sources = BringDialogModel.Sources(
             question: { VigilWorkspaces.shared.moveQuestion(home: device, workspace: name, anchor: anchor, part: part) },
             heard: VigilRemote.shared.$hosts.map { _ in () }.eraseToAnyPublisher(),
             // Each read takes the source's directory fresh from it while it
             // answers (`moveSource`, what the move itself commits against),
             // else the question as this Mac last heard it.
-            read: { question, needs in
+            read: { question, needs, live in
                 let settle = needs.isEmpty ? nil : needs
                 guard live else {
                     var question = question
@@ -2225,10 +2230,40 @@ extension VigilWorkspaces {
         let model = BringDialogModel(
             workspace: name, anchor: anchor, part: part, mac: host.name, target: nil, what: Self.moving(source.label, part),
             home: here, sources: sources)
+        if part == .pane, expecting == nil {
+            model.offersFork = { ref in
+                guard let current = VigilRemote.shared.host(device), current.error == nil,
+                      let facts = current.directory?.panes[anchor] else { return false }
+                return facts.alive && facts.meaning?.reference == ref
+            }
+            model.makeFork = { parent in
+                guard let current = VigilRemote.shared.host(device), current.error == nil,
+                      let revision = current.directory?.live.first(where: { $0.name == name })?.layoutRevision else {
+                    throw WireError.refused("The source is out of reach.")
+                }
+                let reply = try await VigilRemote.shared.command(device, request: .fork(in: name, revision: revision, anchor: anchor, split: nil, expecting: parent))
+                guard reply.ok, let pane = reply.pane else { throw WireError.refused(reply.message) }
+                return pane
+            }
+            model.forkIdentity = { pane, parent in
+                guard let current = VigilRemote.shared.host(device), current.error == nil else { throw WireError.refused("The source is out of reach.") }
+                guard let directory = current.directory else { return nil }
+                if directory.panes[pane]?.ended != nil { throw WireError.refused("Its program ended before its new conversation was ready.") }
+                guard let glance = directory.panes[pane]?.meaning, let child = glance.conversation,
+                      let from = glance.forkedFrom else { return nil }
+                guard glance.agent == parent.agent, from == parent.id, child != parent.id, ConversationRef.valid(child),
+                      directory.live.contains(where: { $0.name == name && $0.only(.pane, of: pane) != nil }) else {
+                    throw WireError.refused("The pane has not confirmed a fork of \(parent.key) in the requested workspace. Open its row to inspect it.")
+                }
+                return ConversationRef(agent: glance.agent, id: child)
+            }
+        }
         guard model.open() else { return lifecycleLog.error("bring: the workspace is not listed", ["workspace": name, "from": host.name]) }
         present(model, source: device, sourceHome: directory.home, targetHome: here) { revision in
             Task { @MainActor in
-                let reply = await VigilSessionControl.transact(.bring(name, from: device, anchor: anchor, part: part, checkoutRevision: revision))
+                var request = VigilSessionControl.Request.bring(name, from: device, anchor: anchor, part: part, checkoutRevision: revision)
+                request.expectedConversation = expecting ?? model.liveConversation
+                let reply = await VigilSessionControl.transact(request)
                 guard !reply.ok || reply.code == "copied" else { return }
                 let alert = NSAlert()
                 alert.messageText = reply.ok ? "\(source.label) was copied" : "\(source.label) was not brought"
@@ -2275,6 +2310,9 @@ extension VigilWorkspaces {
                 } else {
                     self.activatePane(name: workspace, paneId: pane, in: parent?.windowController as? TerminalController)
                 }
+            case .bringFork(let pane, let ref):
+                guard let source else { return }
+                self?.bringWithSheet(device: source, workspace: workspace, anchor: pane, part: .pane, expecting: ref)
             case .bring(let revision):
                 move(revision)
             }

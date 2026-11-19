@@ -314,6 +314,9 @@ extension VigilWorkspaces {
                     alert.messageText = "Open the saved conversation here?"
                     alert.informativeText = "The other Mac confirmed that it closed its fork. Any different returned history is listed in vigil conflicts."
                 }
+                if ticket.panes.count > 1 {
+                    alert.informativeText += "\n\nThis handoff covers \(ticket.panes.count) panes: " + ticket.panes.values.sorted().joined(separator: ", ") + "."
+                }
                 alert.addButton(withTitle: ticket.peerClosed == true ? "Open here" : "Continue here")
                 alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
                 if alert.runModal() == .alertFirstButtonReturn {

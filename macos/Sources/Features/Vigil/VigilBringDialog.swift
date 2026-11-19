@@ -67,7 +67,52 @@ final class BringDialogModel: ObservableObject {
     /// `bring` carries the checkout differences the person saw and accepts
     /// (`Bring.checkoutRevision` of the sheet on screen; empty when none
     /// stood), which the commit checks its own sheet against.
-    enum Outcome { case cancel, bring(checkoutRevision: String), open(pane: String) }
+    enum Outcome { case cancel, bring(checkoutRevision: String), open(pane: String), bringFork(String, ConversationRef) }
+
+    var offersFork: ((ConversationRef) -> Bool)?
+    var makeFork: ((ConversationRef) async throws -> String)?
+    var forkIdentity: ((String, ConversationRef) throws -> ConversationRef?)?
+    private var forkTask: Task<Void, Never>?
+    private var forkWaiting: (pane: String, parent: ConversationRef)?
+    @Published private(set) var forkProgress: String?
+    @Published private(set) var forkPane: String?
+    var liveConversation: ConversationRef? {
+        guard part == .pane, sourceGone == nil, source == .live, let pane = question?.panes.first,
+              pane.pane == anchor, let agent = pane.agent, let id = pane.conversation,
+              ConversationRef.agents.contains(agent), ConversationRef.valid(id) else { return nil }
+        return .init(agent: agent, id: id)
+    }
+
+    var forkable: ConversationRef? { liveConversation.flatMap { offersFork?($0) == true ? $0 : nil } }
+
+    func startFork() {
+        guard forkProgress == nil, let parent = forkable, let makeFork else { return }
+        forkProgress = "Asking \(mac) to fork \(parent.key). Closing this sheet leaves any fork on \(mac)."
+        forkTask = Task {
+            do {
+                let pane = try await makeFork(parent)
+                guard !Task.isCancelled else { return }
+                forkPane = pane
+                forkWaiting = (pane, parent)
+                forkProgress = "Fork pane \(pane) is on \(mac). Waiting for its agent to identify its new conversation."
+                checkFork()
+            } catch {
+                if !Task.isCancelled { forkProgress = "Could not confirm the fork on \(mac). \(error) Check its panes before trying again." }
+            }
+        }
+    }
+
+    private func checkFork() {
+        guard let child = forkWaiting, let forkIdentity else { return }
+        do {
+            guard let ref = try forkIdentity(child.pane, child.parent) else { return }
+            forkWaiting = nil
+            answer(.bringFork(child.pane, ref))
+        } catch {
+            forkWaiting = nil
+            forkProgress = "The fork pane is \(child.pane) on \(mac). \(error)"
+        }
+    }
 
     /// The workspace's Mac, as heard: here (live), out of reach since when
     /// (what it said then is what the sheet holds), or this Mac itself.
@@ -97,7 +142,7 @@ final class BringDialogModel: ObservableObject {
     struct Sources {
         var question: @MainActor () -> (question: Bring.Question, standing: Standing)?
         var heard: AnyPublisher<Void, Never>
-        var read: @Sendable (Bring.Question, [Bring.Need]) throws -> Bring.Answer
+        var read: @Sendable (Bring.Question, [Bring.Need], Bool) throws -> Bring.Answer
         var changes: (@Sendable (Bring.Question) -> AsyncStream<Local.BringStep>)?
         var askSource: (@Sendable ([String]) throws -> WorkRead.Answer)?
     }
@@ -222,6 +267,8 @@ final class BringDialogModel: ObservableObject {
 
     /// Everything it follows let go (the dialog closed).
     func stop() {
+        forkTask?.cancel()
+        forkTask = nil
         heard?.cancel()
         heard = nil
         watch?.cancel()
@@ -231,6 +278,7 @@ final class BringDialogModel: ObservableObject {
     /// The source's directory moved: the sheet is read again when what it
     /// says of these panes did.
     private func sourceMoved() {
+        if forkWaiting != nil { checkFork(); return }
         guard let now = sources.question() else {
             if sourceGone == nil {
                 sourceGone = "\(mac) no longer lists it: nothing can be moved unless it lists it again"
@@ -354,11 +402,12 @@ final class BringDialogModel: ObservableObject {
         if needs.isEmpty { reading = true }
         readsOut += 1
         let read = sources.read
+        let live = source == .live
         let revision = questionRevision
         // One queue, in the order asked; each answer hopped to main in that
         // same order.
         reads.async {
-            let result = Result { try read(question, needs) }
+            let result = Result { try read(question, needs, live) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self.read(result, settled: needs, plain: needs.isEmpty, for: revision) }
             }
@@ -525,11 +574,13 @@ final class BringDialogModel: ObservableObject {
             ])
         case .cancel:
             lifecycleLog.info("bring: cancelled", ["workspace": workspace, "mac": mac, "to": destination])
-        case .open:
+        case .open, .bringFork:
             break
         }
+        let finish = close
+        close = { _ in }
         stop()
-        close(outcome)
+        finish(outcome)
     }
 
     /// Where the source's facts stand, in one sentence.
@@ -709,8 +760,15 @@ struct BringDialog: View {
                         .disabled(!model.working.isEmpty)
                 }
                 Spacer()
-                Button("Cancel") { model.answer(.cancel) }.keyboardShortcut(.cancelAction)
-                if !model.canMove {
+                if model.makeFork != nil, model.forkable != nil, model.forkProgress == nil {
+                    Button("Fork and Bring Here") { model.startFork() }
+                        .help("Keep the original running there. Review the new fork before moving it here.")
+                }
+                Button(model.forkProgress == nil ? "Cancel" : "Close") { model.answer(.cancel) }.keyboardShortcut(.cancelAction)
+                if let progress = model.forkProgress {
+                    Text(progress).font(.callout).textSelection(.enabled)
+                    if let pane = model.forkPane { Button("Open Fork") { model.answer(.open(pane: pane)) } }
+                } else if !model.canMove {
                     // No sheet of the question as it stands, a read still out,
                     // the last read failed, or the source lists it no more:
                     // there is nothing to accept, so nothing to bring.

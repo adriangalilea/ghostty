@@ -265,7 +265,7 @@ extension VigilWorkspaces {
     /// lifecycle service, awaited off the main thread (a service
     /// that is stuck never freezes the app); every other operation is an
     /// edit of the registry alone (`applySessionEdit`).
-    static let birthOperations: Set<String> = ["create", "new_session", "split", "new_tab", "fork", "open_pane", "open_shell"]
+    static let birthOperations: Set<String> = ["create", "new_session", "split", "new_tab", "fork", "fork_checked", "open_pane", "open_shell"]
 
     /// The home app's session transaction. Remote callers supply identities
     /// and intent, never a replacement registry or local cwd. A birth is
@@ -414,7 +414,7 @@ extension VigilWorkspaces {
         guard let anchor = tab.panes.first(where: { $0.id == request.anchor }) else {
             return refused("unsupported_target", "A dock tenant cannot anchor a split or tab.")
         }
-        let asTab = request.operation == "new_tab" || (request.operation == "fork" && request.direction == nil)
+        let asTab = request.operation == "new_tab" || (request.forks && request.direction == nil)
         if !asTab, !["left", "right", "up", "down"].contains(request.direction ?? "") {
             return refused("invalid_direction", "Expected left, right, up or down.")
         }
@@ -425,12 +425,18 @@ extension VigilWorkspaces {
         /// What the new pane is born running, when that is not the program
         /// it is from then on (a fork: `Fork.Birth`).
         var born = request.command
-        if request.operation == "fork" {
+        if request.forks {
             // The fork's line is this Mac's own: built from its broker's
             // record of the anchor's conversation, never from the wire.
             guard let source = Fork.source(pane: anchor.id, in: VigilPaths.conversations),
                   let birth = Fork.birth(of: source, folder: folder) else {
                 return refused("not_forkable", "That pane holds no conversation its agent can fork.")
+            }
+            if let expected = request.expectedConversation {
+                guard case .running = Self.standing(anchor.id), paneFacts(anchor.id).meaning?.reference == expected,
+                      expected == ConversationRef(agent: source.harness, id: source.conversation) else {
+                    return refused("conversation_changed", "The source pane no longer shows a running agent holding the conversation you chose.")
+                }
             }
             command = birth.program
             guard let shell = getpwuid(getuid())?.pointee.pw_shell else { return refused("no_shell", "The login shell could not be read.") }
@@ -547,12 +553,12 @@ extension VigilWorkspaces {
         /// The closed pane was a dock tenant (it goes back into the dock).
         var closedFromDock = false
         switch request.operation {
-        case "split", "new_tab", "fork":
+        case "split", "new_tab", "fork", "fork_checked":
             guard let anchor = tab.panes.first(where: { $0.id == request.anchor }) else {
                 return .failure(request, "unsupported_target", "A dock tenant cannot anchor a split or tab.")
             }
             // A fork with no direction is a tab of its own, as a new tab is.
-            let asTab = request.operation == "new_tab" || (request.operation == "fork" && request.direction == nil)
+            let asTab = request.operation == "new_tab" || (request.forks && request.direction == nil)
             if !asTab, !["left", "right", "up", "down"].contains(request.direction ?? "") {
                 return .failure(request, "invalid_direction", "Expected left, right, up or down.")
             }
