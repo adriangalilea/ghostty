@@ -295,6 +295,27 @@ extension VigilWorkspaces {
         }
     }
 
+    static func takeoverAlert(mac: String, unpaired: Bool, peerClosed: Bool, panes: [String]) -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "Take over from " + mac + "?"
+        alert.informativeText = "This Mac cannot reach the source. It may still be working. Open the saved copy here and stop its other copy when contact returns? A running turn or tool can be interrupted. Later history from the other copy will be kept separately."
+        if unpaired {
+            alert.informativeText = "Contact failed before this Mac lost its pairing. Its current state cannot be checked. Both copies may be writing until you pair the Macs again and the other copy retires."
+        }
+        if peerClosed {
+            alert.messageText = "Open the saved conversation here?"
+            alert.informativeText = "The other Mac confirmed that it closed its fork. Any different returned history is listed in vigil conflicts."
+        }
+        if panes.count > 1 {
+            alert.informativeText += "\n\nThis handoff covers \(panes.count) panes: " + panes.sorted().joined(separator: ", ") + "."
+        }
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+        alert.window.defaultButtonCell = cancel.cell as? NSButtonCell
+        alert.addButton(withTitle: peerClosed ? "Open here" : "Continue here").keyEquivalent = ""
+        return alert
+    }
+
     /// The note's button: the person asks for what it offers. Another Mac's
     /// pane is opened at its home (`open_pane`), which owns its life.
     func noteAsked(_ view: Ghostty.SurfaceView) {
@@ -304,23 +325,8 @@ extension VigilWorkspaces {
                 guard let ticket = moveTicket(for: pane), canTakeOver(ticket) else { showMoveNote(pane); return }
                 let since = view.vigilNote?.lastContact
                 guard since == nil ? ticket.peerClosed == true : moveOffline[arrival.device] == since else { showMoveNote(pane); return }
-                let alert = NSAlert()
-                alert.messageText = "Take over from " + arrival.mac + "?"
-                alert.informativeText = "This Mac cannot reach the source. It may still be working. Open the saved copy here and stop its other copy when contact returns? A running turn or tool can be interrupted. Later history from the other copy will be kept separately."
-                if unpairedMoves.contains(arrival.device) {
-                    alert.informativeText = "Contact failed before this Mac lost its pairing. Its current state cannot be checked. Both copies may be writing until you pair the Macs again and the other copy retires."
-                }
-                if ticket.peerClosed == true {
-                    alert.messageText = "Open the saved conversation here?"
-                    alert.informativeText = "The other Mac confirmed that it closed its fork. Any different returned history is listed in vigil conflicts."
-                }
-                if ticket.panes.count > 1 {
-                    alert.informativeText += "\n\nThis handoff covers \(ticket.panes.count) panes: " + ticket.panes.values.sorted().joined(separator: ", ") + "."
-                }
-                let cancel = alert.addButton(withTitle: "Cancel")
-                cancel.keyEquivalent = "\u{1b}"
-                alert.window.defaultButtonCell = cancel.cell as? NSButtonCell
-                alert.addButton(withTitle: ticket.peerClosed == true ? "Open here" : "Continue here").keyEquivalent = ""
+                let alert = Self.takeoverAlert(mac: arrival.mac, unpaired: unpairedMoves.contains(arrival.device),
+                                               peerClosed: ticket.peerClosed == true, panes: Array(ticket.panes.values))
                 if alert.runModal() == .alertSecondButtonReturn {
                     Task { @MainActor in await takeOverHere(pane, since: since) }
                 }
