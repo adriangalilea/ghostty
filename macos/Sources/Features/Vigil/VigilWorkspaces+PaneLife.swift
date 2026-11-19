@@ -310,10 +310,23 @@ extension VigilWorkspaces {
             alert.informativeText += "\n\nThis handoff covers \(panes.count) panes: " + panes.sorted().joined(separator: ", ") + "."
         }
         let cancel = alert.addButton(withTitle: "Cancel")
-        cancel.keyEquivalent = "\u{1b}"
-        alert.window.defaultButtonCell = cancel.cell as? NSButtonCell
         alert.addButton(withTitle: peerClosed ? "Open here" : "Continue here").keyEquivalent = ""
+        alert.window.defaultButtonCell = cancel.cell as? NSButtonCell
         return alert
+    }
+
+    /// AppKit gives a button one key equivalent. During this alert both bare
+    /// Return and Escape cancel, including after focus has moved to Continue.
+    static func runTakeoverAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard NSApp.modalWindow === alert.window, event.window === alert.window,
+                  event.modifierFlags.intersection([.shift, .option, .control, .command]).isEmpty,
+                  let key = event.charactersIgnoringModifiers, ["\r", "\u{3}", "\u{1b}"].contains(key) else { return event }
+            alert.buttons[0].performClick(nil)
+            return nil
+        }
+        defer { if let monitor { NSEvent.removeMonitor(monitor) } }
+        return alert.runModal()
     }
 
     /// The note's button: the person asks for what it offers. Another Mac's
@@ -327,7 +340,7 @@ extension VigilWorkspaces {
                 guard since == nil ? ticket.peerClosed == true : moveOffline[arrival.device] == since else { showMoveNote(pane); return }
                 let alert = Self.takeoverAlert(mac: arrival.mac, unpaired: unpairedMoves.contains(arrival.device),
                                                peerClosed: ticket.peerClosed == true, panes: Array(ticket.panes.values))
-                if alert.runModal() == .alertSecondButtonReturn {
+                if Self.runTakeoverAlert(alert) == .alertSecondButtonReturn {
                     Task { @MainActor in await takeOverHere(pane, since: since) }
                 }
                 return
