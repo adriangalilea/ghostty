@@ -823,10 +823,7 @@ extension VigilWorkspaces {
                 question.handoff = .grant(takeover: forced ? request.id : nil)
                 try current()
                 let answer = try await readMove(question)
-                let preserved = question.resumeWholeLines == true && answer.preservedCheckpoints == final && answer.keptHistories?.isEmpty == false
-                guard answer.failed.isEmpty, Set(answer.lines.map(\.pane)) == Set(final.keys),
-                      answer.lines.allSatisfy({ $0.folderHere && $0.proof?.valid == true && ($0.proof == final[$0.pane] || preserved) })
-                else { throw WireError.refused("The saved conversation could not be verified on this Mac.") }
+                guard answer.confirmsGrant(question) else { throw WireError.refused("The saved conversation could not be verified on this Mac.") }
                 try recordMoveHistory(answer.keptHistories ?? [], for: ticket)
             }
             if !forced && !final.isEmpty {
