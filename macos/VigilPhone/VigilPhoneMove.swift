@@ -145,8 +145,7 @@ extension VigilPhone {
 
     /// An async call waited for on the dialog's own read queue (never main).
     nonisolated private static func blocking<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) throws -> T {
-        final class Box: @unchecked Sendable { var result: Result<T, Error>? }
-        let box = Box()
+        let box = BlockingResult<T>()
         let done = DispatchSemaphore(value: 0)
         Task.detached {
             do { box.result = .success(try await work()) } catch { box.result = .failure(error) }
@@ -155,6 +154,11 @@ extension VigilPhone {
         done.wait()
         return try box.result!.get()
     }
+}
+
+/// What a blocking wait hands back across the task it waited on.
+private final class BlockingResult<T>: @unchecked Sendable {
+    var result: Result<T, Error>?
 }
 
 /// A row's Move To, as every row's menu offers it: one Mac is one item,
