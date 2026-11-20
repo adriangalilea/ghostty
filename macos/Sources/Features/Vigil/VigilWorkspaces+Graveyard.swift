@@ -426,7 +426,7 @@ extension VigilWorkspaces {
            needsTip || !ids.allSatisfy({ pane in
                guard let expected = session.moveRevisions?[pane] else { return false }
                if let files = session.moveTranscripts?[pane],
-                  !files.allSatisfy({ Bring.fileVersion($0.key) == $0.value }) { return false }
+                  !files.allSatisfy({ Move.fileVersion($0.key) == $0.value }) { return false }
                return Self.moveRevision(pane) == expected
            }) {
             if !refreshed, let move = session.moveCheckpoint, let device = move.device, let proofs = move.transcripts,

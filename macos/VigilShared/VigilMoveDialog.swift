@@ -1,27 +1,32 @@
-import AppKit
 import Combine
+import Log
 import SwiftUI
 import VigilWire
+
+/// A move's steps in the app's record, whichever app draws the dialog.
+let moveLog = Log.log.scope("move")
 
 /// The dialog of a move (PORTABILITY.md "Before anything moves, what it
 /// depends on"): what stands between a workspace and the Mac it moves to,
 /// each thing said once for all the panes it holds back and with what
 /// settles it beside it, then the panes and what opening each does there.
-/// A Bring Here is the move to this Mac; a Move to names another, which
-/// reads the sheet itself (`Open.bringSheet`).
+/// A Move To This Mac is the move to this Mac; a Move to names another, which
+/// reads the sheet itself (`Open.moveSheet`). One dialog for every device:
+/// the Mac lays it out in a sheet on its window, the phone in a sheet of its
+/// own; each only supplies where its facts come from (`Sources`).
 ///
 /// Nothing in it waits for a button. Its facts are two Macs': the
 /// workspace's own Mac says what its panes depend on (their work, in the
 /// directory this Mac follows), and the Mac it moves to says what it lacks.
 /// The sheet is read again whenever either moves: the source's directory
 /// changing (`sources`, followed from `VigilRemote`), and on this Mac what
-/// the sheet reads changing (`changes`, vigil-agent's `BringWatch`: a
+/// the sheet reads changing (`changes`, vigil-agent's `MoveWatch`: a
 /// checkout, a folder arriving, a transcript). Opening it asks the source
 /// to read its panes' work now (`work-read`, said in both Macs' logs), so
 /// the sheet says as of when, not as of the last change. A source with an
 /// older vigil is said to be one, and never asked.
 ///
-/// What can be settled where is the need's own fact (`Bring.Need.Kind`): a
+/// What can be settled where is the need's own fact (`Move.Need.Kind`): a
 /// repository the target lacks is cloned there, a commit it lacks is fetched
 /// there, a clean checkout behind is moved forward there (from this dialog
 /// only when the target is this Mac: on another Mac it is its person's to
@@ -29,29 +34,29 @@ import VigilWire
 /// (uncommitted, unpushed, a stash) is settled on it, so its row opens a
 /// pane of that repository there.
 @MainActor
-final class BringDialogModel: ObservableObject {
+final class MoveDialogModel: ObservableObject {
     let workspace: String
     let anchor: String
     let part: Registry.Workspace.Part?
     /// The workspace's own Mac, by name ("this Mac" when it is this one).
     let mac: String
-    /// The Mac it moves to; nil: this Mac (a Bring Here).
+    /// The Mac it moves to; nil: this Mac (a Move To This Mac).
     let target: String?
     let what: String
     /// The target's home folder, how its lines name folders.
     let home: String
 
-    /// Where the sheet's facts come from (`BringDialogModel.Sources`).
+    /// Where the sheet's facts come from (`MoveDialogModel.Sources`).
     let sources: Sources
 
     /// Whether this dialog settles anything (only on this Mac).
     var settles: Bool { target == nil }
     /// The move's verb, on its button.
-    var verb: String { target.map { "Move to \($0)" } ?? "Bring Here" }
+    var verb: String { target.map { "Move to \($0)" } ?? "Move Here" }
     /// The Mac the lines' "this Mac" is, in a sentence.
     var destination: String { target ?? "this Mac" }
 
-    @Published private(set) var lines: [Bring.Line] = []
+    @Published private(set) var lines: [Move.Line] = []
     /// The workspace's Mac as this Mac hears it now.
     @Published private(set) var source: Standing = .live
     /// A need being settled, by its text: what is being done.
@@ -62,17 +67,17 @@ final class BringDialogModel: ObservableObject {
     /// The last read asked of the source, and how it went.
     @Published private(set) var asked: Asked?
 
-    /// How the dialog ends: brought or not, or toward a pane on the other Mac.
+    /// How the dialog ends: moved or not, or toward a pane on the other Mac.
     var close: (Outcome) -> Void = { _ in }
-    /// `bring` carries the checkout differences the person saw and accepts
-    /// (`Bring.checkoutRevision` of the sheet on screen; empty when none
+    /// `move` carries the checkout differences the person saw and accepts
+    /// (`Move.checkoutRevision` of the sheet on screen; empty when none
     /// stood), which the commit checks its own sheet against.
-    enum Outcome { case cancel, bring(checkoutRevision: String), open(pane: String), bringFork(String, ConversationRef) }
+    enum Outcome { case cancel, move(checkoutRevision: String), open(pane: String), moveFork(String, ConversationRef) }
 
     struct ReceiptRow: Identifiable, Equatable {
         let id: String
         let title: String
-        let answers: Bring.MoveAnswers
+        let answers: Move.MoveAnswers
     }
     var submitMove: ((String) -> Void)?
     @Published var moveID: UUID?
@@ -118,7 +123,7 @@ final class BringDialogModel: ObservableObject {
         do {
             guard let ref = try forkIdentity(child.pane, child.parent) else { return }
             forkWaiting = nil
-            answer(.bringFork(child.pane, ref))
+            answer(.moveFork(child.pane, ref))
         } catch {
             forkWaiting = nil
             forkProgress = "The fork pane is \(child.pane) on \(mac). \(error)"
@@ -145,35 +150,35 @@ final class BringDialogModel: ObservableObject {
     /// - `heard`: an element each time the source's directory changes.
     /// - `read`: the sheet for a question, with what to settle here first.
     /// - `changes`: the watch of what the sheet reads on the Mac it moves to
-    ///   (this Mac's `BringWatch`): `ready` once it stands, `changed` at each
+    ///   (this Mac's `MoveWatch`): `ready` once it stands, `changed` at each
     ///   fact that may have moved, `ended` with why; nil: that Mac is
     ///   another, which keeps no watch for this dialog.
     /// - `askSource`: a read asked of the source (nil: the source is this
     ///   Mac, whose work book keeps its facts current).
     struct Sources {
-        var question: @MainActor () -> (question: Bring.Question, standing: Standing)?
+        var question: @MainActor () -> (question: Move.Question, standing: Standing)?
         var heard: AnyPublisher<Void, Never>
-        var read: @Sendable (Bring.Question, [Bring.Need], Bool) throws -> Bring.Answer
-        var changes: (@Sendable (Bring.Question) -> AsyncStream<Local.BringStep>)?
+        var read: @Sendable (Move.Question, [Move.Need], Bool) throws -> Move.Answer
+        var changes: (@Sendable (Move.Question) -> AsyncStream<Local.MoveStep>)?
         var askSource: (@Sendable ([String]) throws -> WorkRead.Answer)?
     }
 
     /// The repository whose changes the dialog shows in the list's place;
     /// nil: the list.
-    @Published var showing: Bring.Group?
+    @Published var showing: Move.Group?
     /// A repository's top level as its own Mac names it, from this Mac's
     /// name for it.
     var there: (String) -> String = { $0 }
     /// The view of what a repository holds there, from whoever can read it
     /// (the app: the Changes view over the hub).
-    var changes: ((Bring.Group) -> AnyView)?
+    var changes: ((Move.Group) -> AnyView)?
 
-    private var question: Bring.Question? {
+    private var question: Move.Question? {
         didSet { if oldValue.map({ Self.asRead($0.panes) }) != question.map({ Self.asRead($0.panes) }) { questionRevision += 1 } }
     }
     /// The panes as the sheet reads them: a pane's last activity moves with
     /// every turn there and is no fact this Mac reads.
-    private static func asRead(_ panes: [Bring.Pane]) -> [Bring.Pane] {
+    private static func asRead(_ panes: [Move.Pane]) -> [Move.Pane] {
         panes.map { var pane = $0; pane.active = nil; return pane }
     }
     /// Counts the questions the dialog has asked, by what the sheet reads of
@@ -186,7 +191,7 @@ final class BringDialogModel: ObservableObject {
     @Published private(set) var readsOut = 0
     /// Every read runs on this one queue and is applied on main in the order
     /// made: a settle's read and a plain one never land out of order.
-    private let reads = DispatchQueue(label: "vigil.bring-dialog.reads", qos: .userInitiated)
+    private let reads = DispatchQueue(label: "vigil.move-dialog.reads", qos: .userInitiated)
     /// What the watch on the Mac it moves to watches: a new set of folders
     /// and conversations is a new watch.
     private var watching: Set<String>?
@@ -219,7 +224,7 @@ final class BringDialogModel: ObservableObject {
             MainActor.assumeIsolated { self?.sourceMoved() }
         }
         // Read now, and again once the watch here stands (`ready`): what
-        // moves in between is in the second read. Nothing can be brought
+        // moves in between is in the second read. Nothing can be moved
         // until a read of the question as it stands has answered (`canMove`).
         rewatch()
         reload()
@@ -243,7 +248,7 @@ final class BringDialogModel: ObservableObject {
     }
 
     /// A sheet has been read for this dialog and the last read answered:
-    /// until then nothing can be brought (Return takes nothing).
+    /// until then nothing can be moved (Return takes nothing).
     @Published private(set) var sheetRead = false
 
     /// The move can be asked: the sheet on screen answers the question as it
@@ -274,7 +279,7 @@ final class BringDialogModel: ObservableObject {
     /// has not stood yet (`ready`): one that ends before it is not remade.
     private var remadeAfterEnd = false
     /// The source's re-reads, asked one at a time and answered in order.
-    private let asks = DispatchQueue(label: "vigil.bring-dialog.asks", qos: .userInitiated)
+    private let asks = DispatchQueue(label: "vigil.move-dialog.asks", qos: .userInitiated)
 
     /// Everything it follows let go (the dialog closed).
     func stop() {
@@ -295,13 +300,13 @@ final class BringDialogModel: ObservableObject {
         guard let now = sources.question() else {
             if sourceGone == nil {
                 sourceGone = "\(mac) no longer lists it: nothing can be moved unless it lists it again"
-                lifecycleLog.warn("bring: the source no longer lists the workspace", ["workspace": workspace, "mac": mac])
+                moveLog.warn("move: the source no longer lists the workspace", ["workspace": workspace, "mac": mac])
             }
             return
         }
         if sourceGone != nil {
             sourceGone = nil
-            lifecycleLog.info("bring: the source lists the workspace again", ["workspace": workspace, "mac": mac])
+            moveLog.info("move: the source lists the workspace again", ["workspace": workspace, "mac": mac])
         }
         let wasAway = source != .live
         source = now.standing
@@ -335,7 +340,7 @@ final class BringDialogModel: ObservableObject {
     /// changes (a repository, a folder, a conversation of another pane) or
     /// after it ended; whether one was made (its `ready` reads the sheet).
     @discardableResult
-    private func rewatch(for asked: Bring.Question? = nil) -> Bool {
+    private func rewatch(for asked: Move.Question? = nil) -> Bool {
         guard let changes = sources.changes, let question = asked ?? question else { return false }
         var wanted = Set<String>()
         for pane in question.panes {
@@ -369,7 +374,7 @@ final class BringDialogModel: ObservableObject {
                     self.reload()
                 case .ended(let why):
                     self.watchLost = why
-                    lifecycleLog.warn("bring: this Mac's facts are no longer followed", ["workspace": named, "why": why])
+                    moveLog.warn("move: this Mac's facts are no longer followed", ["workspace": named, "why": why])
                     // Ended before it stood: what moved since the first read
                     // was never followed, so it is read once more.
                     if !self.watchReady { self.reload() }
@@ -387,20 +392,20 @@ final class BringDialogModel: ObservableObject {
     }
 
     /// Every distinct need with the panes it holds back, in the order a
-    /// person settles them (`Bring.standing`, the command line's order too).
-    var standing: [Bring.Standing] { Bring.standing(lines) }
+    /// person settles them (`Move.standing`, the command line's order too).
+    var standing: [Move.Standing] { Move.standing(lines) }
 
     var unknown: Bool { lines.contains { $0.work == nil } }
 
-    /// What the source's facts are worth (`Bring.Currency`).
-    var currency: Bring.Currency { Bring.Currency.of(lines) }
+    /// What the source's facts are worth (`Move.Currency`).
+    var currency: Move.Currency { Move.Currency.of(lines) }
 
     /// The sheet read again, by the Mac it moves to, for the question as it
     /// stands; with `settling` (this Mac only), vigil-agent first does those
     /// (a clone, a fetch, a fast-forward: the one place they are done, `vigil
     /// workspace move --settle` too). Off the main thread: a clone takes as
     /// long as it takes.
-    func reload(settling needs: [Bring.Need] = [], saying: String = "") {
+    func reload(settling needs: [Move.Need] = [], saying: String = "") {
         precondition(needs.isEmpty || settles, "only this Mac's own dialog settles")
         guard let question else { return }
         for need in needs {
@@ -427,7 +432,7 @@ final class BringDialogModel: ObservableObject {
         }
     }
 
-    private func read(_ result: Result<Bring.Answer, any Error>, settled needs: [Bring.Need], plain: Bool, for revision: Int) {
+    private func read(_ result: Result<Move.Answer, any Error>, settled needs: [Move.Need], plain: Bool, for revision: Int) {
         readsOut -= 1
         for need in needs { working[need.text] = nil }
         switch result {
@@ -439,9 +444,9 @@ final class BringDialogModel: ObservableObject {
             lastRead = Date()
             readFor = revision
         case .failure(let error):
-            // Said, and nothing can be brought on a sheet that did not read.
+            // Said, and nothing can be moved on a sheet that did not read.
             readError = "\(target ?? "vigil-agent") did not answer, so nothing can be moved until it does: \(error)"
-            lifecycleLog.error("bring: sheet not read", ["workspace": workspace, "mac": mac, "to": destination, "err": error])
+            moveLog.error("move: sheet not read", ["workspace": workspace, "mac": mac, "to": destination, "err": error])
         }
         guard plain else { return }
         reading = false
@@ -453,18 +458,18 @@ final class BringDialogModel: ObservableObject {
 
     /// A sheet that reads differently than the last: what came and went, in
     /// the log (the first one in full).
-    private func took(_ now: [Bring.Line]) {
+    private func took(_ now: [Move.Line]) {
         let before = Set(lines.flatMap(\.lacks))
         let after = Set(now.flatMap(\.lacks))
         let first = lines.isEmpty && !now.isEmpty
         lines = now
         if first {
-            lifecycleLog.info("bring: sheet opened", [
+            moveLog.info("move: sheet opened", [
                 "workspace": workspace, "mac": mac, "to": destination, "panes": now.count, "needs": after.sorted(),
                 "unknown": now.filter { $0.work == nil }.count, "watched": currency.watched,
             ])
         } else if before != after {
-            lifecycleLog.info("bring: sheet changed", [
+            moveLog.info("move: sheet changed", [
                 "workspace": workspace, "mac": mac, "came": after.subtracting(before).sorted(), "went": before.subtracting(after).sorted(),
             ])
         }
@@ -480,14 +485,14 @@ final class BringDialogModel: ObservableObject {
         let works = question.panes.compactMap(\.work)
         guard works.count == question.panes.count, works.allSatisfy(\.answersReads) else {
             asked = .older
-            lifecycleLog.info("bring: the source runs an older vigil or published no work, not asked to read again", [
+            moveLog.info("move: the source runs an older vigil or published no work, not asked to read again", [
                 "workspace": workspace, "mac": mac, "published": works.count, "panes": question.panes.count,
             ])
             return
         }
         asked = .asking
         let panes = question.panes.map(\.pane)
-        lifecycleLog.info("bring: asking the source to read its work again", ["workspace": workspace, "mac": mac, "panes": panes.count])
+        moveLog.info("move: asking the source to read its work again", ["workspace": workspace, "mac": mac, "panes": panes.count])
         // One queue: an earlier ask's answer never lands after a later one's.
         asks.async {
             let result = Result { try ask(panes) }
@@ -496,7 +501,7 @@ final class BringDialogModel: ObservableObject {
                     switch result {
                     case .success(let answer):
                         self.asked = .answered(at: Date(timeIntervalSince1970: answer.at), changed: answer.changed.count)
-                        lifecycleLog.info("bring: the source read its work again", [
+                        moveLog.info("move: the source read its work again", [
                             "workspace": self.workspace, "mac": self.mac, "read": answer.works.count, "changed": answer.changed,
                         ])
                         // A receipt: the sheet stays on the directory, which
@@ -505,7 +510,7 @@ final class BringDialogModel: ObservableObject {
                     case .failure(let error):
                         let said = "\(error)"
                         self.asked = said.contains(Open.unknownOp) ? .older : .failed(said)
-                        lifecycleLog.warn("bring: the source did not read its work again", ["workspace": self.workspace, "mac": self.mac, "err": said])
+                        moveLog.warn("move: the source did not read its work again", ["workspace": self.workspace, "mac": self.mac, "err": said])
                     }
                 }
             }
@@ -513,12 +518,12 @@ final class BringDialogModel: ObservableObject {
     }
 
     /// The same needs as a person settles them: a repository once, with
-    /// everything about it (`Bring.groups`, the command line's sheet too).
-    var groups: [Bring.Group] { Bring.groups(lines) }
+    /// everything about it (`Move.groups`, the command line's sheet too).
+    var groups: [Move.Group] { Move.groups(lines) }
 
     /// What this Mac does about a repository by itself, as its button says
     /// it; nil: nothing here does.
-    func hereAction(for group: Bring.Group) -> String? {
+    func hereAction(for group: Move.Group) -> String? {
         guard settles, let need = group.here.first else { return nil }
         switch need.kind {
         case .clone: return "Clone Here"
@@ -529,13 +534,13 @@ final class BringDialogModel: ObservableObject {
     }
 
     /// What is being done about a repository right now, in words.
-    func working(on group: Bring.Group) -> String? {
+    func working(on group: Move.Group) -> String? {
         group.needs.lazy.compactMap { self.working[$0.text] }.first
     }
 
-    func settleHere(_ group: Bring.Group) {
+    func settleHere(_ group: Move.Group) {
         guard let need = group.here.first else { return }
-        lifecycleLog.info("bring: settling here", ["workspace": workspace, "need": need.text, "kind": need.kind.rawValue])
+        moveLog.info("move: settling here", ["workspace": workspace, "need": need.text, "kind": need.kind.rawValue])
         let saying = switch need.kind {
         case .clone: "Cloning…"
         case .fetch: "Fetching…"
@@ -547,41 +552,41 @@ final class BringDialogModel: ObservableObject {
 
     /// Work that is only on its Mac is settled where it is: a pane of that
     /// repository, there.
-    func openThere(_ group: Bring.Group) {
+    func openThere(_ group: Move.Group) {
         guard let pane = group.panes.first?.pane else { return }
-        lifecycleLog.info("bring: opening the pane that holds what is only there", ["pane": pane, "mac": mac, "repository": group.root ?? ""])
+        moveLog.info("move: opening the pane that holds what is only there", ["pane": pane, "mac": mac, "repository": group.root ?? ""])
         answer(.open(pane: pane))
     }
 
     /// What a repository holds there, read from its Mac by the Changes view
     /// (the same reader the sheet's counts come from).
-    func showChanges(_ group: Bring.Group) {
+    func showChanges(_ group: Move.Group) {
         guard group.root != nil, !group.panes.isEmpty else { return }
-        lifecycleLog.info("bring: showing what a repository holds there", ["mac": mac, "repository": group.root ?? ""])
+        moveLog.info("move: showing what a repository holds there", ["mac": mac, "repository": group.root ?? ""])
         showing = group
     }
 
     /// Everything this Mac can do by itself, at once (`vigil move --settle`):
     /// a clone and a fetch before a fast-forward, which needs the commit.
-    var settledHere: [Bring.Need] { settles ? standing.map(\.need).filter { $0.settledHere && $0.kind != .fastForward } : [] }
-    /// A Move to's target asked to read its sheet again (`bring-sheet`, said
+    var settledHere: [Move.Need] { settles ? standing.map(\.need).filter { $0.settledHere && $0.kind != .fastForward } : [] }
+    /// A Move to's target asked to read its sheet again (`move-sheet`, said
     /// in its log).
     func readAgain() {
-        lifecycleLog.info("bring: asking the target to read the sheet again", ["workspace": workspace, "to": destination])
+        moveLog.info("move: asking the target to read the sheet again", ["workspace": workspace, "to": destination])
         reload()
     }
 
     func settleAllHere() {
-        lifecycleLog.info("bring: settling everything this Mac can", ["workspace": workspace, "needs": settledHere.map(\.text)])
+        moveLog.info("move: settling everything this Mac can", ["workspace": workspace, "needs": settledHere.map(\.text)])
         reload(settling: settledHere, saying: "Working…")
     }
 
     /// The person's answer, said in the log with what it leaves standing.
     func answer(_ outcome: Outcome) {
         switch outcome {
-        case .bring(let revision):
+        case .move(let revision):
             let standing = self.standing.map(\.need.text)
-            lifecycleLog.info(standing.isEmpty ? "bring: brought" : "bring: brought anyway", [
+            moveLog.info(standing.isEmpty ? "move: moved" : "move: moved anyway", [
                 "workspace": workspace, "mac": mac, "to": destination, "overrides": standing,
                 "unknown": lines.filter { $0.work == nil }.count, "checkout": revision,
             ])
@@ -592,8 +597,8 @@ final class BringDialogModel: ObservableObject {
                 return
             }
         case .cancel:
-            lifecycleLog.info("bring: cancelled", ["workspace": workspace, "mac": mac, "to": destination])
-        case .open, .bringFork:
+            moveLog.info("move: cancelled", ["workspace": workspace, "mac": mac, "to": destination])
+        case .open, .moveFork:
             break
         }
         let finish = close
@@ -616,7 +621,7 @@ final class BringDialogModel: ObservableObject {
             return said
         }
         if source != .here, let changed = facts.changed {
-            said += "\(mac): " + Bring.Currency.said(facts, since: Self.clock(Date(timeIntervalSince1970: changed))) + "."
+            said += "\(mac): " + Move.Currency.said(facts, since: Self.clock(Date(timeIntervalSince1970: changed))) + "."
             switch asked {
             case .answered(let at, _):
                 said += caughtUp ? " Read again there at \(Self.clock(at)), and its directory carries that read."
@@ -653,8 +658,22 @@ final class BringDialogModel: ObservableObject {
     }()
 }
 
-struct BringDialog: View {
-    @ObservedObject var model: BringDialogModel
+extension View {
+    /// The dialog's size where it is laid out: a sheet on a Mac's window
+    /// keeps the size its content was measured for; on the phone it takes
+    /// the sheet it is shown in.
+    @ViewBuilder
+    fileprivate func dialogFrame(width: CGFloat, height: CGFloat? = nil) -> some View {
+        #if os(macOS)
+            frame(width: width, height: height)
+        #else
+            frame(maxWidth: .infinity, maxHeight: height == nil ? nil : .infinity, alignment: .topLeading)
+        #endif
+    }
+}
+
+struct MoveDialog: View {
+    @ObservedObject var model: MoveDialogModel
     static let width: CGFloat = 540
     static let tallest: CGFloat = 520
     /// The dialog while it shows a repository's changes: wide enough for a
@@ -675,14 +694,15 @@ struct BringDialog: View {
 
     private func receipt(_ id: UUID) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Bring \(model.what) here from \(model.mac)").font(.headline)
+            Text(model.target.map { "Move \(model.what) from \(model.mac) to \($0)" } ?? "Move \(model.what) here from \(model.mac)")
+                .font(.headline)
             Text("Move " + id.uuidString).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     ForEach(model.receiptRows) { row in
                         VStack(alignment: .leading, spacing: 6) {
                             Text(row.title).font(.subheadline.weight(.semibold))
-                            BringMoveProofs(answers: row.answers)
+                            MoveProofs(answers: row.answers)
                         }
                     }
                     if let notice = model.moveNotice { Text(notice).foregroundStyle(.secondary) }
@@ -692,7 +712,7 @@ struct BringDialog: View {
             HStack { Spacer(); Button("Close") { model.answer(.cancel) }.keyboardShortcut(.cancelAction) }
         }
         .padding(20)
-        .frame(width: Self.width, height: min(Self.tallest, 178 + CGFloat(model.receiptRows.count) * 124))
+        .dialogFrame(width: Self.width, height: min(Self.tallest, 178 + CGFloat(model.receiptRows.count) * 124))
     }
 
     private var away: Bool { if case .away = model.source { true } else { false } }
@@ -700,7 +720,7 @@ struct BringDialog: View {
     /// What a repository holds on the other Mac, in the sheet's own place:
     /// the dialog stays the dialog (wider, for a diff's lines), nothing else
     /// on screen moves, and the way back keeps the sheet as it was.
-    private func changes(_ group: Bring.Group) -> some View {
+    private func changes(_ group: Move.Group) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Button { model.showing = nil } label: { Label("Back", systemImage: "chevron.left") }
@@ -721,13 +741,13 @@ struct BringDialog: View {
             (model.changes?(group) ?? AnyView(EmptyView()))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: Self.changesSize.width, height: Self.changesSize.height)
+        .dialogFrame(width: Self.changesSize.width, height: Self.changesSize.height)
     }
 
     private var sheet: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(model.target.map { "Move \(model.what) from \(model.mac) to \($0)" } ?? "Bring \(model.what) here from \(model.mac)")
+                Text(model.target.map { "Move \(model.what) from \(model.mac) to \($0)" } ?? "Move \(model.what) here from \(model.mac)")
                     .font(.system(size: 14, weight: .semibold))
                 Text("Nothing runs until you open a pane" + (model.target.map { " on \($0)." } ?? "."))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -753,12 +773,12 @@ struct BringDialog: View {
                             ForEach(groups) { row($0) }
                         }
                     }
-                    let quiet = Bring.notAtRisk(model.lines)
+                    let quiet = Move.notAtRisk(model.lines)
                     if !quiet.isEmpty {
                         section("Changed there, not at risk", "Held by another repository, or holding nothing: nothing stands in the way.") {
                             ForEach(quiet) { repo in
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(Bring.Group.title(repo.root, home: model.home))
+                                    Text(Move.Group.title(repo.root, home: model.home))
                                         .font(.system(size: 12, weight: .medium))
                                     ForEach(repo.said, id: \.self) { Text($0).font(.system(size: 11)).foregroundStyle(.secondary) }
                                 }
@@ -769,7 +789,7 @@ struct BringDialog: View {
                     section(!model.sheetRead ? "Reading what \(model.destination) lacks…" : groups.isEmpty ? "Nothing stands in the way" : "Its panes", nil) {
                         ForEach(Array(model.lines.enumerated()), id: \.offset) { _, line in pane(line) }
                         if model.unknown {
-                            Label(Bring.Line.workNotKnown, systemImage: "questionmark.circle")
+                            Label(Move.Line.workNotKnown, systemImage: "questionmark.circle")
                                 .font(.system(size: 11)).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -804,7 +824,7 @@ struct BringDialog: View {
                 }
                 Spacer()
                 if model.makeFork != nil, model.forkable != nil, model.forkProgress == nil {
-                    Button("Fork and Bring Here") { model.startFork() }
+                    Button("Fork and Move Here") { model.startFork() }
                         .help("Keep the original running there. Review the new fork before moving it here.")
                 }
                 Button(model.forkProgress == nil ? "Cancel" : "Close") { model.answer(.cancel) }.keyboardShortcut(.cancelAction)
@@ -814,22 +834,22 @@ struct BringDialog: View {
                 } else if !model.canMove {
                     // No sheet of the question as it stands, a read still out,
                     // the last read failed, or the source lists it no more:
-                    // there is nothing to accept, so nothing to bring.
+                    // there is nothing to accept, so nothing to move.
                     Button(model.verb) {}.disabled(true).help(model.cannotMove)
                 } else if model.standing.isEmpty {
-                    Button(model.verb) { model.answer(.bring(checkoutRevision: "")) }.keyboardShortcut(.defaultAction)
+                    Button(model.verb) { model.answer(.move(checkoutRevision: "")) }.keyboardShortcut(.defaultAction)
                 } else {
                     // Never the default while something stands: Return must
                     // not leave work behind on the other Mac.
-                    Button(model.settles ? "Bring Anyway" : "Move Anyway") {
-                        model.answer(.bring(checkoutRevision: Bring.checkoutRevision(model.lines)))
+                    Button("Move Anyway") {
+                        model.answer(.move(checkoutRevision: Move.checkoutRevision(model.lines)))
                     }
                         .help("Move it though \(model.destination) lacks what is listed")
                 }
             }
             .padding(.horizontal, 20).padding(.vertical, 12)
         }
-        .frame(width: Self.width)
+        .dialogFrame(width: Self.width)
     }
 
     private var currencySymbol: String {
@@ -853,7 +873,7 @@ struct BringDialog: View {
 
     /// One repository (or one need of none): its name, everything about it a
     /// line each, the panes it holds back, and beside it what settles it.
-    private func row(_ group: Bring.Group) -> some View {
+    private func row(_ group: Move.Group) -> some View {
         let kind = group.here.first?.kind ?? group.needs[0].kind
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: Self.symbol(kind)).font(.system(size: 11)).foregroundStyle(Self.tint(kind)).frame(width: 14)
@@ -897,7 +917,7 @@ struct BringDialog: View {
         }
     }
 
-    private func pane(_ line: Bring.Line) -> some View {
+    private func pane(_ line: Move.Line) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Group {
                 if let agent = line.agent, AgentMark.knows(agent) {
@@ -928,7 +948,7 @@ struct BringDialog: View {
         }
     }
 
-    private static func symbol(_ kind: Bring.Need.Kind) -> String {
+    private static func symbol(_ kind: Move.Need.Kind) -> String {
         switch kind {
         case .clone: "arrow.down.circle.fill"
         case .fetch: "arrow.triangle.2.circlepath.circle.fill"
@@ -942,7 +962,7 @@ struct BringDialog: View {
         }
     }
 
-    private static func tint(_ kind: Bring.Need.Kind) -> Color {
+    private static func tint(_ kind: Move.Need.Kind) -> Color {
         switch kind {
         case .clone, .fetch, .fastForward, .submodule, .position, .thereOnly, .folder: .orange
         case .transcript, .running: .secondary

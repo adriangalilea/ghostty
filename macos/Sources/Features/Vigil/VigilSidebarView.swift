@@ -553,7 +553,7 @@ struct VigilSidebarView: View {
     }
 
     /// A row's move (VigilWire's `Move`), the same rule wherever the row
-    /// lives: one Mac it may go to is one item ("Bring Here…" when that is
+    /// lives: one Mac it may go to is one item ("Move to This Mac…" when that is
     /// this Mac, else "Move to <Mac>…"); more are one "Move To" submenu,
     /// this Mac first when it is one of them. A Mac out of reach is listed,
     /// disabled, with why. When the move would leave something behind on
@@ -570,13 +570,13 @@ struct VigilSidebarView: View {
             EmptyView()
         case .one(let target):
             moveButton(target, target.action, home, anchor: anchor, part: part, leaves: leaves,
-                       symbol: target.device == nil ? Self.bringSymbol : Self.moveSymbol)
+                       symbol: target.device == nil ? Self.moveHereSymbol : Self.moveSymbol)
         case .submenu(let targets):
             Menu {
                 menu {
                     ForEach(targets) { target in
                         moveButton(target, target.title, home, anchor: anchor, part: part, leaves: leaves,
-                                   symbol: target.device == nil ? Self.bringSymbol : "desktopcomputer")
+                                   symbol: target.device == nil ? Self.moveHereSymbol : "desktopcomputer")
                     }
                 }
             } label: {
@@ -628,7 +628,7 @@ struct VigilSidebarView: View {
         }
     }
 
-    private static let bringSymbol = "arrow.down.to.line"
+    private static let moveHereSymbol = "arrow.down.to.line"
     private static let moveSymbol = "arrow.right.to.line"
     /// A menu draws a symbol as a template, in the menu's own ink: the
     /// orange one is drawn into an image that is not one, once per symbol.
@@ -756,6 +756,8 @@ struct VigilSidebarView: View {
             // the front tint and the filled tab icons, the rest by the
             // tooltip.
             HStack(spacing: marks.gap) {
+                // A move of it being decided or done, as its destination says it.
+                movingMark(row.moving)
                 // Where it came from, folded or not, until its panes are opened.
                 arrivedMark(row.tabs.flatMap(\.panes).compactMap(\.arrived))
                 if collapsed { foldedMarks(row.tabs.flatMap(\.panes)) }
@@ -1368,7 +1370,19 @@ struct VigilSidebarView: View {
         }
     }
 
-    /// Brought from another Mac and not opened here: that Mac's name (one
+    /// A move of the row's workspace being decided or done, its destination's
+    /// word for how it stands ("mbp-m4: Waiting for your yes in Authz").
+    @ViewBuilder
+    private func movingMark(_ moving: String?) -> some View {
+        if let moving {
+            Image(systemName: Self.moveSymbol).font(marks.symbol)
+                .foregroundStyle(.orange)
+                .help(moving)
+                .accessibilityLabel(moving)
+        }
+    }
+
+    /// Moved from another Mac and not opened here: that Mac's name (one
     /// pane's, or a workspace's panes rolled up). It leaves a pane's row
     /// when the pane is opened, since from then it runs here.
     @ViewBuilder
@@ -1379,7 +1393,7 @@ struct VigilSidebarView: View {
                 Text(first.mac).font(marks.word).lineLimit(1)
             }
             .foregroundStyle(.secondary)
-            .help("Brought from \(first.mac), \(Self.endTime.string(from: Date(timeIntervalSince1970: first.at))). "
+            .help("Moved from \(first.mac), \(Self.endTime.string(from: Date(timeIntervalSince1970: first.at))). "
                 + (arrivals.count == 1 ? "Not opened here yet: opening it starts it." : "\(arrivals.count) panes not opened here yet: opening one starts it."))
         }
     }

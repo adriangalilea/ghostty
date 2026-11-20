@@ -18,7 +18,7 @@ enum VigilChangesPanel {
 
     /// The view of `pane` as the sidebar knows it: a local pane id, or
     /// `<tether root>/id` for another Mac's. `repository`: that one alone,
-    /// as a path on the pane's Mac (a Bring Here's dialog asks about one).
+    /// as a path on the pane's Mac (a move dialog asks about one).
     static func view(pane: String, repository: String? = nil) -> some View {
         let remote = VigilRemote.split(pane)
         let id = remote?.name ?? pane
@@ -45,8 +45,8 @@ enum VigilChangesPanel {
     /// `controller`'s window: that window's right bar, beside the terminal
     /// they describe. Any other pane (another tab, another workspace,
     /// another Mac): a window of its own, since no terminal here is theirs
-    /// to sit beside. (A Bring Here's dialog shows a repository's inside
-    /// itself, `BringDialog`.)
+    /// to sit beside. (A move dialog shows a repository's inside
+    /// itself, `MoveDialog`.)
     static func show(pane: String, title: String, in controller: TerminalController?) {
         guard let controller, VigilBars.shared.panesOnScreen(in: controller).contains(pane) else {
             window(pane: pane, title: title)

@@ -35,6 +35,9 @@ final class VigilRemote: ObservableObject {
         /// Its power, disk and heat as its app last wrote them
         /// (`Open.machine`), followed beside its directory.
         var machine: MachineState?
+        /// The moves it decides and does as their destination
+        /// (`Open.moves`), followed beside its directory.
+        var moves: [Move.Ticket] = []
     }
 
     @Published private(set) var hosts: [Host] = []
@@ -49,6 +52,7 @@ final class VigilRemote: ObservableObject {
     private var following: [String: Int32] = [:]
     /// Each Mac's state, followed the same way (its socket to the hub).
     private var followingMachine: [String: Int32] = [:]
+    private var followingMoves: [String: Int32] = [:]
     private var arrivals: [String: (revision: String, at: Date)] = [:]
     func arrival(device: String, pane: String, revision: String) -> Date {
         let id = Self.compositeId(device, pane)
@@ -170,6 +174,8 @@ final class VigilRemote: ObservableObject {
         following.removeAll()
         for fd in followingMachine.values { shutdown(fd, SHUT_RDWR) }
         followingMachine.removeAll()
+        for fd in followingMoves.values { shutdown(fd, SHUT_RDWR) }
+        followingMoves.removeAll()
     }
 
     /// The hub's Macs stream, one at a time. Each attempt is numbered and its
@@ -339,6 +345,10 @@ final class VigilRemote: ObservableObject {
             followingMachine[device] = nil
             shutdown(fd, SHUT_RDWR)
         }
+        for (device, fd) in followingMoves where !continuing.contains(device) {
+            followingMoves[device] = nil
+            shutdown(fd, SHUT_RDWR)
+        }
         hosts.removeAll { !continuing.contains($0.device) }
         arrivals = arrivals.filter { Self.split($0.key).map { continuing.contains($0.device) } ?? false }
         VigilMessageStore.shared.macs(continuing)
@@ -351,6 +361,7 @@ final class VigilRemote: ObservableObject {
             }
             follow(peer.id)
             followMachine(peer.id)
+            followMoves(peer.id)
         }
         VigilMessageStore.shared.macs(wanted)
         VigilWatchStore.shared.macs(wanted)
@@ -424,6 +435,44 @@ final class VigilRemote: ObservableObject {
                 self.followingMachine[device] = nil
             }
         }
+    }
+
+    /// A Mac's moves as their destination, followed through the hub as its
+    /// state is: each document a line; one that does not read is said and
+    /// dropped, the last one stays drawn.
+    private func followMoves(_ device: String) {
+        guard !stopped, followingMoves[device] == nil, host(device) != nil else { return }
+        let fd: Int32
+        do { fd = try Self.hub.request(.moves(of: device)) } catch {
+            return remoteLog.warn("moves not followed", ["host": host(device)?.name ?? device, "err": error])
+        }
+        followingMoves[device] = fd
+        let pairing = host(device)?.pairing
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let reader = Lines.Reader(fd: fd)
+            while let line = try? reader.next() {
+                do {
+                    let moves = try JSONDecoder().decode([Move.Ticket].self, from: line)
+                    Task { @MainActor [weak self] in
+                        guard let self, self.host(device)?.pairing == pairing else { return }
+                        self.moves(device, moves)
+                    }
+                } catch {
+                    Task { @MainActor in remoteLog.warn("moves unreadable", ["device": device, "err": error]) }
+                }
+            }
+            close(fd)
+            Task { @MainActor [weak self] in
+                guard let self, self.followingMoves[device] == fd else { return }
+                self.followingMoves[device] = nil
+            }
+        }
+    }
+
+    private func moves(_ device: String, _ moves: [Move.Ticket]) {
+        guard let index = hosts.firstIndex(where: { $0.device == device }), hosts[index].moves != moves else { return }
+        hosts[index].moves = moves
+        NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
     private func machine(_ device: String, _ machine: MachineState) {
