@@ -147,7 +147,8 @@ struct VigilTranscriptCopyRow: View {
 
     private func clock(_ label: String, at seconds: Double) -> some View {
         let time = Date(timeIntervalSince1970: seconds)
-        return Text("\(label) \(time.formatted(date: .abbreviated, time: .shortened)) · \(time.formatted(.relative(presentation: .named)))")
+        return Text("\(label) · \(time.formatted(date: .abbreviated, time: .shortened)) · \(time.formatted(.relative(presentation: .named)))")
+            .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(.secondary)
     }
 }
