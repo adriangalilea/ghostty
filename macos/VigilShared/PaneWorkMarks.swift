@@ -215,12 +215,15 @@ struct PaneProblemsMark: View {
         }
         if let note = item.subject.note {
             switch note.state {
+            case .ending: return .feedback(.working(note.said), actions: alongside)
             case .armed: return .feedback(.waiting(note.said), actions: [command("Cancel restart", .cancel)] + alongside)
             case .notRun: return .feedback(.failed(note.said), actions: [command("Retry", .now)] + alongside)
             case .ran: return .feedback(.waiting(note.said), actions: alongside)
             }
         }
-        let targets = restartItems.filter { $0.subject.note?.state != .armed && feedback.receipt($0) == nil }
+        let targets = restartItems.filter { target in
+            (target.subject.note == nil || target.subject.note?.state == .notRun) && feedback.receipt(target) == nil
+        }
         if targets.count > 1 {
             var choices = targets.map { target in
                 InkHUD.Action("Restart " + target.subject.title) {
