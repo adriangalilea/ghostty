@@ -530,11 +530,8 @@ extension VigilWorkspaces {
     /// is gone before the signal).
     func killDaemons(_ ids: Set<String>) {
         guard !ids.isEmpty else { return }
-        let unfenced = fence(ids)
-        if !unfenced.isEmpty {
-            graveyardLog.error("!! close not fenced; asked all the same (vigild's kill fences it first)", ["panes": unfenced.sorted()])
-        }
-        // Never behind a birth or a restore (`lifeQueue`).
+        // Reap has already committed and fenced these panes. Delivery can
+        // be overtaken by their next visit and never creates another fence.
         deliverClose(ids)
     }
 
@@ -640,17 +637,20 @@ extension VigilWorkspaces {
     /// and the next launch.
     nonisolated static func closePanes(_ ids: Set<String>, why: String) {
         let sorted = ids.sorted()
-        let ask = PaneLifeClient.settle(PaneLife.Request(.close, panes: sorted))
+        let ask = PaneLifeClient.settle(PaneLife.Request(.finishClose, panes: sorted))
         let isClosed: (String) -> Bool = { PaneLifeClient.closed($0, daemonAlive: VigilWorkspaces.daemonAlive) }
         if case .answered(let reply) = ask, !reply.ok {
             graveyardLog.error("close refused by the lifecycle service", ["panes": sorted, "err": reply.error])
         }
-        var open = sorted.filter { !isClosed($0) }
+        func unfinished(_ pane: String) -> Bool {
+            PaneFence.state(pane, in: VigilPaths.panes) != .none && !isClosed(pane)
+        }
+        var open = sorted.filter(unfinished)
         if !open.isEmpty {
-            graveyardLog.warn("closing here with vigild kill", ["panes": open, "service": "\(ask)"])
+            graveyardLog.warn("finishing the existing close with vigild", ["panes": open, "service": "\(ask)"])
             let p = Process()
             p.executableURL = URL(fileURLWithPath: vigildBin)
-            p.arguments = ["kill"] + open
+            p.arguments = ["finish-close"] + open
             p.standardInput = FileHandle.nullDevice
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
@@ -659,22 +659,16 @@ extension VigilWorkspaces {
                 try p.run()
                 p.waitUntilExit()
             } catch {
-                graveyardLog.error("!! vigild kill could not run", ["panes": open, "err": error])
+                graveyardLog.error("!! vigild finish-close could not run", ["panes": open, "err": error])
             }
-            open = open.filter { !isClosed($0) }
+            open = open.filter(unfinished)
         }
-        let done = sorted.filter { !open.contains($0) }
-        let agentDir = VigilPaths.state
-        for id in done {
-            try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).state"))
-            try? FileManager.default.removeItem(at: agentDir.appendingPathComponent("\(id).seen"))
-        }
+        let done = sorted.filter(isClosed)
         if !done.isEmpty {
             DispatchQueue.main.async { VigilWorkspaces.shared.resumeForks(for: Set(done)) }
         }
-        if open.isEmpty {
-            graveyardLog.success("panes closed, verified", ["panes": sorted, "why": why])
-        } else {
+        if !done.isEmpty { graveyardLog.success("panes closed, verified", ["panes": done, "why": why]) }
+        if !open.isEmpty {
             graveyardLog.error("panes fenced, their close not finished; the lifecycle service finishes it", ["panes": open, "why": why])
         }
     }
@@ -781,6 +775,12 @@ extension VigilWorkspaces {
         do {
             entries = try fm.contentsOfDirectory(atPath: vigildStateDir.path)
             provisional = try PaneLife.provisionals(in: VigilPaths.agent).get()
+            // A staged end or resume belongs to its move until its journal
+            // settles. A backup registry cannot prove it was abandoned.
+            do {
+                let pending = try fm.contentsOfDirectory(atPath: PaneLife.Admission.folder(VigilPaths.agent).path)
+                owned.formUnion(pending.filter(Open.validPane))
+            } catch let error as CocoaError where [.fileNoSuchFile, .fileReadNoSuchFile].contains(error.code) {}
         } catch {
             daemonLog.error("!! the panes on disk cannot be listed: nothing is closed, cleaned or settled this launch", ["err": error])
             return
@@ -789,7 +789,7 @@ extension VigilWorkspaces {
             Set(entries.filter { $0.hasSuffix(suffix) }.map { String($0.dropLast(suffix.count)) }.filter(Open.validPane))
         }
         let specs = ids(".spec")
-        let live = ids(".lock").filter { !owned.contains($0) && Self.daemonAlive($0) }
+        let live = ids(".lock").subtracting(["restore"]).filter { !owned.contains($0) && Self.daemonAlive($0) }
         // A pane something on disk still speaks of (its end, its resume
         // pointer) is accounted for like one with a recipe.
         let evidence = ids(".ended").union(ids(".resume")).union(ids(".pid")).union(ids(".up"))

@@ -737,6 +737,8 @@ class VigilWorkspaces {
             alert.runModal()
             exit(EXIT_FAILURE)
         }
+        do { try recoverMoveAdmissions() }
+        catch { registryLog.error("move preparation awaits recovery", ["err": error]) }
         for session in workspaces.values {
             for pane in session.tabs.flatMap(\.members) where pane.dormant != true && PaneLife.awaitsFirstStart(pane.id, agent: VigilPaths.agent) {
                 tend(pane.id, why: "its committed first start is pending")
@@ -1454,7 +1456,7 @@ class VigilWorkspaces {
 
     private var saveScheduled = false
     private var persisting = false
-    private var lastSaved: Data?
+    private(set) var lastSaved: Data?
     private(set) var registryInstallUncertain = false
 
     /// One save per runloop turn however many edits it held; a save's own
@@ -1483,10 +1485,10 @@ class VigilWorkspaces {
         refreshWorkspaceRevisions()
         persisting = false
         var entries = workspaces.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: nil, layoutRevision: $0.layoutRevision, front: $0.front)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), layoutRevision: $0.layoutRevision, front: $0.front)
         }
         entries += graveyard.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: nil, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, moveRevisions: $0.moveRevisions, moveTranscripts: $0.moveTranscripts, moveCheckpoint: $0.moveCheckpoint, closing: $0.closing)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, moveRevisions: $0.moveRevisions, moveTranscripts: $0.moveTranscripts, moveCheckpoint: $0.moveCheckpoint, closing: $0.closing)
         }
         let claims = offlineContinuations()
         if !claims.isEmpty {
