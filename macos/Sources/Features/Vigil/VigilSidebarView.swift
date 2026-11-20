@@ -540,6 +540,9 @@ struct VigilSidebarView: View {
                 Button {
                     VigilWorkspaces.shared.newWorkspace(on: device)
                 } label: { Label("New Workspace", systemImage: "plus.square.on.square") }
+                Button {
+                    VigilCreation.shared.present(on: device)
+                } label: { Label("New Workspace or Resume…", systemImage: "folder.badge.plus") }
                 if let machine = host.machine {
                     Divider()
                     ForEach(Array(machine.facts.enumerated()), id: \.offset) { _, fact in

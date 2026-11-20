@@ -81,11 +81,10 @@ struct VigilPhoneRoot: View {
         // The new-workspace sheet, from wherever it was asked for; the
         // workspace opens over whatever was on screen.
         .sheet(item: $model.composing) { compose in
-            NewWorkspaceSheet(compose: compose) { ref in
-                model.typeInto = ref
-                model.opening = ref
+            NewWorkspaceSheet(model: model, startMac: compose.host?.id ?? model.onlyReachable?.id, startFolder: compose.folder) {
+                model.composing = nil
             }
-            .environmentObject(model)
+            .presentationDetents([.large])
         }
         // A creation in flight, said wherever you are: they take a moment
         // (the Mac spawns, then its directory lists the pane).

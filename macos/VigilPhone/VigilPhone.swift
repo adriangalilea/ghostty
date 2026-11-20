@@ -758,18 +758,21 @@ final class VigilPhone: ObservableObject {
         /// `Fork`): a split beside it (`direction`), or a tab of its own.
         /// Its Mac starts it from its own record; nothing is named here.
         case fork(of: String, direction: String?)
+        /// A workspace whose pane resumes a conversation: its Mac builds the
+        /// line from where it holds the transcript; nothing is named here.
+        case resume(ConversationRef, folder: String, label: String?)
 
         var command: String? {
             switch self {
             case .workspace(_, let command, _), .tab(_, let command), .split(_, _, let command): command
-            case .fork: nil
+            case .fork, .resume: nil
             }
         }
 
         /// What it is, in the words a receipt and the progress line use.
         var noun: String {
             switch self {
-            case .workspace: "workspace"
+            case .workspace, .resume: "workspace"
             case .tab: "tab"
             case .split: "pane"
             case .fork: "fork"
@@ -813,6 +816,8 @@ final class VigilPhone: ObservableObject {
         switch birth {
         case .workspace(let cwd, let command, let label):
             request = .create(cwd: cwd, command: command, label: label)
+        case .resume(let ref, let folder, let label):
+            request = .create(resuming: ref, folder: folder, label: label)
         case .tab(let anchor, _), .split(let anchor, _, _), .fork(let anchor, _):
             guard let place = directories[host.id]?.place(of: anchor) else {
                 throw CreateError.unplaced("That pane is no longer in a workspace on \(host.name).")

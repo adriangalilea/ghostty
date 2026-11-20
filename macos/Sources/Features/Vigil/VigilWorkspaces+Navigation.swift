@@ -289,9 +289,23 @@ extension VigilWorkspaces {
             // window only for this Mac's own command line (`vigil new
             // --window`): the hub refuses one from another device.
             guard let asked = request.cwd else { return .failure(request, "invalid_request", "A new workspace names its folder.") }
-            let cwd = (asked as NSString).expandingTildeInPath
+            var cwd = (asked as NSString).expandingTildeInPath
+            var command = request.command
+            // A conversation resumed: its folder and line are this Mac's
+            // vigil-agent's, from where this Mac holds its transcript.
+            if let ref = request.resume {
+                do {
+                    let line = try await Task.detached(priority: .userInitiated) {
+                        try Local.Client(socket: VigilPaths.hub).resumeLine(ref, folder: asked)
+                    }.value
+                    cwd = line.folder
+                    command = line.command
+                } catch {
+                    return .failure(request, "not_here", "This Mac cannot resume that conversation: \(error)")
+                }
+            }
             return birthReply(request, await apiNewWorkspace(label: request.label, emoji: request.emoji, cwd: cwd,
-                                                             command: request.command, openWindow: request.window == true))
+                                                             command: command, openWindow: request.window == true))
         case "new_session":
             // The same guards as any edit anchored on a pane: a
             // late request whose anchor moved or went is refused, never
