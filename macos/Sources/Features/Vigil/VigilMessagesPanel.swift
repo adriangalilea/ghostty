@@ -206,13 +206,24 @@ final class VigilMessageStore: ObservableObject {
 
     private func apply(_ root: String, _ changes: Message.Changes) {
         mailboxes[root] = changes.applied(to: mailboxes[root] ?? [:])
+        // An older Mac tells none: a whole with no asks says it holds none.
+        if let told = changes.asks { asks[root] = told } else if changes.whole { asks[root] = [] }
         recount()
     }
+
+    /// The questions each Mac asks about its panes now (`PaneAsk`), by root.
+    @Published private(set) var asks: [String: [PaneAsk]] = [:]
 
     private func recount() {
         let next = MessageThreads.pending(mailboxes)
         if next != marks.pending { marks.pending = next }
-        let awaiting = MessageThreads.awaitingYou(mailboxes)
+        // A pane's hand counts what vigil asks about it too.
+        var awaiting = MessageThreads.awaitingYou(mailboxes)
+        for (root, list) in asks {
+            for ask in list {
+                for pane in ask.panes { awaiting[root, default: [:]][pane, default: []].insert(ask.id) }
+            }
+        }
         if awaiting != marks.awaiting { marks.awaiting = awaiting }
         let due = MessageThreads.forYou(threads)
         VigilMessageAlerts.shared.due(due, names: host)
@@ -306,7 +317,8 @@ final class VigilMessageStore: ObservableObject {
             openFile: { file, key in
                 VigilFilePanel.show(file, beside: key.root == here ? key.pane : "\(key.root)/\(key.pane)")
             },
-            pressedByPerson: { Self.pressedByPerson() })
+            pressedByPerson: { Self.pressedByPerson() },
+            asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] })
     }
 
     /// Whether the event being handled is a person's click: a mouse button

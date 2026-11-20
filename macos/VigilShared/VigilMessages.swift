@@ -81,6 +81,10 @@ struct VigilChatHost {
     /// answer on a request needs, as Authz's own input guard does
     /// (authz.space SECURITY-REVIEW.md). Read inside the button's action.
     var pressedByPerson: @MainActor () -> Bool = { true }
+    /// The questions vigil asks the person about the pane a thread is with
+    /// (`PaneAsk`), as its Mac holds them now: drawn in the thread above the
+    /// composer, answered there on their card.
+    var asks: @MainActor (_ key: MessageThread.Key) -> [PaneAsk] = { _ in [] }
 
     /// Whether a folder on the Mac `root` can be shown here: revealed in
     /// this Mac's Finder, so only this Mac's own.
@@ -454,6 +458,10 @@ struct VigilThreadConversation: View {
         .onChange(of: thread?.items.filter { $0.record.unread }.map(\.id), initial: true) { markRead() }
         .onChange(of: front) { markRead() }
         .onContinuousHover { _ in markRead() }
+        // What vigil asks about this pane, answered here on its card.
+        ForEach(host.asks(key)) { ask in
+            VigilPaneAskRequest(ask: ask, answered: answered[ask.id]) { answer($0, on: ask.id) }
+        }
         InkComposer(
             text: $draft, prompt: "Message \(people.title(of: key))",
             replying: replying.flatMap { id in messages.first { $0.id == id } }.map { InkChat.Answered($0, people: people.all) },
@@ -663,6 +671,50 @@ struct VigilMessageRequest: View {
             }
         }
         .padding(.top, 2)
+    }
+}
+
+/// A question vigil asks about the thread's pane (`PaneAsk`: a close, a line
+/// typed or a key pressed into it from elsewhere), drawn where the person
+/// is: what it would do, the exact line when there is one, how long it
+/// waits, then its answers on its card. Refuse answers it through Authz;
+/// its yes needs the owner, so Allow in Authz… opens its card in Authz on
+/// this Mac (on the phone, it is allowed on its card in Authz).
+struct VigilPaneAskRequest: View {
+    let ask: PaneAsk
+    let answered: String?
+    let act: (Message.Act) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+                (Text("\(ask.asker) asks · ") + Text(Date(timeIntervalSince1970: ask.since), format: .relative(presentation: .named)))
+                    .inkText(.detail)
+            }
+            Text(ask.title).font(.headline)
+            Text(ask.gist + ". " + ask.says).inkText(.detail)
+            if let shell = ask.shell {
+                Text(shell).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+            }
+            if ask.authzOnly == true {
+                // Asked by another app than vigil's broker (`vigil drive`):
+                // its card in Authz is where it is answered.
+                Text("Answer it on its card in Authz.").inkText(.detail)
+            } else {
+                HStack(spacing: 8) {
+                    Button("Refuse") { act(.askRefuse(ask.id)) }.buttonStyle(.ink)
+                    #if os(macOS)
+                        Button("Allow in Authz…") { act(.askOpen(ask.id)) }.buttonStyle(.ink)
+                    #else
+                        Text("It is allowed on its card in Authz, once this device is unlocked.").inkText(.detail)
+                    #endif
+                }
+                .focusable(false)
+            }
+            if let answered { Text(answered).inkText(.detail) }
+        }
+        .padding(8)
     }
 }
 

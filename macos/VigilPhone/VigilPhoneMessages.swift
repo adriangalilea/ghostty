@@ -89,6 +89,8 @@ final class VigilPhoneMessages: ObservableObject {
                 case .changes:
                     guard let changes = step.changes else { continue }
                     self.mailboxes[root] = changes.applied(to: self.mailboxes[root] ?? [:])
+                    // An older Mac tells none: a whole with no asks says it holds none.
+                    if let told = changes.asks { self.asks[root] = told } else if changes.whole { self.asks[root] = [] }
                     self.recount()
                 case .waiting:
                     self.receipts.warn("messages", "mailbox out of reach", ["mac": self.macName(root), "why": step.reason ?? ""])
@@ -100,10 +102,19 @@ final class VigilPhoneMessages: ObservableObject {
         }
     }
 
+    /// The questions each Mac asks about its panes now (`PaneAsk`), by root.
+    @Published private(set) var asks: [String: [PaneAsk]] = [:]
+
     private func recount() {
         let next = MessageThreads.pending(mailboxes)
         if next != marks.pending { marks.pending = next }
-        let awaiting = MessageThreads.awaitingYou(mailboxes)
+        // A pane's hand counts what vigil asks about it too.
+        var awaiting = MessageThreads.awaitingYou(mailboxes)
+        for (root, list) in asks {
+            for ask in list {
+                for pane in ask.panes { awaiting[root, default: [:]][pane, default: []].insert(ask.id) }
+            }
+        }
         if awaiting != marks.awaiting { marks.awaiting = awaiting }
     }
 
@@ -126,7 +137,8 @@ final class VigilPhoneMessages: ObservableObject {
             // view's own `front`) is in the person's hand: the screen locks
             // when nobody holds it.
             handAfter: { _ in true },
-            mention: { call, root in try await Self.mention(call, root: root) })
+            mention: { call, root in try await Self.mention(call, root: root) },
+            asks: { key in VigilPhoneMessages.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] })
     }
 
     /// An ask about the files a message names, of the Mac they are on.
@@ -165,6 +177,15 @@ final class VigilPhoneMessages: ObservableObject {
         // closes it on every device and its Mac hears the answer from
         // authzd. The one path: what Authz does not take is said, and
         // nothing is answered behind it.
+        // A question about a pane, refused on its card through this phone's
+        // endpoint (its yes is given on the card in Authz).
+        if act.kind == .askRefuse || act.kind == .askOpen, let id = act.id {
+            guard act.kind == .askRefuse else { throw Failed(description: "it is allowed on its card in Authz") }
+            if let why = await VigilAuthz.shared.answer(device: root, request: id, .action("deny", feedback: nil)) {
+                throw Failed(description: why)
+            }
+            return Message.Acted(records: [], said: "Refused in Authz.")
+        }
         if act.kind == .allow || act.kind == .refuse, let id = act.id {
             guard let record = shared.mailboxes[root]?[id] else { throw Failed(description: "its Mac's mailbox is not read here yet") }
             guard record.ask?.stage == .asking, let request = record.ask?.request else {
