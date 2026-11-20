@@ -63,7 +63,7 @@ class VigilWorkspaces {
     let nameCandidate: () -> String
     let deliverClose: (Set<String>) -> Void
 
-    init(nameCandidate: @escaping () -> String = VigilWorkspaces.randomName,
+    init(nameCandidate: @escaping () -> String = VigilRef.mintID,
          memberMark: @escaping (String) -> PaneFence.State = { PaneFence.state($0, in: VigilPaths.panes) },
          deliverClose: @escaping (Set<String>) -> Void = { ids in
              VigilWorkspaces.closeQueue.async { VigilWorkspaces.closePanes(ids, why: "closed") }
@@ -436,7 +436,6 @@ class VigilWorkspaces {
         /// just left (bury, drag-out) while its daemon still ran - the new
         /// surface attached to the departed tab's socket and replayed it
         /// (⌘T resurrecting a ⌘W-closed tab).
-        var paneSeq: Int = 0
         /// Opaque, durable CAS token. Returning to an earlier shape must
         /// never make a stale command current again.
         var layoutRevision = UUID().uuidString
@@ -1484,10 +1483,10 @@ class VigilWorkspaces {
         refreshWorkspaceRevisions()
         persisting = false
         var entries = workspaces.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, front: $0.front)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: nil, foreground: isForeground($0), paneSeq: nil, layoutRevision: $0.layoutRevision, front: $0.front)
         }
         entries += graveyard.values.map {
-            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: $0.paneSeq, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, moveRevisions: $0.moveRevisions, moveTranscripts: $0.moveTranscripts, moveCheckpoint: $0.moveCheckpoint, closing: $0.closing)
+            Registry.Workspace(name: $0.name, label: $0.label, emoji: $0.emoji, cwd: $0.cwd, tabs: $0.tabs, order: $0.order, pinned: $0.pinned, sidebar: $0.sidebar, buriedUntil: graveyardDeadlines[$0.name], foreground: false, paneSeq: nil, layoutRevision: $0.layoutRevision, buriedFrom: $0.buriedFrom, movedTo: $0.movedTo, moveRevisions: $0.moveRevisions, moveTranscripts: $0.moveTranscripts, moveCheckpoint: $0.moveCheckpoint, closing: $0.closing)
         }
         let claims = offlineContinuations()
         if !claims.isEmpty {
@@ -1767,23 +1766,6 @@ class VigilWorkspaces {
         }
     }
 
-    /// The highest pane index any state file on disk records for a session:
-    /// pidfiles, specs, resume pointers, trees, mail, tombstones alike.
-    private static func maxPaneIndexOnDisk(session: String) -> Int {
-        let dir = VigilPaths.panes
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
-        else { return -1 }
-        let prefix = "vigil-\(session)-"
-        var maxIndex = -1
-        for entry in entries where entry.hasPrefix(prefix) {
-            let stem = entry.split(separator: ".").first.map(String.init) ?? entry
-            if let n = Int(stem.dropFirst(prefix.count)) {
-                maxIndex = max(maxIndex, n)
-            }
-        }
-        return maxIndex
-    }
-
     private func load() throws {
         // The backup is a fallback, never a merge: whichever file decodes
         // is the workspace. A live file that decodes always wins, even if
@@ -1843,18 +1825,6 @@ class VigilWorkspaces {
                 cwd: entry.cwd,
                 tabs: entry.tabs ?? [],
                 order: entry.order ?? 0)
-            // The counter must clear every index this session has ever
-            // used: a mint that reuses an index inherits a dead pane's
-            // resume pointer and resumes a long-dead conversation in a
-            // fresh pane. The floor covers every index the STATE DIR has
-            // ever seen.
-            var maxIndex = Self.maxPaneIndexOnDisk(session: entry.name)
-            for id in ownedPaneIds(session) {
-                if let n = id.split(separator: "-").last.flatMap({ Int($0) }) {
-                    maxIndex = max(maxIndex, n)
-                }
-            }
-            session.paneSeq = max(entry.paneSeq ?? 0, maxIndex + 1)
             session.layoutRevision = entry.layoutRevision ?? UUID().uuidString
             session.layoutShape = VigilSessionControl.revision(session.tabs)
             session.pinned = entry.pinned ?? false

@@ -82,27 +82,38 @@ extension VigilWorkspaces {
         guard !overlapsPendingMove() else { return .failure(request, "moving", "A move of these panes is already staged here.") }
         let receiver = try? await moveDevice()
         guard let receiver else { return .failure(request, "unavailable", "This Mac cannot identify itself to the source.") }
-        let name = newWorkspaceId()
+        let wholeWorkspace = Set(source.paneIds) == Set(whole.paneIds)
+        let name = wholeWorkspace ? source.name : newWorkspaceId()
+        guard workspaces[name] == nil && graveyard[name] == nil else {
+            return .failure(request, "already_here", "This Mac already holds a workspace with that id.")
+        }
         let owned = (Array(workspaces.values) + Array(graveyard.values)).reduce(into: Set<String>()) {
             $0.formUnion(ownedPaneIds($1))
         }
         let entry: Registry.Workspace
+        var reserved = Set<String>()
+        var retainFiles = false
+        defer {
+            if !retainFiles {
+                for pane in reserved {
+                    do { try Durable.remove(VigilPaths.agent.appendingPathComponent("panes-minted/" + pane)) }
+                    catch { lifecycleLog.error("uncommitted move reservation remains", ["pane": pane, "err": error]) }
+                }
+            }
+        }
         do {
-            var floor = 0
             entry = try source.arrived(as: name, from: device, mac: host.name, at: Date().timeIntervalSince1970,
                                        home: directory.home, here: here, order: (workspaces.values.map(\.order).max() ?? 0) + 1,
-                                       names: names, facts: directory.panes, ticket: request.id) {
-                let index = try PaneLife.reserve(workspace: name, startingAt: floor, owned: owned,
-                                                 panes: VigilPaths.panes, agent: VigilPaths.agent, arrival: true, transferring: true)
-                floor = index + 1
-                return index
+                                       names: names, facts: directory.panes, ticket: request.id) { pane in
+                let id = try PaneLife.reserve(id: pane, owned: owned, panes: VigilPaths.panes, agent: VigilPaths.agent, transferring: true)
+                reserved.insert(id)
+                return id
             }
         } catch {
             return .failure(request, "allocation_failed", "This Mac could not reserve the arriving panes: \(error)")
         }
         let arrivals = Set(entry.paneIds)
         births.formUnion(arrivals)
-        var retainFiles = false
         defer {
             births.subtract(arrivals)
             if !retainFiles {
@@ -154,7 +165,6 @@ extension VigilWorkspaces {
         }
         var session = Workspace(name: entry.name, label: entry.label, emoji: entry.emoji, cwd: entry.cwd, tabs: entry.tabs ?? [],
                                 order: entry.order ?? 0)
-        session.paneSeq = entry.paneSeq ?? session.tabs.flatMap(\.members).count
         session.pinned = entry.pinned ?? false
         session.layoutShape = VigilSessionControl.revision(session.tabs)
         if let difference = source.differs(fromArrived: entry, names: names) {
@@ -1242,12 +1252,10 @@ extension VigilWorkspaces {
         let source = Registry.Workspace(name: name, label: burial.label, emoji: burial.emoji, cwd: burial.cwd, tabs: burial.tabs,
                                         order: burial.order, pinned: burial.pinned, sidebar: burial.sidebar, buriedUntil: nil, foreground: false, paneSeq: nil, layoutRevision: nil)
         let owned = (Array(workspaces.values) + Array(graveyard.values)).reduce(into: Set<String>()) { $0.formUnion(ownedPaneIds($1)) }
-        var floor = 0
         let staged = try source.arrived(as: local, from: device, mac: sent.mac, at: Date().timeIntervalSince1970,
-                                        home: nil, here: NSHomeDirectory(), order: burial.order, ticket: id) {
-            let i = try PaneLife.reserve(workspace: local, startingAt: floor, owned: owned, panes: VigilPaths.panes, agent: VigilPaths.agent, arrival: true, transferring: true)
-            floor = i + 1
-            return i
+                                        home: nil, here: NSHomeDirectory(), order: burial.order, ticket: id) { _ in
+            // An explicit offline continuation forks a new pane while the original may still run.
+            try PaneLife.reserve(owned: owned, panes: VigilPaths.panes, agent: VigilPaths.agent, transferring: true)
         }
         var tabs = staged.tabs ?? []
         var mapping: [String: String] = [:], folders: [String: String] = [:]
@@ -1302,7 +1310,6 @@ extension VigilWorkspaces {
         try ticket.save()
         var workspace = Workspace(name: local, label: staged.label, emoji: staged.emoji, cwd: staged.cwd, tabs: tabs, order: burial.order)
         workspace.pinned = burial.pinned
-        workspace.paneSeq = staged.paneSeq ?? 0
         workspace.layoutShape = VigilSessionControl.revision(tabs)
         if let first = tabs.first?.panes.first { try Durable.replace(ticket.openFile(first.id), with: Data()) }
         guard admit(workspace, "reclaimed move") else { throw WireError.refused("The recovery workspace could not be admitted.") }
@@ -1411,7 +1418,7 @@ extension VigilWorkspaces {
         let entries = owners.sorted().compactMap { owner -> Registry.Workspace? in
             guard let w = workspaces[owner] ?? graveyard[owner] else { return nil }
             return .init(name: w.name, label: w.label, emoji: w.emoji, cwd: w.cwd, tabs: w.tabs, order: w.order, pinned: w.pinned,
-                         sidebar: w.sidebar, buriedUntil: graveyardDeadlines[owner], foreground: nil, paneSeq: w.paneSeq, layoutRevision: w.layoutRevision)
+                         sidebar: w.sidebar, buriedUntil: graveyardDeadlines[owner], foreground: nil, paneSeq: nil, layoutRevision: w.layoutRevision)
         }
         try Durable.create(record, with: JSONEncoder().encode(entries))
         let was = workspaces, buried = graveyard, deadlines = graveyardDeadlines

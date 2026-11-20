@@ -93,21 +93,9 @@ extension VigilWorkspaces {
 
     func newWorkspaceId() -> String {
         let fm = FileManager.default
-        let all = Array(workspaces.values) + Array(graveyard.values)
-        let inUse = Registry.idsInUse(
-            names: all.map(\.name),
-            paneIds: all.flatMap { ownedPaneIds($0) },
-            paneFiles: [VigilPaths.panes, VigilPaths.state].flatMap {
-                (try? fm.contentsOfDirectory(atPath: $0.path)) ?? []
-            })
-        func taken(_ s: String) -> Bool {
-            inUse.contains(s) || fm.fileExists(atPath: dumpsDir(s).path)
-        }
         var id = nameCandidate()
-        var tries = 0
-        while taken(id) {
-            tries += 1
-            id = tries < 40 ? nameCandidate() : "\(nameCandidate())-\(Int.random(in: 2...999))"
+        while workspaces[id] != nil || graveyard[id] != nil || fm.fileExists(atPath: dumpsDir(id).path) {
+            id = VigilRef.mintID()
         }
         return id
     }

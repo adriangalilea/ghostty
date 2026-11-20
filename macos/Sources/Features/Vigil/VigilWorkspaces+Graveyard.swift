@@ -786,7 +786,7 @@ extension VigilWorkspaces {
             return
         }
         func ids(_ suffix: String) -> Set<String> {
-            Set(entries.filter { $0.hasSuffix(suffix) && $0.hasPrefix("vigil-") }.map { String($0.dropLast(suffix.count)) })
+            Set(entries.filter { $0.hasSuffix(suffix) }.map { String($0.dropLast(suffix.count)) }.filter(Open.validPane))
         }
         let specs = ids(".spec")
         let live = ids(".lock").filter { !owned.contains($0) && Self.daemonAlive($0) }
@@ -841,9 +841,9 @@ extension VigilWorkspaces {
         // What a closed pane left that no close removed: only of a pane with
         // its mark, whatever the registry says.
         let fenced = { (pane: String) in PaneFence.provesClose(PaneFence.state(pane, in: VigilPaths.panes)) }
-        for entry in entries where entry.hasPrefix("vigil-") && (entry.hasSuffix(".resume") || entry.hasSuffix(".ended")) {
+        for entry in entries where entry.hasSuffix(".resume") || entry.hasSuffix(".ended") {
             let id = String(entry.prefix(upTo: entry.lastIndex(of: ".")!))
-            guard !owned.contains(id), fenced(id), !Self.daemonAlive(id) else { continue }
+            guard Open.validPane(id), !owned.contains(id), fenced(id), !Self.daemonAlive(id) else { continue }
             try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry))
             try? fm.removeItem(at: vigildStateDir.appendingPathComponent(entry + (entry.hasSuffix(".resume") ? ".seal" : ".txt")))
             daemonLog.info("what a closed pane left removed", ["pane": id, "file": entry])
@@ -851,7 +851,7 @@ extension VigilWorkspaces {
         for entry in (try? fm.contentsOfDirectory(atPath: agentStateDir.path)) ?? []
         where entry.hasSuffix(".state") || entry.hasSuffix(".seen") {
             let id = String(entry.prefix(upTo: entry.lastIndex(of: ".")!))
-            guard !owned.contains(id), fenced(id), !Self.daemonAlive(id) else { continue }
+            guard Open.validPane(id), !owned.contains(id), fenced(id), !Self.daemonAlive(id) else { continue }
             try? fm.removeItem(at: agentStateDir.appendingPathComponent(entry))
         }
     }
