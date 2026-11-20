@@ -541,7 +541,7 @@ struct TreeNodeView: View {
     /// else the glyph of what it is, as the Mac's sidebar picks them.
     @ViewBuilder private var face: some View {
         if case .agent(let agent) = node.face, AgentMark.knows(agent) {
-            AgentMark(agent: agent, size: 15)
+            AgentMark(agent: agent, size: 15, tint: node.glance?.member?.tint)
         } else if let emoji = node.emoji {
             Text(emoji).font(font)
         } else {
@@ -716,7 +716,7 @@ struct GlanceRow<Marks: View>: View {
                     .frame(width: 16)
                     .accessibilityLabel(state.words(node.flavor))
                 if case .agent(let agent) = node.face, AgentMark.knows(agent) {
-                    AgentMark(agent: agent, size: 15)
+                    AgentMark(agent: agent, size: 15, tint: node.glance?.member?.tint)
                 } else if let e = node.emoji {
                     Text(e).font(.subheadline)
                 }

@@ -21,22 +21,32 @@ import VigilWire
 /// A pane as a thread names it: its agent's name and face in every bubble
 /// and every thread's head.
 struct VigilChatPane: Equatable, Sendable {
-    /// What it is called: its agent's conversation, else its row's name.
+    /// What it is called: its member's name, else its agent's conversation,
+    /// else its row's name.
     var title: String
-    /// Its workspace's face (an emoji), when it wears one.
+    /// Its face: its pane's or workspace's emoji, else its member's.
     var face: String?
+    /// Its member's tint, minted once and kept (`Member.tint`): the same
+    /// colour on every surface.
+    var tint: String?
     /// Its Mac's name, when it is not this one.
     var mac: String?
 
     var said: String { mac.map { "\(title) on \($0)" } ?? title }
 
-    /// The one rule every surface names a pane's agent by, from what its Mac
-    /// knows now: the conversation's name from the pane's glance
-    /// (`PaneGlance.title`, what the agent is called this minute), else its
-    /// row's name (`Directory.titles`); its workspace's emoji; its Mac when
-    /// it is not this one.
-    static func of(conversation: String?, title: String, face: String?, mac: String?) -> VigilChatPane {
-        VigilChatPane(title: conversation ?? title, face: face.flatMap { $0.isEmpty ? nil : $0 }, mac: mac)
+    /// The one rule every surface names a pane's agent by (CHATS.md, decided
+    /// 2026-11-19: one look per agent everywhere): the member the pane holds,
+    /// as its Mac's broker stated it (`Members.look`: its name, never a
+    /// prompt's first words, and its tint), else the conversation's name
+    /// from the pane's glance, else its row's name (`Directory.titles`); its
+    /// pane's or workspace's emoji, else its member's face; its Mac when it
+    /// is not this one.
+    static func of(
+        member: (name: String?, face: String?, tint: String?)? = nil, conversation: String?, title: String, face: String?,
+        mac: String?
+    ) -> VigilChatPane {
+        let emoji = face.flatMap { $0.isEmpty ? nil : $0 }
+        return VigilChatPane(title: member?.name ?? conversation ?? title, face: emoji ?? member?.face, tint: member?.tint, mac: mac)
     }
 }
 
@@ -199,15 +209,18 @@ struct VigilChatMember: Equatable {
     var program: String?
     /// How it stands to another member, said after its name ("subagent of @x").
     var relation: String?
+    /// Its own colour, minted once and kept (`Member.tint`); nil: Ink's by order.
+    var tint: String?
 
     /// The pane's agent or command, named by the pane's rows.
     static func pane(_ key: String, _ pane: VigilChatPane, kind: Kind, program: String?) -> VigilChatMember {
-        VigilChatMember(key: key, name: pane.said, short: pane.title, face: pane.face, kind: kind, program: program)
+        VigilChatMember(key: key, name: pane.said, short: pane.title, face: pane.face, kind: kind, program: program, tint: pane.tint)
     }
 
-    /// The member as Ink draws a sender.
+    /// The member as Ink draws a sender, in its own colour.
     var person: InkChat.Person {
-        InkChat.Person(key, name: name, short: short, handle: handle, symbol: symbol, relation: relation)
+        InkChat.Person(
+            key, name: name, short: short, handle: handle, symbol: symbol, tint: tint.flatMap(InkTint.init), relation: relation)
     }
 
     /// Its mark where it wears no face: a person has none (their initial), an
@@ -252,7 +265,7 @@ struct VigilChatPeople {
                 case .agent, .tool:
                     let kind: VigilChatMember.Kind = from.kind == .agent ? .agent : .tool
                     members[key] = .pane(
-                        key, from.pane.map { host.name(item.senderRoot, $0) } ?? VigilChatPane(title: from.agent ?? "a command"),
+                        key, from.pane.map { host.name(item.senderRoot, $0) } ?? VigilChatPane.of(conversation: nil, title: from.agent ?? "a command", face: nil, mac: nil),
                         kind: kind, program: from.agent)
                 case .watch: members[key] = VigilChatMember(key: key, name: "watch \(from.watch ?? "")", kind: .watch)
                 case .feed: members[key] = VigilChatMember(key: key, name: "feed \(from.watch ?? "")", kind: .watch)

@@ -306,6 +306,7 @@ extension VigilWorkspaces {
             alert.messageText = "Open the saved conversation here?"
             alert.informativeText = "The other Mac confirmed that it closed its fork. Any different returned history is listed in vigil conflicts."
         }
+        alert.informativeText += "\n\nForking the histories cannot undo messages already sent or changes already made to repositories while the Macs were apart."
         if panes.count > 1 {
             alert.informativeText += "\n\nThis handoff covers \(panes.count) panes: " + panes.sorted().joined(separator: ", ") + "."
         }

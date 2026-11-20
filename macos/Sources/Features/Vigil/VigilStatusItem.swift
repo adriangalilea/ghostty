@@ -86,25 +86,65 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         mainMenu.insertItem(holder, at: max(0, mainMenu.items.count - 1))
     }
 
-    /// The eye opens when sessions want you or an agent's message to you is
-    /// unread: filled symbol + the count of each (`3`, `✉2`, `3 ✉2`). The
-    /// image is a TEMPLATE so the menu bar tints it correctly for light/dark
-    /// and the open-menu highlight (the Apple-clean way; a raw colour would
-    /// not adapt).
+    /// The eye opens when sessions want you, a message waits on your yes or
+    /// an agent's message to you is unread: filled symbol + the count of
+    /// each, one mark per meaning as every row draws them (`3`, a hand with
+    /// the messages waiting on your yes, `✉2` unread). The eye is a TEMPLATE
+    /// so the menu bar tints it for light/dark and the open-menu highlight;
+    /// the hand is drawn in the label colour at draw time for the same reason.
     private func updateBadge() {
         guard let button = statusItem.button else { return }
+        let store = VigilMessageStore.shared
         let count = VigilWorkspaces.shared.pendingCount
-        let messages = VigilMessageStore.shared.forYouCount
+        let waiting = store.waitingCount
+        let unread = store.unreadCount
         let eye = NSImage(
-            systemSymbolName: count + messages > 0 ? "eye.fill" : "eye",
+            systemSymbolName: count + waiting + unread > 0 ? "eye.fill" : "eye",
             accessibilityDescription: "vigil")
         eye?.isTemplate = true
         button.image = eye
-        button.title = [count > 0 ? "\(count)" : nil, messages > 0 ? "✉\u{FE0E}\(messages)" : nil]
-            .compactMap { $0 }.joined(separator: " ")
-        let said = [count > 0 ? "\(count) need you" : nil, messages > 0 ? "\(messages) unread messages for you" : nil]
-            .compactMap { $0 }
+        let font = NSFont.menuBarFont(ofSize: 0)
+        var parts: [NSAttributedString] = []
+        if count > 0 { parts.append(NSAttributedString(string: "\(count)")) }
+        if waiting > 0 {
+            let hand = NSMutableAttributedString(attributedString: Self.mark("hand.raised.fill", font: font))
+            hand.append(NSAttributedString(string: "\(waiting)"))
+            parts.append(hand)
+        }
+        if unread > 0 { parts.append(NSAttributedString(string: "✉\u{FE0E}\(unread)")) }
+        let title = NSMutableAttributedString()
+        for (index, part) in parts.enumerated() {
+            if index > 0 { title.append(NSAttributedString(string: " ")) }
+            title.append(part)
+        }
+        title.addAttributes([.font: font, .foregroundColor: NSColor.labelColor], range: NSRange(location: 0, length: title.length))
+        button.attributedTitle = title
+        let said = [
+            count > 0 ? "\(count) need you" : nil,
+            waiting > 0 ? (waiting == 1 ? "1 message waits for your yes" : "\(waiting) messages wait for your yes") : nil,
+            unread > 0 ? "\(unread) unread messages for you" : nil,
+        ].compactMap { $0 }
         button.setAccessibilityLabel(said.isEmpty ? "vigil" : "vigil, " + said.joined(separator: ", "))
+    }
+
+    /// A symbol inside the title, drawn in the label colour of whatever
+    /// appearance the menu bar has when it draws (a fixed colour would not
+    /// follow light and dark).
+    private static func mark(_ name: String, font: NSFont) -> NSAttributedString {
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: font.pointSize * 0.85, weight: .regular))
+        else { preconditionFailure("SF Symbols has no \(name)") }
+        let size = symbol.size
+        let drawn = NSImage(size: size, flipped: false) { rect in
+            symbol.draw(in: rect)
+            NSColor.labelColor.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        let attachment = NSTextAttachment()
+        attachment.image = drawn
+        attachment.bounds = CGRect(x: 0, y: (font.capHeight - size.height) / 2, width: size.width, height: size.height)
+        return NSAttributedString(attachment: attachment)
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {

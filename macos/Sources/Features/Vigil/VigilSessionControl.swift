@@ -184,6 +184,20 @@ enum VigilSessionControl {
         // The rule the hub asks of another device's request, asked of every
         // sender (this Mac's own included).
         if let why = request.refusal { return .failure(request, "invalid_request", why) }
+        if let original = request.receiptSubject {
+            let file = directory.appendingPathComponent("workspace-receipts/" + original.id.uuidString + ".json")
+            do {
+                guard let receipt = try Durable.decode(Receipt.self, file).get() else {
+                    return .failure(request, "receipt_unknown", "The home has no receipt for this workspace command. Its outcome is unknown.")
+                }
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                guard try encoder.encode(receipt.request) == encoder.encode(original) else {
+                    return .failure(request, "id_reused", "The recorded command has different arguments.")
+                }
+                return receipt.reply ?? .failure(request, "receipt_unknown", "The home recorded the command and has no final answer yet.")
+            } catch { return .failure(request, "receipt_unknown", "The home's workspace receipt could not be read: " + String(describing: error)) }
+        }
         let age = Date().timeIntervalSince1970 - request.issuedAt
         // No request may outlive the receipt that prevents repeating it.
         guard age >= -300, age < lifetime || ["retire_move", "release_move_v2", "ack_move_v2", "abandon_move_v2", "return_panes_v2"].contains(request.operation) else { return .failure(request, "expired", "This command has expired; it will not be executed.") }
