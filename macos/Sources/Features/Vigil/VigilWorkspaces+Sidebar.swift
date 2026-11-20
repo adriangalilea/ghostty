@@ -65,7 +65,7 @@ extension VigilWorkspaces {
         var background: PaneGlance.Background?
         /// Its program ended badly and nobody opened it yet (`PaneEnd`).
         var ended: PaneEnd?
-        /// Brought from another Mac and not opened here yet: the pane it
+        /// Moved from another Mac and not opened here yet: the pane it
         /// was there (`Registry.Arrival`).
         var arrived: Registry.Arrival?
         /// What its agent instance reports that needs the person's attention.

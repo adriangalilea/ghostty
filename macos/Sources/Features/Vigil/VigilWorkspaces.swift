@@ -149,7 +149,7 @@ class VigilWorkspaces {
             let exited = snapshot.exits != self.facts.exits
             let first = self.facts.revision == 0
             self.facts = snapshot
-            // A brought pane whose daemon now exists was opened.
+            // A moved pane whose daemon now exists was opened.
             self.wake(self.dormantPanes.filter { snapshot.files["panes/\($0).pid"] != nil })
             self.closeFinished(Set(left).union(self.bornUnseen).union(ends).union(self.finishedWaiting))
             // A view with no stream dials its pane's daemon.
@@ -419,7 +419,7 @@ class VigilWorkspaces {
         /// The pane last under the keyboard in it (`Registry.Workspace.front`),
         /// written at the seen chokepoint, read when launch opens its window.
         var front: String?
-        /// A burial of panes brought to another Mac: that Mac's name.
+        /// A burial of panes moved to another Mac: that Mac's name.
         var movedTo: String?
         var moveRevisions: [String: String]?
         var moveCheckpoint: WorkspaceCommand.Request.Moved?
@@ -486,7 +486,7 @@ class VigilWorkspaces {
     /// What a close says of its undo (`Registry.closeGrace`, the burial's
     /// length), for code outside this folder, which imports no VigilWire.
     static var undoWords: String { "you can undo this for \(Registry.closeGraceWords)" }
-    /// While panes that another Mac brought are being closed here
+    /// While panes that another Mac moved are being closed here
     /// (`moved`): that Mac's name, stamped on each burial they make.
     var moveReachable: (String) -> Bool = {
         guard let host = VigilRemote.shared.host($0) else { return false }
@@ -509,8 +509,8 @@ class VigilWorkspaces {
     var moveCommand: (String, VigilSessionControl.Request) async throws -> VigilSessionControl.Reply = {
         try await VigilRemote.shared.command($0, request: $1)
     }
-    var readMove: (Bring.Question) async throws -> Bring.Answer = { question in
-        try await Task.detached(priority: .utility) { try Local.Client(socket: VigilPaths.hub).bring(question) }.value
+    var readMove: (Move.Question) async throws -> Move.Answer = { question in
+        try await Task.detached(priority: .utility) { try Local.Client(socket: VigilPaths.hub).moveSheet(question) }.value
     }
     var incomingMoves: [UUID: IncomingMove] = [:]
     var activeMoves = Set<UUID>()
@@ -1023,7 +1023,7 @@ class VigilWorkspaces {
     }
 
     /// The one way a workspace arrives in the registry already holding
-    /// panes (a birth, a workspace brought here): refused, loudly, when its
+    /// panes (a birth, a workspace moved here): refused, loudly, when its
     /// name is taken or any of its panes is listed by another workspace or
     /// a burial. A pane is in exactly one place; one listed twice is killed
     /// with whichever of its two workspaces dies first.

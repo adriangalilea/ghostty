@@ -273,7 +273,7 @@ extension VigilWorkspaces {
             return .accepted
         case .unborn:
             // Nothing on disk is "never ran" only for a pane this run of
-            // the app made (or one brought here and not opened yet). For
+            // the app made (or one moved here and not opened yet). For
             // any other its files are missing, which is no leave to run
             // what the registry says it ran.
             guard PaneLife.awaitsFirstStart(pane, agent: VigilPaths.agent) || dormantPanes.contains(pane), let entry = registered(pane) else {
