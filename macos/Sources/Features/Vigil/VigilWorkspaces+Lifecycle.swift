@@ -35,8 +35,7 @@ extension VigilWorkspaces {
     /// Register a freshly-created plain window (⌘⇧N, the startup window,
     /// dock reopen) as a session: the window's tree is its first tab.
     func registerWorkspace(controller: TerminalController, name: String, cwd: String) {
-        var session = Workspace(name: name, label: name, cwd: cwd)
-        session.paneSeq = controller.surfaceTree.compactMap { $0.vigilAttachId?.split(separator: "-").last.flatMap { Int($0) } }.max().map { $0 + 1 } ?? 0
+        let session = Workspace(name: name, label: Self.randomName(), cwd: cwd)
         workspaces[name] = session
         registerMember(controller, name: name)
         lifecycleLog.info("born from a window", ["workspace": name, "cwd": cwd])
@@ -49,10 +48,9 @@ extension VigilWorkspaces {
     /// in the pane's daemon (not any window's pty).
     func createWorkspace(cwd: String, command: String? = nil) throws -> String {
         let name = newWorkspaceId()
-        var session = Workspace(name: name, label: name, cwd: cwd)
+        var session = Workspace(name: name, label: Self.randomName(), cwd: cwd)
         let id = try mintPane(in: name)
         session.tabs = [Registry.Tab(panes: [Registry.Pane(id: id, cwd: cwd, command: command)], layout: nil)]
-        session.paneSeq = (id.split(separator: "-").last.flatMap { Int($0) } ?? 0) + 1
         workspaces[name] = session
         lifecycleLog.info("born", ["workspace": name, "cwd": cwd, "command": command])
         return name
@@ -216,10 +214,7 @@ extension VigilWorkspaces {
         let owners = Array(workspaces.values) + Array(graveyard.values)
         let owned = owners.reduce(into: Set<String>()) { $0.formUnion(ownedPaneIds($1)) }
         do {
-            let index = try PaneLife.reserve(workspace: name, startingAt: workspaces[name]?.paneSeq ?? 0,
-                                             owned: owned, panes: VigilPaths.panes, agent: VigilPaths.agent)
-            let pane = "vigil-\(name)-\(index)"
-            workspaces[name]?.paneSeq = index + 1
+            let pane = try PaneLife.reserve(owned: owned, panes: VigilPaths.panes, agent: VigilPaths.agent)
             fresh.insert(pane)
             return pane
         } catch {
@@ -828,7 +823,7 @@ extension VigilWorkspaces {
     func createWorkspace(from controllers: [TerminalController], inheriting old: Workspace) {
         let name = newWorkspaceId()
         let cwd = controllers.first?.focusedSurface?.pwd ?? old.cwd
-        workspaces[name] = Workspace(name: name, label: name, cwd: cwd)
+        workspaces[name] = Workspace(name: name, label: Self.randomName(), cwd: cwd)
         for controller in controllers { registerMember(controller, name: name) }
         let (given, tabs) = Registry.extract(workspaces[name]!.tabs)
         workspaces[name]!.tabs = tabs

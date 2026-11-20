@@ -82,40 +82,57 @@ extension VigilWorkspaces {
         guard !overlapsPendingMove() else { return .failure(request, "moving", "A move of these panes is already staged here.") }
         let receiver = try? await moveDevice()
         guard let receiver else { return .failure(request, "unavailable", "This Mac cannot identify itself to the source.") }
-        let name = newWorkspaceId()
+        do { try recoverMoveAdmissions(only: Set(source.paneIds)) }
+        catch { return .failure(request, "waiting", "Could not settle this pane's previous preparation: " + String(describing: error)) }
+        let wholeWorkspace = Set(source.paneIds) == Set(whole.paneIds)
+        let name = wholeWorkspace ? source.name : newWorkspaceId()
+        guard workspaces[name] == nil && graveyard[name] == nil else {
+            return .failure(request, "already_here", "This Mac already holds a workspace with that id.")
+        }
         let owned = (Array(workspaces.values) + Array(graveyard.values)).reduce(into: Set<String>()) {
             $0.formUnion(ownedPaneIds($1))
         }
         let entry: Registry.Workspace
+        var preparing = [PaneLife.Admission]()
+        var committed = false
+        var uncertain = false
+        defer {
+            if !uncertain {
+                for admission in preparing {
+                    do { try admission.finish(committed: committed, panes: VigilPaths.panes, agent: VigilPaths.agent) }
+                    catch { lifecycleLog.error("pane admission needs recovery", ["pane": admission.pane, "err": error]) }
+                }
+            }
+        }
         do {
-            var floor = 0
             entry = try source.arrived(as: name, from: device, mac: host.name, at: Date().timeIntervalSince1970,
                                        home: directory.home, here: here, order: (workspaces.values.map(\.order).max() ?? 0) + 1,
-                                       names: names, facts: directory.panes, ticket: request.id) {
-                let index = try PaneLife.reserve(workspace: name, startingAt: floor, owned: owned,
-                                                 panes: VigilPaths.panes, agent: VigilPaths.agent, arrival: true, transferring: true)
-                floor = index + 1
-                return index
+                                       names: names, facts: directory.panes, ticket: request.id) { pane in
+                guard !owned.contains(pane), !births.contains(pane),
+                      !preparing.contains(where: { $0.pane == pane }),
+                      let original = source.tabs?.flatMap(\.members).first(where: { $0.id == pane }) else {
+                    throw WireError.refused("This Mac already has a placement for " + pane)
+                }
+                let edge = try priorGrant(pane)
+                if let edge {
+                    guard registryRead == .current || (registryRead == .absent && lastSaved != nil),
+                          edge.continues(original, source: device, receiver: receiver),
+                          Durable.read(Self.closedHereFile(pane), limit: 0) == .absent,
+                          !Self.daemonAlive(pane) else {
+                        throw WireError.refused("The source cannot be confirmed as a continuation of this Mac's departure for " + pane)
+                    }
+                }
+                let admission = PaneLife.Admission(pane: pane, ticket: request.id, departure: edge?.ticket)
+                preparing.append(admission)
+                try admission.prepare(panes: VigilPaths.panes, agent: VigilPaths.agent)
+                return pane
             }
         } catch {
             return .failure(request, "allocation_failed", "This Mac could not reserve the arriving panes: \(error)")
         }
         let arrivals = Set(entry.paneIds)
         births.formUnion(arrivals)
-        var retainFiles = false
-        defer {
-            births.subtract(arrivals)
-            if !retainFiles {
-                for pane in entry.paneIds {
-                    for suffix in [".ended", ".resume", ".resume.seal"] {
-                        let file = VigilPaths.panes.appendingPathComponent(pane + suffix)
-                        do { try Durable.remove(file) } catch {
-                            lifecycleLog.error("could not remove an uncommitted arrival file", ["file": file.path, "err": error])
-                        }
-                    }
-                }
-            }
-        }
+        defer { births.subtract(arrivals) }
         // An end belongs to the imported pane too. Its first opening
         // must use the same shell-only path as an opening at home.
         do {
@@ -154,7 +171,6 @@ extension VigilWorkspaces {
         }
         var session = Workspace(name: entry.name, label: entry.label, emoji: entry.emoji, cwd: entry.cwd, tabs: entry.tabs ?? [],
                                 order: entry.order ?? 0)
-        session.paneSeq = entry.paneSeq ?? session.tabs.flatMap(\.members).count
         session.pinned = entry.pinned ?? false
         session.layoutShape = VigilSessionControl.revision(session.tabs)
         if let difference = source.differs(fromArrived: entry, names: names) {
@@ -182,6 +198,9 @@ extension VigilWorkspaces {
         move.device = receiver
         move.arrival = name
         move.ticket = request.id
+        move.sourceVisits = Dictionary(uniqueKeysWithValues: (source.tabs ?? []).flatMap(\.members).compactMap { pane in
+            pane.from?.ticket.map { (pane.id, $0) }
+        })
         move.arrivals = mapping
         let release = WorkspaceCommand.Request(id: request.id, session: source.name, revision: digest, operation: "release_move_v2", anchor: "", moved: move)
         // The rule the source's hub and app ask of this release, asked here
@@ -212,11 +231,11 @@ extension VigilWorkspaces {
             return .failure(request, "commit_failed", "This Mac's registry already lists that workspace's name or one of its panes; nothing was moved.")
         }
         guard persist(publish: false, durable: true) else {
-            retainFiles = registryInstallUncertain
-            if !retainFiles { workspaces[entry.name] = nil }
+            uncertain = registryInstallUncertain
+            if !uncertain { workspaces[entry.name] = nil }
             return .init(id: request.id, ok: false, code: "commit_unknown", message: "The copy \(entry.name) could not be confirmed. Check the move on both Macs.", session: entry.name)
         }
-        retainFiles = true
+        committed = true
         guard let data = try? Data(contentsOf: persistURL),
               let saved = try? JSONDecoder().decode([Registry.Workspace].self, from: data),
               let kept = saved.first(where: { $0.name == entry.name && $0.buriedUntil == nil }), kept.tabs == entry.tabs else {
@@ -320,8 +339,15 @@ extension VigilWorkspaces {
         let workspace: String
         let pane: String
         let ticket: UUID
+        var visit: UUID? = nil
 
         var valid: Bool { [device, workspace, pane].allSatisfy(Open.validPane) }
+
+        func continues(_ original: Registry.Pane, source: String, receiver: String) -> Bool {
+            guard original.id == pane, let from = original.from, from.pane == pane else { return false }
+            if from.ticket == ticket { return device == source && from.device == receiver }
+            return from.earlierGrants?.contains(ticket) == true
+        }
     }
 
     private func priorGrant(_ pane: String) throws -> MoveSuccessor? {
@@ -342,9 +368,22 @@ extension VigilWorkspaces {
 
     private static var successorsFolder: URL { VigilPaths.root.appendingPathComponent("move-successors") }
 
-    /// A pane id is never reused. Keep its first onward grant even after the
-    /// source burial is acknowledged. A later withdrawal follows that same
-    /// chain until it reaches the pane that actually inherited the work.
+    private func visitGrant(_ pane: String, visit: UUID?) throws -> MoveSuccessor? {
+        let file = Self.grantFile(pane, visit: visit)
+        if let edge = try Durable.decode(MoveSuccessor.self, file).get() {
+            guard edge.valid, edge.visit == visit else { throw WireError.invalid("Invalid placement receipt") }
+            return edge
+        }
+        let latest = try priorGrant(pane)
+        return latest?.visit == visit ? latest : nil
+    }
+
+    private static func grantFile(_ pane: String, visit: UUID?) -> URL {
+        VigilPaths.root.appendingPathComponent("move-grants").appendingPathComponent(visit?.uuidString ?? "birth").appendingPathComponent(pane)
+    }
+
+    /// Each local visit grants its pane onward once. A repeated acknowledgement
+    /// reads that visit even after the same id has come back and left again.
     private func successors(of move: WorkspaceCommand.Request.Moved, recording: Bool) throws -> [String: MoveSuccessor] {
         guard let device = move.device, let workspace = move.arrival, let ticket = move.ticket,
               let arrivals = move.arrivals else { throw WireError.invalid("missing onward pane identities") }
@@ -353,13 +392,24 @@ extension VigilWorkspaces {
         if recording { try Durable.folder(folder) }
         for pane in move.panes {
             guard let arrival = arrivals[pane], Open.validPane(pane) else { throw WireError.invalid("missing onward pane") }
-            let intended = MoveSuccessor(device: device, workspace: workspace, pane: arrival, ticket: ticket)
-            let file = folder.appendingPathComponent(pane)
-            if recording, try Durable.decode(MoveSuccessor.self, file).get() == nil {
-                try Durable.replace(file, with: JSONEncoder().encode(intended))
-            }
-            guard let edge = try Durable.decode(MoveSuccessor.self, file).get(), edge.valid else {
+            let visit = move.priorGrant ?? move.sourceVisits?[pane]
+            let intended = MoveSuccessor(device: device, workspace: workspace, pane: arrival, ticket: ticket, visit: visit)
+            let prior = try visitGrant(pane, visit: visit)
+            guard let edge = prior ?? (recording ? intended : nil) else {
                 throw WireError.refused("The source has no durable onward receipt for " + pane)
+            }
+            if recording {
+                let file = Self.grantFile(pane, visit: visit)
+                try Durable.folder(file.deletingLastPathComponent().deletingLastPathComponent())
+                try Durable.folder(file.deletingLastPathComponent())
+                let bytes = try JSONEncoder().encode(edge)
+                try Durable.create(file, with: bytes)
+                guard try Durable.decode(MoveSuccessor.self, file).get() == edge else {
+                    throw WireError.refused("The placement already granted this pane elsewhere.")
+                }
+                if edge.ticket == ticket {
+                    try Durable.replace(folder.appendingPathComponent(pane), with: bytes)
+                }
             }
             if edge.device != device || edge.pane != arrival { next[pane] = edge }
         }
@@ -400,6 +450,26 @@ extension VigilWorkspaces {
                 moveWaiting[id] = nil
                 moveDelay[id] = nil
             } catch { reportIncompleteMove(ticket.request.session, String(describing: error)) }
+        }
+    }
+
+    func recoverMoveAdmissions(only selected: Set<String>? = nil) throws {
+        let folder = PaneLife.Admission.folder(VigilPaths.agent)
+        let files: [String]
+        do { files = try FileManager.default.contentsOfDirectory(atPath: folder.path) }
+        catch let error as CocoaError where [.fileNoSuchFile, .fileReadNoSuchFile].contains(error.code) { return }
+        for pane in files where !pane.hasPrefix(".") && !births.contains(pane) && (selected?.contains(pane) ?? true) {
+            guard Open.validPane(pane), let admission = try Durable.decode(PaneLife.Admission.self, folder.appendingPathComponent(pane)).get(),
+                  admission.pane == pane else { throw WireError.invalid("Invalid pane admission: " + pane) }
+            let saved = registered(pane)
+            let departed = try visitGrant(pane, visit: admission.ticket) != nil
+            if saved?.from?.ticket == admission.ticket || departed || personallyClosed(pane) {
+                try admission.finish(committed: true, panes: VigilPaths.panes, agent: VigilPaths.agent)
+            } else if saved == nil, registryRead == .current || registryRead == .absent {
+                try admission.finish(committed: false, panes: VigilPaths.panes, agent: VigilPaths.agent)
+            } else {
+                throw WireError.refused("Cannot prove which placement owns " + pane)
+            }
         }
     }
 
@@ -1240,14 +1310,12 @@ extension VigilWorkspaces {
         let local = newWorkspaceId()
         let me = try await moveDevice()
         let source = Registry.Workspace(name: name, label: burial.label, emoji: burial.emoji, cwd: burial.cwd, tabs: burial.tabs,
-                                        order: burial.order, pinned: burial.pinned, sidebar: burial.sidebar, buriedUntil: nil, foreground: false, paneSeq: nil, layoutRevision: nil)
+                                        order: burial.order, pinned: burial.pinned, sidebar: burial.sidebar, buriedUntil: nil, foreground: false, layoutRevision: nil)
         let owned = (Array(workspaces.values) + Array(graveyard.values)).reduce(into: Set<String>()) { $0.formUnion(ownedPaneIds($1)) }
-        var floor = 0
         let staged = try source.arrived(as: local, from: device, mac: sent.mac, at: Date().timeIntervalSince1970,
-                                        home: nil, here: NSHomeDirectory(), order: burial.order, ticket: id) {
-            let i = try PaneLife.reserve(workspace: local, startingAt: floor, owned: owned, panes: VigilPaths.panes, agent: VigilPaths.agent, arrival: true, transferring: true)
-            floor = i + 1
-            return i
+                                        home: nil, here: NSHomeDirectory(), order: burial.order, ticket: id) { _ in
+            // An explicit offline continuation forks a new pane while the original may still run.
+            try PaneLife.reserve(owned: owned, panes: VigilPaths.panes, agent: VigilPaths.agent, transferring: true)
         }
         var tabs = staged.tabs ?? []
         var mapping: [String: String] = [:], folders: [String: String] = [:]
@@ -1284,6 +1352,7 @@ extension VigilWorkspaces {
         move.arrival = local
         move.arrivals = mapping
         move.returnOf = original
+        move.sourceVisits = Dictionary(uniqueKeysWithValues: mapping.keys.map { ($0, original) })
         move.ticket = id
         let request = WorkspaceCommand.Request(id: id, session: remoteName, revision: String(repeating: "0", count: 64), operation: "release_move_v2", anchor: "", moved: move)
         // The original ids must still lead to their first grant if a third
@@ -1302,7 +1371,6 @@ extension VigilWorkspaces {
         try ticket.save()
         var workspace = Workspace(name: local, label: staged.label, emoji: staged.emoji, cwd: staged.cwd, tabs: tabs, order: burial.order)
         workspace.pinned = burial.pinned
-        workspace.paneSeq = staged.paneSeq ?? 0
         workspace.layoutShape = VigilSessionControl.revision(tabs)
         if let first = tabs.first?.panes.first { try Durable.replace(ticket.openFile(first.id), with: Data()) }
         guard admit(workspace, "reclaimed move") else { throw WireError.refused("The recovery workspace could not be admitted.") }
@@ -1411,7 +1479,7 @@ extension VigilWorkspaces {
         let entries = owners.sorted().compactMap { owner -> Registry.Workspace? in
             guard let w = workspaces[owner] ?? graveyard[owner] else { return nil }
             return .init(name: w.name, label: w.label, emoji: w.emoji, cwd: w.cwd, tabs: w.tabs, order: w.order, pinned: w.pinned,
-                         sidebar: w.sidebar, buriedUntil: graveyardDeadlines[owner], foreground: nil, paneSeq: w.paneSeq, layoutRevision: w.layoutRevision)
+                         sidebar: w.sidebar, buriedUntil: graveyardDeadlines[owner], foreground: nil, layoutRevision: w.layoutRevision)
         }
         try Durable.create(record, with: JSONEncoder().encode(entries))
         let was = workspaces, buried = graveyard, deadlines = graveyardDeadlines
@@ -1764,9 +1832,30 @@ extension VigilWorkspaces {
             guard request.id == ticket, request.takenOver == true || workspaces[request.session].map({ Set(move.panes).isSubset(of: ownedPaneIds($0)) }) == true else {
                 return .failure(request, "source_changed", "This workspace no longer owns the requested panes.")
             }
-            if let prior = move.priorGrant, !move.panes.allSatisfy({ pane in
-                registered(pane)?.from?.ticket == prior || (locate(pane) == nil && memberMark(pane) == .clean)
-            }) { return .failure(request, "source_changed", "The onward pane does not belong to the stated grant.") }
+            // A delayed withdrawal may have reached a Mac twice along the same
+            // route. Follow the departure of the visit it actually names.
+            if request.takenOver == true {
+                do {
+                    var old: [String: MoveSuccessor] = [:]
+                    for pane in move.panes {
+                        let visit = move.priorGrant ?? move.sourceVisits?[pane]
+                        if let edge = try visitGrant(pane, visit: visit) { old[pane] = edge }
+                    }
+                    if old.count == move.panes.count {
+                        let next = old.filter { $0.value.device != move.device || $0.value.pane != move.arrivals?[$0.key] }
+                        return .init(id: request.id, ok: true, code: "released", message: "The named placement already moved.",
+                                     released: [:], successors: next.isEmpty ? nil : next)
+                    }
+                } catch { return .failure(request, "waiting", String(describing: error)) }
+            }
+            if move.sourceVisits != nil || move.priorGrant != nil {
+                for pane in move.panes {
+                    let visit = move.priorGrant ?? move.sourceVisits?[pane]
+                    if let current = registered(pane), current.from?.ticket != visit {
+                        return .failure(request, "source_changed", "A different placement now owns " + pane)
+                    }
+                }
+            }
             if let original = move.returnOf {
                 guard request.takenOver == true, move.panes.allSatisfy({ pane in
                     if let prior = incomingMoves[original], prior.granted == true,
@@ -1786,7 +1875,7 @@ extension VigilWorkspaces {
             do {
                 for pane in move.panes {
                     if request.takenOver == true, locate(pane) == nil, memberMark(pane) == .clean,
-                       let onward = try priorGrant(pane) {
+                       let onward = try visitGrant(pane, visit: move.priorGrant ?? move.sourceVisits?[pane]) {
                         guard onward.valid, !Self.daemonAlive(pane) else { throw WireError.refused("Invalid onward grant for " + pane) }
                         forwarded[pane] = onward
                     } else { histories[pane] = try historyAtHome(pane) }
@@ -1932,7 +2021,7 @@ extension VigilWorkspaces {
             do {
                 var onward: [String: MoveSuccessor] = [:]
                 for pane in move.panes {
-                    if let edge = try priorGrant(pane), edge.device != move.device || edge.pane != move.arrivals?[pane] {
+                    if let edge = try visitGrant(pane, visit: move.priorGrant ?? move.sourceVisits?[pane]), edge.device != move.device || edge.pane != move.arrivals?[pane] {
                         onward[pane] = edge
                     }
                 }

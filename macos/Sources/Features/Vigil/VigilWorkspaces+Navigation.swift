@@ -587,7 +587,6 @@ extension VigilWorkspaces {
                 pane.emoji = request.emoji
             }
             created = pane
-            session.paneSeq = workspaces[request.session]!.paneSeq
             if asTab {
                 let newTab = Registry.Tab(panes: [pane], layout: nil, label: request.operation == "new_tab" ? request.label : nil, emoji: request.emoji)
                 session.tabs.insert(newTab, at: index + 1)
