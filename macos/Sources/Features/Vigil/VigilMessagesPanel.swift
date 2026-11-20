@@ -511,7 +511,10 @@ enum VigilMessagesPanel {
         guard let controller else { return messagesLog.warn("messages: no window to show them in", ["pane": id]) }
         let focus = store.paneThread(key)?.firstAwaitingYou(among: waiting)
         store.show(focus, on: key)
-        VigilBars.shared.showMessages(showing: VigilThreadList.end(key), listing: Self.conversation(of: key)?.id, in: controller)
+        // Typed in parts: as one expression it outlasts the type checker.
+        let end: String = VigilThreadList.end(key)
+        let listing: String? = Self.conversation(of: key)?.id
+        VigilBars.shared.showMessages(showing: end, listing: listing, in: controller)
         store.open(root: key.root, pane: key.pane, in: controller)
         DispatchQueue.main.async { aside(key: key, in: controller) }
         messagesLog.info("messages opened from a pane", ["pane": id, "on": focus.map { String($0.prefix(8)) } ?? "its end"])
