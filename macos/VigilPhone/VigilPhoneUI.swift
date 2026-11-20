@@ -424,6 +424,10 @@ struct TreeNodeView: View {
             // A glance row wears its state as its glyph.
             if node.glance == nil { cluster }
             // A Mac's own `+`: a workspace there, its Mac obvious.
+            if node.kind == .host, let host = model.host(of: node), let down = model.down[host.id],
+               down.withheld, let url = VigilWire.renewalLink(refusal: down.reason, root: host.id) {
+                Link("Open in Authz Devices", destination: url).font(.caption)
+            }
             if node.kind == .host, let host = model.host(of: node), model.reachable(host) {
                 Menu { QuickCreateItems(host: host) } label: {
                     Image(systemName: "plus").font(.body.weight(.medium))
