@@ -178,7 +178,7 @@ final class VigilPhoneMessages: ObservableObject {
             return VigilChatPane.of(conversation: nil, title: pane, face: face, mac: mac)
         }
         // The member its glance carries: its name and tint, one look everywhere.
-        let member = node.glance?.member.flatMap { glance in glance.name.map { (name: $0, face: String?.none, tint: glance.tint) } }
+        let member = node.glance?.member.map { (name: $0.name, face: String?.none, tint: $0.tint) }
         return VigilChatPane.of(member: member, conversation: node.glance?.title, title: node.title, face: face, mac: mac)
     }
 

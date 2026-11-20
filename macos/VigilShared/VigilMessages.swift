@@ -42,7 +42,7 @@ struct VigilChatPane: Equatable, Sendable {
     /// pane's or workspace's emoji, else its member's face; its Mac when it
     /// is not this one.
     static func of(
-        member: (name: String, face: String?, tint: String?)? = nil, conversation: String?, title: String, face: String?,
+        member: (name: String?, face: String?, tint: String?)? = nil, conversation: String?, title: String, face: String?,
         mac: String?
     ) -> VigilChatPane {
         let emoji = face.flatMap { $0.isEmpty ? nil : $0 }

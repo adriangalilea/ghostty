@@ -1,3 +1,4 @@
+import Ink
 import SwiftUI
 
 /// An agent's own mark, where a pane's row would wear a plain terminal
@@ -6,15 +7,22 @@ import SwiftUI
 /// does, on the Mac's sidebar and the phone alike (both apps compile this
 /// folder). Which face a pane wears is VigilWire's one rule (`PaneFace`):
 /// the emoji a person gave it, else its agent's mark, else the terminal.
+/// The mark says what program it is; its colour says which agent: its
+/// member's minted tint (`MemberGlance.tint`), the colour every card and
+/// chat draws that agent in, so two Claudes side by side are told apart.
 struct AgentMark: View {
     let agent: String
     /// The em it is drawn in.
     var size: CGFloat
+    /// Its member's tint (an Ink tint's name), when its glance carries one.
+    var tint: String? = nil
 
     var body: some View {
         if let mark = Self.marks[agent] {
+            let ink = tint.flatMap(InkTint.init).map { AnyShapeStyle($0.color) }
+                ?? mark.tint.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary)
             mark.path
-                .fill(mark.tint.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary), style: FillStyle(eoFill: true))
+                .fill(ink, style: FillStyle(eoFill: true))
                 .frame(width: size, height: size)
                 .accessibilityLabel(mark.name)
         }

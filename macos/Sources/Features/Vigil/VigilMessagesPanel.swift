@@ -267,9 +267,8 @@ final class VigilMessageStore: ObservableObject {
 
     /// The member a pane holds, as its glance carries it (`MemberGlance`:
     /// its name and minted tint, the broker's one look of it).
-    private static func member(_ glance: MemberGlance?) -> (name: String, face: String?, tint: String?)? {
-        guard let glance, let name = glance.name else { return nil }
-        return (name, nil, glance.tint)
+    private static func member(_ glance: MemberGlance?) -> (name: String?, face: String?, tint: String?)? {
+        glance.map { ($0.name, nil, $0.tint) }
     }
 
     // MARK: The host the views ask
