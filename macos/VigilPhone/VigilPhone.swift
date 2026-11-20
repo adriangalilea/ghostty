@@ -364,7 +364,7 @@ final class VigilPhone: ObservableObject {
     }
 
     /// vigil's node, or why there is none yet.
-    private func linked() throws -> TetherNode {
+    func linked() throws -> TetherNode {
         guard let node else { throw WireError.refused("vigil is not connected to tether yet") }
         return node
     }
@@ -1121,6 +1121,10 @@ final class VigilPhone: ObservableObject {
     /// A pane to open with the terminal's keyboard up (an activity's
     /// Reply): the pane screen takes it once it shows that pane.
     @Published var typeInto: PaneRef?
+
+    /// The move being looked at (`VigilPhoneMove`): the shared dialog in a
+    /// sheet over the tree, until it is closed.
+    @Published var moving: MoveDialogModel?
 
     /// `keyboard`: with the terminal's own keyboard up (an activity's Reply).
     func openPane(_ id: String, keyboard: Bool = false) {
