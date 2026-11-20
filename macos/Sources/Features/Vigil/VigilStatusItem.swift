@@ -232,6 +232,16 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
             holder.submenu = list
             menu.addItem(holder)
         }
+        // Agents started before the last update, on every Mac: each restarts
+        // at its next idle moment, its row saying when it has.
+        let stale = VigilWorkspaces.shared.restartable().count
+        if stale > 0 {
+            let restart = NSMenuItem(title: "Restart All When Idle (\(stale))", action: #selector(restartAllWhenIdle(_:)), keyEquivalent: "")
+            restart.target = self
+            restart.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+            restart.toolTip = "Agents that started before the last update or cannot receive messages: each restarts when its turn and background work end, its conversation resumed in its pane."
+            menu.addItem(restart)
+        }
 
         menu.addItem(.separator())
         // vigil drive's settings (its grants, their state, the button for
@@ -270,6 +280,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
 
     @objc private func openWatches(_ sender: NSMenuItem) {
         VigilWatchesPanel.window()
+    }
+
+    @objc private func restartAllWhenIdle(_ sender: NSMenuItem) {
+        VigilWorkspaces.shared.restartAllWhenIdle()
     }
 
     @objc private func openConflict(_ sender: NSMenuItem) {

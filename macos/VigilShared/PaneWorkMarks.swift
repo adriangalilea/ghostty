@@ -32,13 +32,49 @@ struct PaneMarkSizes {
 }
 
 struct PaneProblemItem: Identifiable {
+    /// One thing the person can do about it, from where the list is.
+    struct Action {
+        let title: String
+        let act: () -> Void
+    }
     var id: String { pane + "/" + problem.kind.rawValue }
     let pane: String
     let problem: ConversationProblem
-    let button: String
-    let act: () -> Void
+    /// None when nothing here does more than the row already does (the
+    /// pane's own row, the pane on screen: "Open pane" would go nowhere).
+    let actions: [Action]
     var ended: PaneEnd? = nil
     var writers: PaneConflict.Writers? = nil
+
+    init(pane: String, problem: ConversationProblem, actions: [Action], ended: PaneEnd? = nil, writers: PaneConflict.Writers? = nil) {
+        self.pane = pane
+        self.problem = problem
+        self.actions = actions
+        self.ended = ended
+        self.writers = writers
+    }
+
+    init(pane: String, problem: ConversationProblem, button: String, act: @escaping () -> Void,
+         ended: PaneEnd? = nil, writers: PaneConflict.Writers? = nil) {
+        self.init(pane: pane, problem: problem, actions: [Action(title: button, act: act)], ended: ended, writers: writers)
+    }
+
+    /// A pane's restart problem (`ConversationProblem.restarts`): what is
+    /// wrong in one line, and the restarts. `busy`: a turn or background
+    /// work runs, so a restart now waits for its end (the same as kept);
+    /// `armed`: one is kept for its next idle moment already.
+    static func restarts(pane: String, problem: ConversationProblem, busy: Bool, armed: Bool,
+                         restart: @escaping (_ whenIdle: Bool) -> Void, cancel: @escaping () -> Void) -> PaneProblemItem {
+        let actions: [Action]
+        if armed {
+            actions = [Action(title: "Restart Now") { restart(false) }, Action(title: "Don't Restart by Itself", act: cancel)]
+        } else if busy {
+            actions = [Action(title: "Restart When Its Turn Ends") { restart(true) }]
+        } else {
+            actions = [Action(title: "Restart") { restart(false) }, Action(title: "Restart Automatically When Idle") { restart(true) }]
+        }
+        return PaneProblemItem(pane: pane, problem: problem, actions: actions)
+    }
 }
 
 /// A row and its folded ancestors use the same mark. Keeping the contents
@@ -50,7 +86,7 @@ struct PaneProblemsMark: View {
 
     private var tone: Color {
         if items.contains(where: { $0.writers == .both || $0.problem.kind == .twoLive }) { return .red }
-        if items.allSatisfy({ $0.writers != nil }) { return .secondary }
+        if items.allSatisfy({ $0.writers != nil || $0.problem.kind == .restarted }) { return .secondary }
         return .orange
     }
 
@@ -76,8 +112,13 @@ struct PaneProblemsMark: View {
                                 Text(item.pane).font(.caption).foregroundStyle(.secondary)
                                 Text(item.problem.says)
                                 ForEach(item.problem.fix, id: \.self) { Text($0).font(.callout) }
-
-                                Button(item.button) { showing = false; item.act() }
+                                if !item.actions.isEmpty {
+                                    HStack {
+                                        ForEach(Array(item.actions.enumerated()), id: \.offset) { _, action in
+                                            Button(action.title) { showing = false; action.act() }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding()

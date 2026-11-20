@@ -543,6 +543,12 @@ struct VigilSidebarView: View {
                 Button {
                     VigilCreation.shared.present(on: device)
                 } label: { Label("New Workspace or Resume…", systemImage: "folder.badge.plus") }
+                let stale = VigilWorkspaces.shared.restartable(on: device).count
+                if stale > 0 {
+                    Button {
+                        VigilWorkspaces.shared.restartAllWhenIdle(on: device)
+                    } label: { Label("Restart All When Idle (\(stale))", systemImage: "arrow.clockwise") }
+                }
                 if let machine = host.machine {
                     Divider()
                     ForEach(Array(machine.facts.enumerated()), id: \.offset) { _, fact in
@@ -1416,11 +1422,14 @@ struct VigilSidebarView: View {
             messages: panes.reduce(into: Set<String>()) { $0.formUnion(messages.awaiting(paneId: $1.paneId, id: $1.id)) }, sizes: marks)
         MessagesMark(pending: panes.compactMap { messages.pending(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         WatchMark(watches: panes.flatMap { watches.watches(paneId: $0.paneId, id: $0.id) }, sizes: marks)
-        PaneProblemsMark(items: panes.flatMap(problemItems), sizes: marks)
+        PaneProblemsMark(items: panes.flatMap { problemItems($0, rolledUp: true) }, sizes: marks)
         lookerGlyphs(panes.flatMap(\.lookers))
     }
 
-    private func problemItems(_ pane: VigilWorkspaces.SidebarPane) -> [PaneProblemItem] {
+    /// `rolledUp`: the list is a folded row's, for panes it hides. "Open
+    /// pane" is offered only where it goes somewhere: a folded row, another
+    /// Mac's pane, a pane not on screen.
+    private func problemItems(_ pane: VigilWorkspaces.SidebarPane, rolledUp: Bool = false) -> [PaneProblemItem] {
         func visit() {
             for row in model.rows {
                 for tab in row.tabs where tab.panes.contains(where: { $0.id == pane.id }) {
@@ -1430,17 +1439,29 @@ struct VigilSidebarView: View {
             }
         }
         let writers = pane.liveConversation.flatMap { model.writerProblems[$0] }
-        func restart() {
-            if let local = pane.paneId { VigilWorkspaces.shared.restartAgent(pane: local, device: nil) }
-            else if let remote = VigilRemote.split(pane.id) { VigilWorkspaces.shared.restartAgent(pane: remote.name, device: remote.device) }
-        }
+        // Asked of the windows only for a row that has something to list.
+        let listed = !pane.problems.isEmpty || writers != nil || pane.ended.map { !$0.clean } == true
+        let open = listed && (rolledUp || pane.paneId == nil || !VigilWorkspaces.shared.isOnScreen(pane.id))
+            ? [PaneProblemItem.Action(title: "Open pane", act: visit)] : []
+        let target = VigilWorkspaces.shared.restartTarget(pane)
+        // As its broker judges it: a pane blocked on a turn-end question is
+        // idle there, and a restart asked to wait runs at once then.
+        let busy = pane.state.map { [AgentState.working, .interrupting, .unknown, .blocked].contains($0) } ?? false
         var items = (pane.problems + [writers].compactMap { $0 }).map { issue in
             issue.restarts
-                ? PaneProblemItem(pane: pane.id, problem: issue, button: "Restart", act: restart)
-                : PaneProblemItem(pane: pane.id, problem: issue, button: "Open pane", act: visit)
+                ? PaneProblemItem.restarts(pane: pane.id, problem: issue, busy: busy, armed: pane.restart?.state == .armed,
+                                           restart: { whenIdle in
+                                               guard let target else { return }
+                                               VigilWorkspaces.shared.restartAgent(pane: target.pane, device: target.device, whenIdle: whenIdle)
+                                           },
+                                           cancel: {
+                                               guard let target else { return }
+                                               VigilWorkspaces.shared.restartAgent(pane: target.pane, device: target.device, cancel: true)
+                                           })
+                : PaneProblemItem(pane: pane.id, problem: issue, actions: open)
         }
         if let ended = pane.ended, !ended.clean {
-            items.append(PaneProblemItem(pane: pane.id, problem: ended.problem, button: "Open pane", act: visit, ended: ended))
+            items.append(PaneProblemItem(pane: pane.id, problem: ended.problem, actions: open, ended: ended))
         }
         if let conflict = pane.conflict, conflict.worn {
             items.append(PaneProblemItem(pane: pane.id, problem: conflict.problem, button: "Review copies", act: {

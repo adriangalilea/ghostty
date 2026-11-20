@@ -941,14 +941,17 @@ final class VigilPhone: ObservableObject {
     /// The person's restart of a pane's agent, asked of its Mac (`Open.restart`):
     /// what it answered, said as `failure` is, unless it is still working,
     /// which is `restartOffer` (restart when its turn ends).
-    func restart(_ ref: PaneRef, whenIdle: Bool = false) async {
+    /// A kept restart (`whenIdle`) and a let-go one (`cancel`) are said on
+    /// the pane's row, not here.
+    func restart(_ ref: PaneRef, whenIdle: Bool = false, cancel: Bool = false) async {
         do {
-            let data = try await VigilLink.call(linked(), device: ref.host.id, .restart(ref.pane, whenIdle: whenIdle))
+            let data = try await VigilLink.call(linked(), device: ref.host.id, .restart(ref.pane, whenIdle: whenIdle, cancel: cancel))
             let answer = try JSONDecoder().decode(Restart.Answer.self, from: data)
+            if cancel { return }
             switch answer.outcome {
             case .busy: restartOffer = .init(ref: ref, said: answer.said)
             case .restarting: failure = .init(title: "Restarting the agent", message: answer.said)
-            case .armed: failure = .init(title: "Restarts when its turn ends", message: answer.said)
+            case .armed: break
             case .refused: failure = .init(title: "Not restarted", message: answer.said)
             }
         } catch {

@@ -70,6 +70,8 @@ extension VigilWorkspaces {
         var arrived: Registry.Arrival?
         /// What its agent instance reports that needs the person's attention.
         var problems: [ConversationProblem] = []
+        /// What became of its restart, as its Mac's broker says (its glance).
+        var restart: Restart.Note?
 
         /// Its conversation was written on its Mac and on another, and
         /// nobody has said which copy goes on (`PaneConflict`).
@@ -241,6 +243,7 @@ extension VigilWorkspaces {
                 ended: facts.ended,
                 arrived: pane.dormant == true ? pane.from : nil,
                 problems: (meaning?.problems ?? []) + [continuations[pane.id]?.problem].compactMap { $0 },
+                restart: meaning?.restart,
                 conflict: facts.conflict)
         }
 

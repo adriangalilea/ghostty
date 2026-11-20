@@ -630,6 +630,8 @@ struct TreeNodeView: View {
 
 private struct PhonePaneProblems: View {
     let leaves: [VigilPhone.Node]
+    /// The list is on the pane's own screen.
+    var onScreen = false
     let open: (PaneRef) -> Void
     @EnvironmentObject private var model: VigilPhone
     @State private var showingConflict: PaneConflict?
@@ -641,10 +643,17 @@ private struct PhonePaneProblems: View {
             let ref = leaf.pane ?? PaneRef(host: host, pane: id, title: leaf.path ?? leaf.title)
             let glance = leaf.glance
             let writers = glance.flatMap { g in g.conversation.flatMap { model.writerProblems[ConversationRef(agent: g.agent, id: $0)] } }
+            // "Open pane" only where it goes somewhere: a folded row, or a
+            // pane that is not the one on screen.
+            let opens = leaves.count > 1 || !onScreen
+            let background = glance?.background.map { $0.agents + $0.shells + $0.others } ?? 0
+            let busy = glance?.turn != nil || glance?.question != nil || background > 0
             var items = ((glance?.problems ?? []) + [writers, leaf.continuation?.problem].compactMap { $0 }).map { issue in
                 issue.restarts
-                    ? PaneProblemItem(pane: ref.pane, problem: issue, button: "Restart") { Task { await model.restart(ref) } }
-                    : PaneProblemItem(pane: ref.pane, problem: issue, button: "Open pane") { open(ref) }
+                    ? PaneProblemItem.restarts(pane: ref.pane, problem: issue, busy: busy, armed: glance?.restart?.state == .armed,
+                                               restart: { whenIdle in Task { await model.restart(ref, whenIdle: whenIdle) } },
+                                               cancel: { Task { await model.restart(ref, cancel: true) } })
+                    : PaneProblemItem(pane: ref.pane, problem: issue, actions: opens ? [.init(title: "Open pane") { open(ref) }] : [])
             }
             if let ended = leaf.ended, !ended.clean {
                 items.append(PaneProblemItem(pane: id, problem: ended.problem, button: "Open pane", act: {
@@ -1612,7 +1621,7 @@ struct PaneScreen: View {
                           tint: node?.alive == false ? .secondary : (node?.state ?? .idle).tint)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                if let node { PhonePaneProblems(leaves: [node]) { _ in setMode(.terminal) } }
+                if let node { PhonePaneProblems(leaves: [node], onScreen: true) { _ in setMode(.terminal) } }
                 // Conversation, changes, documents, messages, terminal: the
                 // others, for a pane with an agent (its repositories come
                 // from its conversation).
