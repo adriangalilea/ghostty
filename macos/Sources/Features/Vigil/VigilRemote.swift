@@ -21,6 +21,7 @@ final class VigilRemote: ObservableObject {
     struct Host {
         let device: String
         var name: String
+        var pairing: String?
         /// Its last directory as the sidebar projects it (content
         /// receipts dropped: they are the phone's, never a row's).
         var directory: Directory?
@@ -118,7 +119,8 @@ final class VigilRemote: ObservableObject {
     private func keep(_ device: String) {
         guard unkept.remove(device) != nil, let host = host(device), let directory = sourceDirectory(device), let received = host.received
         else { return }
-        let kept = KeptDirectory(device: device, name: host.name, received: received.timeIntervalSince1970, directory: directory)
+        guard let pairing = host.pairing else { return }
+        let kept = KeptDirectory(device: device, pairing: pairing, name: host.name, received: received.timeIntervalSince1970, directory: directory)
         DispatchQueue.global(qos: .utility).async {
             do { try kept.write(in: VigilPaths.away) } catch {
                 remoteLog.error("directory not kept: this Mac will not be listed once away, after a relaunch", ["host": kept.name, "err": error])
@@ -129,9 +131,10 @@ final class VigilRemote: ObservableObject {
     /// A Mac first heard of in this launch, drawn from what was kept of it
     /// until its own directory arrives.
     private func kept(_ peer: Local.Peer) -> Host {
-        var host = Host(device: peer.id, name: peer.name)
+        var host = Host(device: peer.id, name: peer.name, pairing: peer.pairing)
         do {
-            guard let kept = try KeptDirectory.read(peer.id, in: VigilPaths.away) else { return host }
+            guard let pairing = peer.pairing, let kept = try KeptDirectory.read(peer.id, in: VigilPaths.away),
+                  kept.pairing == pairing else { return host }
             receivedDirectories[peer.id] = kept.directory
             host.directory = kept.directory.projected
             host.received = Date(timeIntervalSince1970: kept.received)
@@ -322,21 +325,24 @@ final class VigilRemote: ObservableObject {
 
     private func peers(_ peers: [Local.Peer]) {
         let wanted = Set(peers.map(\.id))
+        let continuing = Set(peers.filter { peer in host(peer.id)?.pairing == peer.pairing }.map(\.id))
         for device in Set(hosts.map(\.device)).symmetricDifference(wanted) {
             VigilWorkspaces.shared.moveContact(device, waiting: true, recheck: true)
         }
-        receivedDirectories = receivedDirectories.filter { wanted.contains($0.key) }
-        for (device, fd) in following where !wanted.contains(device) {
+        receivedDirectories = receivedDirectories.filter { continuing.contains($0.key) }
+        for (device, fd) in following where !continuing.contains(device) {
             followIDs[device] = nil
             following[device] = nil
             shutdown(fd, SHUT_RDWR)
         }
-        for (device, fd) in followingMachine where !wanted.contains(device) {
+        for (device, fd) in followingMachine where !continuing.contains(device) {
             followingMachine[device] = nil
             shutdown(fd, SHUT_RDWR)
         }
-        hosts.removeAll { !wanted.contains($0.device) }
-        arrivals = arrivals.filter { Self.split($0.key).map { wanted.contains($0.device) } ?? false }
+        hosts.removeAll { !continuing.contains($0.device) }
+        arrivals = arrivals.filter { Self.split($0.key).map { continuing.contains($0.device) } ?? false }
+        VigilMessageStore.shared.macs(continuing)
+        VigilWatchStore.shared.macs(continuing)
         for peer in peers {
             if let index = hosts.firstIndex(where: { $0.device == peer.id }) {
                 hosts[index].name = peer.name
@@ -398,12 +404,16 @@ final class VigilRemote: ObservableObject {
             return remoteLog.warn("machine state not followed", ["host": host(device)?.name ?? device, "err": error])
         }
         followingMachine[device] = fd
+        let pairing = host(device)?.pairing
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let reader = Lines.Reader(fd: fd)
             while let line = try? reader.next() {
                 do {
                     let machine = try JSONDecoder().decode(MachineState.self, from: line)
-                    Task { @MainActor [weak self] in self?.machine(device, machine) }
+                    Task { @MainActor [weak self] in
+                        guard let self, self.host(device)?.pairing == pairing else { return }
+                        self.machine(device, machine)
+                    }
                 } catch {
                     Task { @MainActor in remoteLog.warn("machine state unreadable", ["device": device, "err": error]) }
                 }

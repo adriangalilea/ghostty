@@ -67,8 +67,8 @@ final class VigilPhoneMessages: ObservableObject {
         for (root, task) in following where !roots.contains(root) {
             task.cancel()
             following[root] = nil
-            mailboxes[root] = nil
         }
+        mailboxes = mailboxes.filter { roots.contains($0.key) }
         for root in roots { follow(root) }
         recount()
     }
@@ -82,7 +82,7 @@ final class VigilPhoneMessages: ObservableObject {
         let steps = VigilLink.messages(node, device: root)
         following[root] = Task { [weak self] in
             for await step in steps {
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { return }
                 switch step.step {
                 case .open: self.receipts.info("messages", "mailbox followed", ["mac": self.macName(root)])
                 case .changes:

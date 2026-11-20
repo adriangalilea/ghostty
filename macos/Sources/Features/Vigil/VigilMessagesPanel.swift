@@ -111,8 +111,8 @@ final class VigilMessageStore: ObservableObject {
         for (key, task) in following where !key.isEmpty && !devices.contains(key) {
             task.cancel()
             following[key] = nil
-            mailboxes[key] = nil
         }
+        mailboxes = mailboxes.filter { $0.key == here || devices.contains($0.key) }
         for device in devices { follow(device: device) }
         recount()
     }
@@ -141,6 +141,7 @@ final class VigilMessageStore: ObservableObject {
             var root = device
             var delivered = false
             for await step in steps {
+                guard !Task.isCancelled else { return }
                 switch step.step {
                 case .open:
                     root = step.root

@@ -52,8 +52,8 @@ final class VigilPhoneWatches: ObservableObject {
         for (root, task) in following where !roots.contains(root) {
             task.cancel()
             following[root] = nil
-            boards[root] = nil
         }
+        boards = boards.filter { roots.contains($0.key) }
         for root in roots { follow(root) }
         remark()
     }
@@ -67,7 +67,7 @@ final class VigilPhoneWatches: ObservableObject {
         let steps = VigilLink.watches(node, device: root)
         following[root] = Task { [weak self] in
             for await step in steps {
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { return }
                 switch step.step {
                 case .open: self.receipts.info("watches", "watches followed", ["mac": self.macName(root)])
                 case .changes:

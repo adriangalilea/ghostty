@@ -34,6 +34,7 @@ enum VigilAgents {
     private static var told: [String: AgentsRoute] = [:]
     /// The Macs to tell, and the panes followed on each.
     private static var macs: [String: [String]] = [:]
+    private static var enrollments: [String: String] = [:]
     private static var observed = Set<String>()
     /// Whose notes the activity opens (`NoteSenders.homes`: each Mac's note
     /// key id by its tether root), as kept beside the activity key, where
@@ -105,6 +106,14 @@ enum VigilAgents {
     /// The Macs as tether now knows them, each with what is followed there:
     /// each is told where this phone's activity is reached (once per change;
     /// what is followed there arrives on its `follows` stream).
+    static func pairings(_ next: [String: String], continuing: Set<String>) {
+        enrollments = next
+        macs = macs.filter { continuing.contains($0.key) }
+        told = told.filter { continuing.contains($0.key) }
+        tokens = tokens.filter { continuing.contains($0.key) }
+        keep(NoteSenders(homes: senders.homes.filter { continuing.contains($0.key) }))
+    }
+
     static func macs(_ next: [String: [String]]) {
         let fresh = next.keys.filter { macs[$0] == nil }
         macs = next
@@ -120,10 +129,11 @@ enum VigilAgents {
     /// opens its notes and no one else's. Asked each time its directory
     /// opens: a Mac whose key changed is learned again.
     static func learnNoteKey(of mac: String, node: TetherNode) {
+        guard let pairing = enrollments[mac] else { return }
         Task {
             do {
                 let id = try await VigilLink.noteKey(node, device: mac)
-                guard macs[mac] != nil else { return }
+                guard enrollments[mac] == pairing, macs[mac] != nil else { return }
                 var next = senders
                 next.homes[mac] = id
                 keep(next)

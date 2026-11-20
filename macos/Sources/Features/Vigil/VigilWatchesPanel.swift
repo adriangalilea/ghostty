@@ -48,8 +48,8 @@ final class VigilWatchStore: ObservableObject {
         for (key, task) in following where !key.isEmpty && !devices.contains(key) {
             task.cancel()
             following[key] = nil
-            boards[key] = nil
         }
+        boards = boards.filter { $0.key == here || devices.contains($0.key) }
         for device in devices { follow(device: device) }
         remark()
     }
@@ -70,6 +70,7 @@ final class VigilWatchStore: ObservableObject {
             var root = device
             var delivered = false
             for await step in steps {
+                guard !Task.isCancelled else { return }
                 switch step.step {
                 case .open:
                     root = step.root
