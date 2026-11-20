@@ -92,6 +92,7 @@ final class VigilPhone: ObservableObject {
     struct Host: Identifiable, Hashable {
         let id: String
         var name: String
+        var pairing: String?
     }
 
     /// The paired Macs running vigil, from tether (never typed in).
@@ -214,8 +215,9 @@ final class VigilPhone: ObservableObject {
 
     private func keep(_ device: String, heard: Date) {
         guard unkept.remove(device) != nil, let directory = directories[device],
-              let name = hosts.first(where: { $0.id == device })?.name else { return }
-        let kept = KeptDirectory(device: device, name: name, received: heard.timeIntervalSince1970, directory: directory.projected)
+              let host = hosts.first(where: { $0.id == device }), let pairing = host.pairing else { return }
+        let name = host.name
+        let kept = KeptDirectory(device: device, pairing: pairing, name: name, received: heard.timeIntervalSince1970, directory: directory.projected)
         do { try kept.write(in: Self.away) } catch {
             receipts.error("dir", "not kept: this Mac will not be listed once away, after a relaunch", ["mac": name, "err": "\(error)"])
         }
@@ -226,7 +228,8 @@ final class VigilPhone: ObservableObject {
     private func readKept(_ host: Host) {
         guard directories[host.id] == nil else { return }
         do {
-            guard let kept = try KeptDirectory.read(host.id, in: Self.away) else { return }
+            guard let pairing = host.pairing, let kept = try KeptDirectory.read(host.id, in: Self.away),
+                  kept.pairing == pairing else { return }
             down[host.id] = Down(since: Date(timeIntervalSince1970: kept.received), reason: "not heard yet", attempts: 0)
             directories[host.id] = kept.directory
             receipts.info("dir", "kept directory read", [
@@ -264,6 +267,10 @@ final class VigilPhone: ObservableObject {
     private var watches: [String: Task<Void, Never>] = [:]
     /// Each Mac's `follows` stream: what this phone follows there, as it changes.
     private var followWatches: [String: Task<Void, Never>] = [:]
+    /// Each Mac's moves as their destination publishes them (`Open.moves`),
+    /// drawn on the moving workspace's row (`Move.note`).
+    private var movesWatches: [String: Task<Void, Never>] = [:]
+    private(set) var moves: [String: [Move.Ticket]] = [:] { didSet { rebuildTree() } }
 
     private init() {
         TerminalSurface.report = { [weak self] message, fields in
@@ -318,25 +325,42 @@ final class VigilPhone: ObservableObject {
     private func readPeers() {
         guard let node else { return }
         let next: [Host]
-        do { next = try VigilLink.macs(node).map { Host(id: $0.root, name: $0.name) } } catch {
+        do { next = try VigilLink.macs(node).map { Host(id: $0.root, name: $0.name, pairing: $0.pairing) } } catch {
             // Who the Macs are could not be read: the list stays as it was
             // and says why, never an empty "no Macs".
             return receipts.error("macs", "paired devices not readable", ["err": error])
         }
+        let pairings = Dictionary(uniqueKeysWithValues: next.compactMap { host in host.pairing.map { (host.id, $0) } })
+        let previous = UserDefaults.standard.dictionary(forKey: "vigil.phone.pairings") as? [String: String] ?? [:]
+        let continuing = Set(pairings.filter { previous[$0.key] == $0.value }.keys)
+        let obsolete = Set(previous.keys).union(followed.compactMap { $0.split(separator: "/").first.map(String.init) }).subtracting(continuing)
+        for device in obsolete { followed([], on: device) }
+        VigilAgents.pairings(pairings, continuing: continuing)
+        if previous != pairings { UserDefaults.standard.set(pairings, forKey: "vigil.phone.pairings") }
         if next != hosts {
+            let lost = Set(hosts.map(\.id)).subtracting(continuing)
+            for id in lost {
+                for pane in directories[id]?.panes.keys.map({ $0 }) ?? [] { endSurface(pane) }
+            }
             hosts = next
             receipts.info("macs", "paired macs changed", ["macs": next.map(\.name)])
-            let ids = Set(next.map(\.id))
-            directories = directories.filter { ids.contains($0.key) }
-            down = down.filter { ids.contains($0.key) }
-            for (id, task) in watches where !ids.contains(id) {
+            directories = directories.filter { continuing.contains($0.key) }
+            down = down.filter { continuing.contains($0.key) }
+            for (id, task) in watches where !continuing.contains(id) {
                 task.cancel()
                 watches[id] = nil
             }
-            for (id, task) in followWatches where !ids.contains(id) {
+            for (id, task) in followWatches where !continuing.contains(id) {
                 task.cancel()
                 followWatches[id] = nil
             }
+            VigilPhoneMessages.shared.macs(continuing)
+            VigilPhoneWatches.shared.macs(continuing)
+            for (id, task) in movesWatches where !continuing.contains(id) {
+                task.cancel()
+                movesWatches[id] = nil
+            }
+            moves = moves.filter { continuing.contains($0.key) }
         }
         for host in hosts {
             readKept(host)
@@ -348,7 +372,7 @@ final class VigilPhone: ObservableObject {
         VigilPhoneWatches.shared.macs(Set(hosts.map(\.id)))
         // Each Mac learns where this phone's agents activity is reached and
         // what is followed there.
-        VigilAgents.macs(Dictionary(uniqueKeysWithValues: hosts.map { host in
+        VigilAgents.macs(Dictionary(uniqueKeysWithValues: hosts.filter { $0.pairing != nil }.map { host in
             (host.id, followed.compactMap { key -> String? in
                 guard key.hasPrefix(host.id + "/") else { return nil }
                 let pane = String(key.dropFirst(host.id.count + 1))
@@ -364,7 +388,7 @@ final class VigilPhone: ObservableObject {
     }
 
     /// vigil's node, or why there is none yet.
-    private func linked() throws -> TetherNode {
+    func linked() throws -> TetherNode {
         guard let node else { throw WireError.refused("vigil is not connected to tether yet") }
         return node
     }
@@ -379,6 +403,7 @@ final class VigilPhone: ObservableObject {
             let follows = VigilLink.follows(node, device: host.id)
             followWatches[host.id] = Task { [weak self] in
                 for await panes in follows {
+                    guard !Task.isCancelled, self?.hosts.contains(where: { $0.id == host.id && $0.pairing == host.pairing }) == true else { return }
                     VigilAgents.followed(panes, on: host.id)
                     self?.followed(panes, on: host.id)
                 }
@@ -386,11 +411,26 @@ final class VigilPhone: ObservableObject {
                 self?.followWatches[host.id] = nil
             }
         }
+        if movesWatches[host.id] == nil, let node {
+            let lines = VigilLink.movesLines(node, device: host.id)
+            movesWatches[host.id] = Task { [weak self] in
+                for await line in lines {
+                    guard case .line(let raw) = line else { continue }
+                    guard let tickets = try? JSONDecoder().decode([Move.Ticket].self, from: raw) else {
+                        self?.receipts.warn("move", "tickets unreadable", ["mac": host.name])
+                        continue
+                    }
+                    if self?.moves[host.id] != tickets { self?.moves[host.id] = tickets }
+                }
+                guard !Task.isCancelled else { return }
+                self?.movesWatches[host.id] = nil
+            }
+        }
         guard watches[host.id] == nil, let node else { return }
         let steps = VigilLink.directory(node, device: host.id)
         watches[host.id] = Task { [weak self] in
             for await step in steps {
-                guard let self else { return }
+                guard let self, !Task.isCancelled, self.hosts.contains(where: { $0.id == host.id && $0.pairing == host.pairing }) else { return }
                 switch step.step {
                 case .open:
                     if let was = self.down[host.id] {
@@ -718,18 +758,21 @@ final class VigilPhone: ObservableObject {
         /// `Fork`): a split beside it (`direction`), or a tab of its own.
         /// Its Mac starts it from its own record; nothing is named here.
         case fork(of: String, direction: String?)
+        /// A workspace whose pane resumes a conversation: its Mac builds the
+        /// line from where it holds the transcript; nothing is named here.
+        case resume(ConversationRef, folder: String, label: String?)
 
         var command: String? {
             switch self {
             case .workspace(_, let command, _), .tab(_, let command), .split(_, _, let command): command
-            case .fork: nil
+            case .fork, .resume: nil
             }
         }
 
         /// What it is, in the words a receipt and the progress line use.
         var noun: String {
             switch self {
-            case .workspace: "workspace"
+            case .workspace, .resume: "workspace"
             case .tab: "tab"
             case .split: "pane"
             case .fork: "fork"
@@ -773,6 +816,8 @@ final class VigilPhone: ObservableObject {
         switch birth {
         case .workspace(let cwd, let command, let label):
             request = .create(cwd: cwd, command: command, label: label)
+        case .resume(let ref, let folder, let label):
+            request = .create(resuming: ref, folder: folder, label: label)
         case .tab(let anchor, _), .split(let anchor, _, _), .fork(let anchor, _):
             guard let place = directories[host.id]?.place(of: anchor) else {
                 throw CreateError.unplaced("That pane is no longer in a workspace on \(host.name).")
@@ -1035,6 +1080,9 @@ final class VigilPhone: ObservableObject {
                 let sid = "\(host.id)/\(s.name)"
                 var sess = Node(id: sid, kind: .workspace, title: s.label, emoji: s.emoji,
                                 anchor: tabs.last?.panes.first?.id)
+                // A move of it being decided or done, its destination's word.
+                sess.subtitle = Move.note(workspace: s.name, source: host.id,
+                                          destinations: hosts.map { (name: $0.name, tickets: moves[$0.id] ?? []) })
                 let docked = Set(tabs.flatMap { $0.dock?.panes.map(\.id) ?? [] })
                 func paneNode(_ p: Registry.Pane) -> Node {
                     let truth = dir.panes[p.id]
@@ -1121,6 +1169,10 @@ final class VigilPhone: ObservableObject {
     /// A pane to open with the terminal's keyboard up (an activity's
     /// Reply): the pane screen takes it once it shows that pane.
     @Published var typeInto: PaneRef?
+
+    /// The move being looked at (`VigilPhoneMove`): the shared dialog in a
+    /// sheet over the tree, until it is closed.
+    @Published var moving: MoveDialogModel?
 
     /// `keyboard`: with the terminal's own keyboard up (an activity's Reply).
     func openPane(_ id: String, keyboard: Bool = false) {

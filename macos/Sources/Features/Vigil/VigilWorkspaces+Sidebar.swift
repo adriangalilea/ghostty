@@ -65,7 +65,7 @@ extension VigilWorkspaces {
         var background: PaneGlance.Background?
         /// Its program ended badly and nobody opened it yet (`PaneEnd`).
         var ended: PaneEnd?
-        /// Brought from another Mac and not opened here yet: the pane it
+        /// Moved from another Mac and not opened here yet: the pane it
         /// was there (`Registry.Arrival`).
         var arrived: Registry.Arrival?
         /// What its agent instance reports that needs the person's attention.
@@ -120,6 +120,9 @@ extension VigilWorkspaces {
         /// host group it sits under; nil = this Mac. Row ids of remote
         /// workspaces are `device/name`.
         var host: HostHeader?
+        /// A move of it being decided or done ("mbp-m4: Waiting for your
+        /// yes in Authz"), from the destination's ticket (`moveNote`).
+        var moving: String?
 
         /// A Mac's header: its name, and how it stands when that is not
         /// "here and live" ("away since 12:34", why it cannot be read).
@@ -282,7 +285,14 @@ extension VigilWorkspaces {
                 states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.dots)),
                 tabs: tabs))
         }
-        return rows + VigilRemote.shared.sidebarRows()
+        // A move under way, on the row of what moves, wherever it is asked
+        // and wherever it goes.
+        return (rows + VigilRemote.shared.sidebarRows()).map { row in
+            var row = row
+            let home = VigilRemote.split(row.id)
+            row.moving = moveNote(home: home?.device, workspace: home?.name ?? row.id)
+            return row
+        }
     }
 
     // MARK: Pin on top

@@ -71,14 +71,20 @@ struct VigilPhoneRoot: View {
             open(ref)
             model.opening = nil
         }
+        // A move's dialog (the shared one), from a row's Move To.
+        .sheet(isPresented: Binding(get: { model.moving != nil }, set: { if !$0 { model.moving?.answer(.cancel); model.moving = nil } })) {
+            if let moving = model.moving {
+                ScrollView { MoveDialog(model: moving).padding(.top, 8) }
+                    .presentationDetents([.medium, .large])
+            }
+        }
         // The new-workspace sheet, from wherever it was asked for; the
         // workspace opens over whatever was on screen.
         .sheet(item: $model.composing) { compose in
-            NewWorkspaceSheet(compose: compose) { ref in
-                model.typeInto = ref
-                model.opening = ref
+            NewWorkspaceSheet(model: model, startMac: compose.host?.id ?? model.onlyReachable?.id, startFolder: compose.folder) {
+                model.composing = nil
             }
-            .environmentObject(model)
+            .presentationDetents([.large])
         }
         // A creation in flight, said wherever you are: they take a moment
         // (the Mac spawns, then its directory lists the pane).
@@ -460,6 +466,9 @@ struct TreeNodeView: View {
             if let ref = node.pane, !watches.watches(root: ref.host.id, pane: ref.pane).isEmpty {
                 Button { showingWatches = true } label: { Label("Watches", systemImage: "binoculars") }
             }
+            // Move To another Mac, its home away or not: the destination
+            // reads from what it last heard of it.
+            if node.kind != .host { Section { PhoneMoveItems(node: node) } }
             if let host = model.host(of: node), model.reachable(host) {
                 if node.kind == .host {
                     QuickCreateItems(host: host)
@@ -1834,7 +1843,7 @@ struct SettingsView: View {
                         }
                     }
                 } header: { Text("Macs") } footer: {
-                    Text("Pairing is approved on the Mac with Touch ID. A paired Mac running vigil shows its workspaces here.")
+                    Text("Pairing is approved on the Mac by its owner. A paired Mac running vigil shows its workspaces here.")
                 }
                 SoundsSection()
                 ReceiptsSection(receipts: model.receipts)

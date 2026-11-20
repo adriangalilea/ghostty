@@ -2,8 +2,8 @@ import SwiftUI
 import VigilWire
 
 /// The ticket and pane are the heading in the containing sheet.
-struct BringMoveProofs: View {
-    let answers: Bring.MoveAnswers
+struct MoveProofs: View {
+    let answers: Move.MoveAnswers
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

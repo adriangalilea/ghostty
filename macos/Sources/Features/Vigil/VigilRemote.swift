@@ -21,6 +21,7 @@ final class VigilRemote: ObservableObject {
     struct Host {
         let device: String
         var name: String
+        var pairing: String?
         /// Its last directory as the sidebar projects it (content
         /// receipts dropped: they are the phone's, never a row's).
         var directory: Directory?
@@ -34,6 +35,9 @@ final class VigilRemote: ObservableObject {
         /// Its power, disk and heat as its app last wrote them
         /// (`Open.machine`), followed beside its directory.
         var machine: MachineState?
+        /// The moves it decides and does as their destination
+        /// (`Open.moves`), followed beside its directory.
+        var moves: [Move.Ticket] = []
     }
 
     @Published private(set) var hosts: [Host] = []
@@ -48,6 +52,7 @@ final class VigilRemote: ObservableObject {
     private var following: [String: Int32] = [:]
     /// Each Mac's state, followed the same way (its socket to the hub).
     private var followingMachine: [String: Int32] = [:]
+    private var followingMoves: [String: Int32] = [:]
     private var arrivals: [String: (revision: String, at: Date)] = [:]
     func arrival(device: String, pane: String, revision: String) -> Date {
         let id = Self.compositeId(device, pane)
@@ -118,7 +123,8 @@ final class VigilRemote: ObservableObject {
     private func keep(_ device: String) {
         guard unkept.remove(device) != nil, let host = host(device), let directory = sourceDirectory(device), let received = host.received
         else { return }
-        let kept = KeptDirectory(device: device, name: host.name, received: received.timeIntervalSince1970, directory: directory)
+        guard let pairing = host.pairing else { return }
+        let kept = KeptDirectory(device: device, pairing: pairing, name: host.name, received: received.timeIntervalSince1970, directory: directory)
         DispatchQueue.global(qos: .utility).async {
             do { try kept.write(in: VigilPaths.away) } catch {
                 remoteLog.error("directory not kept: this Mac will not be listed once away, after a relaunch", ["host": kept.name, "err": error])
@@ -129,9 +135,10 @@ final class VigilRemote: ObservableObject {
     /// A Mac first heard of in this launch, drawn from what was kept of it
     /// until its own directory arrives.
     private func kept(_ peer: Local.Peer) -> Host {
-        var host = Host(device: peer.id, name: peer.name)
+        var host = Host(device: peer.id, name: peer.name, pairing: peer.pairing)
         do {
-            guard let kept = try KeptDirectory.read(peer.id, in: VigilPaths.away) else { return host }
+            guard let pairing = peer.pairing, let kept = try KeptDirectory.read(peer.id, in: VigilPaths.away),
+                  kept.pairing == pairing else { return host }
             receivedDirectories[peer.id] = kept.directory
             host.directory = kept.directory.projected
             host.received = Date(timeIntervalSince1970: kept.received)
@@ -167,6 +174,8 @@ final class VigilRemote: ObservableObject {
         following.removeAll()
         for fd in followingMachine.values { shutdown(fd, SHUT_RDWR) }
         followingMachine.removeAll()
+        for fd in followingMoves.values { shutdown(fd, SHUT_RDWR) }
+        followingMoves.removeAll()
     }
 
     /// The hub's Macs stream, one at a time. Each attempt is numbered and its
@@ -322,21 +331,28 @@ final class VigilRemote: ObservableObject {
 
     private func peers(_ peers: [Local.Peer]) {
         let wanted = Set(peers.map(\.id))
+        let continuing = Set(peers.filter { peer in host(peer.id)?.pairing == peer.pairing }.map(\.id))
         for device in Set(hosts.map(\.device)).symmetricDifference(wanted) {
             VigilWorkspaces.shared.moveContact(device, waiting: true, recheck: true)
         }
-        receivedDirectories = receivedDirectories.filter { wanted.contains($0.key) }
-        for (device, fd) in following where !wanted.contains(device) {
+        receivedDirectories = receivedDirectories.filter { continuing.contains($0.key) }
+        for (device, fd) in following where !continuing.contains(device) {
             followIDs[device] = nil
             following[device] = nil
             shutdown(fd, SHUT_RDWR)
         }
-        for (device, fd) in followingMachine where !wanted.contains(device) {
+        for (device, fd) in followingMachine where !continuing.contains(device) {
             followingMachine[device] = nil
             shutdown(fd, SHUT_RDWR)
         }
-        hosts.removeAll { !wanted.contains($0.device) }
-        arrivals = arrivals.filter { Self.split($0.key).map { wanted.contains($0.device) } ?? false }
+        for (device, fd) in followingMoves where !continuing.contains(device) {
+            followingMoves[device] = nil
+            shutdown(fd, SHUT_RDWR)
+        }
+        hosts.removeAll { !continuing.contains($0.device) }
+        arrivals = arrivals.filter { Self.split($0.key).map { continuing.contains($0.device) } ?? false }
+        VigilMessageStore.shared.macs(continuing)
+        VigilWatchStore.shared.macs(continuing)
         for peer in peers {
             if let index = hosts.firstIndex(where: { $0.device == peer.id }) {
                 hosts[index].name = peer.name
@@ -345,6 +361,7 @@ final class VigilRemote: ObservableObject {
             }
             follow(peer.id)
             followMachine(peer.id)
+            followMoves(peer.id)
         }
         VigilMessageStore.shared.macs(wanted)
         VigilWatchStore.shared.macs(wanted)
@@ -398,12 +415,16 @@ final class VigilRemote: ObservableObject {
             return remoteLog.warn("machine state not followed", ["host": host(device)?.name ?? device, "err": error])
         }
         followingMachine[device] = fd
+        let pairing = host(device)?.pairing
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let reader = Lines.Reader(fd: fd)
             while let line = try? reader.next() {
                 do {
                     let machine = try JSONDecoder().decode(MachineState.self, from: line)
-                    Task { @MainActor [weak self] in self?.machine(device, machine) }
+                    Task { @MainActor [weak self] in
+                        guard let self, self.host(device)?.pairing == pairing else { return }
+                        self.machine(device, machine)
+                    }
                 } catch {
                     Task { @MainActor in remoteLog.warn("machine state unreadable", ["device": device, "err": error]) }
                 }
@@ -414,6 +435,44 @@ final class VigilRemote: ObservableObject {
                 self.followingMachine[device] = nil
             }
         }
+    }
+
+    /// A Mac's moves as their destination, followed through the hub as its
+    /// state is: each document a line; one that does not read is said and
+    /// dropped, the last one stays drawn.
+    private func followMoves(_ device: String) {
+        guard !stopped, followingMoves[device] == nil, host(device) != nil else { return }
+        let fd: Int32
+        do { fd = try Self.hub.request(.moves(of: device)) } catch {
+            return remoteLog.warn("moves not followed", ["host": host(device)?.name ?? device, "err": error])
+        }
+        followingMoves[device] = fd
+        let pairing = host(device)?.pairing
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let reader = Lines.Reader(fd: fd)
+            while let line = try? reader.next() {
+                do {
+                    let moves = try JSONDecoder().decode([Move.Ticket].self, from: line)
+                    Task { @MainActor [weak self] in
+                        guard let self, self.host(device)?.pairing == pairing else { return }
+                        self.moves(device, moves)
+                    }
+                } catch {
+                    Task { @MainActor in remoteLog.warn("moves unreadable", ["device": device, "err": error]) }
+                }
+            }
+            close(fd)
+            Task { @MainActor [weak self] in
+                guard let self, self.followingMoves[device] == fd else { return }
+                self.followingMoves[device] = nil
+            }
+        }
+    }
+
+    private func moves(_ device: String, _ moves: [Move.Ticket]) {
+        guard let index = hosts.firstIndex(where: { $0.device == device }), hosts[index].moves != moves else { return }
+        hosts[index].moves = moves
+        NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
     private func machine(_ device: String, _ machine: MachineState) {

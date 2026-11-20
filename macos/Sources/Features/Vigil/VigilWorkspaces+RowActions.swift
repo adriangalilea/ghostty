@@ -61,7 +61,7 @@ extension VigilWorkspaces {
         guard let device = home.device else {
             // A birth among them is awaited off the main thread.
             Task { @MainActor in
-                let reply = await self.applySessionCommand(request)
+                let reply = await self.applySessionCommand(request, fromThisApp: true)
                 said(reply.ok ? nil : reply.message)
             }
             return
@@ -76,7 +76,9 @@ extension VigilWorkspaces {
             } catch {
                 problem = "\(mac) did not answer (\(error)). It may have been done: look at its rows before trying again."
             }
-            DispatchQueue.main.async { said(problem) }
+            // A Mac on another Vigil does not know a move's words: said so.
+            let told = request.operation == "move_to" ? problem.map { Move.olderVigil($0, mac: mac) } : problem
+            DispatchQueue.main.async { said(told) }
         }
     }
 

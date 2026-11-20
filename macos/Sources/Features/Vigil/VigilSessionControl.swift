@@ -51,11 +51,11 @@ enum VigilSessionControl {
         var session: String?
         var input: [InputDiagnostic]?
         var status: Status?
-        var released: [String: Bring.TranscriptProof]?
+        var released: [String: Move.TranscriptProof]?
         /// Revisions of the pane writers the source actually retired, captured
         /// before their daemons stopped and retained with the source burial.
         var writerRevisions: [String: String]?
-        var page: Bring.Page?
+        var page: Move.Page?
         var successors: [String: VigilWorkspaces.MoveSuccessor]?
 
         static func failure(_ request: Request?, _ code: String, _ message: String) -> Self {
@@ -182,7 +182,7 @@ enum VigilSessionControl {
     @MainActor private static var underWay: Set<UUID> = []
 
     @MainActor
-    static func transact(_ request: Request) async -> Reply {
+    static func transact(_ request: Request, fromThisApp: Bool = false) async -> Reply {
         guard request.version == 1 else { return .failure(request, "unsupported_version", "Workspace command version 1 is required.") }
         // The rule the hub asks of another device's request, asked of every
         // sender (this Mac's own included).
@@ -256,7 +256,7 @@ enum VigilSessionControl {
             try Durable.create(file, with: encoder.encode(Receipt(request: request, reply: nil)), exclusive: true)
             underWay.insert(request.id)
             defer { underWay.remove(request.id) }
-            let reply = await VigilWorkspaces.shared.applySessionCommand(request)
+            let reply = await VigilWorkspaces.shared.applySessionCommand(request, fromThisApp: fromThisApp)
             do { try Durable.replace(file, with: encoder.encode(Receipt(request: request, reply: reply))) } catch {
                 return .init(id: request.id, ok: false, code: "indeterminate", message: "The command was taken. Its outcome could not be recorded. Check the workspace before acting again.", pane: reply.pane, session: reply.session)
             }

@@ -272,8 +272,11 @@ extension VigilWorkspaces {
     /// awaited before its edit: the main thread runs other work meanwhile,
     /// so the edit is checked against the revision asked for once the pane
     /// runs, and a pane born for an edit that no longer applies is closed.
-    func applySessionCommand(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
-        if request.operation == "bring" { return await bring(request) }
+    /// `fromThisApp`: asked by this app's own process (its sidebar, its
+    /// dialogs), never through the socket: the one fact a move's card names
+    /// the person's own button by.
+    func applySessionCommand(_ request: VigilSessionControl.Request, fromThisApp: Bool = false) async -> VigilSessionControl.Reply {
+        if request.operation == "move_to" { return await orderMove(request, fromThisApp: fromThisApp) }
         if request.operation == "retire_move" {
             return .failure(request, "upgrade_required", "Update the destination and move again. This source requires a handoff before another Mac can open the pane.")
         }
@@ -286,9 +289,23 @@ extension VigilWorkspaces {
             // window only for this Mac's own command line (`vigil new
             // --window`): the hub refuses one from another device.
             guard let asked = request.cwd else { return .failure(request, "invalid_request", "A new workspace names its folder.") }
-            let cwd = (asked as NSString).expandingTildeInPath
+            var cwd = (asked as NSString).expandingTildeInPath
+            var command = request.command
+            // A conversation resumed: its folder and line are this Mac's
+            // vigil-agent's, from where this Mac holds its transcript.
+            if let ref = request.resume {
+                do {
+                    let line = try await Task.detached(priority: .userInitiated) {
+                        try Local.Client(socket: VigilPaths.hub).resumeLine(ref, folder: asked)
+                    }.value
+                    cwd = line.folder
+                    command = line.command
+                } catch {
+                    return .failure(request, "not_here", "This Mac cannot resume that conversation: \(error)")
+                }
+            }
             return birthReply(request, await apiNewWorkspace(label: request.label, emoji: request.emoji, cwd: cwd,
-                                                             command: request.command, openWindow: request.window == true))
+                                                             command: command, openWindow: request.window == true))
         case "new_session":
             // The same guards as any edit anchored on a pane: a
             // late request whose anchor moved or went is refused, never
@@ -489,7 +506,7 @@ extension VigilWorkspaces {
             return Reply(id: request.id, ok: true, code: "committed", message: "Back on its Mac.",
                          revision: workspaces[back]?.layoutRevision, session: back)
         }
-        // Panes of a workspace here that another Mac brought: they close.
+        // Panes of a workspace here that another Mac moved: they close.
         guard var session = workspaces[request.session] else {
             return .failure(request, "not_found", "That workspace no longer exists on its Mac.")
         }
