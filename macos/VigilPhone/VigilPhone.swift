@@ -286,7 +286,6 @@ final class VigilPhone: ObservableObject {
             Task { @MainActor in receipts.info("intent", what, facts) }
         }
         self.intents = intents
-        intents.carry(acts: support.appendingPathComponent("tether/vigil-acts.json")) // PURGE(release C: every device ran release B once)
         Task {
             await intents.run { [weak self] answer in await self?.heard(answer) }
         }
