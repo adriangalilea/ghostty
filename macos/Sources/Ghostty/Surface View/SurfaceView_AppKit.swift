@@ -272,6 +272,12 @@ extension Ghostty {
         /// cannot take it back from another viewport.
         @Published private(set) var vigilWantsSize = false
         @Published private(set) var vigilSizeLost = false
+        /// vigil: its pane shows its conversation over this view, so this
+        /// terminal is not on screen and takes no keys (a key typed into a
+        /// dialog nobody sees is consent nobody gave): it refuses focus,
+        /// drops what reaches it, and hands focus asked of it to `vigilHeldFocus`.
+        private(set) var vigilKeysHeld = false
+        private var vigilHeldFocus: (() -> Void)?
         @Published private(set) var vigilTransportState: UInt8 = 0
         @Published private(set) var vigilInputPending = false
         /// How this Mac's pane stands while this view has no stream to it,
@@ -1213,7 +1219,34 @@ extension Ghostty {
 
         // MARK: - NSView
 
+        /// vigil: holds this view's keys while its pane's conversation covers
+        /// it (`vigilKeysHeld`), giving up the keyboard if it has it. Let go
+        /// with `refocus` (the person turned the pane to its terminal), the
+        /// terminal takes the keyboard back.
+        func vigilHoldKeys(_ held: Bool, refocus: Bool = false, focus: (() -> Void)? = nil) {
+            guard held != vigilKeysHeld else {
+                if held { vigilHeldFocus = focus }
+                return
+            }
+            vigilKeysHeld = held
+            vigilHeldFocus = held ? focus : nil
+            daemonLog.info(held ? "keys held: the conversation covers this terminal" : "keys back: the terminal shows",
+                           ["pane": vigilAttachId ?? "?"])
+            if held, window?.firstResponder === self {
+                window?.makeFirstResponder(nil)
+                focus?()
+            } else if !held, refocus, let window, window.isKeyWindow {
+                window.makeFirstResponder(self)
+            }
+        }
+
         override func becomeFirstResponder() -> Bool {
+            if vigilKeysHeld {
+                // Asked by a landing, a split move, a click that reached it:
+                // the keyboard goes to what is on screen instead.
+                DispatchQueue.main.async { [weak self] in self?.vigilHeldFocus?() }
+                return false
+            }
             let result = super.becomeFirstResponder()
             if result { vigilFocusDidChange(true, reason: "became first responder") }
             return result
@@ -1499,6 +1532,11 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
+            // vigil: a terminal its conversation covers is not on screen.
+            if vigilKeysHeld {
+                daemonLog.warn("key dropped: the conversation covers this terminal", ["pane": vigilAttachId ?? "?"])
+                return
+            }
             if vigilAttachId != nil {
                 vigilKeyEvents &+= 1
                 vigilLastKeyAt = Date().timeIntervalSince1970
@@ -1695,6 +1733,8 @@ extension Ghostty {
         }
 
         override func keyUp(with event: NSEvent) {
+            // vigil: a release is a key too (the kitty protocol reports it).
+            guard !vigilKeysHeld else { return }
             _ = keyAction(GHOSTTY_ACTION_RELEASE, event: event)
         }
 
@@ -1851,6 +1891,7 @@ extension Ghostty {
         }
 
         override func flagsChanged(with event: NSEvent) {
+            guard !vigilKeysHeld else { return }
             let mod: UInt32
             switch event.keyCode {
             case 0x39: mod = GHOSTTY_MODS_CAPS.rawValue
@@ -2542,6 +2583,8 @@ extension Ghostty.SurfaceView: NSTextInputClient {
     func insertText(_ string: Any, replacementRange: NSRange) {
         // We must have an associated event
         guard NSApp.currentEvent != nil else { return }
+        // vigil: a terminal its conversation covers takes no text.
+        guard !vigilKeysHeld else { return }
 
         // We want the string view of the any value
         var chars = ""

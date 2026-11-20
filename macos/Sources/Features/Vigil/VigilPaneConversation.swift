@@ -1,6 +1,8 @@
 import AppKit
+import AuthzProtocol
 import Log
 import SwiftUI
+import VigilHarness
 import VigilWire
 
 let conversationLog = Log.log.scope("conversation")
@@ -8,7 +10,7 @@ let conversationLog = Log.log.scope("conversation")
 /// An agent pane on the Mac shows its conversation or its terminal, as the
 /// phone's pane screen does (`VigilShared/VigilConversation.swift`, the one
 /// implementation of both): the conversation by default, the terminal one
-/// press away, and the person's choice kept per pane while the app runs.
+/// press away, and the person's choice kept per pane across launches.
 /// Which panes run an agent is their facts' word (the glance, while it
 /// speaks for the pane's program): a pane whose agent exits shows its
 /// terminal again, a shell never gets a conversation.
@@ -29,8 +31,11 @@ final class VigilPaneFaces: ObservableObject {
     /// Every pane a view of this app shows that runs an agent, by row id
     /// (this Mac's daemon id, `<tether root>/<id>` for another Mac's).
     @Published private(set) var agents: [String: Agent] = [:]
-    /// The person's choice, by row id; none: the conversation.
-    @Published private(set) var chosen: [String: Face] = [:]
+    /// The panes the person turned to their terminal, by row id; every
+    /// other agent pane shows its conversation. Kept in the app's defaults:
+    /// the choice of a pane outlives a launch, and dies with the pane.
+    @Published private(set) var terminals: Set<String>
+    private static let terminalsKey = "vigil.paneFaces.terminal"
 
     /// The conversations followed, one per pane however many views show it
     /// (a mirror in another window shares it), with how many show it.
@@ -39,6 +44,15 @@ final class VigilPaneFaces: ObservableObject {
     private var pending = false
 
     private init() {
+        // A pane of this Mac no workspace or burial lists any more is gone
+        // for good (ids are never reused): its choice goes with it. Another
+        // Mac's are kept, that Mac's registry is not here to ask.
+        let kept = Set(UserDefaults.standard.stringArray(forKey: Self.terminalsKey) ?? [])
+        let workspaces = VigilWorkspaces.shared
+        let listed = Set(workspaces.workspaces.values.flatMap { $0.tabs.flatMap(\.paneIds) })
+            .union(workspaces.graveyard.values.flatMap { $0.tabs.flatMap(\.paneIds) })
+        terminals = kept.filter { VigilRemote.split($0) != nil || listed.contains($0) }
+        if terminals != kept { UserDefaults.standard.set(Array(terminals).sorted(), forKey: Self.terminalsKey) }
         observer = NotificationCenter.default.addObserver(forName: VigilWorkspaces.stateDidChange, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { VigilPaneFaces.shared.refreshSoon() }
         }
@@ -48,12 +62,14 @@ final class VigilPaneFaces: ObservableObject {
     /// The face `row` shows: nil for a pane that runs no agent.
     func face(of row: String) -> Face? {
         guard agents[row] != nil else { return nil }
-        return chosen[row] ?? .conversation
+        return terminals.contains(row) ? .terminal : .conversation
     }
 
     func show(_ face: Face, of row: String) {
-        guard chosen[row] != face else { return }
-        chosen[row] = face
+        let next = face == .terminal ? terminals.union([row]) : terminals.subtracting([row])
+        guard next != terminals else { return }
+        terminals = next
+        UserDefaults.standard.set(Array(next).sorted(), forKey: Self.terminalsKey)
         conversationLog.info("face", ["pane": row, "face": face.rawValue])
     }
 
@@ -155,15 +171,56 @@ enum VigilPaneConversation {
                 conversationLog.info("reply sent", ["pane": row, "bytes": text.utf8.count, "how": said.words])
                 return said.words
             },
-            // The Mac app is no authz endpoint: a standing request is
-            // answered at the terminal, one press away.
-            authz: nil,
+            // This Mac's pane: its request answered in place through its
+            // broker, which holds the card (`answer.own`, the path Messages
+            // takes; anything above a plain yes opens Authz's own card).
+            // Another Mac's request is that Mac's broker's card: answered
+            // at its terminal until that path crosses the wire.
+            authz: device == nil ? ConversationAuthz(
+                read: { request in await Self.read(request) },
+                answer: { request, decision in await Self.answer(request, decision) },
+                pressedByPerson: { VigilMessageStore.pressedByPerson() }) : nil,
             log: ConversationLog(
                 info: { Log.log.scope($0).info($1, $2) },
                 warn: { Log.log.scope($0).warn($1, $2) },
                 error: { Log.log.scope($0).error($1, $2) }),
             reason: { "\($0)" },
             here: "this Mac")
+    }
+
+    /// A request of this Mac's panes as its broker published it to Authz,
+    /// while it waits there (nil: gone, or the broker does not hold it).
+    private nonisolated static func read(_ request: String) async -> AskRequest? {
+        await Task.detached {
+            do {
+                let response = try HarnessWire.call(RPCRequest("request.read", .object(["request": .string(request)])))
+                guard response.ok else {
+                    conversationLog.info("request not read", ["request": String(request.prefix(8)), "why": response.refusal])
+                    return nil
+                }
+                return try response.value.decode(AskRequest.self)
+            } catch {
+                conversationLog.warn("request not read", ["request": String(request.prefix(8)), "err": error])
+                return nil
+            }
+        }.value
+    }
+
+    /// A person's answer on it, given to its card by the broker.
+    private nonisolated static func answer(_ request: String, _ decision: Decision) async -> ConversationAuthz.Answered {
+        await Task.detached {
+            do {
+                let response = try HarnessWire.call(RPCRequest(
+                    "request.answer", .object(["request": .string(request), "answer": try .from(decision)])))
+                guard response.ok else { return .refused(response.refusal) }
+                let said = (try? response.value.decode(String.self)) ?? "answered"
+                conversationLog.info("request answered here", ["request": String(request.prefix(8)), "said": said])
+                return said == "opened" ? .opened("It needs more than a plain yes: its card is open in Authz.") : .taken
+            } catch {
+                conversationLog.warn("request not answered", ["request": String(request.prefix(8)), "err": error])
+                return .refused("vigil-agent could not be reached (\(error))")
+            }
+        }.value
     }
 
     /// The pane's feed through the hub, dialed again when the hub's stream
@@ -270,8 +327,6 @@ private struct VigilPaneConversationView: View {
                 ConversationView(conversation: conversation, shown: shown, ground: ground) {
                     VigilPaneFaces.shared.show(.terminal, of: row)
                 }
-                .onAppear { if surfaceView.focused { conversation.askReply() } }
-                .onChange(of: surfaceView.focusInstant) { if surfaceView.focused { conversation.askReply() } }
             }
         }
         .environment(\.colorScheme, Self.scheme(of: ground))
@@ -287,8 +342,18 @@ private struct VigilPaneConversationView: View {
             .padding(6)
             .help("Show this pane's terminal instead of its conversation")
         }
-        .onAppear { conversation = VigilPaneFaces.shared.take(row) }
+        .onAppear {
+            let taken = VigilPaneFaces.shared.take(row)
+            conversation = taken
+            // From this moment the terminal under it takes no keys; focus
+            // asked of it goes to the reply box.
+            surfaceView.vigilHoldKeys(true) { taken.askReply() }
+        }
         .onDisappear {
+            // The keyboard goes back to the terminal only when the person
+            // turned the pane to it, never when the view merely left (a tab
+            // switch: another pane has the keyboard then).
+            surfaceView.vigilHoldKeys(false, refocus: VigilPaneFaces.shared.face(of: row) == .terminal)
             VigilPaneFaces.shared.release(row)
             conversation = nil
         }

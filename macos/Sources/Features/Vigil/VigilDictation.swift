@@ -139,7 +139,17 @@ enum VigilDictation {
                 guard let pane = request.pane, let text = request.text else {
                     return send(.refused("type needs a pane and a text"), to: fd)
                 }
-                delivering.async { send(deliver(text, into: pane), to: fd) }
+                // Through the main queue, in order (lines land as they were said).
+                DispatchQueue.main.async { MainActor.assumeIsolated {
+                    // Pinned before its conversation came over it: its
+                    // terminal is not on screen now, so nothing is typed there.
+                    if VigilPaneFaces.shared.face(of: pane) == .conversation {
+                        dictationLog.info("type refused: the pane shows its conversation", ["pane": pane])
+                        DispatchQueue.global(qos: .userInitiated).async { send(.refused("the pane shows its conversation"), to: fd) }
+                        return
+                    }
+                    delivering.async { send(deliver(text, into: pane), to: fd) }
+                } }
             default:
                 send(.refused("unknown op \(request.op)"), to: fd)
             }
@@ -164,6 +174,12 @@ enum VigilDictation {
             return .refused("the pane lives on another Mac")
         }
         guard let pane = surface.vigilAttachId else { return .refused("the surface has no pane") }
+        // Its conversation covers it: utter types into the window instead,
+        // where the reply box has the keyboard.
+        guard !surface.vigilKeysHeld else {
+            dictationLog.info("target: the pane shows its conversation", ["pane": pane])
+            return .refused("the pane shows its conversation")
+        }
         let workspaces = VigilWorkspaces.shared
         let words = workspaces.cortexIdentity(ofPane: pane)?.keywords ?? []
         let workspace = workspaces.workspaceOwning(pane: pane)

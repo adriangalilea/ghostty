@@ -34,7 +34,9 @@ extension Conversation {
             say: { text in try await phone.say(text, to: ref) },
             authz: ConversationAuthz(
                 read: { id in await VigilAuthz.shared.request(device: device, id: id) },
-                answer: { id, decision in await VigilAuthz.shared.answer(device: device, request: id, decision) }),
+                answer: { id, decision in
+                    await VigilAuthz.shared.answer(device: device, request: id, decision).map { .refused($0) } ?? .taken
+                }),
             log: ConversationLog(
                 info: { receipts.info($0, $1, $2) }, warn: { receipts.warn($0, $1, $2) }, error: { receipts.error($0, $1, $2) }),
             reason: { VigilLink.reason($0) },

@@ -55,10 +55,23 @@ struct ConversationSource {
 
 /// A standing request read from its authz home and answered there.
 struct ConversationAuthz {
+    /// What came of an answer given here.
+    enum Answered: Equatable {
+        /// Its home took it.
+        case taken
+        /// It needs more than a plain yes (the owner, a standing yes): its
+        /// card is open in Authz instead, in these words.
+        case opened(String)
+        /// Not answered, and why.
+        case refused(String)
+    }
     /// The request by id (nil: not found, gone, or not readable now).
     let read: @Sendable (String) async -> AskRequest?
-    /// Nil once its home took the answer, else why not.
-    let answer: @Sendable (String, Decision) async -> String?
+    let answer: @Sendable (String, Decision) async -> Answered
+    /// Whether the press being handled now is a person's (on the Mac a
+    /// hardware click, as Authz's own input guard and Messages require),
+    /// read in the button's own turn: a program driving the app answers nothing.
+    var pressedByPerson: @MainActor () -> Bool = { true }
 }
 
 /// How a conversation says what it does: each app's record (the phone's
@@ -186,16 +199,18 @@ final class Conversation: ObservableObject {
         guard let id = live?.request?.id else {
             offer = nil
             answerError = nil
+            answerNote = nil
             return
         }
         guard offer?.request != id else { return }
-        // No authz endpoint here: the terminal answers it.
+        // Nothing here reaches its authz home: the terminal answers it.
         guard let authz = source.authz else {
             offer = (id, .terminal)
             return
         }
         offer = (id, .reading)
         answerError = nil
+        answerNote = nil
         Task {
             let request = await authz.read(id)
             guard live?.request?.id == id else { return }
@@ -220,14 +235,27 @@ final class Conversation: ObservableObject {
     /// Answers the standing request through authz, as its card would.
     func answer(_ decision: Decision) {
         guard let request = offer?.request, !answering, let authz = source.authz else { return }
+        // In the press's own turn, where its event is the one being handled.
+        guard authz.pressedByPerson() else {
+            answerError = "only a click of yours answers it here"
+            source.log.warn("feed", "answer refused: not a person's press", ["pane": pane, "request": String(request.prefix(8))])
+            return
+        }
         answering = true
         answerError = nil
+        answerNote = nil
         Task {
-            let why = await authz.answer(request, decision)
+            switch await authz.answer(request, decision) {
+            case .taken: break
+            case .opened(let words): answerNote = words
+            case .refused(let why): answerError = why
+            }
             answering = false
-            answerError = why
         }
     }
+
+    /// Where an answer went instead of being taken here (its card opened in Authz).
+    @Published private(set) var answerNote: String?
 
     /// Follows the pane's feed until `stop`.
     func start() {
@@ -879,6 +907,7 @@ private struct Composer: View {
     /// The keyboard is up (`KeyboardState`): the box sits on it, and its
     /// own row of ↑ ↓ and hide shows above the text.
     let keyboardUp: Bool
+    @Environment(\.showTerminal) private var showTerminal
     @State private var text = ""
     @FocusState private var focused: Bool
     /// Where ↑ and ↓ stand in what was sent (nil: the box holds the draft).
@@ -925,6 +954,17 @@ private struct Composer: View {
             if let failed = conversation.reply?.failed {
                 Label("Not sent: \(failed)", systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(Hue.care)
+            }
+            // A dialog stands in its terminal that no request here names (a
+            // chooser, a consent): it is answered there, on the person's press.
+            if refusal != nil, conversation.live?.request == nil {
+                HStack(spacing: 8) {
+                    Label("A dialog waits in its terminal", systemImage: AgentState.blocked.symbol)
+                        .font(.footnote.weight(.medium)).foregroundStyle(AgentState.blocked.tint)
+                    Spacer(minLength: 0)
+                    Button { showTerminal() } label: { Label("Show the terminal", systemImage: "terminal") }
+                        .buttonStyle(.ink)
+                }
             }
             // Typing: what was sent, one step at a time, and the keyboard
             // put away. A row of the box itself, never a layer over it.
@@ -1419,6 +1459,8 @@ private struct AnswerBar: View {
                 }
             } else if let why = conversation.answerError {
                 Label("Not answered: \(why)", systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(Hue.care)
+            } else if let note = conversation.answerNote {
+                Label(note, systemImage: "arrow.up.forward.app").font(.footnote).foregroundStyle(.secondary)
             }
         }
         .disabled(conversation.answering)
