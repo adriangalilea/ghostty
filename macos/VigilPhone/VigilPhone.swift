@@ -539,6 +539,7 @@ final class VigilPhone: ObservableObject {
         /// instead of a live terminal. nil: a shell, a command, a Mac whose
         /// broker publishes none; its row is the terminal, as ever.
         var glance: PaneGlance?
+        var restartRecovery: PaneGlance?
         /// A pane's state in the words every surface uses.
         var words: String { alive ? (state ?? .idle).words(flavor) : ended.map { "Ended, \($0.how)" } ?? "Not running" }
         var pane: PaneRef?
@@ -1106,6 +1107,7 @@ final class VigilPhone: ObservableObject {
                                 agent: alive && Program.runsAgent(truth?.tree ?? []),
                                 face: PaneFace.of(emoji: p.emoji, program: alive ? Program.agent(in: truth?.tree ?? []) : nil),
                                 glance: alive ? truth?.meaning : nil,
+                                restartRecovery: truth?.glance?.isRestartRecovery == true ? truth?.glance : nil,
                                 pane: alive ? PaneRef(host: host, pane: p.id, title: path) : nil,
                                 rows: truth?.grid?.rows ?? 0, cols: truth?.grid?.cols ?? 0,
                                 sizeOwner: truth?.owner ?? "",

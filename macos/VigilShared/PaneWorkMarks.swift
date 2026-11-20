@@ -74,20 +74,23 @@ struct PaneProblemItem: Identifiable {
     func send(_ intent: Restart.Intent, to item: PaneProblemItem) {
         guard let request = item.restart, receipt(item)?.sending != true else { return }
         let key = item.operationID
-        var r = Receipt(note: item.subject.note, status: .working(intent == .cancel ? "Cancelling restart…" : "Requesting restart…"))
+        var r = Receipt(note: item.subject.note, status: .working(Restart(intent).cancellation != nil ? "Cancelling restart…" : "Requesting restart…"))
         receipts[key] = r
         Task {
             do {
                 let answer = try await request(Restart(intent))
                 switch answer.outcome {
                 case .restarting: r.status = .working("Restarting the agent…")
-                case .armed: r.status = .waiting(answer.said)
+                case .armed:
+                    r.status = .waiting(answer.said)
+                    r.next = answer.scheduleID.map(Restart.Intent.cancel)
                 case .busy:
                     r.status = .waiting(answer.said)
-                    if let token = answer.confirmation { r.next = .confirm(token) }
-                    else if intent != .whenIdle && answer.canSchedule == true { r.next = .whenIdle }
+                    if intent != .whenIdle && answer.canSchedule == true { r.next = .whenIdle }
                     else { r.canDismiss = true }
-                case .refused: r.status = .failed(answer.said); r.next = intent == .cancel ? nil : .now
+                case .refused:
+                    r.status = .failed(answer.said)
+                    if Restart(intent).cancellation != nil { r.canDismiss = true } else { r.next = .now }
                 case .cancelled: r.status = .succeeded(answer.said); r.canDismiss = true
                 }
             } catch {
@@ -152,7 +155,8 @@ struct PaneProblemsMark: View {
         let affected = restartItems
         let folded = oneRestartProblem && affected.count > 1
         let title = folded && item.problem.kind == .receiver ? "\(affected.count) panes can’t receive messages" : item.problem.title
-        let detail = folded ? nil : item.subject.title
+        let showReceipt = [.restartFailed, .restarting, .restarted].contains(item.problem.kind)
+        let detail = showReceipt ? item.problem.says : folded ? nil : item.subject.title
         let panel = InkActionPanel(title, detail: detail,
             tone: statusOnly ? .ok : item.writers == .both || item.problem.kind == .twoLive ? .bad : .warn,
             actions: actions(item), style: statusOnly ? .status : .problem)
@@ -168,6 +172,7 @@ struct PaneProblemsMark: View {
                 }
             }, in: "Affected panes", count: { "\($0) panes" })
         }
+        if showReceipt { return panel }
         return panel.details("Details") {
             VStack(alignment: .leading, spacing: .inkGap) {
                 Text(item.problem.says).inkText(.body)
@@ -201,9 +206,7 @@ struct PaneProblemsMark: View {
             var next: [InkHUD.Action] = []
             if let intent = r.next {
                 switch intent {
-                case .confirm:
-                    next = [.init("Keep running") { feedback.forget(item.operationID) },
-                            .init("Restart now", destructive: true) { feedback.send(intent, to: item) }]
+                case .cancel: next = [command("Cancel restart", intent)]
                 case .whenIdle: next = [command("Restart when idle", intent)]
                 default: next = [command("Retry", intent)]
                 }
@@ -216,7 +219,9 @@ struct PaneProblemsMark: View {
         if let note = item.subject.note {
             switch note.state {
             case .ending: return .feedback(.working(note.said), actions: alongside)
-            case .armed: return .feedback(.waiting(note.said), actions: [command("Cancel restart", .cancel)] + alongside)
+            case .armed:
+                let cancel = note.scheduleID.map { command("Cancel restart", .cancel($0)) }
+                return .feedback(.waiting(note.said), actions: [cancel].compactMap { $0 } + alongside)
             case .notRun: return .feedback(.failed(note.said), actions: [command("Retry", .now)] + alongside)
             case .ran: return .feedback(.waiting(note.said), actions: alongside)
             }

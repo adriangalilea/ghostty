@@ -630,7 +630,7 @@ private struct PhonePaneProblems: View {
         leaves.flatMap { leaf -> [PaneProblemItem] in
             guard let id = leaf.followPane, let host = model.host(of: leaf) else { return [] }
             let ref = leaf.pane ?? PaneRef(host: host, pane: id, title: leaf.path ?? leaf.title)
-            let glance = leaf.glance
+            let glance = leaf.glance ?? leaf.restartRecovery
             let writers = glance.flatMap { g in g.conversation.flatMap { model.writerProblems[ConversationRef(agent: g.agent, id: $0)] } }
             let subject = PaneProblemItem.Subject(key: host.id + "/" + id, title: leaf.title, face: leaf.face,
                                                   state: leaf.state, conversation: glance?.conversation, note: glance?.restart)
