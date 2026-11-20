@@ -51,11 +51,11 @@ enum VigilSessionControl {
         var session: String?
         var input: [InputDiagnostic]?
         var status: Status?
-        var released: [String: Bring.TranscriptProof]?
+        var released: [String: Move.TranscriptProof]?
         /// Revisions of the pane writers the source actually retired, captured
         /// before their daemons stopped and retained with the source burial.
         var writerRevisions: [String: String]?
-        var page: Bring.Page?
+        var page: Move.Page?
         var successors: [String: VigilWorkspaces.MoveSuccessor]?
 
         static func failure(_ request: Request?, _ code: String, _ message: String) -> Self {

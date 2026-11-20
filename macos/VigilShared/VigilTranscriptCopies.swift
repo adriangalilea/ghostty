@@ -74,7 +74,7 @@ struct VigilTranscriptCopyReport: View {
     }
 }
 
-/// The destination's row in Bring Here is the same observation shown in details.
+/// The destination's row in Move To This Mac is the same observation shown in details.
 struct VigilTranscriptCopyRow: View {
     let row: TranscriptProgress
 
