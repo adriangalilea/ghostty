@@ -96,20 +96,14 @@ struct VigilChatHost {
 
 /// The Messages list (CHATS.md, decided 2026-11-19): every conversation
 /// once, and a picker at its foot, All or one agent; opened from somewhere
-/// specific (`only`) it lands filtered there. What the Mac's window, its
-/// bar and the phone each list.
+/// specific it lands filtered there. `only` is its host's, so whoever opens
+/// it (a pane's hand, envelope or menu on the Mac) says which agent. What
+/// the Mac's window, its bar and the phone each list.
 struct VigilThreadList: View {
     let threads: [MessageThread]
     let people: VigilChatPeople
     @Binding var selection: String?
-    @State private var only: String?
-
-    init(threads: [MessageThread], people: VigilChatPeople, selection: Binding<String?>, only: String? = nil) {
-        self.threads = threads
-        self.people = people
-        _selection = selection
-        _only = State(initialValue: only)
-    }
+    @Binding var only: String?
 
     /// The agent a pane's end names, by Mac and pane.
     static func end(_ key: MessageThread.Key) -> String { "\(key.root)/\(key.pane)" }
@@ -142,6 +136,9 @@ struct VigilChat: View {
     let threads: [MessageThread]
     let host: VigilChatHost
     @Binding var chosen: String?
+    /// Whose conversations the list shows: opened from nothing in
+    /// particular, all.
+    @State private var only: String?
 
     var body: some View {
         let thread = threads.first { $0.id == chosen }
@@ -151,7 +148,7 @@ struct VigilChat: View {
             detail: thread.map { VigilThreadWords.detail($0, people: people) },
             open: thread != nil
         ) {
-            VigilThreadList(threads: threads, people: people, selection: $chosen)
+            VigilThreadList(threads: threads, people: people, selection: $chosen, only: $only)
         } conversation: {
             if let thread {
                 VigilThreadConversation(key: thread.key, thread: thread, people: people, host: host)
@@ -178,11 +175,13 @@ struct VigilThreadColumn: View {
     let key: MessageThread.Key
     let thread: MessageThread?
     let host: VigilChatHost
+    /// The message it opens on (`VigilMessageStore.focus`): a pressed hand's.
+    var focus: String? = nil
 
     var body: some View {
         let people = VigilChatPeople(threads: thread.map { [$0] } ?? [], host: host)
         InkChat.Column(title: people.title(of: key), detail: thread.map { VigilThreadWords.detail($0, people: people) }) {
-            VigilThreadConversation(key: key, thread: thread, people: people, host: host)
+            VigilThreadConversation(key: key, thread: thread, people: people, host: host, focus: focus)
         }
     }
 }
@@ -399,6 +398,9 @@ struct VigilThreadConversation: View {
     let thread: MessageThread?
     let people: VigilChatPeople
     let host: VigilChatHost
+    /// The message it opens on, scrolled to and marked while it waits on the
+    /// person (InkConversation's `focus`); nil, its newest.
+    var focus: String? = nil
 
     @State private var draft = ""
     @State private var replying: String?
@@ -423,7 +425,7 @@ struct VigilThreadConversation: View {
     var body: some View {
         let messages = thread.map { VigilThreadWords.messages($0, people: people) } ?? []
         InkConversation(
-            messages, people: people.all, me: Message.you, unread: thread?.firstUnread, acts: acts(messages)
+            messages, people: people.all, me: Message.you, unread: thread?.firstUnread, focus: focus, acts: acts(messages)
         ) { message in
             VStack(alignment: .leading, spacing: 6) {
                 VigilMessageWords(
