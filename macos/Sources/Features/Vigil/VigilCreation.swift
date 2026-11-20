@@ -74,6 +74,15 @@ final class VigilCreation: ObservableObject, CreationModel {
         return try JSONDecoder().decode(ConversationAnswer<[ConversationRow]>.self, from: data).value
     }
 
+    func startCheck(_ ask: StartCheck.Ask, onMac id: String) async throws -> StartCheck.Answer {
+        let here = id == Self.here
+        let data = try await Task.detached(priority: .userInitiated) {
+            let hub = Local.Client(socket: VigilPaths.hub)
+            return here ? try hub.here(.startCheck(ask)) : try hub.call(device: id, .startCheck(ask))
+        }.value
+        return try JSONDecoder().decode(StartCheck.Answer.self, from: data)
+    }
+
     func move(_ card: ConversationRow, running holding: Holding, toMac id: String) {
         guard let pane = holding.pane else {
             creationProblem = "It runs \(holding.how.words) on \(holding.mac), in no pane: it cannot be moved from here."

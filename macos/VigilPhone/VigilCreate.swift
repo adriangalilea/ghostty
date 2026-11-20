@@ -137,6 +137,11 @@ extension VigilPhone: CreationModel {
         return try JSONDecoder().decode(ConversationAnswer<[ConversationRow]>.self, from: data).value
     }
 
+    func startCheck(_ ask: StartCheck.Ask, onMac id: String) async throws -> StartCheck.Answer {
+        let data = try await VigilLink.call(linked(), device: id, .startCheck(ask))
+        return try JSONDecoder().decode(StartCheck.Answer.self, from: data)
+    }
+
     func move(_ card: ConversationRow, running holding: Holding, toMac id: String) {
         guard let pane = holding.pane, let source = hosts.first(where: { $0.name == holding.mac }),
               let target = hosts.first(where: { $0.id == id }), let directory = directories[source.id],

@@ -72,6 +72,8 @@ protocol CreationModel: ObservableObject {
     /// Every conversation the Mac `id` knows of, its own and the copies
     /// another Mac's sync left there, as its conversation engine lists them.
     func conversations(onMac id: String) async throws -> [ConversationRow]
+    /// What the Mac `id` lacks for it (`Open.startCheck`, answered there).
+    func startCheck(_ ask: StartCheck.Ask, onMac id: String) async throws -> StartCheck.Answer
     /// The move of the pane that runs `card` (`holding`) to the Mac `id`.
     func move(_ card: ConversationRow, running holding: Holding, toMac id: String)
 }
@@ -94,6 +96,16 @@ struct NewWorkspaceSheet<Model: CreationModel>: View {
     @State private var cards: [ConversationRow]?
     @State private var cardsProblem: String?
     @State private var search = ""
+    /// The chosen Mac's answer for what is chosen now, and for which ask.
+    @State private var checked: (ask: StartCheck.Ask, answer: StartCheck.Answer)?
+    @State private var checkProblem: String?
+
+    private var checkAsk: StartCheck.Ask {
+        if let resuming { return StartCheck.Ask(folder: resuming.folder ?? "~", resume: resuming.ref) }
+        let program = chosenCommand?.split(separator: " ").first.map(String.init)
+        return StartCheck.Ask(folder: chosenFolder, program: program)
+    }
+    private var answer: StartCheck.Answer? { checked?.ask == checkAsk ? checked?.answer : nil }
 
     private var mac: CreationMac? { model.creationMacs.first { $0.id == macId } }
     private var chosenFolder: String {
@@ -121,11 +133,13 @@ struct NewWorkspaceSheet<Model: CreationModel>: View {
     private var problem: String? {
         guard let mac else { return "Choose a Mac." }
         guard mac.reachable else { return "\(mac.name) can't be reached right now." }
-        // Listed by the chosen Mac's own engine, so it knows the history; if
-        // its transcript is not there yet, that Mac says so at Create.
         if resuming != nil, let writer {
             return "It runs on \(writer.mac) (\(writer.how.words)): move it here instead of a second writer."
         }
+        // Every check answered before Create, each fact as it arrives.
+        if let checkProblem { return "\(mac.name) did not say what it lacks: \(checkProblem)" }
+        guard let answer else { return "Checking \(mac.name)…" }
+        if answer.blocks { return answer.lacks(on: mac.name, program: checkAsk.program).joined(separator: " ") }
         if let why = plan.request.refusal { return why.prefix(1).uppercased() + why.dropFirst() + "." }
         return nil
     }
@@ -176,6 +190,7 @@ struct NewWorkspaceSheet<Model: CreationModel>: View {
             if let startFolder { folder = startFolder }
         }
         .task(id: macId) { await readCards() }
+        .task(id: [macId ?? "", checkAsk.folder, checkAsk.program ?? "", checkAsk.resume?.id ?? ""]) { await check() }
         .onChange(of: macId) { old, _ in
             if old != nil { folder = "~"; resuming = nil }
         }
@@ -193,6 +208,22 @@ struct NewWorkspaceSheet<Model: CreationModel>: View {
     private func cardDetail(_ card: ConversationRow) -> String {
         let place = card.holdings.first.map { "\($0.how.words) · \($0.mac)" } ?? "nowhere"
         return [card.folder.map(Create.caption), place].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// The chosen Mac asked what it lacks for what is chosen now; a newer
+    /// choice supersedes it (the task is cancelled).
+    private func check() async {
+        checkProblem = nil
+        guard let macId else { return }
+        let ask = checkAsk
+        do {
+            let answer = try await model.startCheck(ask, onMac: macId)
+            guard !Task.isCancelled else { return }
+            checked = (ask, answer)
+        } catch {
+            guard !Task.isCancelled else { return }
+            checkProblem = "\(error)"
+        }
     }
 
     private func readCards() async {
@@ -285,6 +316,11 @@ struct NewWorkspaceSheet<Model: CreationModel>: View {
                 Text(problem).font(.caption).foregroundStyle(.orange).multilineTextAlignment(.center)
                 if let writer, let resuming, let macId {
                     Button("Move It to \(mac?.name ?? "this Mac")…") { model.move(resuming, running: writer, toMac: macId) }
+                }
+            } else if let answer, let mac {
+                // What it lacks that does not stop it (a folder that is gone).
+                ForEach(answer.lacks(on: mac.name, program: checkAsk.program), id: \.self) {
+                    Text($0).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 }
             }
             HStack {
