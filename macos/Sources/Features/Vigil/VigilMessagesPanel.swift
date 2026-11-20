@@ -93,6 +93,19 @@ final class VigilMessageStore: ObservableObject {
         MessageThreads.pane(mailboxes, root: key.root, pane: key.pane, conversation: key.conversation)
     }
 
+    /// The message a press on a pane's waiting hand asked to be shown, by
+    /// Mac and pane (`MessageThread.firstAwaitingYou`).
+    @Published private(set) var asked: [String: String] = [:]
+
+    func show(_ message: String?, on key: MessageThread.Key) { asked["\(key.root)/\(key.pane)"] = message }
+
+    /// What a pane's thread opens on: the message asked for, while it still
+    /// waits on the person; answered, nothing is marked.
+    func focus(_ key: MessageThread.Key) -> String? {
+        guard let id = asked["\(key.root)/\(key.pane)"] else { return nil }
+        return paneThread(key)?.items.first { $0.id == id && $0.record.awaitsYou }?.id
+    }
+
     /// A thread's key for a pane row: its Mac, the pane, the conversation it holds.
     func key(paneId: String?, id: String, conversation: String?) -> MessageThread.Key? {
         if let paneId { return here.map { MessageThread.Key(root: $0, pane: paneId, conversation: conversation) } }
@@ -292,7 +305,28 @@ final class VigilMessageStore: ObservableObject {
             mention: { call, root in try await Self.mention(call, root: root, here: here) },
             openFile: { file, key in
                 VigilFilePanel.show(file, beside: key.root == here ? key.pane : "\(key.root)/\(key.pane)")
-            })
+            },
+            pressedByPerson: { Self.pressedByPerson() })
+    }
+
+    /// Whether the event being handled is a person's click: a mouse button
+    /// event no process posted (a hardware click carries poster 0, as Authz's
+    /// `InputGuard` measured), dispatched within the last second. An
+    /// accessibility press dispatches no event, so what AppKit holds then is
+    /// an older one, or none, and it is refused, logged.
+    @MainActor static func pressedByPerson() -> Bool {
+        guard let event = NSApp.currentEvent else {
+            messagesLog.warn("press refused: no event (an accessibility action)")
+            return false
+        }
+        let clicks: Set<NSEvent.EventType> = [.leftMouseDown, .leftMouseUp]
+        let poster = event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? -1
+        let age = ProcessInfo.processInfo.systemUptime - event.timestamp
+        guard clicks.contains(event.type), poster == 0, age < 1 else {
+            messagesLog.warn("press refused: not a person's click", ["event": "\(event.type.rawValue)", "poster": poster, "age": age])
+            return false
+        }
+        return true
     }
 
     /// An ask about the files a message names, of the Mac they are on: this
@@ -447,22 +481,37 @@ enum VigilMessagesPanel {
         messagesLog.info("messages opened", ["where": "window"])
     }
 
-    /// A pane row's envelope or its menu's Messages: the bar's Messages on
-    /// the pane's thread (which opens it), or, for a pane nothing was said
-    /// to yet, its empty thread beside it. `id`: the row's pane id, a local
-    /// daemon id or `<tether root>/id` for another Mac's.
-    static func show(paneId: String?, id: String, conversation: String?, in controller: TerminalController?) {
+    /// A pane row's waiting hand, its envelope or its menu's Messages: the
+    /// pane in the window and its thread beside it, the bar's Messages
+    /// filtered to that pane's agent (opened from somewhere specific, it
+    /// lands there), its conversation chosen in the list. `waiting`: the
+    /// messages a pressed hand counts; the thread opens on the first of them
+    /// that still waits on the person, scrolled to and marked, instead of at
+    /// its end. `id`: the row's pane id, a local daemon id or
+    /// `<tether root>/id` for another Mac's.
+    static func show(
+        paneId: String?, id: String, conversation: String?, waiting: Set<String> = [], in controller: TerminalController?
+    ) {
         let store = VigilMessageStore.shared
         guard let key = store.key(paneId: paneId, id: id, conversation: conversation) else {
             return messagesLog.warn("messages: this Mac's mailbox has not answered yet", ["pane": id])
         }
         guard let controller else { return messagesLog.warn("messages: no window to show them in", ["pane": id]) }
-        if let thread = thread(of: key) {
-            VigilBars.shared.showMessages(thread: thread.id, in: controller)
-        } else {
-            store.open(root: key.root, pane: key.pane, in: controller)
-            DispatchQueue.main.async { aside(key: key, in: controller) }
+        let focus = store.paneThread(key)?.firstAwaitingYou(among: waiting)
+        store.show(focus, on: key)
+        VigilBars.shared.showMessages(showing: VigilThreadList.end(key), listing: conversation(of: key)?.id, in: controller)
+        store.open(root: key.root, pane: key.pane, in: controller)
+        DispatchQueue.main.async { aside(key: key, in: controller) }
+        messagesLog.info("messages opened from a pane", ["pane": id, "on": focus.map { String($0.prefix(8)) } ?? "its end"])
+    }
+
+    /// The conversation the list draws for a pane: one of its two ends, the
+    /// conversation it holds first.
+    static func conversation(of key: MessageThread.Key) -> MessageThread? {
+        let ends = VigilMessageStore.shared.conversations.filter { thread in
+            [thread.key, thread.with].compactMap { $0 }.contains { $0.root == key.root && $0.pane == key.pane }
         }
+        return ends.first { [$0.key, $0.with].compactMap { $0 }.contains(key) } ?? ends.first
     }
 
     /// The pane's thread: the conversation it holds, else the pane's newest.
@@ -571,7 +620,7 @@ private struct VigilMessagesAside: View {
             if let sidebar { VigilThreadPlace(key: key, sidebar: sidebar, here: store.here) }
             // The pane's every thread: what its row mark counts, so opening
             // it is what clears the mark.
-            VigilThreadColumn(key: key, thread: store.paneThread(key), host: store.host)
+            VigilThreadColumn(key: key, thread: store.paneThread(key), host: store.host, focus: store.focus(key))
         }
     }
 }
@@ -639,6 +688,7 @@ struct VigilSidebarThreads: View {
         let threads = store.conversations
         let people = VigilChatPeople(threads: threads, host: store.host)
         VigilThreadList(
-            threads: threads, people: people, selection: Binding(get: { model.thread }, set: { model.choose(thread: $0) }))
+            threads: threads, people: people, selection: Binding(get: { model.thread }, set: { model.choose(thread: $0) }),
+            only: $model.showing)
     }
 }

@@ -540,6 +540,9 @@ struct VigilSidebarView: View {
                 Button {
                     VigilWorkspaces.shared.newWorkspace(on: device)
                 } label: { Label("New Workspace", systemImage: "plus.square.on.square") }
+                Button {
+                    VigilCreation.shared.present(on: device)
+                } label: { Label("New Workspace or Resume…", systemImage: "folder.badge.plus") }
                 if let machine = host.machine {
                     Divider()
                     ForEach(Array(machine.facts.enumerated()), id: \.offset) { _, fact in
@@ -1336,9 +1339,12 @@ struct VigilSidebarView: View {
         HStack(spacing: marks.gap) {
 
             // Messages waiting on your yes, to it or from it: a press opens
-            // its thread, where each is answered on its message.
-            WaitingMark(messages: messages.awaiting(paneId: pane.paneId, id: pane.id), sizes: marks) {
-                VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, in: model.hostController)
+            // its thread on the first of them, where each is answered on its
+            // message.
+            let waiting = messages.awaiting(paneId: pane.paneId, id: pane.id)
+            WaitingMark(messages: waiting, sizes: marks) {
+                VigilMessagesPanel.show(
+                    paneId: pane.paneId, id: pane.id, conversation: pane.conversation, waiting: waiting, in: model.hostController)
             }
             // Messages for it that wait on its agent, or that you have not
             // read: a press opens its thread in the bar's Messages.

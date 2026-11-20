@@ -267,6 +267,10 @@ final class VigilPhone: ObservableObject {
     private var watches: [String: Task<Void, Never>] = [:]
     /// Each Mac's `follows` stream: what this phone follows there, as it changes.
     private var followWatches: [String: Task<Void, Never>] = [:]
+    /// Each Mac's moves as their destination publishes them (`Open.moves`),
+    /// drawn on the moving workspace's row (`Move.note`).
+    private var movesWatches: [String: Task<Void, Never>] = [:]
+    private(set) var moves: [String: [Move.Ticket]] = [:] { didSet { rebuildTree() } }
 
     private init() {
         TerminalSurface.report = { [weak self] message, fields in
@@ -352,6 +356,11 @@ final class VigilPhone: ObservableObject {
             }
             VigilPhoneMessages.shared.macs(continuing)
             VigilPhoneWatches.shared.macs(continuing)
+            for (id, task) in movesWatches where !continuing.contains(id) {
+                task.cancel()
+                movesWatches[id] = nil
+            }
+            moves = moves.filter { continuing.contains($0.key) }
         }
         for host in hosts {
             readKept(host)
@@ -400,6 +409,21 @@ final class VigilPhone: ObservableObject {
                 }
                 guard !Task.isCancelled else { return }
                 self?.followWatches[host.id] = nil
+            }
+        }
+        if movesWatches[host.id] == nil, let node {
+            let lines = VigilLink.movesLines(node, device: host.id)
+            movesWatches[host.id] = Task { [weak self] in
+                for await line in lines {
+                    guard case .line(let raw) = line else { continue }
+                    guard let tickets = try? JSONDecoder().decode([Move.Ticket].self, from: raw) else {
+                        self?.receipts.warn("move", "tickets unreadable", ["mac": host.name])
+                        continue
+                    }
+                    if self?.moves[host.id] != tickets { self?.moves[host.id] = tickets }
+                }
+                guard !Task.isCancelled else { return }
+                self?.movesWatches[host.id] = nil
             }
         }
         guard watches[host.id] == nil, let node else { return }
@@ -734,18 +758,21 @@ final class VigilPhone: ObservableObject {
         /// `Fork`): a split beside it (`direction`), or a tab of its own.
         /// Its Mac starts it from its own record; nothing is named here.
         case fork(of: String, direction: String?)
+        /// A workspace whose pane resumes a conversation: its Mac builds the
+        /// line from where it holds the transcript; nothing is named here.
+        case resume(ConversationRef, folder: String, label: String?)
 
         var command: String? {
             switch self {
             case .workspace(_, let command, _), .tab(_, let command), .split(_, _, let command): command
-            case .fork: nil
+            case .fork, .resume: nil
             }
         }
 
         /// What it is, in the words a receipt and the progress line use.
         var noun: String {
             switch self {
-            case .workspace: "workspace"
+            case .workspace, .resume: "workspace"
             case .tab: "tab"
             case .split: "pane"
             case .fork: "fork"
@@ -789,6 +816,8 @@ final class VigilPhone: ObservableObject {
         switch birth {
         case .workspace(let cwd, let command, let label):
             request = .create(cwd: cwd, command: command, label: label)
+        case .resume(let ref, let folder, let label):
+            request = .create(resuming: ref, folder: folder, label: label)
         case .tab(let anchor, _), .split(let anchor, _, _), .fork(let anchor, _):
             guard let place = directories[host.id]?.place(of: anchor) else {
                 throw CreateError.unplaced("That pane is no longer in a workspace on \(host.name).")
@@ -1051,6 +1080,9 @@ final class VigilPhone: ObservableObject {
                 let sid = "\(host.id)/\(s.name)"
                 var sess = Node(id: sid, kind: .workspace, title: s.label, emoji: s.emoji,
                                 anchor: tabs.last?.panes.first?.id)
+                // A move of it being decided or done, its destination's word.
+                sess.subtitle = Move.note(workspace: s.name, source: host.id,
+                                          destinations: hosts.map { (name: $0.name, tickets: moves[$0.id] ?? []) })
                 let docked = Set(tabs.flatMap { $0.dock?.panes.map(\.id) ?? [] })
                 func paneNode(_ p: Registry.Pane) -> Node {
                     let truth = dir.panes[p.id]

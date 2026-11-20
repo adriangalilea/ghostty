@@ -76,6 +76,11 @@ struct VigilChatHost {
     /// pane of the thread it was pressed in (`key`). Nil: the conversation
     /// pushes its page itself (the phone).
     var openFile: (@MainActor (_ file: VigilMentionedFile, _ key: MessageThread.Key) -> Void)? = nil
+    /// Whether the press being handled now is a person's: on the Mac, a
+    /// hardware click (no posted event, no accessibility action), which an
+    /// answer on a request needs, as Authz's own input guard does
+    /// (authz.space SECURITY-REVIEW.md). Read inside the button's action.
+    var pressedByPerson: @MainActor () -> Bool = { true }
 
     /// Whether a folder on the Mac `root` can be shown here: revealed in
     /// this Mac's Finder, so only this Mac's own.
@@ -96,20 +101,14 @@ struct VigilChatHost {
 
 /// The Messages list (CHATS.md, decided 2026-11-19): every conversation
 /// once, and a picker at its foot, All or one agent; opened from somewhere
-/// specific (`only`) it lands filtered there. What the Mac's window, its
-/// bar and the phone each list.
+/// specific it lands filtered there. `only` is its host's, so whoever opens
+/// it (a pane's hand, envelope or menu on the Mac) says which agent. What
+/// the Mac's window, its bar and the phone each list.
 struct VigilThreadList: View {
     let threads: [MessageThread]
     let people: VigilChatPeople
     @Binding var selection: String?
-    @State private var only: String?
-
-    init(threads: [MessageThread], people: VigilChatPeople, selection: Binding<String?>, only: String? = nil) {
-        self.threads = threads
-        self.people = people
-        _selection = selection
-        _only = State(initialValue: only)
-    }
+    @Binding var only: String?
 
     /// The agent a pane's end names, by Mac and pane.
     static func end(_ key: MessageThread.Key) -> String { "\(key.root)/\(key.pane)" }
@@ -142,6 +141,9 @@ struct VigilChat: View {
     let threads: [MessageThread]
     let host: VigilChatHost
     @Binding var chosen: String?
+    /// Whose conversations the list shows: opened from nothing in
+    /// particular, all.
+    @State private var only: String?
 
     var body: some View {
         let thread = threads.first { $0.id == chosen }
@@ -151,7 +153,7 @@ struct VigilChat: View {
             detail: thread.map { VigilThreadWords.detail($0, people: people) },
             open: thread != nil
         ) {
-            VigilThreadList(threads: threads, people: people, selection: $chosen)
+            VigilThreadList(threads: threads, people: people, selection: $chosen, only: $only)
         } conversation: {
             if let thread {
                 VigilThreadConversation(key: thread.key, thread: thread, people: people, host: host)
@@ -178,11 +180,13 @@ struct VigilThreadColumn: View {
     let key: MessageThread.Key
     let thread: MessageThread?
     let host: VigilChatHost
+    /// The message it opens on (`VigilMessageStore.focus`): a pressed hand's.
+    var focus: String? = nil
 
     var body: some View {
         let people = VigilChatPeople(threads: thread.map { [$0] } ?? [], host: host)
         InkChat.Column(title: people.title(of: key), detail: thread.map { VigilThreadWords.detail($0, people: people) }) {
-            VigilThreadConversation(key: key, thread: thread, people: people, host: host)
+            VigilThreadConversation(key: key, thread: thread, people: people, host: host, focus: focus)
         }
     }
 }
@@ -399,6 +403,9 @@ struct VigilThreadConversation: View {
     let thread: MessageThread?
     let people: VigilChatPeople
     let host: VigilChatHost
+    /// The message it opens on, scrolled to and marked while it waits on the
+    /// person (InkConversation's `focus`); nil, its newest.
+    var focus: String? = nil
 
     @State private var draft = ""
     @State private var replying: String?
@@ -423,7 +430,7 @@ struct VigilThreadConversation: View {
     var body: some View {
         let messages = thread.map { VigilThreadWords.messages($0, people: people) } ?? []
         InkConversation(
-            messages, people: people.all, me: Message.you, unread: thread?.firstUnread, acts: acts(messages)
+            messages, people: people.all, me: Message.you, unread: thread?.firstUnread, focus: focus, acts: acts(messages)
         ) { message in
             VStack(alignment: .leading, spacing: 6) {
                 VigilMessageWords(
@@ -562,6 +569,12 @@ struct VigilThreadConversation: View {
 
     /// The person's answer on a message waiting for their yes.
     private func answer(_ act: Message.Act, on id: String) {
+        // Checked in the press's own turn, where its event is the one being
+        // handled: a program driving the app answers nothing.
+        guard host.pressedByPerson() else {
+            answered[id] = "Not answered: only a click of yours answers it here."
+            return
+        }
         let run = host.act, root = root(of: id)
         Task {
             do {
@@ -596,11 +609,13 @@ struct VigilThreadConversation: View {
 /// 2026-11-19: "A request sits on the message it is about … never a detached
 /// bar"), drawn inside its bubble: "Waiting for you" and how long it has
 /// waited, the one mark every surface draws for it, then its answers. It is
-/// answered here or in Authz, whichever comes first; vigil decides and
-/// records it and takes the other down. Refuse; Deliver, this one message,
-/// where its urgency takes a plain yes (`Message.Urgency.requirement`: a
-/// stop is allowed on its card in Authz, owner authenticated); Allow both ways…,
-/// which puts its card up in Authz to give a standing yes for both agents.
+/// answered here or in Authz, whichever comes first, and the other comes
+/// down: on the Mac a press answers its card through authzd (`answer.own`),
+/// only from a person's click (`VigilChatHost.pressedByPerson`). Refuse;
+/// Deliver, this one message, where its urgency takes a plain yes
+/// (`Message.Urgency.requirement`); a stop's Allow in Authz…, which opens
+/// its card in Authz on this Mac for the owner's authentication; Allow both
+/// ways…, which opens its card there to give a standing yes for both agents.
 /// Nothing is offered on an older Mac's records (`answerable`). Once
 /// answered here, what came of it, in the Mac's words.
 struct VigilMessageRequest: View {
@@ -624,8 +639,13 @@ struct VigilMessageRequest: View {
                     HStack(spacing: 8) {
                         Button("Refuse") { act(.refuse(item.id)) }.buttonStyle(.ink)
                         if message.declared.requirement == .ownerAuthenticated {
-                            Text("A stop is allowed on its card in Authz, once the device that shows it is unlocked.")
-                                .inkText(.detail)
+                            #if os(macOS)
+                                // Its card opens in Authz on this Mac, where the owner authenticates.
+                                Button("Allow in Authz…") { act(.allow(item.id)) }.buttonStyle(.ink)
+                            #else
+                                Text("A stop is allowed on its card in Authz, once the device that shows it is unlocked.")
+                                    .inkText(.detail)
+                            #endif
                         } else {
                             if message.from.kind == .agent, message.from.root == nil, message.from.conversation != nil,
                                message.to.conversation != nil {

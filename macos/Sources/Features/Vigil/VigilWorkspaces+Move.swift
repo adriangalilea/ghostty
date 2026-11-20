@@ -2190,7 +2190,7 @@ extension VigilWorkspaces {
                         return lifecycleLog.error("move: the workspace is not listed", ["workspace": workspace, "to": target.name])
                     }
                     manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) { revision in
-                        guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, asker: Self.asker,
+                        guard let order = Move.order(workspace, home: homeDevice, to: target, me: from,
                                                      anchor: anchor, part: part, checkoutRevision: revision) else {
                             return lifecycleLog.error("move: no order", ["workspace": workspace, "to": target.name])
                         }
@@ -2319,7 +2319,7 @@ extension VigilWorkspaces {
         guard model.open() else { return lifecycleLog.error("move: the workspace is not listed", ["workspace": name, "from": host.name]) }
         model.submitMove = { [weak self, weak model] revision in
             guard let self, let model else { return }
-            var request = VigilSessionControl.Request.moveTo(name, from: device, asker: Self.asker, anchor: anchor, part: part,
+            var request = VigilSessionControl.Request.moveTo(name, from: device, anchor: anchor, part: part,
                                                              checkoutRevision: revision)
             request.expectedConversation = expecting ?? model.liveConversation
             let id = request.id
@@ -2350,7 +2350,7 @@ extension VigilWorkspaces {
                 if model.moveNotice != said { model.moveNotice = said }
             }
             Task { @MainActor [weak model] in
-                let reply = await VigilSessionControl.transact(request)
+                let reply = await VigilSessionControl.transact(request, fromThisApp: true)
                 if !reply.ok || reply.code == "copied" { model?.moveNotice = reply.message }
             }
         }
