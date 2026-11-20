@@ -1,3 +1,4 @@
+import AuthzProtocol
 import Foundation
 import GitViews
 import Ink
@@ -597,8 +598,8 @@ struct VigilThreadConversation: View {
 /// waited, the one mark every surface draws for it, then its answers. It is
 /// answered here or in Authz, whichever comes first; vigil decides and
 /// records it and takes the other down. Refuse; Deliver, this one message,
-/// where its urgency takes a plain yes (`allowNeedsPresence`: a stop is
-/// allowed on its card in Authz, with the fingerprint); Allow both ways…,
+/// where its urgency takes a plain yes (`Message.Urgency.requirement`: a
+/// stop is allowed on its card in Authz, owner authenticated); Allow both ways…,
 /// which puts its card up in Authz to give a standing yes for both agents.
 /// Nothing is offered on an older Mac's records (`answerable`). Once
 /// answered here, what came of it, in the Mac's words.
@@ -622,8 +623,9 @@ struct VigilMessageRequest: View {
                 if record.answerable == true {
                     HStack(spacing: 8) {
                         Button("Refuse") { act(.refuse(item.id)) }.buttonStyle(.ink)
-                        if message.declared.allowNeedsPresence {
-                            Text("A stop is allowed on its card in Authz, with your fingerprint.").inkText(.detail)
+                        if message.declared.requirement == .ownerAuthenticated {
+                            Text("A stop is allowed on its card in Authz, once the device that shows it is unlocked.")
+                                .inkText(.detail)
                         } else {
                             if message.from.kind == .agent, message.from.root == nil, message.from.conversation != nil,
                                message.to.conversation != nil {

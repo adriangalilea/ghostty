@@ -1834,7 +1834,7 @@ struct SettingsView: View {
                         }
                     }
                 } header: { Text("Macs") } footer: {
-                    Text("Pairing is approved on the Mac with Touch ID. A paired Mac running vigil shows its workspaces here.")
+                    Text("Pairing is approved on the Mac by its owner. A paired Mac running vigil shows its workspaces here.")
                 }
                 SoundsSection()
                 ReceiptsSection(receipts: model.receipts)
