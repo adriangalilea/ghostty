@@ -218,6 +218,14 @@ final class VigilSidebarModel: ObservableObject {
     /// The thread chosen in Messages (`MessageThread.id`): open in this
     /// window's right bar, its pane in the viewport.
     @Published private(set) var thread: String?
+    /// Whose conversations the list shows: one agent's end
+    /// (`VigilThreadList.end`), or all. Opened from a pane it is that pane's
+    /// agent; opened from the menu bar or a notification, all.
+    @Published var showing: String?
+
+    /// A thread chosen in the list without opening it: the pane that asked
+    /// put itself and its thread in the window already.
+    func list(thread: String?) { self.thread = thread }
 
     /// Choosing a thread opens it: its pane in this window, its thread
     /// beside it (`VigilMessagesPanel.open`).
