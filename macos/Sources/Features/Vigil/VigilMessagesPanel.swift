@@ -305,7 +305,28 @@ final class VigilMessageStore: ObservableObject {
             mention: { call, root in try await Self.mention(call, root: root, here: here) },
             openFile: { file, key in
                 VigilFilePanel.show(file, beside: key.root == here ? key.pane : "\(key.root)/\(key.pane)")
-            })
+            },
+            pressedByPerson: { Self.pressedByPerson() })
+    }
+
+    /// Whether the event being handled is a person's click: a mouse button
+    /// event no process posted (a hardware click carries poster 0, as Authz's
+    /// `InputGuard` measured), dispatched within the last second. An
+    /// accessibility press dispatches no event, so what AppKit holds then is
+    /// an older one, or none, and it is refused, logged.
+    @MainActor static func pressedByPerson() -> Bool {
+        guard let event = NSApp.currentEvent else {
+            messagesLog.warn("press refused: no event (an accessibility action)")
+            return false
+        }
+        let clicks: Set<NSEvent.EventType> = [.leftMouseDown, .leftMouseUp]
+        let poster = event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? -1
+        let age = ProcessInfo.processInfo.systemUptime - event.timestamp
+        guard clicks.contains(event.type), poster == 0, age < 1 else {
+            messagesLog.warn("press refused: not a person's click", ["event": "\(event.type.rawValue)", "poster": poster, "age": age])
+            return false
+        }
+        return true
     }
 
     /// An ask about the files a message names, of the Mac they are on: this
