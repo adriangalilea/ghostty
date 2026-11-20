@@ -697,15 +697,21 @@ struct VigilPaneAskRequest: View {
             if let shell = ask.shell {
                 Text(shell).font(.system(.body, design: .monospaced)).textSelection(.enabled)
             }
-            HStack(spacing: 8) {
-                Button("Refuse") { act(.askRefuse(ask.id)) }.buttonStyle(.ink)
-                #if os(macOS)
-                    Button("Allow in Authz…") { act(.askOpen(ask.id)) }.buttonStyle(.ink)
-                #else
-                    Text("It is allowed on its card in Authz, once this device is unlocked.").inkText(.detail)
-                #endif
+            if ask.authzOnly == true {
+                // Asked by another app than vigil's broker (`vigil drive`):
+                // its card in Authz is where it is answered.
+                Text("Answer it on its card in Authz.").inkText(.detail)
+            } else {
+                HStack(spacing: 8) {
+                    Button("Refuse") { act(.askRefuse(ask.id)) }.buttonStyle(.ink)
+                    #if os(macOS)
+                        Button("Allow in Authz…") { act(.askOpen(ask.id)) }.buttonStyle(.ink)
+                    #else
+                        Text("It is allowed on its card in Authz, once this device is unlocked.").inkText(.detail)
+                    #endif
+                }
+                .focusable(false)
             }
-            .focusable(false)
             if let answered { Text(answered).inkText(.detail) }
         }
         .padding(8)

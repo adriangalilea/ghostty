@@ -220,7 +220,9 @@ final class VigilMessageStore: ObservableObject {
         // A pane's hand counts what vigil asks about it too.
         var awaiting = MessageThreads.awaitingYou(mailboxes)
         for (root, list) in asks {
-            for ask in list { awaiting[root, default: [:]][ask.pane, default: []].insert(ask.id) }
+            for ask in list {
+                for pane in ask.panes { awaiting[root, default: [:]][pane, default: []].insert(ask.id) }
+            }
         }
         if awaiting != marks.awaiting { marks.awaiting = awaiting }
         let due = MessageThreads.forYou(threads)
@@ -316,7 +318,7 @@ final class VigilMessageStore: ObservableObject {
                 VigilFilePanel.show(file, beside: key.root == here ? key.pane : "\(key.root)/\(key.pane)")
             },
             pressedByPerson: { Self.pressedByPerson() },
-            asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.pane == key.pane } ?? [] })
+            asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] })
     }
 
     /// Whether the event being handled is a person's click: a mouse button
