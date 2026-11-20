@@ -28,9 +28,17 @@ final class VigilCreation: ObservableObject, CreationModel {
     }
 
     func recentFolders(onMac id: String) -> [String] {
-        let panes: [(String, Double)] = id == Self.here
-            ? VigilWorkspaces.shared.workspaces.values.flatMap { $0.tabs.flatMap(\.members) }.map { ($0.cwd, 0) }
-            : (directory(id).map { dir in dir.live.flatMap { ($0.tabs ?? []).flatMap(\.members) }.map { ($0.cwd, dir.panes[$0.id]?.since ?? 0) } } ?? [])
+        // Typed in parts: as one expression it outlasts the type checker.
+        let panes: [(String, Double)]
+        if id == Self.here {
+            let members: [Registry.Pane] = VigilWorkspaces.shared.workspaces.values.flatMap { $0.tabs.flatMap(\.members) }
+            panes = members.map { ($0.cwd, 0) }
+        } else if let dir = directory(id) {
+            let members: [Registry.Pane] = dir.live.flatMap { ($0.tabs ?? []).flatMap(\.members) }
+            panes = members.map { pane -> (String, Double) in (pane.cwd, dir.panes[pane.id]?.since ?? 0) }
+        } else {
+            panes = []
+        }
         var latest: [String: Double] = [:]
         for (folder, at) in panes { latest[folder] = max(latest[folder] ?? 0, at) }
         return latest.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
