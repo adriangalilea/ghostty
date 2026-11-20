@@ -512,6 +512,8 @@ struct VigilSidebarView: View {
                         .lineLimit(1)
                         .layoutPriority(-1)
                 }
+                // What waits on your yes on that Mac, each message once.
+                WaitingMark(messages: messages.awaiting(root: device), sizes: marks)
                 // Its power on the rail, in the header's own size; away, what
                 // it last sent, dimmed with the rest of it.
                 if let machine = host.machine {
@@ -1329,6 +1331,11 @@ struct VigilSidebarView: View {
     private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         HStack(spacing: marks.gap) {
 
+            // Messages waiting on your yes, to it or from it: a press opens
+            // its thread, where each is answered on its message.
+            WaitingMark(messages: messages.awaiting(paneId: pane.paneId, id: pane.id), sizes: marks) {
+                VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, in: model.hostController)
+            }
             // Messages for it that wait on its agent, or that you have not
             // read: a press opens its thread in the bar's Messages.
             if let pending = messages.pending(paneId: pane.paneId, id: pane.id) {
@@ -1383,6 +1390,8 @@ struct VigilSidebarView: View {
     private func foldedMarks(_ panes: [VigilWorkspaces.SidebarPane]) -> some View {
         GearsMark(backgrounds: panes.compactMap(\.background), sizes: marks)
 
+        WaitingMark(
+            messages: panes.reduce(into: Set<String>()) { $0.formUnion(messages.awaiting(paneId: $1.paneId, id: $1.id)) }, sizes: marks)
         MessagesMark(pending: panes.compactMap { messages.pending(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         WatchMark(watches: panes.flatMap { watches.watches(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         PaneProblemsMark(items: panes.flatMap(problemItems), sizes: marks)

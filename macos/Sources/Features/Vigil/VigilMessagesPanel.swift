@@ -33,6 +33,9 @@ final class VigilMessageStore: ObservableObject {
     final class Marks: ObservableObject {
         /// Every pane's count (`MessageThreads.pending`), replaced only when it differs.
         @Published fileprivate(set) var pending: [String: [String: MessageThreads.Pending]] = [:]
+        /// The messages waiting on the person's yes, by Mac and pane, on both
+        /// their panes (`MessageThreads.awaitingYou`), replaced only when it differs.
+        @Published fileprivate(set) var awaiting: [String: [String: Set<String>]] = [:]
         @Published fileprivate(set) var here: String?
 
         /// The count a pane row wears: `paneId` for this Mac's, the composite
@@ -41,6 +44,19 @@ final class VigilMessageStore: ObservableObject {
             if let paneId { return here.flatMap { pending[$0]?[paneId] } }
             guard let (device, pane) = VigilRemote.split(id) else { return nil }
             return pending[device]?[pane]
+        }
+
+        /// The messages waiting on the person a pane row's mark counts, by id:
+        /// a fold of rows is the union of theirs.
+        func awaiting(paneId: String?, id: String) -> Set<String> {
+            if let paneId { return here.flatMap { awaiting[$0]?[paneId] } ?? [] }
+            guard let (device, pane) = VigilRemote.split(id) else { return [] }
+            return awaiting[device]?[pane] ?? []
+        }
+
+        /// Every message waiting on the person on one Mac: its header's mark.
+        func awaiting(root: String) -> Set<String> {
+            (awaiting[root] ?? [:]).values.reduce(into: Set<String>()) { $0.formUnion($1) }
         }
     }
     /// What each pane is called, by `root/pane` (`VigilChatPane`), and where
@@ -66,6 +82,9 @@ final class VigilMessageStore: ObservableObject {
     }
 
     var threads: [MessageThread] { MessageThreads.threads(mailboxes) }
+    /// Every conversation listed once (`MessageThreads.conversations`): what
+    /// the Messages list draws.
+    var conversations: [MessageThread] { MessageThreads.conversations(mailboxes) }
     var pendingTotal: Int { marks.pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread + $1.waiting } }
 
     /// A pane's every thread as one: what its aside shows, holding exactly
@@ -179,16 +198,22 @@ final class VigilMessageStore: ObservableObject {
     private func recount() {
         let next = MessageThreads.pending(mailboxes)
         if next != marks.pending { marks.pending = next }
+        let awaiting = MessageThreads.awaitingYou(mailboxes)
+        if awaiting != marks.awaiting { marks.awaiting = awaiting }
         let due = MessageThreads.forYou(threads)
         VigilMessageAlerts.shared.due(due, names: host)
-        if due.count != forYouCount {
-            forYouCount = due.count
+        let waits = awaiting.values.flatMap(\.values).reduce(into: Set<String>()) { $0.formUnion($1) }
+        let needs = Set(due.map(\.item.id)).union(waits).count
+        if needs != forYouCount {
+            forYouCount = needs
             NotificationCenter.default.post(name: Self.forYouDidChange, object: nil)
         }
     }
 
-    /// The messages agents addressed to the person that they have not read
-    /// (`MessageThreads.forYou`): what the Dock's badge and the menu bar count.
+    /// What needs the person in Messages, each once: the messages agents
+    /// addressed to them that they have not read (`MessageThreads.forYou`)
+    /// and the messages waiting on their yes (`MessageThreads.awaitingYou`).
+    /// What the Dock's badge and the menu bar count.
     private(set) var forYouCount = 0
     /// `forYouCount` changed.
     static let forYouDidChange = Notification.Name("vigilMessagesForYouDidChange")
@@ -353,7 +378,9 @@ enum VigilMessagesPanel {
     /// (as a press on its row does), its thread in the right bar beside it.
     static func open(thread id: String, in controller: TerminalController) {
         let store = VigilMessageStore.shared
-        guard let thread = store.threads.first(where: { $0.id == id }) else {
+        // The list is of conversations, each listed once: its first end's
+        // pane goes in the window.
+        guard let thread = store.conversations.first(where: { $0.id == id }) else {
             return messagesLog.warn("messages: that thread is gone", ["thread": id])
         }
         let key = thread.key
@@ -512,7 +539,7 @@ private struct VigilMessagesWindow: View {
     @ObservedObject private var store = VigilMessageStore.shared
 
     var body: some View {
-        VigilChat(threads: store.threads, host: store.host, chosen: $chosen.id)
+        VigilChat(threads: store.conversations, host: store.host, chosen: $chosen.id)
     }
 }
 
@@ -592,19 +619,9 @@ struct VigilSidebarThreads: View {
     @ObservedObject private var store = VigilMessageStore.shared
 
     var body: some View {
-        let threads = store.threads
-        let host = store.host
-        let people = VigilChatPeople(threads: threads, host: host)
-        InkConversations(
-            threads.map { people.summary($0) },
-            selection: Binding(get: { model.thread }, set: { model.choose(thread: $0) }),
-            people: people.all, me: Message.you,
-            picture: { people.picture($0) },
-            empty: {
-                Text("No messages yet. An agent's message to another, or to you (`vigil send you`), starts a thread here.")
-                    .inkText(.detail)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            })
+        let threads = store.conversations
+        let people = VigilChatPeople(threads: threads, host: store.host)
+        VigilThreadList(
+            threads: threads, people: people, selection: Binding(get: { model.thread }, set: { model.choose(thread: $0) }))
     }
 }

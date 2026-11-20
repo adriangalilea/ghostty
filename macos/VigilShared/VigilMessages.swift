@@ -83,6 +83,49 @@ struct VigilChatHost {
     }
 }
 
+/// The Messages list (CHATS.md, decided 2026-11-19): every conversation
+/// once, and a picker at its foot, All or one agent; opened from somewhere
+/// specific (`only`) it lands filtered there. What the Mac's window, its
+/// bar and the phone each list.
+struct VigilThreadList: View {
+    let threads: [MessageThread]
+    let people: VigilChatPeople
+    @Binding var selection: String?
+    @State private var only: String?
+
+    init(threads: [MessageThread], people: VigilChatPeople, selection: Binding<String?>, only: String? = nil) {
+        self.threads = threads
+        self.people = people
+        _selection = selection
+        _only = State(initialValue: only)
+    }
+
+    /// The agent a pane's end names, by Mac and pane.
+    static func end(_ key: MessageThread.Key) -> String { "\(key.root)/\(key.pane)" }
+
+    var body: some View {
+        let ends = Array(Set(threads.flatMap { [$0.key] + [$0.with].compactMap { $0 } }.map(Self.end))).sorted()
+        let shown = only.map { one in threads.filter { Self.end($0.key) == one || $0.with.map(Self.end) == one } } ?? threads
+        VStack(spacing: 0) {
+            InkConversations(
+                shown.map { people.summary($0) }, selection: $selection, people: people.all, me: Message.you,
+                picture: { people.picture($0) },
+                empty: {
+                    Text(only == nil ? "When an agent writes to another agent or to you, it shows here." : "Nothing with this agent yet.")
+                        .inkText(.detail)
+                })
+            if ends.count > 1 {
+                InkSelect(
+                    "Show", selection: $only,
+                    options: [InkSelectOption(String?.none, "All")]
+                        + ends.map { end in InkSelectOption(Optional(end), people.title(ofEnd: end)) },
+                    prompt: "All")
+                .padding(.inkGap)
+            }
+        }
+    }
+}
+
 /// Every thread, and the one chosen beside the list.
 struct VigilChat: View {
     let threads: [MessageThread]
@@ -93,17 +136,11 @@ struct VigilChat: View {
         let thread = threads.first { $0.id == chosen }
         let people = VigilChatPeople(threads: threads, host: host)
         InkChat(
-            title: thread.map { people.title(of: $0.key) },
+            title: thread.map { people.title(of: $0) },
             detail: thread.map { VigilThreadWords.detail($0, people: people) },
             open: thread != nil
         ) {
-            InkConversations(
-                threads.map { people.summary($0) }, selection: $chosen, people: people.all, me: Message.you,
-                picture: { people.picture($0) },
-                empty: {
-                    Text("No messages yet. An agent's message to another, or to you (`vigil send you`), starts a thread here.")
-                        .inkText(.detail)
-                })
+            VigilThreadList(threads: threads, people: people, selection: $chosen)
         } conversation: {
             if let thread {
                 VigilThreadConversation(key: thread.key, thread: thread, people: people, host: host)
@@ -254,10 +291,20 @@ struct VigilChatPeople {
     }
 
     @MainActor func title(of key: MessageThread.Key) -> String { host.name(key.root, key.pane).said }
+    /// A thread's name: its pane's, or both ends' for a conversation between
+    /// two agents, listed once.
+    @MainActor func title(of thread: MessageThread) -> String {
+        thread.with.map { "\(title(of: thread.key)) ↔ \(title(of: $0))" } ?? title(of: thread.key)
+    }
+    /// An end of the list's picker (`VigilThreadList.end`, "root/pane") by name.
+    @MainActor func title(ofEnd end: String) -> String {
+        guard let slash = end.firstIndex(of: "/") else { return end }
+        return host.name(String(end[..<slash]), String(end[end.index(after: slash)...])).said
+    }
 
     @MainActor func summary(_ thread: MessageThread) -> InkChat.Summary {
         let messages = VigilThreadWords.messages(thread, people: self)
-        let read = InkChat.Summary(thread.id, title: title(of: thread.key), messages: messages, me: Message.you)
+        let read = InkChat.Summary(thread.id, title: title(of: thread), messages: messages, me: Message.you)
         // Unread is the thread's own count (its messages for the pane you have
         // not read), never every message after the first of them.
         return InkChat.Summary(
@@ -364,8 +411,15 @@ struct VigilThreadConversation: View {
         InkConversation(
             messages, people: people.all, me: Message.you, unread: thread?.firstUnread, acts: acts(messages)
         ) { message in
-            VigilMessageWords(
-                id: message.id, words: message.words, place: item(message.id)?.mentionPlace, host: host, open: open)
+            VStack(alignment: .leading, spacing: 6) {
+                VigilMessageWords(
+                    id: message.id, words: message.words, place: item(message.id)?.mentionPlace, host: host, open: open)
+                // A request sits on the message it is about (CHATS.md, decided
+                // 2026-11-19), with what came of an answer given here.
+                if let item = item(message.id), item.record.awaitsYou || answered[item.id] != nil {
+                    VigilMessageRequest(item: item, answered: answered[item.id]) { answer($0, on: item.id) }
+                }
+            }
         } picture: {
             people.picture($0)
         } change: { before, after in
@@ -379,7 +433,6 @@ struct VigilThreadConversation: View {
         .onChange(of: thread?.items.filter { $0.record.unread }.map(\.id), initial: true) { markRead() }
         .onChange(of: front) { markRead() }
         .onContinuousHover { _ in markRead() }
-        VigilDeliveryAsks(items: items) { act($0, on: $0.id!) }
         InkComposer(
             text: $draft, prompt: "Message \(people.title(of: key))",
             replying: replying.flatMap { id in messages.first { $0.id == id } }.map { InkChat.Answered($0, people: people.all) },
@@ -489,6 +542,23 @@ struct VigilThreadConversation: View {
         }
     }
 
+    /// What the answer given here on each message came to, in the Mac's own
+    /// words (`Message.Acted.said`): shown on the message, never discarded.
+    @State private var answered: [String: String] = [:]
+
+    /// The person's answer on a message waiting for their yes.
+    private func answer(_ act: Message.Act, on id: String) {
+        let run = host.act, root = root(of: id)
+        Task {
+            do {
+                let acted = try await run(act, root)
+                answered[id] = acted.said
+            } catch {
+                answered[id] = "Not answered: \(error)"
+            }
+        }
+    }
+
     /// What a person had in front of them is read: while the thread is in
     /// front, its pane's unread messages that a hand on this device followed
     /// (`toMarkRead`, the host's seen rule), marked on the Mac that holds
@@ -508,46 +578,56 @@ struct VigilThreadConversation: View {
     }
 }
 
-/// The messages of a thread that wait on the person's yes or no on their
-/// delivery, above the composer: each with how long it has waited and where
-/// it stands (the mailbox's own words, `Record.said`). Refuse; Allow, a plain
-/// yes where its urgency takes one (`allowNeedsPresence`, WIP: a stop is
-/// confirmed on its card in Authz, with the fingerprint); and Allow This
-/// Pair, which puts its card up in Authz where a standing yes is given.
-/// Nothing is offered on an older Mac's records (`answerable`).
-struct VigilDeliveryAsks: View {
-    let items: [MessageThread.Item]
+/// The request on a message waiting for the person's yes (CHATS.md, decided
+/// 2026-11-19: "A request sits on the message it is about … never a detached
+/// bar"), drawn inside its bubble: "Waiting for you" and how long it has
+/// waited, the one mark every surface draws for it, then its answers. It is
+/// answered here or in Authz, whichever comes first; vigil decides and
+/// records it and takes the other down. Refuse; Deliver, this one message,
+/// where its urgency takes a plain yes (`allowNeedsPresence`: a stop is
+/// allowed on its card in Authz, with the fingerprint); Allow both ways…,
+/// which puts its card up in Authz to give a standing yes for both agents.
+/// Nothing is offered on an older Mac's records (`answerable`). Once
+/// answered here, what came of it, in the Mac's words.
+struct VigilMessageRequest: View {
+    let item: MessageThread.Item
+    let answered: String?
     let act: (Message.Act) -> Void
 
     var body: some View {
-        let waiting = items.flatMap(\.every).filter { $0.record.awaitsYou }
-        if !waiting.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(waiting, id: \.id) { item in
-                    let message = item.record.message
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(item.record.said()).inkText(.detail).lineLimit(3)
-                        Spacer(minLength: 8)
-                        // An older Mac takes no answer from here (`answerable`),
-                        // and a yes that needs the fingerprint is given on its
-                        // card (`allowNeedsPresence`): its words say where.
-                        if item.record.answerable == true {
-                            Button("Refuse") { act(.refuse(item.id)) }
-                            if !message.declared.allowNeedsPresence, item.record.ask?.stage != .asking {
-                                if message.from.kind == .agent, message.from.root == nil, message.from.conversation != nil,
-                                   message.to.conversation != nil {
-                                    Button("Allow This Pair…") { act(.allowPair(item.id)) }
-                                }
-                                // Never a default button: Return is the composer's.
-                                Button("Allow") { act(.allow(item.id)) }
+        let record = item.record, message = record.message
+        VStack(alignment: .leading, spacing: 6) {
+            if let answered, !record.awaitsYou {
+                Text(answered).inkText(.detail)
+            } else {
+                HStack(spacing: 4) {
+                    Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+                    (Text("Waiting for you · asked ")
+                        + Text(Date(timeIntervalSince1970: record.arrived), format: .relative(presentation: .named)))
+                        .inkText(.detail)
+                }
+                if record.answerable == true {
+                    HStack(spacing: 8) {
+                        Button("Refuse") { act(.refuse(item.id)) }.buttonStyle(.ink)
+                        if message.declared.allowNeedsPresence {
+                            Text("A stop is allowed on its card in Authz, with your fingerprint.").inkText(.detail)
+                        } else {
+                            if message.from.kind == .agent, message.from.root == nil, message.from.conversation != nil,
+                               message.to.conversation != nil {
+                                Button("Allow both ways…") { act(.allowPair(item.id)) }.buttonStyle(.ink)
                             }
+                            // Never a default button: Return is the composer's.
+                            Button("Deliver") { act(.allow(item.id)) }.buttonStyle(.inkProminent)
                         }
                     }
+                    .focusable(false)
+                } else {
+                    Text("Its Mac's vigil is older: answer it on its card in Authz there.").inkText(.detail)
                 }
+                if let answered { Text(answered).inkText(.detail) }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
         }
+        .padding(.top, 2)
     }
 }
 
