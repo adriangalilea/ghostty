@@ -14,7 +14,7 @@ import VigilWire
 // Read it with `mise run log`. One scope per area:
 let lifecycleLog = Log.log.scope("lifecycle")
 let registryLog = Log.log.scope("registry")
-let moveLog = Log.log.scope("move")
+// `moveLog` is VigilShared's (VigilMoveDialog.swift): the phone draws moves too.
 let graveyardLog = Log.log.scope("graveyard")
 let daemonLog = Log.log.scope("daemon")
 let viewportLog = Log.log.scope("viewport")
