@@ -1104,12 +1104,13 @@ final class VigilPhone: ObservableObject {
     /// born a moment ago arrives with its Mac's next document: up to five
     /// seconds of them are awaited.
     func resolve(url: URL) async -> PaneRef? {
-        guard url.scheme == "vigil", url.host == "pane" else {
+        let ref = VigilRef(url: url)
+        guard ref?.kind == .pane || (url.scheme == "vigil" && url.host == "pane" && url.pathComponents.count == 2) else {
             receipts.warn("url", "not a pane link", ["url": url.absoluteString]); return nil
         }
         let id = url.lastPathComponent
         guard Open.validPane(id) else { receipts.warn("url", "names no pane", ["url": url.absoluteString]); return nil }
-        guard let ref = await listed(id, within: 5) else {
+        guard let ref = await listed(id, within: 5, on: ref?.home) else {
             receipts.warn("url", "no mac lists the pane", ["pane": id])
             return nil
         }
@@ -1120,10 +1121,15 @@ final class VigilPhone: ObservableObject {
     /// The live pane `id` once a Mac's directory lists it, awaiting the
     /// documents that arrive within `seconds` (a pane born a moment ago
     /// arrives with its Mac's next one).
-    private func listed(_ id: String, within seconds: TimeInterval) async -> PaneRef? {
+    private func listed(_ id: String, within seconds: TimeInterval, on home: String? = nil) async -> PaneRef? {
         let deadline = Date().addingTimeInterval(seconds)
         while true {
-            if let ref = nodes.flatMap(\.leaves).compactMap(\.pane).first(where: { $0.pane == id }) { return ref }
+            let refs = nodes.flatMap(\.leaves).compactMap(\.pane).filter { $0.pane == id && (home == nil || $0.host.id == home) }
+            if refs.count == 1 { return refs[0] }
+            if refs.count > 1 {
+                receipts.warn("url", "several Macs list this pane", ["pane": id])
+                return nil
+            }
             let left = deadline.timeIntervalSinceNow
             guard left > 0 else { return nil }
             await nextDirectory(within: left)
