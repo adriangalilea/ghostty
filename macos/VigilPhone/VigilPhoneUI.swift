@@ -110,16 +110,6 @@ struct VigilPhoneRoot: View {
         } message: {
             Text(model.failure?.message ?? "")
         }
-        // A restart asked while the agent works: offered for its turn's end.
-        .alert("The agent is still working", isPresented: Binding(
-            get: { model.restartOffer != nil },
-            set: { if !$0 { model.restartOffer = nil } }
-        ), presenting: model.restartOffer) { offer in
-            Button("Restart When Its Turn Ends") { Task { await model.restart(offer.ref, whenIdle: true) } }
-            Button("Not Now", role: .cancel) {}
-        } message: { offer in
-            Text(offer.said)
-        }
         // The Mac's one close question: asked only when something runs,
         // naming it (undo stays in Recently closed either way).
         .alert(closeTitle, isPresented: Binding(
@@ -630,6 +620,7 @@ struct TreeNodeView: View {
 
 private struct PhonePaneProblems: View {
     let leaves: [VigilPhone.Node]
+    var onScreen = false
     let open: (PaneRef) -> Void
     @EnvironmentObject private var model: VigilPhone
     @State private var showingConflict: PaneConflict?
@@ -641,18 +632,19 @@ private struct PhonePaneProblems: View {
             let ref = leaf.pane ?? PaneRef(host: host, pane: id, title: leaf.path ?? leaf.title)
             let glance = leaf.glance
             let writers = glance.flatMap { g in g.conversation.flatMap { model.writerProblems[ConversationRef(agent: g.agent, id: $0)] } }
+            let subject = PaneProblemItem.Subject(key: host.id + "/" + id, title: leaf.title, face: leaf.face,
+                                                  state: leaf.state, conversation: glance?.conversation, note: glance?.restart)
+            let visit: (() -> Void)? = onScreen ? nil : { open(ref) }
             var items = ((glance?.problems ?? []) + [writers, leaf.continuation?.problem].compactMap { $0 }).map { issue in
-                issue.restarts
-                    ? PaneProblemItem(pane: ref.pane, problem: issue, button: "Restart") { Task { await model.restart(ref) } }
-                    : PaneProblemItem(pane: ref.pane, problem: issue, button: "Open pane") { open(ref) }
+                PaneProblemItem(subject: subject, problem: issue, visit: visit,
+                                restart: issue.restarts ? { request in try await model.restart(ref, request: request) } : nil)
             }
             if let ended = leaf.ended, !ended.clean {
-                items.append(PaneProblemItem(pane: id, problem: ended.problem, button: "Open pane", act: {
-                    Task { await model.openEnded(ref, end: ended) }
-                }, ended: ended))
+                items.append(PaneProblemItem(subject: subject, problem: ended.problem,
+                    button: "Open pane", act: { Task { await model.openEnded(ref, end: ended) } }, ended: ended))
             }
             if let conflict = leaf.conflict, conflict.worn {
-                items.append(PaneProblemItem(pane: ref.pane, problem: conflict.problem, button: "Review copies", act: {
+                items.append(PaneProblemItem(subject: subject, problem: conflict.problem, button: "Review copies", act: {
                     conflictHost = host.id
                     showingConflict = conflict
                 }, writers: conflict.writers))
@@ -1612,7 +1604,7 @@ struct PaneScreen: View {
                           tint: node?.alive == false ? .secondary : (node?.state ?? .idle).tint)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                if let node { PhonePaneProblems(leaves: [node]) { _ in setMode(.terminal) } }
+                if let node { PhonePaneProblems(leaves: [node], onScreen: true) { _ in setMode(.terminal) } }
                 // Conversation, changes, documents, messages, terminal: the
                 // others, for a pane with an agent (its repositories come
                 // from its conversation).

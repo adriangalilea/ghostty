@@ -938,29 +938,10 @@ final class VigilPhone: ObservableObject {
     /// it: it waits in Recently closed, undoable, like a close made there.
     /// Asked first only when something runs in it; `done` once its Mac
     /// committed it.
-    /// The person's restart of a pane's agent, asked of its Mac (`Open.restart`):
-    /// what it answered, said as `failure` is, unless it is still working,
-    /// which is `restartOffer` (restart when its turn ends).
-    func restart(_ ref: PaneRef, whenIdle: Bool = false) async {
-        do {
-            let data = try await VigilLink.call(linked(), device: ref.host.id, .restart(ref.pane, whenIdle: whenIdle))
-            let answer = try JSONDecoder().decode(Restart.Answer.self, from: data)
-            switch answer.outcome {
-            case .busy: restartOffer = .init(ref: ref, said: answer.said)
-            case .restarting: failure = .init(title: "Restarting the agent", message: answer.said)
-            case .armed: failure = .init(title: "Restarts when its turn ends", message: answer.said)
-            case .refused: failure = .init(title: "Not restarted", message: answer.said)
-            }
-        } catch {
-            failure = .init(title: "Not restarted", message: VigilLink.reason(error))
-        }
+    func restart(_ ref: PaneRef, request: Restart) async throws -> Restart.Answer {
+        let data = try await VigilLink.call(linked(), device: ref.host.id, .restart(ref.pane, request: request))
+        return try JSONDecoder().decode(Restart.Answer.self, from: data)
     }
-
-    struct RestartOffer: Equatable {
-        let ref: PaneRef
-        let said: String
-    }
-    @Published var restartOffer: RestartOffer?
 
     func settle(_ choice: ConflictSettle, on device: String) async throws -> ConflictSettle.Outcome {
         let data = try await VigilLink.call(linked(), device: device, .settleConflict(choice))

@@ -1416,11 +1416,11 @@ struct VigilSidebarView: View {
             messages: panes.reduce(into: Set<String>()) { $0.formUnion(messages.awaiting(paneId: $1.paneId, id: $1.id)) }, sizes: marks)
         MessagesMark(pending: panes.compactMap { messages.pending(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         WatchMark(watches: panes.flatMap { watches.watches(paneId: $0.paneId, id: $0.id) }, sizes: marks)
-        PaneProblemsMark(items: panes.flatMap(problemItems), sizes: marks)
+        PaneProblemsMark(items: panes.flatMap { problemItems($0, folded: true) }, sizes: marks)
         lookerGlyphs(panes.flatMap(\.lookers))
     }
 
-    private func problemItems(_ pane: VigilWorkspaces.SidebarPane) -> [PaneProblemItem] {
+    private func problemItems(_ pane: VigilWorkspaces.SidebarPane, folded: Bool = false) -> [PaneProblemItem] {
         func visit() {
             for row in model.rows {
                 for tab in row.tabs where tab.panes.contains(where: { $0.id == pane.id }) {
@@ -1430,20 +1430,27 @@ struct VigilSidebarView: View {
             }
         }
         let writers = pane.liveConversation.flatMap { model.writerProblems[$0] }
-        func restart() {
-            if let local = pane.paneId { VigilWorkspaces.shared.restartAgent(pane: local, device: nil) }
-            else if let remote = VigilRemote.split(pane.id) { VigilWorkspaces.shared.restartAgent(pane: remote.name, device: remote.device) }
+        guard !pane.problems.isEmpty || writers != nil || pane.ended != nil || pane.conflict != nil else { return [] }
+        let subject = PaneProblemItem.Subject(key: pane.id, title: pane.title,
+            face: .of(emoji: pane.emoji, program: pane.program), state: pane.state,
+            conversation: pane.conversation, note: pane.restart)
+        let onScreen = !folded && TerminalController.all.contains { controller in
+            controller.window?.isVisible == true && VigilBars.shared.panesOnScreen(in: controller).contains(pane.id)
+        }
+        func restart(_ request: Restart) async throws -> Restart.Answer {
+            let remote = VigilRemote.split(pane.id)
+            guard let id = pane.paneId ?? remote?.name else { throw WireError.refused("This pane has no running agent.") }
+            return try await VigilWorkspaces.shared.restartAgent(pane: id, device: remote?.device, request: request)
         }
         var items = (pane.problems + [writers].compactMap { $0 }).map { issue in
-            issue.restarts
-                ? PaneProblemItem(pane: pane.id, problem: issue, button: "Restart", act: restart)
-                : PaneProblemItem(pane: pane.id, problem: issue, button: "Open pane", act: visit)
+            PaneProblemItem(subject: subject, problem: issue, visit: onScreen ? nil : visit,
+                            restart: issue.restarts ? restart : nil)
         }
         if let ended = pane.ended, !ended.clean {
-            items.append(PaneProblemItem(pane: pane.id, problem: ended.problem, button: "Open pane", act: visit, ended: ended))
+            items.append(PaneProblemItem(subject: subject, problem: ended.problem, button: "Open pane", act: visit, ended: ended))
         }
         if let conflict = pane.conflict, conflict.worn {
-            items.append(PaneProblemItem(pane: pane.id, problem: conflict.problem, button: "Review copies", act: {
+            items.append(PaneProblemItem(subject: subject, problem: conflict.problem, button: "Review copies", act: {
                 if let local = pane.paneId { VigilWorkspaces.shared.conflictSheet(pane: local) }
                 else if let host = VigilRemote.split(pane.id)?.device {
                     _ = VigilWorkspaces.shared.conflictSheet(conflict, pane: nil, device: host)

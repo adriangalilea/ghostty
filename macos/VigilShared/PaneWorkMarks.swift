@@ -32,30 +32,92 @@ struct PaneMarkSizes {
 }
 
 struct PaneProblemItem: Identifiable {
-    var id: String { pane + "/" + problem.kind.rawValue }
-    let pane: String
+    struct Subject {
+        let key: String
+        let title: String
+        let face: PaneFace
+        let state: AgentState?
+        let conversation: String?
+        let note: Restart.Note?
+    }
+    let subject: Subject
     let problem: ConversationProblem
-    let button: String
-    let act: () -> Void
-    var ended: PaneEnd? = nil
-    var writers: PaneConflict.Writers? = nil
+    var visit: (() -> Void)?
+    var restart: ((Restart) async throws -> Restart.Answer)?
+    var button: String?
+    var act: (() -> Void)?
+    var ended: PaneEnd?
+    var writers: PaneConflict.Writers?
+    var id: String { subject.key + "/" + problem.kind.rawValue }
+    var operationID: String { subject.key + "/" + (subject.conversation ?? "") }
 }
 
-/// A row and its folded ancestors use the same mark. Keeping the contents
-/// derived from its current inputs also updates an already-open list.
+/// A row and its folded ancestor can present the same request. Keep its
+/// acknowledgement across popover dismissal. The broker owns scheduled work.
+@MainActor @Observable private final class PaneRestartFeedback {
+    static let shared = PaneRestartFeedback()
+    struct Receipt {
+        let id = UUID()
+        var note: Restart.Note?
+        var status: InkNotice.ActionFeedback
+        var next: Restart.Intent?
+        var sending = true
+        var canDismiss = false
+    }
+    private var receipts: [String: Receipt] = [:]
+
+    func receipt(_ item: PaneProblemItem) -> Receipt? {
+        guard let r = receipts[item.operationID], r.sending || r.note == item.subject.note else { return nil }
+        return r
+    }
+
+    func send(_ intent: Restart.Intent, to item: PaneProblemItem) {
+        guard let request = item.restart, receipt(item)?.sending != true else { return }
+        let key = item.operationID
+        var r = Receipt(note: item.subject.note, status: .working(intent == .cancel ? "Cancelling restart…" : "Requesting restart…"))
+        receipts[key] = r
+        Task {
+            do {
+                let answer = try await request(Restart(intent))
+                switch answer.outcome {
+                case .restarting: r.status = .working("Restarting the agent…")
+                case .armed: r.status = .waiting(answer.said)
+                case .busy:
+                    r.status = .waiting(answer.said)
+                    if let token = answer.confirmation { r.next = .confirm(token) }
+                    else if intent != .whenIdle && answer.canSchedule == true { r.next = .whenIdle }
+                    else { r.canDismiss = true }
+                case .refused: r.status = .failed(answer.said); r.next = intent == .cancel ? nil : .now
+                case .cancelled: r.status = .succeeded(answer.said); r.canDismiss = true
+                }
+            } catch {
+                r.status = .failed(error.localizedDescription)
+                r.canDismiss = true
+            }
+            guard receipts[key]?.id == r.id else { return }
+            r.sending = false
+            receipts[key] = r
+        }
+    }
+
+    func forget(_ key: String) { receipts[key] = nil }
+}
+
 struct PaneProblemsMark: View {
     let items: [PaneProblemItem]
     let sizes: PaneMarkSizes
     @State private var showing = false
+    @State private var selected: String?
+    private let feedback = PaneRestartFeedback.shared
 
     private var tone: Color {
         if items.contains(where: { $0.writers == .both || $0.problem.kind == .twoLive }) { return .red }
-        if items.allSatisfy({ $0.writers != nil }) { return .secondary }
+        if items.allSatisfy({ $0.writers != nil || $0.problem.kind == .restarted }) { return .secondary }
         return .orange
     }
 
     var body: some View {
-        if !items.isEmpty {
+        if let first = items.first {
             Button { showing = true } label: {
                 let ends = items.compactMap(\.ended)
                 if ends.isEmpty {
@@ -67,31 +129,98 @@ struct PaneProblemsMark: View {
             .buttonStyle(.plain)
             .accessibilityLabel("\(items.count) pane problems")
             .help(items.map { $0.problem.title }.joined(separator: "\n"))
-            .popover(isPresented: $showing) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        ForEach(items) { item in
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(item.problem.title).font(.headline)
-                                Text(item.pane).font(.caption).foregroundStyle(.secondary)
-                                Text(item.problem.says)
-                                ForEach(item.problem.fix, id: \.self) { Text($0).font(.callout) }
-
-                                Button(item.button) { showing = false; item.act() }
-                            }
+            .inkActionPopover(isPresented: $showing) {
+                let current = items.first(where: { $0.id == selected }) ?? first
+                VStack(alignment: .leading, spacing: 0) {
+                    if items.count > 1 {
+                        Picker("Problem", selection: Binding(get: { current.id }, set: { selected = $0 })) {
+                            ForEach(items) { item in Text(item.subject.title + " · " + item.problem.title).tag(item.id) }
                         }
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding()
+                        .pickerStyle(.menu).padding(.horizontal, .inkBlock).padding(.vertical, .inkGap)
+                    }
+                    panel(current).id(current.id)
                 }
-                .frame(idealWidth: 340, idealHeight: min(460, CGFloat(items.count) * 210))
-                .presentationCompactAdaptation(.sheet)
+            }
+            .onChange(of: items.map(\.operationID)) { old, new in
+                for key in Set(old).subtracting(new) { feedback.forget(key) }
             }
         }
     }
+
+    private func panel(_ item: PaneProblemItem) -> InkActionPanel {
+        let statusOnly = item.problem.kind == .restarted
+        let panel = InkActionPanel(item.problem.title, detail: item.subject.title,
+            tone: statusOnly ? .ok : item.writers == .both || item.problem.kind == .twoLive ? .bad : .warn,
+            actions: actions(item), style: statusOnly ? .status : .problem)
+        let affected = restartItems
+        if item.restart != nil && affected.count > 1 {
+            return panel.affectedItems(affected.map { other in
+                InkActionPanel.Item(other.subject.title, id: other.operationID,
+                    status: feedback.receipt(other)?.status.text ?? other.subject.note?.said ?? other.subject.state?.rawValue.capitalized ?? "Unknown") {
+                    switch other.subject.face {
+                    case .emoji(let emoji): Text(emoji)
+                    case .agent(let agent): AgentMark(agent: agent, size: 15, tint: nil)
+                    case .plain: Image(systemName: "terminal")
+                    }
+                }
+            }, in: "Affected panes", count: { "\($0) panes" })
+        }
+        return panel.details("Details") {
+            VStack(alignment: .leading, spacing: .inkGap) {
+                Text(item.problem.says).inkText(.body)
+                ForEach(item.problem.fix, id: \.self) { Text($0).inkText(.detail) }
+            }
+        }
+    }
+
+    private var restartItems: [PaneProblemItem] {
+        var seen = Set<String>()
+        return items.filter { $0.restart != nil && seen.insert($0.operationID).inserted }
+    }
+
+    private func actions(_ item: PaneProblemItem) -> InkActionPanel.Actions {
+        var alongside: [InkHUD.Action] = []
+        if let act = item.act, let label = item.button {
+            alongside.append(.init(label) { showing = false; act() })
+        } else if let visit = item.visit {
+            alongside.append(.init("Open pane", symbol: "arrow.up.forward") { showing = false; visit() })
+        }
+        guard item.restart != nil else { return .buttons(alongside) }
+        func command(_ label: String, _ intent: Restart.Intent) -> InkHUD.Action {
+            .init(label) { feedback.send(intent, to: item) }
+        }
+        if let r = feedback.receipt(item) {
+            var next: [InkHUD.Action] = []
+            if let intent = r.next {
+                switch intent {
+                case .confirm: next = [command("Restart now", intent)]
+                case .whenIdle: next = [command("Restart when idle", intent)]
+                default: next = [command("Retry", intent)]
+                }
+            }
+            if !r.sending && (r.canDismiss) {
+                next.append(.init("Done") { feedback.forget(item.operationID) })
+            }
+            return .feedback(r.status, actions: next + alongside)
+        }
+        if let note = item.subject.note {
+            switch note.state {
+            case .armed: return .feedback(.waiting(note.said), actions: [command("Cancel restart", .cancel)] + alongside)
+            case .notRun: return .feedback(.failed(note.said), actions: [command("Retry", .now)] + alongside)
+            case .ran: return .feedback(.waiting(note.said), actions: alongside)
+            }
+        }
+        let targets = restartItems.filter { $0.subject.note?.state != .armed && feedback.receipt($0) == nil }
+        if targets.count > 1 {
+            return .group("Restart", [command("Restart " + item.subject.title, .now),
+                .init("Restart all \(targets.count) when idle") {
+                    for target in targets { feedback.send(.whenIdle, to: target) }
+                }], alongside: alongside)
+        }
+        return .buttons([command("Restart", .now)] + alongside)
+    }
 }
 
-/// A row's dots, by swift-utils' `InkStateDotCluster`: a pane's own (each
-/// background agent not finished, then its main agent's state) or a folded
-/// row's. How a dot looks for what it says is here and nowhere else.
 struct PaneDots: View {
     let dots: [PaneDot]
     let sizes: PaneMarkSizes
