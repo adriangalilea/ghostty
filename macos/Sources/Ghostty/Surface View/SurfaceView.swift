@@ -172,6 +172,10 @@ extension Ghostty {
                     SurfaceErrorView()
                 }
 
+                // vigil: an agent pane shows its conversation over its
+                // terminal, or the toggle back to it (VigilPaneConversation).
+                VigilPaneFace(surfaceView: surfaceView, ground: ghostty.config.backgroundColor)
+
                 // If we're part of a split view and don't have focus, we put a semi-transparent
                 // rectangle above our view to make it look unfocused. We include the last
                 // focused surface so this still works while SwiftUI focus is temporarily nil.
