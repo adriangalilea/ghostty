@@ -71,6 +71,13 @@ struct VigilPhoneRoot: View {
             open(ref)
             model.opening = nil
         }
+        // A move's dialog (the shared one), from a row's Move To.
+        .sheet(isPresented: Binding(get: { model.moving != nil }, set: { if !$0 { model.moving?.answer(.cancel); model.moving = nil } })) {
+            if let moving = model.moving {
+                ScrollView { MoveDialog(model: moving).padding(.top, 8) }
+                    .presentationDetents([.medium, .large])
+            }
+        }
         // The new-workspace sheet, from wherever it was asked for; the
         // workspace opens over whatever was on screen.
         .sheet(item: $model.composing) { compose in
@@ -460,6 +467,9 @@ struct TreeNodeView: View {
             if let ref = node.pane, !watches.watches(root: ref.host.id, pane: ref.pane).isEmpty {
                 Button { showingWatches = true } label: { Label("Watches", systemImage: "binoculars") }
             }
+            // Move To another Mac, its home away or not: the destination
+            // reads from what it last heard of it.
+            if node.kind != .host { Section { PhoneMoveItems(node: node) } }
             if let host = model.host(of: node), model.reachable(host) {
                 if node.kind == .host {
                     QuickCreateItems(host: host)

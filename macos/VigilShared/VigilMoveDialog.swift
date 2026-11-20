@@ -1,14 +1,19 @@
-import AppKit
 import Combine
+import Log
 import SwiftUI
 import VigilWire
+
+/// A move's steps in the app's record, whichever app draws the dialog.
+let moveLog = Log.log.scope("move")
 
 /// The dialog of a move (PORTABILITY.md "Before anything moves, what it
 /// depends on"): what stands between a workspace and the Mac it moves to,
 /// each thing said once for all the panes it holds back and with what
 /// settles it beside it, then the panes and what opening each does there.
 /// A Move To This Mac is the move to this Mac; a Move to names another, which
-/// reads the sheet itself (`Open.moveSheet`).
+/// reads the sheet itself (`Open.moveSheet`). One dialog for every device:
+/// the Mac lays it out in a sheet on its window, the phone in a sheet of its
+/// own; each only supplies where its facts come from (`Sources`).
 ///
 /// Nothing in it waits for a button. Its facts are two Macs': the
 /// workspace's own Mac says what its panes depend on (their work, in the
@@ -295,13 +300,13 @@ final class MoveDialogModel: ObservableObject {
         guard let now = sources.question() else {
             if sourceGone == nil {
                 sourceGone = "\(mac) no longer lists it: nothing can be moved unless it lists it again"
-                lifecycleLog.warn("move: the source no longer lists the workspace", ["workspace": workspace, "mac": mac])
+                moveLog.warn("move: the source no longer lists the workspace", ["workspace": workspace, "mac": mac])
             }
             return
         }
         if sourceGone != nil {
             sourceGone = nil
-            lifecycleLog.info("move: the source lists the workspace again", ["workspace": workspace, "mac": mac])
+            moveLog.info("move: the source lists the workspace again", ["workspace": workspace, "mac": mac])
         }
         let wasAway = source != .live
         source = now.standing
@@ -369,7 +374,7 @@ final class MoveDialogModel: ObservableObject {
                     self.reload()
                 case .ended(let why):
                     self.watchLost = why
-                    lifecycleLog.warn("move: this Mac's facts are no longer followed", ["workspace": named, "why": why])
+                    moveLog.warn("move: this Mac's facts are no longer followed", ["workspace": named, "why": why])
                     // Ended before it stood: what moved since the first read
                     // was never followed, so it is read once more.
                     if !self.watchReady { self.reload() }
@@ -441,7 +446,7 @@ final class MoveDialogModel: ObservableObject {
         case .failure(let error):
             // Said, and nothing can be moved on a sheet that did not read.
             readError = "\(target ?? "vigil-agent") did not answer, so nothing can be moved until it does: \(error)"
-            lifecycleLog.error("move: sheet not read", ["workspace": workspace, "mac": mac, "to": destination, "err": error])
+            moveLog.error("move: sheet not read", ["workspace": workspace, "mac": mac, "to": destination, "err": error])
         }
         guard plain else { return }
         reading = false
@@ -459,12 +464,12 @@ final class MoveDialogModel: ObservableObject {
         let first = lines.isEmpty && !now.isEmpty
         lines = now
         if first {
-            lifecycleLog.info("move: sheet opened", [
+            moveLog.info("move: sheet opened", [
                 "workspace": workspace, "mac": mac, "to": destination, "panes": now.count, "needs": after.sorted(),
                 "unknown": now.filter { $0.work == nil }.count, "watched": currency.watched,
             ])
         } else if before != after {
-            lifecycleLog.info("move: sheet changed", [
+            moveLog.info("move: sheet changed", [
                 "workspace": workspace, "mac": mac, "came": after.subtracting(before).sorted(), "went": before.subtracting(after).sorted(),
             ])
         }
@@ -480,14 +485,14 @@ final class MoveDialogModel: ObservableObject {
         let works = question.panes.compactMap(\.work)
         guard works.count == question.panes.count, works.allSatisfy(\.answersReads) else {
             asked = .older
-            lifecycleLog.info("move: the source runs an older vigil or published no work, not asked to read again", [
+            moveLog.info("move: the source runs an older vigil or published no work, not asked to read again", [
                 "workspace": workspace, "mac": mac, "published": works.count, "panes": question.panes.count,
             ])
             return
         }
         asked = .asking
         let panes = question.panes.map(\.pane)
-        lifecycleLog.info("move: asking the source to read its work again", ["workspace": workspace, "mac": mac, "panes": panes.count])
+        moveLog.info("move: asking the source to read its work again", ["workspace": workspace, "mac": mac, "panes": panes.count])
         // One queue: an earlier ask's answer never lands after a later one's.
         asks.async {
             let result = Result { try ask(panes) }
@@ -496,7 +501,7 @@ final class MoveDialogModel: ObservableObject {
                     switch result {
                     case .success(let answer):
                         self.asked = .answered(at: Date(timeIntervalSince1970: answer.at), changed: answer.changed.count)
-                        lifecycleLog.info("move: the source read its work again", [
+                        moveLog.info("move: the source read its work again", [
                             "workspace": self.workspace, "mac": self.mac, "read": answer.works.count, "changed": answer.changed,
                         ])
                         // A receipt: the sheet stays on the directory, which
@@ -505,7 +510,7 @@ final class MoveDialogModel: ObservableObject {
                     case .failure(let error):
                         let said = "\(error)"
                         self.asked = said.contains(Open.unknownOp) ? .older : .failed(said)
-                        lifecycleLog.warn("move: the source did not read its work again", ["workspace": self.workspace, "mac": self.mac, "err": said])
+                        moveLog.warn("move: the source did not read its work again", ["workspace": self.workspace, "mac": self.mac, "err": said])
                     }
                 }
             }
@@ -535,7 +540,7 @@ final class MoveDialogModel: ObservableObject {
 
     func settleHere(_ group: Move.Group) {
         guard let need = group.here.first else { return }
-        lifecycleLog.info("move: settling here", ["workspace": workspace, "need": need.text, "kind": need.kind.rawValue])
+        moveLog.info("move: settling here", ["workspace": workspace, "need": need.text, "kind": need.kind.rawValue])
         let saying = switch need.kind {
         case .clone: "Cloning…"
         case .fetch: "Fetching…"
@@ -549,7 +554,7 @@ final class MoveDialogModel: ObservableObject {
     /// repository, there.
     func openThere(_ group: Move.Group) {
         guard let pane = group.panes.first?.pane else { return }
-        lifecycleLog.info("move: opening the pane that holds what is only there", ["pane": pane, "mac": mac, "repository": group.root ?? ""])
+        moveLog.info("move: opening the pane that holds what is only there", ["pane": pane, "mac": mac, "repository": group.root ?? ""])
         answer(.open(pane: pane))
     }
 
@@ -557,7 +562,7 @@ final class MoveDialogModel: ObservableObject {
     /// (the same reader the sheet's counts come from).
     func showChanges(_ group: Move.Group) {
         guard group.root != nil, !group.panes.isEmpty else { return }
-        lifecycleLog.info("move: showing what a repository holds there", ["mac": mac, "repository": group.root ?? ""])
+        moveLog.info("move: showing what a repository holds there", ["mac": mac, "repository": group.root ?? ""])
         showing = group
     }
 
@@ -567,12 +572,12 @@ final class MoveDialogModel: ObservableObject {
     /// A Move to's target asked to read its sheet again (`move-sheet`, said
     /// in its log).
     func readAgain() {
-        lifecycleLog.info("move: asking the target to read the sheet again", ["workspace": workspace, "to": destination])
+        moveLog.info("move: asking the target to read the sheet again", ["workspace": workspace, "to": destination])
         reload()
     }
 
     func settleAllHere() {
-        lifecycleLog.info("move: settling everything this Mac can", ["workspace": workspace, "needs": settledHere.map(\.text)])
+        moveLog.info("move: settling everything this Mac can", ["workspace": workspace, "needs": settledHere.map(\.text)])
         reload(settling: settledHere, saying: "Working…")
     }
 
@@ -581,7 +586,7 @@ final class MoveDialogModel: ObservableObject {
         switch outcome {
         case .move(let revision):
             let standing = self.standing.map(\.need.text)
-            lifecycleLog.info(standing.isEmpty ? "move: moved" : "move: moved anyway", [
+            moveLog.info(standing.isEmpty ? "move: moved" : "move: moved anyway", [
                 "workspace": workspace, "mac": mac, "to": destination, "overrides": standing,
                 "unknown": lines.filter { $0.work == nil }.count, "checkout": revision,
             ])
@@ -592,7 +597,7 @@ final class MoveDialogModel: ObservableObject {
                 return
             }
         case .cancel:
-            lifecycleLog.info("move: cancelled", ["workspace": workspace, "mac": mac, "to": destination])
+            moveLog.info("move: cancelled", ["workspace": workspace, "mac": mac, "to": destination])
         case .open, .moveFork:
             break
         }
@@ -653,6 +658,20 @@ final class MoveDialogModel: ObservableObject {
     }()
 }
 
+extension View {
+    /// The dialog's size where it is laid out: a sheet on a Mac's window
+    /// keeps the size its content was measured for; on the phone it takes
+    /// the sheet it is shown in.
+    @ViewBuilder
+    fileprivate func dialogFrame(width: CGFloat, height: CGFloat? = nil) -> some View {
+        #if os(macOS)
+            frame(width: width, height: height)
+        #else
+            frame(maxWidth: .infinity, maxHeight: height == nil ? nil : .infinity, alignment: .topLeading)
+        #endif
+    }
+}
+
 struct MoveDialog: View {
     @ObservedObject var model: MoveDialogModel
     static let width: CGFloat = 540
@@ -675,7 +694,8 @@ struct MoveDialog: View {
 
     private func receipt(_ id: UUID) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Move \(model.what) here from \(model.mac)").font(.headline)
+            Text(model.target.map { "Move \(model.what) from \(model.mac) to \($0)" } ?? "Move \(model.what) here from \(model.mac)")
+                .font(.headline)
             Text("Move " + id.uuidString).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -692,7 +712,7 @@ struct MoveDialog: View {
             HStack { Spacer(); Button("Close") { model.answer(.cancel) }.keyboardShortcut(.cancelAction) }
         }
         .padding(20)
-        .frame(width: Self.width, height: min(Self.tallest, 178 + CGFloat(model.receiptRows.count) * 124))
+        .dialogFrame(width: Self.width, height: min(Self.tallest, 178 + CGFloat(model.receiptRows.count) * 124))
     }
 
     private var away: Bool { if case .away = model.source { true } else { false } }
@@ -721,7 +741,7 @@ struct MoveDialog: View {
             (model.changes?(group) ?? AnyView(EmptyView()))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: Self.changesSize.width, height: Self.changesSize.height)
+        .dialogFrame(width: Self.changesSize.width, height: Self.changesSize.height)
     }
 
     private var sheet: some View {
@@ -829,7 +849,7 @@ struct MoveDialog: View {
             }
             .padding(.horizontal, 20).padding(.vertical, 12)
         }
-        .frame(width: Self.width)
+        .dialogFrame(width: Self.width)
     }
 
     private var currencySymbol: String {
