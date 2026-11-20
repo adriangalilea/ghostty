@@ -476,12 +476,12 @@ extension VigilFixtureView {
 
     static func conversation(_ entries: [FeedEntry], live: FeedLive, earlier: Bool = false, offer: Conversation.Offer? = nil,
                              reply: Conversation.Reply? = nil) -> Conversation {
-        Conversation(ref: pane, entries: entries, live: live, earlier: earlier, offer: offer, reply: reply)
+        Conversation(key: Conversation.key(pane), pane: pane.pane, entries: entries, live: live, earlier: earlier, offer: offer, reply: reply)
     }
 
     static var atWorkConversation: Conversation {
         Conversation(
-            ref: pane, entries: atWork, live: FeedLive(state: .working, context: 61),
+            key: Conversation.key(pane), pane: pane.pane, entries: atWork, live: FeedLive(state: .working, context: 61),
             queued: [FeedQueued(text: "also check the CSV header while you wait", at: now - 40),
                      FeedQueued(text: "and keep the old column names", at: now - 12)])
     }
@@ -643,7 +643,8 @@ extension VigilFixtureView {
 /// (`vigil conversation follow <pane> --json --once > …`: a person's conversation, so a
 /// file on the Mac, never in the repository), else made-up rows.
 private struct ArrivingFixture: View {
-    @State private var conversation = Conversation(ref: VigilFixtureView.pane)
+    @State private var conversation = Conversation(
+        key: Conversation.key(VigilFixtureView.pane), pane: VigilFixtureView.pane.pane, source: .still)
     @State private var path: [Int] = []
     static let realFeed = "/tmp/vigil-fixture-feed.json"
 
@@ -676,7 +677,7 @@ private struct ArrivingFixture: View {
         NavigationStack(path: $path) {
             Color.clear
                 .navigationDestination(for: Int.self) { _ in
-                    ConversationView(conversation: conversation) {}
+                    PhoneConversationView(conversation: conversation, ref: VigilFixtureView.pane) {}
                         .navigationBarTitleDisplayMode(.inline)
                 }
         }
@@ -712,12 +713,12 @@ private struct ConversationFixture: View {
     let conversation: Conversation
     var body: some View {
         NavigationStack {
-            ConversationView(conversation: conversation) {}
+            PhoneConversationView(conversation: conversation, ref: VigilFixtureView.pane) {}
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) { Button {} label: { Image(systemName: "chevron.left") } }
                     ToolbarItem(placement: .principal) {
-                        PaneTitle(title: conversation.ref.title, state: nil, host: conversation.ref.host.name, tint: .gray)
+                        PaneTitle(title: VigilFixtureView.pane.title, state: nil, host: VigilFixtureView.pane.host.name, tint: .gray)
                     }
                     ToolbarItemGroup(placement: .topBarTrailing) {
                         Button {} label: { Image(systemName: "terminal") }

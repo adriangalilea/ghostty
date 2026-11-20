@@ -70,6 +70,8 @@
 		0DAA1111000000000000E141 /* MarkdownText in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E140 /* MarkdownText */; };
 		0DAA1111000000000000E0B3 /* MarkdownEditing in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E0B2 /* MarkdownEditing */; };
 		0DAA1111000000000000E151 /* Syntax in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E150 /* Syntax */; };
+		0DAA1111000000000000E161 /* VigilActivity in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E160 /* VigilActivity */; };
+		0DAA1111000000000000E163 /* AuthzGlance in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E162 /* AuthzGlance */; };
 		0DAA1111000000000000E153 /* Syntax in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E152 /* Syntax */; };
 		0DAA1111000000000000E0A1 /* MachineStates in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E0A0 /* MachineStates */; };
 		0DAA1111000000000000E0A3 /* MachineStateViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA1111000000000000E0A2 /* MachineStateViews */; };
@@ -288,6 +290,8 @@
 				0DAA1111000000000000E0B1 /* MarkdownEditing in Frameworks */,
 				0DAA1111000000000000E141 /* MarkdownText in Frameworks */,
 				0DAA1111000000000000E151 /* Syntax in Frameworks */,
+				0DAA1111000000000000E161 /* VigilActivity in Frameworks */,
+				0DAA1111000000000000E163 /* AuthzGlance in Frameworks */,
 				0DAA1111000000000000E0A1 /* MachineStates in Frameworks */,
 				0DAA1111000000000000E0A3 /* MachineStateViews in Frameworks */,
 				A56B880B2A840447007A0E29 /* Carbon.framework in Frameworks */,
@@ -522,6 +526,8 @@
 				0DAA1111000000000000E0B0 /* MarkdownEditing */,
 				0DAA1111000000000000E140 /* MarkdownText */,
 				0DAA1111000000000000E150 /* Syntax */,
+				0DAA1111000000000000E160 /* VigilActivity */,
+				0DAA1111000000000000E162 /* AuthzGlance */,
 				0DAA1111000000000000E0A0 /* MachineStates */,
 				0DAA1111000000000000E0A2 /* MachineStateViews */,
 			);
@@ -1908,7 +1914,7 @@
 			repositoryURL = "https://github.com/adriangalilea/swift-utils";
 			requirement = {
 				kind = upToNextMinorVersion;
-				minimumVersion = 0.103.2;
+				minimumVersion = 0.104.0;
 			};
 		};
 		A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
@@ -2014,6 +2020,8 @@
 		0DAA1111000000000000E140 /* MarkdownText */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = MarkdownText; };
 		0DAA1111000000000000E0B2 /* MarkdownEditing */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = MarkdownEditing; };
 		0DAA1111000000000000E150 /* Syntax */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = Syntax; };
+		0DAA1111000000000000E160 /* VigilActivity */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */; productName = VigilActivity; };
+		0DAA1111000000000000E162 /* AuthzGlance */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000002A1; productName = AuthzGlance; };
 		0DAA1111000000000000E152 /* Syntax */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = Syntax; };
 		0DAA1111000000000000E0A0 /* MachineStates */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = MachineStates; };
 		0DAA1111000000000000E0A2 /* MachineStateViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = MachineStateViews; };

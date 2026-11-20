@@ -1455,7 +1455,7 @@ struct PaneScreen: View {
             switch mode {
             case .conversation:
                 if let conversation {
-                    ConversationView(conversation: conversation) { setMode(.terminal) }
+                    PhoneConversationView(conversation: conversation, ref: current) { setMode(.terminal) }
                 } else {
                     ProgressView()
                 }
@@ -1676,9 +1676,9 @@ struct PaneScreen: View {
         // The conversation is followed in the changes too: a quote goes to its box.
         if mode != .terminal, node?.agent == true {
             model.present(ref)
-            if conversation?.ref != ref {
+            if conversation?.key != Conversation.key(ref) {
                 conversation?.stop()
-                let next = Conversation(ref: ref)
+                let next = Conversation.phone(ref)
                 next.start()
                 conversation = next
             }

@@ -1,17 +1,82 @@
-import AuthzUI
+import AuthzGlance
+import AuthzProtocol
 import GitViews
+import Ink
 import Log
 import MarkdownText
+import Syntax
 import SwiftUI
 import VigilActivity
-import VigilLink
 import VigilWire
+
+/// A step of a pane's followed feed: one of its messages as the pane's Mac
+/// sent it, or why nothing arrives now.
+enum ConversationStep: Sendable {
+    case message(FeedMessage)
+    case waiting(String)
+}
+
+/// Where a conversation's facts come from and where its acts go, answered
+/// by the pane's Mac: over tether from the phone and for another Mac's
+/// pane, by this Mac's hub for its own. Each app builds one; the screen
+/// never knows which.
+struct ConversationSource {
+    /// The pane's feed, followed (reopened from where it stands) until the
+    /// caller stops iterating.
+    let follow: () -> AsyncStream<ConversationStep>
+    /// The page before an entry, from the Mac (`Open.feedEarlier`).
+    let earlier: @Sendable (FeedEarlier) async throws -> FeedPage
+    /// One of the agent's keys pressed in its pane: the Mac's account of it.
+    let press: @Sendable (PaneKey) async throws -> String
+    /// The person's words for the pane (`Open.say`): what its Mac did.
+    let say: @Sendable (String) async throws -> String
+    /// Requests read from and answered at their authz home, where this app
+    /// is an authz endpoint (the phone); nil where it is not (the Mac),
+    /// and a standing request is answered at the terminal.
+    let authz: ConversationAuthz?
+    /// Every step said, in the app's own record.
+    let log: ConversationLog
+    /// An error in the words the screen shows.
+    let reason: @Sendable (Error) -> String
+    /// Where this app runs, as a sentence names it: "this iPhone".
+    let here: String
+
+    /// A source that reads and does nothing: a conversation drawn from rows
+    /// given to it (a fixture).
+    static let still = ConversationSource(
+        follow: { AsyncStream { $0.finish() } },
+        earlier: { _ in throw Still() }, press: { _ in throw Still() }, say: { _ in throw Still() },
+        authz: nil, log: .silent, reason: { "\($0)" }, here: "here")
+
+    private struct Still: Error, CustomStringConvertible {
+        var description: String { "nothing is followed here" }
+    }
+}
+
+/// A standing request read from its authz home and answered there.
+struct ConversationAuthz {
+    /// The request by id (nil: not found, gone, or not readable now).
+    let read: @Sendable (String) async -> AskRequest?
+    /// Nil once its home took the answer, else why not.
+    let answer: @Sendable (String, Decision) async -> String?
+}
+
+/// How a conversation says what it does: each app's record (the phone's
+/// receipts, the Mac's log), scope first.
+struct ConversationLog {
+    let info: @MainActor (String, String, LogFields) -> Void
+    let warn: @MainActor (String, String, LogFields) -> Void
+    let error: @MainActor (String, String, LogFields) -> Void
+
+    static let silent = ConversationLog(info: { _, _, _ in }, warn: { _, _, _ in }, error: { _, _, _ in })
+}
 
 /// An agent pane drawn as its conversation (harness/CLAUDE-FEED.md): what
 /// was asked, what the agent said, every tool call with its command, diff
 /// or output, and what it does now. The Mac reads the agent's files and
 /// sends vigil's own rows (`FeedEntry`); this screen only draws them. The
-/// terminal is one toggle away and stays the truth of last resort.
+/// terminal is one toggle away and stays the truth of last resort. One
+/// implementation for both apps: the phone's pane screen and the Mac's pane.
 ///
 /// Who owns which fact: the rows are the transcript's (what happened); what
 /// happens now is the broker's (`FeedLive`), joined to a tool call by its
@@ -20,7 +85,12 @@ import VigilWire
 /// "unfinished": the rows never stand in for state.
 @MainActor
 final class Conversation: ObservableObject {
-    let ref: PaneRef
+    /// Which conversation this is, for its holder (the phone: its Mac and
+    /// pane; the Mac: the pane's row id).
+    let key: String
+    /// The pane's daemon id on its Mac, as the log names it.
+    let pane: String
+    private let source: ConversationSource
     /// The conversation as one fold over its feed (VigilWire's `FeedState`):
     /// the rows, the broker's facts, the queue, and the rules every drawing
     /// of a conversation shares (what a call with no result is, whether a
@@ -60,12 +130,18 @@ final class Conversation: ObservableObject {
     private var index: [String: Int] { state.index }
     private var task: Task<Void, Never>?
 
-    init(ref: PaneRef) { self.ref = ref }
+    init(key: String, pane: String, source: ConversationSource) {
+        self.key = key
+        self.pane = pane
+        self.source = source
+    }
 
     /// Drawn from made-up rows (`VigilFixture`): nothing followed.
-    init(ref: PaneRef, entries: [FeedEntry], live: FeedLive?, earlier: Bool = false, waiting: String? = nil, offer: Offer? = nil,
-         reply: Reply? = nil, queued: [FeedQueued] = []) {
-        self.ref = ref
+    init(key: String, pane: String, entries: [FeedEntry], live: FeedLive?, earlier: Bool = false, waiting: String? = nil,
+         offer: Offer? = nil, reply: Reply? = nil, queued: [FeedQueued] = []) {
+        self.key = key
+        self.pane = pane
+        self.source = .still
         self.reply = reply
         self.state = FeedState(live: live, queued: queued)
         self.earlier = earlier
@@ -113,14 +189,19 @@ final class Conversation: ObservableObject {
             return
         }
         guard offer?.request != id else { return }
+        // No authz endpoint here: the terminal answers it.
+        guard let authz = source.authz else {
+            offer = (id, .terminal)
+            return
+        }
         offer = (id, .reading)
         answerError = nil
         Task {
-            let request = await VigilAuthz.shared.request(device: ref.host.id, id: id)
+            let request = await authz.read(id)
             guard live?.request?.id == id else { return }
             let next = request.map(Self.offer) ?? .terminal
             offer = (id, next)
-            VigilPhone.shared.receipts.info("feed", "request read", ["pane": ref.pane, "request": String(id.prefix(8)), "offer": "\(next)"])
+            source.log.info("feed", "request read", ["pane": pane, "request": String(id.prefix(8)), "offer": "\(next)"])
         }
     }
 
@@ -138,11 +219,11 @@ final class Conversation: ObservableObject {
 
     /// Answers the standing request through authz, as its card would.
     func answer(_ decision: Decision) {
-        guard let request = offer?.request, !answering else { return }
+        guard let request = offer?.request, !answering, let authz = source.authz else { return }
         answering = true
         answerError = nil
         Task {
-            let why = await VigilAuthz.shared.answer(device: ref.host.id, request: request, decision)
+            let why = await authz.answer(request, decision)
             answering = false
             answerError = why
         }
@@ -151,7 +232,7 @@ final class Conversation: ObservableObject {
     /// Follows the pane's feed until `stop`.
     func start() {
         guard task == nil else { return }
-        let steps = VigilPhone.shared.feed(ref)
+        let steps = source.follow()
         task = Task { [weak self] in
             for await step in steps {
                 guard let self else { return }
@@ -161,11 +242,17 @@ final class Conversation: ObservableObject {
                     receive(message)
                 case .waiting(let why):
                     waiting = why
-                    VigilPhone.shared.receipts.warn("feed", "waiting", ["pane": ref.pane, "why": why])
+                    source.log.warn("feed", "waiting", ["pane": pane, "why": why])
                 }
             }
         }
     }
+
+    /// The reply box is to take the keyboard (an activity's Reply on the
+    /// phone), once it is drawn: it takes it and says so (`replyTaken`).
+    @Published private(set) var replyWanted = false
+    func askReply() { replyWanted = true }
+    func replyTaken() { replyWanted = false }
 
     func stop() {
         task?.cancel()
@@ -178,8 +265,8 @@ final class Conversation: ObservableObject {
         switch message {
         case .snapshot(let snapshot):
             guard snapshot.schema == Feed.schema else {
-                waiting = "This conversation is in a newer form than vigil on this iPhone reads. Update vigil here."
-                VigilPhone.shared.receipts.warn("feed", "unknown schema", ["pane": ref.pane, "schema": snapshot.schema])
+                waiting = "This conversation is in a newer form than vigil on \(source.here) reads. Update vigil here."
+                source.log.warn("feed", "unknown schema", ["pane": pane, "schema": snapshot.schema])
                 return
             }
             earlier = snapshot.earlier
@@ -189,8 +276,8 @@ final class Conversation: ObservableObject {
             drawn = Self.page
             revision += 1
             opened = true
-            VigilPhone.shared.receipts.info("feed", "snapshot", [
-                "pane": ref.pane, "agent": snapshot.agent, "entries": snapshot.entries.count, "earlier": snapshot.earlier,
+            source.log.info("feed", "snapshot", [
+                "pane": pane, "agent": snapshot.agent, "entries": snapshot.entries.count, "earlier": snapshot.earlier,
             ])
         case .entries(let changed, _):
             state.apply(message)
@@ -229,17 +316,17 @@ final class Conversation: ObservableObject {
         pageError = nil
         defer { paging = false }
         do {
-            let page = try await VigilPhone.shared.feedEarlier(ref, FeedEarlier(conversation: conversation, before: first.id))
+            let page = try await source.earlier(FeedEarlier(conversation: conversation, before: first.id))
             // Another conversation arrived meanwhile: this page is not its.
             guard self.conversation == conversation else { return false }
             let fresh = state.prepend(page.entries)
             drawn += fresh
             earlier = page.earlier
-            VigilPhone.shared.receipts.info("feed", "earlier page", ["pane": ref.pane, "entries": fresh, "more": page.earlier])
+            source.log.info("feed", "earlier page", ["pane": pane, "entries": fresh, "more": page.earlier])
             return fresh > 0
         } catch {
-            pageError = VigilLink.reason(error)
-            VigilPhone.shared.receipts.warn("feed", "earlier page not read", ["pane": ref.pane, "err": error])
+            pageError = source.reason(error)
+            source.log.warn("feed", "earlier page not read", ["pane": pane, "err": error])
             return false
         }
     }
@@ -321,10 +408,10 @@ final class Conversation: ObservableObject {
         Task {
             defer { pressing = nil }
             do {
-                keyNote = try await VigilPhone.shared.press(key, in: ref)
+                keyNote = try await source.press(key)
             } catch {
-                keyNote = VigilLink.reason(error)
-                VigilPhone.shared.receipts.warn("feed", "key not pressed", ["pane": ref.pane, "key": key.rawValue, "err": error])
+                keyNote = source.reason(error)
+                source.log.warn("feed", "key not pressed", ["pane": pane, "key": key.rawValue, "err": error])
             }
         }
     }
@@ -341,11 +428,11 @@ final class Conversation: ObservableObject {
             do {
                 // Shown as sent when the feed carries it as a prompt
                 // (`apply`), which may be before this returns.
-                try await VigilPhone.shared.say(text, to: ref)
+                _ = try await source.say(text)
             } catch {
                 guard reply?.text == text else { return }
-                reply?.failed = VigilLink.reason(error)
-                VigilPhone.shared.receipts.warn("feed", "reply not sent", ["pane": ref.pane, "err": error])
+                reply?.failed = source.reason(error)
+                source.log.warn("feed", "reply not sent", ["pane": pane, "err": error])
             }
         }
     }
@@ -360,17 +447,32 @@ final class Conversation: ObservableObject {
     var requestUnplaced: Bool { state.requestUnplaced }
 
     func pending(_ call: ToolCall, turn: String?) -> Pending? { state.pending(call, turn: turn) }
+
+    /// Where its views say what they saw (the list's witness).
+    var log: ConversationLog { source.log }
 }
 
 // MARK: - The screen
 
+/// Where the on-screen keyboard stands, for the app that has one (the
+/// phone's `KeyboardState`, read by its host): up, and how far above the
+/// safe area the column ends. The Mac's never moves.
+struct ConversationKeyboard: Equatable {
+    var up = false
+    var lift: CGFloat = 0
+}
+
 struct ConversationView: View {
     @ObservedObject var conversation: Conversation
-    /// Its Mac's directory: the state the header shows (the seen rule).
-    @ObservedObject private var phone = VigilPhone.shared
+    /// The pane's state as every row shows it (its Mac's directory, the
+    /// seen rule applied), read by the host.
+    var shown: AgentState?
+    /// The ground under the rows: the terminal's own, so switching to the
+    /// terminal never changes it (the host knows its terminal).
+    var ground: Color
+    var keyboard = ConversationKeyboard()
     /// Shows the pane's terminal instead (the toggle's other side).
     let showTerminal: () -> Void
-    @Environment(\.colorScheme) private var scheme
     @State private var position = ScrollPosition(idType: String.self)
     @State private var atBottom = true
     /// Where each row is and what the list shows, checked after every
@@ -379,8 +481,6 @@ struct ConversationView: View {
 
     /// The bottom row's id: the live state, always last.
     private static let bottom = "live"
-
-    @ObservedObject private var keyboard = KeyboardState.shared
 
     var body: some View {
         Group {
@@ -403,14 +503,10 @@ struct ConversationView: View {
         .environment(\.showTerminal, showTerminal)
     }
 
-    /// The terminal's own ground in dark (the app's appearance), the
-    /// system's in light: switching to the terminal never changes it.
-    private var ground: Color { scheme == .dark ? Color(VigilTheme.background) : Color(.systemBackground) }
-
     /// A row's frame moved: kept, and the list checked.
     private func framed(_ id: String, _ frame: CGRect) {
         witness.rows[id] = frame
-        witness.check(pane: conversation.ref.pane, ids: conversation.visible.map(\.id) + [Self.bottom])
+        witness.check(pane: conversation.pane, ids: conversation.visible.map(\.id) + [Self.bottom], log: conversation.log)
     }
 
     /// The rows over the reply box, one column moved up by the keyboard as a
@@ -421,11 +517,11 @@ struct ConversationView: View {
     private var screen: some View {
         VStack(spacing: 0) {
             rows
-            Composer(conversation: conversation, keyboardUp: keyboard.inset > 0)
+            Composer(conversation: conversation, keyboardUp: keyboard.up)
         }
         // Down: the box ends above the home indicator, its ground reaching
         // under it. Up: it ends where the keyboard begins.
-        .padding(.bottom, keyboard.aboveSafeArea)
+        .padding(.bottom, keyboard.lift)
         .ignoresSafeArea(.keyboard)
     }
 
@@ -472,7 +568,7 @@ struct ConversationView: View {
                     }
                     .transition(.opacity)
                 }
-                LiveRow(live: conversation.live, shown: phone.directories[conversation.ref.host.id]?.panes[conversation.ref.pane]?.shown)
+                LiveRow(live: conversation.live, shown: shown)
                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .scrollView) } action: { framed(Self.bottom, $0) }
                     .id(Self.bottom)
             }
@@ -501,7 +597,7 @@ struct ConversationView: View {
             .init(room: geometry.containerSize, content: geometry.contentSize.height, top: geometry.visibleRect.minY)
         } action: { _, now in
             witness.scroll = now
-            witness.check(pane: conversation.ref.pane, ids: conversation.visible.map(\.id) + [Self.bottom])
+            witness.check(pane: conversation.pane, ids: conversation.visible.map(\.id) + [Self.bottom], log: conversation.log)
         }
         .overlay(alignment: .bottom) {
             if let missing = conversation.focusMissing {
@@ -557,7 +653,7 @@ struct ConversationView: View {
     private var checking = false
 
     /// After the layout pass in progress, once however many asked.
-    func check(pane: String, ids: [String]) {
+    func check(pane: String, ids: [String], log receipts: ConversationLog) {
         guard !checking else { return }
         checking = true
         DispatchQueue.main.async { [self] in
@@ -565,7 +661,6 @@ struct ConversationView: View {
             guard scroll.room.height > 0, !ids.isEmpty else { return }
             let screen = CGRect(origin: .zero, size: scroll.room)
             let shown = ids.filter { rows[$0]?.intersects(screen) == true }.count
-            let receipts = VigilPhone.shared.receipts
             let numbers: LogFields = [
                 "pane": pane, "rows": ids.count, "onScreen": shown, "content": Int(scroll.content),
                 "top": Int(scroll.top), "room": Int(scroll.room.height),
@@ -860,14 +955,11 @@ private struct Composer: View {
                     .disabled(refusal != nil)
                     .padding(.horizontal, 12).padding(.vertical, 9)
                     .background(.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                Button {
-                    conversation.send(text)
-                    if conversation.reply?.failed == nil {
-                        text = ""
-                        recalled = nil
-                        draft = ""
-                    }
-                } label: {
+                    #if os(macOS)
+                    // Return sends, as a message app's box does (⌥Return is a new line).
+                    .onSubmit { if !sending, refusal == nil { submit() } }
+                    #endif
+                Button(action: submit) {
                     Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
                 }
                 .tint(Hue.yes)
@@ -892,11 +984,22 @@ private struct Composer: View {
             conversation.quote = nil
             focused = true
         }
-        // An activity's Reply: the box takes the keyboard.
-        .onReceive(VigilPhone.shared.$typeInto) { ref in
-            guard ref == conversation.ref else { return }
-            VigilPhone.shared.typeInto = nil
+        // Its host asked for the keyboard (an activity's Reply on the phone),
+        // before this box was drawn or while it is.
+        .onChange(of: conversation.replyWanted, initial: true) { _, wanted in
+            guard wanted else { return }
             focused = true
+            conversation.replyTaken()
+        }
+    }
+
+    private func submit() {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        conversation.send(text)
+        if conversation.reply?.failed == nil {
+            text = ""
+            recalled = nil
+            draft = ""
         }
     }
 }
