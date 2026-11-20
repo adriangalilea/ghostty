@@ -286,7 +286,7 @@ enum VigilAgents {
 
     /// A Mac's answer to a route or a follow. Refused or never reaching it,
     /// said, and a route is told again at the next change; lost (the Mac
-    /// stopped mid-answer, or it reached the Mac a week late, not done),
+    /// stopped mid-answer, or the home no longer has the transport receipt),
     /// made again from what holds now.
     static func heard(_ answer: VigilIntents.Answer, mac name: String) {
         let mac = answer.device

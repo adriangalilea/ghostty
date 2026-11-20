@@ -203,19 +203,25 @@ final class VigilMessageStore: ObservableObject {
         let due = MessageThreads.forYou(threads)
         VigilMessageAlerts.shared.due(due, names: host)
         let waits = awaiting.values.flatMap(\.values).reduce(into: Set<String>()) { $0.formUnion($1) }
-        let needs = Set(due.map(\.item.id)).union(waits).count
-        if needs != forYouCount {
-            forYouCount = needs
+        let unread = Set(due.map(\.item.id))
+        if unread.count != unreadCount || waits.count != waitingCount {
+            unreadCount = unread.count
+            waitingCount = waits.count
             NotificationCenter.default.post(name: Self.forYouDidChange, object: nil)
         }
     }
 
-    /// What needs the person in Messages, each once: the messages agents
-    /// addressed to them that they have not read (`MessageThreads.forYou`)
-    /// and the messages waiting on their yes (`MessageThreads.awaitingYou`).
-    /// What the Dock's badge and the menu bar count.
-    private(set) var forYouCount = 0
-    /// `forYouCount` changed.
+    /// The messages agents addressed to the person that they have not read
+    /// (`MessageThreads.forYou`): the menu bar's ✉.
+    private(set) var unreadCount = 0
+    /// The messages waiting on the person's yes, each once
+    /// (`MessageThreads.awaitingYou`): the menu bar's hand, as every row's
+    /// `WaitingMark`.
+    private(set) var waitingCount = 0
+    /// What needs the person in Messages, each once: the two together, the
+    /// Dock's one number (an awaited message is never one addressed to them).
+    var forYouCount: Int { unreadCount + waitingCount }
+    /// `unreadCount` or `waitingCount` changed.
     static let forYouDidChange = Notification.Name("vigilMessagesForYouDidChange")
 
     // MARK: Names (from the sidebar's own rows: the one naming rule)
@@ -239,7 +245,9 @@ final class VigilMessageStore: ObservableObject {
             for pane in row.tabs.flatMap(\.panes) {
                 guard let paneId = pane.paneId else { continue }
                 next["\(here)/\(paneId)"] = Named(
-                    pane: VigilChatPane.of(conversation: pane.conversationName, title: pane.title, face: row.emoji, mac: nil),
+                    pane: VigilChatPane.of(
+                        member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
+                        face: row.emoji, mac: nil),
                     workspace: row.id, navigation: paneId)
             }
         }
@@ -248,11 +256,19 @@ final class VigilMessageStore: ObservableObject {
             for pane in row.tabs.flatMap(\.panes) {
                 guard let (_, name) = VigilRemote.split(pane.id) else { continue }
                 next["\(device)/\(name)"] = Named(
-                    pane: VigilChatPane.of(conversation: pane.conversationName, title: pane.title, face: row.emoji, mac: row.host?.name),
+                    pane: VigilChatPane.of(
+                        member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
+                        face: row.emoji, mac: row.host?.name),
                     workspace: row.id, navigation: pane.id)
             }
         }
         if next != panes { panes = next }
+    }
+
+    /// The member a pane holds, as its glance carries it (`MemberGlance`:
+    /// its name and minted tint, the broker's one look of it).
+    private static func member(_ glance: MemberGlance?) -> (name: String?, face: String?, tint: String?)? {
+        glance.map { ($0.name, nil, $0.tint) }
     }
 
     // MARK: The host the views ask

@@ -1068,7 +1068,7 @@ struct VigilSidebarView: View {
                 // (VigilWire's `PaneFace`, the phone's rule too), else the
                 // glyph of where it sits.
                 if case .agent(let agent) = PaneFace.of(emoji: nil, program: pane.program), AgentMark.knows(agent) {
-                    AgentMark(agent: agent, size: 11 * scale)
+                    AgentMark(agent: agent, size: 11 * scale, tint: pane.member?.tint)
                 } else {
                     Image(systemName: pane.isDock ? "sidebar.right" : "terminal")
                         .font(.system(size: 8 * scale))

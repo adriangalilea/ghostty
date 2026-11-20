@@ -308,6 +308,7 @@ extension VigilWorkspaces {
         } else {
             alert.informativeText += " Messages already sent and changes already made to repositories on either Mac remain in effect."
         }
+        alert.informativeText += "\n\nForking the histories cannot undo messages already sent or changes already made to repositories while the Macs were apart."
         if panes.count > 1 {
             alert.informativeText += "\n\nThis handoff covers \(panes.count) panes: " + panes.sorted().joined(separator: ", ") + "."
         }
