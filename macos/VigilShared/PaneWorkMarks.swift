@@ -241,6 +241,39 @@ struct MessagesMark: View {
     }
 }
 
+/// Messages waiting on your yes (CHATS.md, decided 2026-11-19: "Waiting for
+/// your approval is one mark, defined once and drawn the same everywhere,
+/// rolling up as the state dots do"): a raised hand in the care tone and how
+/// many, by the messages' ids (`MessageThreads.awaitingYou`), so a fold of
+/// rows (a tab, a workspace, a Mac) counts each message once however many
+/// of its panes it holds. `press` opens where it is answered. Nothing while
+/// none waits.
+struct WaitingMark: View {
+    let messages: Set<String>
+    let sizes: PaneMarkSizes
+    var press: (() -> Void)?
+
+    var body: some View {
+        if !messages.isEmpty {
+            let said = messages.count == 1 ? "1 message waits for your yes" : "\(messages.count) messages wait for your yes"
+            let mark = HStack(spacing: 1) {
+                Image(systemName: "hand.raised.fill").font(sizes.symbol)
+                Text("\(messages.count)").font(sizes.count)
+            }
+            .foregroundStyle(.orange)
+            .fixedSize()
+            .help(said + (press == nil ? "" : "\nPress to answer it."))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(said)
+            if let press {
+                Button(action: press) { mark }.buttonStyle(.plain)
+            } else {
+                mark
+            }
+        }
+    }
+}
+
 /// Watches whose verdict will reach the pane (`WatchRecord`, on its own
 /// Mac): binoculars, as a watch is drawn wherever it speaks (a thread's
 /// sender), and how many when more than one. In the care tone, with the

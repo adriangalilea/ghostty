@@ -28,8 +28,12 @@ final class VigilPhoneMessages: ObservableObject {
     final class Marks: ObservableObject {
         /// Every pane's count (`MessageThreads.pending`), replaced only when it differs.
         @Published fileprivate(set) var pending: [String: [String: MessageThreads.Pending]] = [:]
+        /// The messages waiting on the person's yes, by Mac and pane, on both
+        /// their panes (`MessageThreads.awaitingYou`), replaced only when it differs.
+        @Published fileprivate(set) var awaiting: [String: [String: Set<String>]] = [:]
 
         func pending(root: String, pane: String) -> MessageThreads.Pending? { pending[root]?[pane] }
+        func awaiting(root: String, pane: String) -> Set<String> { awaiting[root]?[pane] ?? [] }
         /// What the person has not read, on every Mac.
         var unread: Int { pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread } }
     }
@@ -42,6 +46,8 @@ final class VigilPhoneMessages: ObservableObject {
     private init() {}
 
     var threads: [MessageThread] { MessageThreads.threads(mailboxes) }
+    /// Every conversation listed once: what the Messages screen lists.
+    var conversations: [MessageThread] { MessageThreads.conversations(mailboxes) }
 
     /// A pane's every thread as one: what its mode shows, holding exactly
     /// what its row mark counts.
@@ -96,6 +102,8 @@ final class VigilPhoneMessages: ObservableObject {
     private func recount() {
         let next = MessageThreads.pending(mailboxes)
         if next != marks.pending { marks.pending = next }
+        let awaiting = MessageThreads.awaitingYou(mailboxes)
+        if awaiting != marks.awaiting { marks.awaiting = awaiting }
     }
 
     private func macName(_ root: String) -> String {
@@ -191,7 +199,7 @@ struct PhoneMessagesScreen: View {
     @State private var chosen: String?
 
     var body: some View {
-        VigilChat(threads: store.threads, host: store.host, chosen: $chosen)
+        VigilChat(threads: store.conversations, host: store.host, chosen: $chosen)
             .navigationTitle("Messages")
             .toolbarTitleDisplayMode(.inline)
     }
@@ -220,6 +228,10 @@ struct PhoneMessagesMark: View {
     @ObservedObject private var marks = VigilPhoneMessages.shared.marks
 
     var body: some View {
+        // What waits on your yes first, each message once across the folded
+        // panes; then what you have not read.
+        WaitingMark(
+            messages: refs.reduce(into: Set<String>()) { $0.formUnion(marks.awaiting(root: $1.host.id, pane: $1.pane)) }, sizes: sizes)
         MessagesMark(pending: refs.compactMap { marks.pending(root: $0.host.id, pane: $0.pane) }, sizes: sizes)
     }
 }
