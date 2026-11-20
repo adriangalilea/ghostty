@@ -132,7 +132,7 @@ struct PaneProblemsMark: View {
             .inkActionPopover(isPresented: $showing) {
                 let current = items.first(where: { $0.id == selected }) ?? first
                 VStack(alignment: .leading, spacing: 0) {
-                    if items.count > 1 {
+                    if items.count > 1 && (!oneRestartProblem || items.contains(where: { feedback.receipt($0) != nil || $0.subject.note != nil })) {
                         Picker("Problem", selection: Binding(get: { current.id }, set: { selected = $0 })) {
                             ForEach(items) { item in Text(item.subject.title + " · " + item.problem.title).tag(item.id) }
                         }
@@ -149,10 +149,13 @@ struct PaneProblemsMark: View {
 
     private func panel(_ item: PaneProblemItem) -> InkActionPanel {
         let statusOnly = item.problem.kind == .restarted
-        let panel = InkActionPanel(item.problem.title, detail: item.subject.title,
+        let affected = restartItems
+        let folded = oneRestartProblem && affected.count > 1
+        let title = folded && item.problem.kind == .receiver ? "\(affected.count) panes can’t receive messages" : item.problem.title
+        let detail = folded ? nil : item.subject.title
+        let panel = InkActionPanel(title, detail: detail,
             tone: statusOnly ? .ok : item.writers == .both || item.problem.kind == .twoLive ? .bad : .warn,
             actions: actions(item), style: statusOnly ? .status : .problem)
-        let affected = restartItems
         if item.restart != nil && affected.count > 1 {
             return panel.affectedItems(affected.map { other in
                 InkActionPanel.Item(other.subject.title, id: other.operationID,
@@ -173,6 +176,11 @@ struct PaneProblemsMark: View {
         }
     }
 
+    private var oneRestartProblem: Bool {
+        guard let first = items.first, first.restart != nil else { return false }
+        return items.allSatisfy { $0.restart != nil && $0.problem.kind == first.problem.kind }
+    }
+
     private var restartItems: [PaneProblemItem] {
         var seen = Set<String>()
         return items.filter { $0.restart != nil && seen.insert($0.operationID).inserted }
@@ -183,7 +191,7 @@ struct PaneProblemsMark: View {
         if let act = item.act, let label = item.button {
             alongside.append(.init(label) { showing = false; act() })
         } else if let visit = item.visit {
-            alongside.append(.init("Open pane", symbol: "arrow.up.forward") { showing = false; visit() })
+            alongside.append(.init(items.count > 1 ? "Open " + item.subject.title : "Open pane", symbol: "arrow.up.forward") { showing = false; visit() })
         }
         guard item.restart != nil else { return .buttons(alongside) }
         func command(_ label: String, _ intent: Restart.Intent) -> InkHUD.Action {
@@ -193,7 +201,9 @@ struct PaneProblemsMark: View {
             var next: [InkHUD.Action] = []
             if let intent = r.next {
                 switch intent {
-                case .confirm: next = [command("Restart now", intent)]
+                case .confirm:
+                    next = [.init("Keep running") { feedback.forget(item.operationID) },
+                            .init("Restart now", destructive: true) { feedback.send(intent, to: item) }]
                 case .whenIdle: next = [command("Restart when idle", intent)]
                 default: next = [command("Retry", intent)]
                 }
@@ -212,15 +222,24 @@ struct PaneProblemsMark: View {
         }
         let targets = restartItems.filter { $0.subject.note?.state != .armed && feedback.receipt($0) == nil }
         if targets.count > 1 {
-            return .group("Restart", [command("Restart " + item.subject.title, .now),
-                .init("Restart all \(targets.count) when idle") {
-                    for target in targets { feedback.send(.whenIdle, to: target) }
-                }], alongside: alongside)
+            var choices = targets.map { target in
+                InkHUD.Action("Restart " + target.subject.title) {
+                    selected = target.id
+                    feedback.send(.now, to: target)
+                }
+            }
+            choices.append(.init("Restart all \(targets.count) when idle") {
+                for target in targets { feedback.send(.whenIdle, to: target) }
+            })
+            return .group("Restart", choices, alongside: alongside)
         }
         return .buttons([command("Restart", .now)] + alongside)
     }
 }
 
+/// A row's dots, by swift-utils' `InkStateDotCluster`: a pane's own (each
+/// background agent not finished, then its main agent's state) or a folded
+/// row's. How a dot looks for what it says is here and nowhere else.
 struct PaneDots: View {
     let dots: [PaneDot]
     let sizes: PaneMarkSizes
