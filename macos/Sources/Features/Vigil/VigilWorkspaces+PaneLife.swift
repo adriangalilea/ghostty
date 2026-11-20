@@ -298,13 +298,15 @@ extension VigilWorkspaces {
     static func takeoverAlert(mac: String, unpaired: Bool, peerClosed: Bool, panes: [String]) -> NSAlert {
         let alert = NSAlert()
         alert.messageText = "Take over from " + mac + "?"
-        alert.informativeText = "This Mac cannot reach the source. It may still be working. Open the saved copy here and stop its other copy when contact returns? A running turn or tool can be interrupted. Later history from the other copy will be kept separately."
+        alert.informativeText = "Release unconfirmed. \(mac) may still be working. Open the saved copy here and stop its other copy when contact returns? A running turn or tool can be interrupted. Later history from the other copy will be kept separately."
         if unpaired {
-            alert.informativeText = "Contact failed before this Mac lost its pairing. Its current state cannot be checked. Both copies may be writing until you pair the Macs again and the other copy retires."
+            alert.informativeText = "Release unconfirmed. \(mac) may still be working. Contact failed before this Mac lost its pairing. Both copies may be writing until you pair the Macs again and the other copy retires."
         }
         if peerClosed {
             alert.messageText = "Open the saved conversation here?"
             alert.informativeText = "The other Mac confirmed that it closed its fork. Any different returned history is listed in vigil conflicts."
+        } else {
+            alert.informativeText += " Messages already sent and changes already made to repositories on either Mac remain in effect."
         }
         if panes.count > 1 {
             alert.informativeText += "\n\nThis handoff covers \(panes.count) panes: " + panes.sorted().joined(separator: ", ") + "."
@@ -343,6 +345,14 @@ extension VigilWorkspaces {
                 guard since == nil ? ticket.peerClosed == true : moveOffline[arrival.device] == since else { showMoveNote(pane); return }
                 let alert = Self.takeoverAlert(mac: arrival.mac, unpaired: unpairedMoves.contains(arrival.device),
                                                peerClosed: ticket.peerClosed == true, panes: Array(ticket.panes.values))
+                if ticket.peerClosed != true {
+                    let lines = ticket.panes.keys.sorted().map { sourcePane in
+                        let proof = ticket.answers(for: sourcePane) { VigilRemote.shared.host($0)?.name }
+                        let checkpoint = proof.copyCheckpoint.map { " (" + $0.prefix(12) + ")" } ?? ""
+                        return (ticket.panes.count > 1 ? sourcePane + " · " : "") + proof.copy + checkpoint
+                    }
+                    alert.informativeText += "\n\n" + lines.joined(separator: "\n")
+                }
                 if Self.runTakeoverAlert(alert) == .alertSecondButtonReturn {
                     Task { @MainActor in await takeOverHere(pane, since: since) }
                 }

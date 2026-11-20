@@ -1157,8 +1157,8 @@ struct VigilSidebarView: View {
                 }
                 // Who its conversation is, as its Mac's tuples say:
                 // handle, lineage, subagents, the runs that speak for it.
-                if pane.member != nil {
-                    Button { VigilMemberCard.show(pane) } label: { Label("Member…", systemImage: "person.text.rectangle") }
+                if pane.conversationRef != nil || pane.member != nil {
+                    Button { VigilMemberCard.show(pane) } label: { Label("Conversation Details…", systemImage: "info.circle") }
                 }
                 // Its agent's conversation, forked: a second pane starts
                 // from the same state under a new id and this one goes on.

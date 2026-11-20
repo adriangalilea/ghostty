@@ -51,7 +51,8 @@ extension VigilWorkspaces {
         /// The agent's conversation (its glance), while one runs there: its
         /// id (Claude's session id, what `c -r` and its logs name) and its
         /// name (what the agent's own UI calls it).
-        var conversation: String?
+        var conversationRef: ConversationRef?
+        var conversation: String? { conversationRef?.id }
         var conversationName: String?
         var liveConversation: ConversationRef?
         /// The conversation its own was forked from, by id (its glance).
@@ -228,7 +229,7 @@ extension VigilWorkspaces {
                 lookers: Viewer.parse(paneFileLines(pane.id, "viewers").joined(separator: "\n")),
                 followed: phoneFollows.contains(pane.id),
                 priority: pane.priority ?? .normal,
-                conversation: meaning?.conversation,
+                conversationRef: meaning?.reference,
                 conversationName: meaning?.title,
                 liveConversation: facts.alive ? meaning?.reference : nil,
                 forkedFrom: meaning?.forkedFrom,

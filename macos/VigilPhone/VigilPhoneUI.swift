@@ -341,6 +341,7 @@ struct TreeNodeView: View {
 
     /// The pane's watches, over the tree (its long press).
     @State private var showingWatches = false
+    @State private var copyDetails: PhoneCopyDetails?
     @ObservedObject private var watches = VigilPhoneWatches.shared.marks
     private var foldable: Bool { !node.children.isEmpty }
 
@@ -435,6 +436,11 @@ struct TreeNodeView: View {
             }
         }
         .contextMenu {
+            if let ref = node.glance?.reference, let host = model.host(of: node) {
+                Button { copyDetails = PhoneCopyDetails(conversation: ref, host: host) } label: {
+                    Label("Conversation Details", systemImage: "info.circle")
+                }
+            }
             // The ids we communicate by, each where it exists.
             if let pane = node.followPane {
                 Section {
@@ -475,6 +481,7 @@ struct TreeNodeView: View {
                 }
             }
         }
+        .sheet(item: $copyDetails) { $0 }
         .sheet(isPresented: $showingWatches) {
             if let ref = node.pane { PhonePaneWatches(ref: ref) }
         }
@@ -1355,6 +1362,7 @@ struct PaneScreen: View {
     @State private var conversation: Conversation?
     /// The pane's watches, over the screen (its menu).
     @State private var showingWatches = false
+    @State private var copyDetails: PhoneCopyDetails?
     @ObservedObject private var watches = VigilPhoneWatches.shared.marks
 
     enum Mode: CaseIterable {
@@ -1448,6 +1456,7 @@ struct PaneScreen: View {
         .navigationBarBackButtonHidden(true)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar { toolbar }
+        .sheet(item: $copyDetails) { $0 }
         .sheet(isPresented: $showingWatches) { PhonePaneWatches(ref: current) }
         .task {
             screenVisible = true
@@ -1586,6 +1595,11 @@ struct PaneScreen: View {
                         }
                     }
                     .disabled(model.creating != nil || !model.reachable(current.host))
+                    if let ref = node?.glance?.reference {
+                        Button { copyDetails = PhoneCopyDetails(conversation: ref, host: current.host) } label: {
+                            Label("Conversation Details", systemImage: "info.circle")
+                        }
+                    }
                     // The watches whose verdict reaches it, as the Mac's row offers them.
                     if !watches.watches(root: current.host.id, pane: current.pane).isEmpty {
                         Section {
@@ -1855,6 +1869,37 @@ struct ReceiptsSection: View {
                 Text(receipt.line).font(.caption2.monospaced())
                     .foregroundStyle(receipt.level == .info ? Color.secondary : receipt.level == .warn ? Hue.care : Color.red)
             }
+        }
+    }
+}
+
+struct PhoneCopyDetails: View, Identifiable {
+    let conversation: ConversationRef
+    let host: VigilPhone.Host
+    var id: String { host.id + "/" + conversation.key }
+    @Environment(\.dismiss) private var dismiss
+
+    let read: @MainActor (ConversationRef, VigilPhone.Host) async throws -> [TranscriptProgress]
+
+    init(conversation: ConversationRef, host: VigilPhone.Host,
+         read: @escaping @MainActor (ConversationRef, VigilPhone.Host) async throws -> [TranscriptProgress] = {
+             try await VigilPhone.shared.transcriptProgress($0, at: $1)
+         }) {
+        self.conversation = conversation
+        self.host = host
+        self.read = read
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VigilTranscriptCopies(conversation: conversation, home: host.name) { ref in
+                    try await read(ref, host)
+                }.padding()
+            }
+            .navigationTitle("Conversation Details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
     }
 }

@@ -573,7 +573,7 @@ final class VigilRemote: ObservableObject {
                             // one (two Macs): only the phone is news.
                             lookers: truth?.lookers.filter { $0 == .phone } ?? [],
                             priority: pane.priority ?? .normal,
-                            conversation: truth?.meaning?.conversation,
+                            conversationRef: truth?.meaning?.reference,
                             conversationName: truth?.meaning?.title,
                             liveConversation: !host.away && host.error == nil && truth?.alive == true ? truth?.meaning?.reference : nil,
                             forkedFrom: truth?.meaning?.forkedFrom,

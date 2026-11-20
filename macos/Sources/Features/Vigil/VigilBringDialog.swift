@@ -69,6 +69,17 @@ final class BringDialogModel: ObservableObject {
     /// stood), which the commit checks its own sheet against.
     enum Outcome { case cancel, bring(checkoutRevision: String), open(pane: String), bringFork(String, ConversationRef) }
 
+    struct ReceiptRow: Identifiable, Equatable {
+        let id: String
+        let title: String
+        let answers: Bring.MoveAnswers
+    }
+    var submitMove: ((String) -> Void)?
+    @Published var moveID: UUID?
+    @Published var receiptRows: [ReceiptRow] = []
+    @Published var moveNotice: String?
+    var receiptEvents: AnyCancellable?
+
     var offersFork: ((ConversationRef) -> Bool)?
     var makeFork: ((ConversationRef) async throws -> String)?
     var forkIdentity: ((String, ConversationRef) throws -> ConversationRef?)?
@@ -267,6 +278,8 @@ final class BringDialogModel: ObservableObject {
 
     /// Everything it follows let go (the dialog closed).
     func stop() {
+        receiptEvents?.cancel()
+        receiptEvents = nil
         forkTask?.cancel()
         forkTask = nil
         heard?.cancel()
@@ -572,6 +585,12 @@ final class BringDialogModel: ObservableObject {
                 "workspace": workspace, "mac": mac, "to": destination, "overrides": standing,
                 "unknown": lines.filter { $0.work == nil }.count, "checkout": revision,
             ])
+            if let submitMove {
+                self.submitMove = nil
+                stop()
+                submitMove(revision)
+                return
+            }
         case .cancel:
             lifecycleLog.info("bring: cancelled", ["workspace": workspace, "mac": mac, "to": destination])
         case .open, .bringFork:
@@ -645,11 +664,35 @@ struct BringDialog: View {
     @State private var listHeight: CGFloat = 0
 
     var body: some View {
-        if let group = model.showing {
+        if let id = model.moveID {
+            receipt(id)
+        } else if let group = model.showing {
             changes(group)
         } else {
             sheet
         }
+    }
+
+    private func receipt(_ id: UUID) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Bring \(model.what) here from \(model.mac)").font(.headline)
+            Text("Move " + id.uuidString).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(model.receiptRows) { row in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(row.title).font(.subheadline.weight(.semibold))
+                            BringMoveProofs(answers: row.answers)
+                        }
+                    }
+                    if let notice = model.moveNotice { Text(notice).foregroundStyle(.secondary) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack { Spacer(); Button("Close") { model.answer(.cancel) }.keyboardShortcut(.cancelAction) }
+        }
+        .padding(20)
+        .frame(width: Self.width, height: min(Self.tallest, 178 + CGFloat(model.receiptRows.count) * 124))
     }
 
     private var away: Bool { if case .away = model.source { true } else { false } }
@@ -868,6 +911,11 @@ struct BringDialog: View {
                 Text(line.name ?? Directory.folder(line.folder, home: model.home))
                     .font(.system(size: 12, weight: .medium)).lineLimit(1)
                 Text(line.opens).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if let progress = line.progress {
+                    VigilTranscriptCopyRow(row: progress).padding(.top, 4)
+                } else if line.conversation != nil {
+                    Text("No verified copy reported.").font(.caption).foregroundStyle(.secondary)
+                }
             }
             Spacer(minLength: 8)
             if let idle = line.idle() {

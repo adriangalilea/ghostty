@@ -2,38 +2,34 @@ import AppKit
 import SwiftUI
 import VigilWire
 
-/// The member card (harness/IDENTITY.md section 10): who an agent pane's
-/// conversation is, as its Mac's tuples say it. Every row is a view of
-/// the glance's member (`PaneGlance.member`), which the pane's broker
-/// builds from its tuples: its handle, its lineage, its subagents, the
-/// runs that speak for it, its ids. One window per card, closed by the
-/// person; read only.
+/// Identity from the pane’s glance and transcript comparisons from its home.
+@MainActor
 enum VigilMemberCard {
     private static var shown: [String: NSWindow] = [:]
 
     static func show(_ pane: VigilWorkspaces.SidebarPane) {
-        guard let member = pane.member else { return }
-        if let window = shown[member.key] {
+        guard pane.member != nil || pane.conversationRef != nil else { return }
+        let key = [pane.id, pane.conversationRef?.key ?? pane.member?.key ?? ""].joined(separator: "/")
+        if let window = shown[key] {
             window.makeKeyAndOrderFront(nil)
             return
         }
         let window = NSWindow(contentViewController: NSHostingController(
-            rootView: Card(pane: pane, member: member).frame(minWidth: 380, minHeight: 240)))
+            rootView: Card(pane: pane).frame(minWidth: 380, minHeight: 240)))
         window.title = pane.conversationName ?? pane.title
         window.setContentSize(NSSize(width: 460, height: 380))
         window.isReleasedWhenClosed = false
         window.center()
-        shown[member.key] = window
+        shown[key] = window
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
-            MainActor.assumeIsolated { shown[member.key] = nil }
+            MainActor.assumeIsolated { shown[key] = nil }
         }
         window.makeKeyAndOrderFront(nil)
-        sidebarLog.info("member card opened", ["pane": pane.id, "member": member.key])
+        sidebarLog.info("member card opened", ["pane": pane.id])
     }
 
     private struct Card: View {
         let pane: VigilWorkspaces.SidebarPane
-        let member: MemberGlance
 
         var body: some View {
             ScrollView {
@@ -42,40 +38,58 @@ enum VigilMemberCard {
                         Text(pane.emoji.map { "\($0) " } ?? "")
                             + Text(pane.conversationName ?? pane.title).font(.headline)
                         Spacer()
-                        Text("@\(member.handle)").font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    Text([pane.program, member.runs.isEmpty ? "not running" : "running"].compactMap { $0 }.joined(separator: " · "))
-                        .foregroundStyle(.secondary)
-                    Divider()
-                    section("Lineage") {
-                        if let parent = member.forkedFrom { line("forked from \(parent)") }
-                        if let parent = member.continuedFrom { line("continued from \(parent) (after /clear)") }
-                        if !member.forks.isEmpty { line("forks: \(member.forks.joined(separator: " · "))") }
-                        if member.forkedFrom == nil, member.continuedFrom == nil, member.forks.isEmpty { line("none") }
-                    }
-                    section("Subagents") {
-                        if member.subagents.isEmpty { line("none") }
-                        ForEach(member.subagents, id: \.key) { sub in
-                            HStack(spacing: 6) {
-                                Text(String(repeating: "   ", count: sub.depth - 1) + "↳ " + (sub.name.isEmpty ? sub.handle : sub.name))
-                                if let type = sub.type { Text(type).foregroundStyle(.secondary) }
-                                Text(sub.running ? "running" : "finished").foregroundStyle(sub.running ? .green : .secondary)
-                                Spacer()
-                                Text("@\(sub.handle)").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                            }
+                        if let member = pane.member {
+                            Text("@\(member.handle)").font(.system(.body, design: .monospaced))
+                                .foregroundStyle(.secondary).textSelection(.enabled)
                         }
                     }
-                    section("Reached") {
-                        line(member.runs.isEmpty
-                            ? "not running: a send is refused for now (resuming it is a later step)"
-                            : "its inbox, in this pane (\(member.runs.joined(separator: ", ")))")
+                    if let ref = pane.conversationRef {
+                        let remote = VigilRemote.split(pane.id)?.device
+                        let home = remote.flatMap { VigilRemote.shared.host($0)?.name } ?? (remote == nil ? "This Mac" : "The pane’s Mac")
+                        Divider()
+                        VigilTranscriptCopies(conversation: ref, home: home) { subject in
+                            try await Task.detached {
+                                let ask = Open.conversation(ConversationAsk(op: .progress, key: ConversationKey(.ref(subject))))
+                                let hub = Local.Client(socket: VigilPaths.hub)
+                                let data = try remote.map { try hub.call(device: $0, ask) } ?? hub.conversationProgress(subject)
+                                return try JSONDecoder().decode(ConversationAnswer<[TranscriptProgress]>.self, from: data).value
+                            }.value
+                        }
+                        .id(ref)
                     }
-                    section("Ids") {
-                        Text(member.key).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                        if let conversation = pane.conversation {
-                            Text("conversation \(conversation)").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    if let member = pane.member {
+                        Text([pane.program, member.runs.isEmpty ? "not running" : "running"].compactMap { $0 }.joined(separator: " · "))
+                            .foregroundStyle(.secondary)
+                        Divider()
+                        section("Lineage") {
+                            if let parent = member.forkedFrom { line("forked from \(parent)") }
+                            if let parent = member.continuedFrom { line("continued from \(parent) (after /clear)") }
+                            if !member.forks.isEmpty { line("forks: \(member.forks.joined(separator: " · "))") }
+                            if member.forkedFrom == nil, member.continuedFrom == nil, member.forks.isEmpty { line("none") }
+                        }
+                        section("Subagents") {
+                            if member.subagents.isEmpty { line("none") }
+                            ForEach(member.subagents, id: \.key) { sub in
+                                HStack(spacing: 6) {
+                                    Text(String(repeating: "   ", count: sub.depth - 1) + "↳ " + (sub.name.isEmpty ? sub.handle : sub.name))
+                                    if let type = sub.type { Text(type).foregroundStyle(.secondary) }
+                                    Text(sub.running ? "running" : "finished").foregroundStyle(sub.running ? .green : .secondary)
+                                    Spacer()
+                                    Text("@\(sub.handle)").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                        section("Reached") {
+                            line(member.runs.isEmpty
+                                ? "not running: a send is refused for now (resuming it is a later step)"
+                                : "its inbox, in this pane (\(member.runs.joined(separator: ", ")))")
+                        }
+                        section("Ids") {
+                            Text(member.key).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            if let conversation = pane.conversation {
+                                Text("conversation \(conversation)").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            }
                         }
                     }
                 }

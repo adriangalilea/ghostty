@@ -1208,8 +1208,13 @@ final class VigilPhone: ObservableObject {
         }
     }
 
-    /// One ask about a pane's documents, answered by its Mac
-    /// (harness/DOCUMENTS.md).
+    func transcriptProgress(_ ref: ConversationRef, at host: Host) async throws -> [TranscriptProgress] {
+        let ask = ConversationAsk(op: .progress, key: ConversationKey(.ref(ref)))
+        let data = try await VigilLink.call(linked(), device: host.id, .conversation(ask))
+        return try JSONDecoder().decode(ConversationAnswer<[TranscriptProgress]>.self, from: data).value
+    }
+
+    /// One ask about a pane’s documents, answered by its Mac (harness/DOCUMENTS.md).
     func documents(_ call: DocumentCall, in ref: PaneRef) async throws -> Data {
         let data = try await VigilLink.call(linked(), device: ref.host.id, .documents(ref.pane, call))
         receipts.info("documents", "answered", ["mac": ref.host.name, "pane": ref.pane, "kind": call.kind.rawValue, "bytes": data.count])

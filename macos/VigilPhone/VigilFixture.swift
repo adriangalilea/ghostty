@@ -18,6 +18,8 @@ enum VigilFixture: String {
     case conversation
     /// A permission on its tool call's row, a question with its options.
     case conversationWaiting = "conversation-waiting"
+    /// The conversation details sheet, including a partial record and an unreported copy.
+    case conversationCopies = "conversation-copies"
     /// A question asked mid-turn, its options as buttons.
     case conversationQuestion = "conversation-question"
     /// The other kinds of rows (a plan, a subagent, a compaction, a
@@ -184,6 +186,27 @@ struct VigilFixtureView: View {
             case .conversation:
                 ConversationFixture(conversation: Self.conversation(Self.turn, live: Self.doneLive,
                                                                     reply: .init(text: "Good. Add a line about it to the changelog.")))
+            case .conversationCopies:
+                PhoneCopyDetails(conversation: .init(agent: "claude", id: "fixture"), host: Self.host) { ref, host in
+                    var reported = TranscriptProgress(sourceRoot: host.id, sourceMac: host.name,
+                                                      copyRoot: "replica", copyMac: "mini", ref: ref)
+                    let prefix = TranscriptRewrite.Point(length: 261_120, digest: String(repeating: "a", count: 64))
+                    var offer = TranscriptOffer(agent: ref.agent, id: ref.id, place: "fixture.jsonl", length: prefix.length + 240)
+                    offer.digest = String(repeating: "b", count: 64)
+                    reported.native = prefix
+                    reported.sourceTip = offer.tip
+                    reported.reporterRoot = "replica"
+                    reported.reporterMac = "mini"
+                    var nativeTip = offer.tip
+                    nativeTip.length = prefix.length
+                    nativeTip.digest = prefix.digest
+                    reported.reportedTip = nativeTip
+                    reported.state = .partial
+                    reported.reportedAt = Date().timeIntervalSince1970 - 480
+                    reported.verifiedAt = reported.reportedAt
+                    let unknown = TranscriptProgress(sourceRoot: host.id, sourceMac: host.name, copyRoot: "m5", copyMac: "M5", ref: ref)
+                    return [reported, unknown]
+                }
             case .conversationWaiting:
                 ConversationFixture(conversation: Self.conversation(Self.asking, live: Self.askingLive, offer: Self.consent))
             case .conversationQuestion:

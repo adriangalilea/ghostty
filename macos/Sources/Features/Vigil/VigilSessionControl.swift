@@ -52,6 +52,9 @@ enum VigilSessionControl {
         var input: [InputDiagnostic]?
         var status: Status?
         var released: [String: Bring.TranscriptProof]?
+        /// Revisions of the pane writers the source actually retired, captured
+        /// before their daemons stopped and retained with the source burial.
+        var writerRevisions: [String: String]?
         var page: Bring.Page?
         var successors: [String: VigilWorkspaces.MoveSuccessor]?
 
