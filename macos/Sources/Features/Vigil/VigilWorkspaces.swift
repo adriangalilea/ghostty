@@ -521,6 +521,15 @@ class VigilWorkspaces {
     var stoppingMoves = Set<String>()
     var moveDelay: [UUID: UInt64] = [:]
     var moveWaiting: [UUID: String] = [:]
+    /// The moves this Mac decides and does as their destination, published
+    /// whole at `VigilPaths.moves` at every change (`publishMoveTickets`):
+    /// what every device draws while a move is checked, asked in Authz and
+    /// done, and why one that ended did not move. One per thing moved: a
+    /// new order of the same workspace, tab or pane replaces an ended one.
+    var moveTickets: [UUID: Move.Ticket] = [:]
+    /// This Mac's tether root, as a ticket names a source (`moveDevice`,
+    /// asked once at launch).
+    var moveRoot: String?
     var savedMoveHistories: [UUID: SavedMoveHistory] = [:]
     var savedMoveHistoriesFile: URL { SavedMoveHistory.ledger(in: VigilPaths.root) }
     var closedForkReceipts: [UUID: WorkspaceCommand.Request.Moved] = [:]
@@ -739,6 +748,7 @@ class VigilWorkspaces {
         collectOrphans()
         finishPendingCloses()
         loadIncomingMoves()
+        loadMoveTickets()
         // Publish revisions for older registries without changing their
         // saved login-restoration intent before any windows are restored.
         shutdownForeground = Dictionary(uniqueKeysWithValues: workspaces.values.map { ($0.name, $0.foreground) })

@@ -2190,7 +2190,8 @@ extension VigilWorkspaces {
                         return lifecycleLog.error("move: the workspace is not listed", ["workspace": workspace, "to": target.name])
                     }
                     manager.present(model, source: homeDevice, sourceHome: sourceHome, targetHome: targetHome) { revision in
-                        guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, anchor: anchor, part: part, checkoutRevision: revision) else {
+                        guard let order = Move.order(workspace, home: homeDevice, to: target, me: from, asker: Self.asker,
+                                                     anchor: anchor, part: part, checkoutRevision: revision) else {
                             return lifecycleLog.error("move: no order", ["workspace": workspace, "to": target.name])
                         }
                         manager.ask(RowHome(device: device, workspace: workspace), order.request, failing: "\(label) was not moved to \(target.name)")
@@ -2234,7 +2235,7 @@ extension VigilWorkspaces {
         }
     }
 
-    private static func moving(_ label: String, _ part: Registry.Workspace.Part?) -> String {
+    static func moving(_ label: String, _ part: Registry.Workspace.Part?) -> String {
         switch part {
         case .tab: "this tab of \(label)"
         case .pane: "this pane of \(label)"
@@ -2242,7 +2243,7 @@ extension VigilWorkspaces {
         }
     }
 
-    private static func away(_ host: VigilRemote.Host?) -> String? {
+    static func away(_ host: VigilRemote.Host?) -> String? {
         guard let host, host.away else { return nil }
         return host.received.map { String(VigilRemote.awaySince($0).dropFirst("away since ".count)) }
     }
@@ -2318,7 +2319,8 @@ extension VigilWorkspaces {
         guard model.open() else { return lifecycleLog.error("move: the workspace is not listed", ["workspace": name, "from": host.name]) }
         model.submitMove = { [weak self, weak model] revision in
             guard let self, let model else { return }
-            var request = VigilSessionControl.Request.moveTo(name, from: device, anchor: anchor, part: part, checkoutRevision: revision)
+            var request = VigilSessionControl.Request.moveTo(name, from: device, asker: Self.asker, anchor: anchor, part: part,
+                                                             checkoutRevision: revision)
             request.expectedConversation = expecting ?? model.liveConversation
             let id = request.id
             let labels = Dictionary(model.lines.map { ($0.pane, $0.name ?? $0.pane) }, uniquingKeysWith: { first, _ in first })
@@ -2332,7 +2334,13 @@ extension VigilWorkspaces {
                 guard let self, let model else { return }
                 let ended = note.object as? IncomingMove
                 let completed = ended?.request.id == id && ended?.source == device
-                guard let ticket = completed ? ended : self.incomingMoves[id], ticket.source == device else { return }
+                guard let ticket = completed ? ended : self.incomingMoves[id], ticket.source == device else {
+                    // Before the handoff is saved: the order's own ticket
+                    // (checked, asked in Authz, refused or failed).
+                    let said = self.moveTickets[id].map { $0.words(destination: Self.thisMac) }
+                    if model.moveNotice != said { model.moveNotice = said }
+                    return
+                }
                 let rows = ticket.panes.keys.sorted().map { pane in
                     let answers = ticket.answers(for: pane, completed: completed) { VigilRemote.shared.host($0)?.name }
                     return MoveDialogModel.ReceiptRow(id: pane, title: labels[pane] ?? pane, answers: answers)

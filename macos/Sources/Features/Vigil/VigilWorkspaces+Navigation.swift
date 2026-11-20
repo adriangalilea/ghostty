@@ -273,7 +273,7 @@ extension VigilWorkspaces {
     /// so the edit is checked against the revision asked for once the pane
     /// runs, and a pane born for an edit that no longer applies is closed.
     func applySessionCommand(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
-        if request.operation == "move_to" { return await moveHere(request) }
+        if request.operation == "move_to" { return orderMove(request) }
         if request.operation == "retire_move" {
             return .failure(request, "upgrade_required", "Update the destination and move again. This source requires a handoff before another Mac can open the pane.")
         }

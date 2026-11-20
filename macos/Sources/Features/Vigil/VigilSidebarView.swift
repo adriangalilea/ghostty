@@ -756,6 +756,8 @@ struct VigilSidebarView: View {
             // the front tint and the filled tab icons, the rest by the
             // tooltip.
             HStack(spacing: marks.gap) {
+                // A move of it being decided or done, as its destination says it.
+                movingMark(row.moving)
                 // Where it came from, folded or not, until its panes are opened.
                 arrivedMark(row.tabs.flatMap(\.panes).compactMap(\.arrived))
                 if collapsed { foldedMarks(row.tabs.flatMap(\.panes)) }
@@ -1372,6 +1374,18 @@ struct VigilSidebarView: View {
     /// pane's, or a workspace's panes rolled up). It leaves a pane's row
     /// when the pane is opened, since from then it runs here.
     @ViewBuilder
+    /// A move of the row's workspace being decided or done, its destination's
+    /// word for how it stands ("mbp-m4: Waiting for your yes in Authz").
+    @ViewBuilder
+    private func movingMark(_ moving: String?) -> some View {
+        if let moving {
+            Image(systemName: Self.moveSymbol).font(marks.symbol)
+                .foregroundStyle(.orange)
+                .help(moving)
+                .accessibilityLabel(moving)
+        }
+    }
+
     private func arrivedMark(_ arrivals: [Registry.Arrival]) -> some View {
         if let first = arrivals.first {
             HStack(spacing: 1) {
