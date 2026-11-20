@@ -160,21 +160,23 @@ final class VigilPhoneMessages: ObservableObject {
     }
 
     private static func act(_ act: Message.Act, root: String) async throws -> Message.Acted {
-        // Deliver or Refuse on a message whose card stands: answered on that
-        // card through this phone's Authz endpoint, as its notification's
-        // buttons do, so Authz closes it on every device and its Mac hears
-        // the answer from authzd. A card this phone cannot answer (its Mac
-        // does not let vigil answer, the card already gone) falls through to
-        // the Mac's mailbox.
-        if act.kind == .allow || act.kind == .refuse, let id = act.id,
-           let record = shared.mailboxes[root]?[id], record.ask?.stage == .asking, let request = record.ask?.request,
-           act.kind == .refuse || record.message.declared.requirement == .answered
-        {
-            let decision = Decision.action(act.kind == .allow ? "allow" : "deny", feedback: nil)
-            if await VigilAuthz.shared.answer(device: root, request: request, decision) == nil {
-                return Message.Acted(
-                    records: [record], said: act.kind == .allow ? "Allowed: it goes to its agent." : "Refused: it is not delivered.")
+        // Deliver or Refuse: answered on the message's card through this
+        // phone's Authz endpoint, as its notification's buttons do, so Authz
+        // closes it on every device and its Mac hears the answer from
+        // authzd. The one path: what Authz does not take is said, and
+        // nothing is answered behind it.
+        if act.kind == .allow || act.kind == .refuse, let id = act.id {
+            guard let record = shared.mailboxes[root]?[id] else { throw Failed(description: "its Mac's mailbox is not read here yet") }
+            guard record.ask?.stage == .asking, let request = record.ask?.request else {
+                throw Failed(description: "no card stands for it in Authz" + (record.ask?.why.map { ": \($0)" } ?? " yet"))
             }
+            guard act.kind == .refuse || record.message.declared.requirement == .answered else {
+                throw Failed(description: "a stop is allowed on its card in Authz, once the device that shows it is unlocked")
+            }
+            let decision = Decision.action(act.kind == .allow ? "allow" : "deny", feedback: nil)
+            if let why = await VigilAuthz.shared.answer(device: root, request: request, decision) { throw Failed(description: why) }
+            return Message.Acted(
+                records: [record], said: act.kind == .allow ? "Allowed in Authz: it goes to its agent." : "Refused in Authz: it is not delivered.")
         }
         let output: Data
         do { output = try await VigilLink.call(linked(), device: root, .messageAct(act)) } catch {
