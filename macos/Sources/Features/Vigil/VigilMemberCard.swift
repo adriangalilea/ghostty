@@ -48,11 +48,8 @@ enum VigilMemberCard {
                         let home = remote.flatMap { VigilRemote.shared.host($0)?.name } ?? (remote == nil ? "This Mac" : "The pane’s Mac")
                         Divider()
                         VigilTranscriptCopies(conversation: ref, home: home) { subject in
-                            try await Task.detached {
-                                let ask = Open.conversation(ConversationAsk(op: .progress, key: ConversationKey(.ref(subject))))
-                                let hub = Local.Client(socket: VigilPaths.hub)
-                                let data = try remote.map { try hub.call(device: $0, ask) } ?? hub.conversationProgress(subject)
-                                return try JSONDecoder().decode(ConversationAnswer<[TranscriptProgress]>.self, from: data).value
+                            await Task.detached {
+                                Local.Client(socket: VigilPaths.hub).progressChanges(device: remote, ref: subject)
                             }.value
                         }
                         .id(ref)

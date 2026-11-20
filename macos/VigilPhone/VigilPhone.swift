@@ -1208,10 +1208,8 @@ final class VigilPhone: ObservableObject {
         }
     }
 
-    func transcriptProgress(_ ref: ConversationRef, at host: Host) async throws -> [TranscriptProgress] {
-        let ask = ConversationAsk(op: .progress, key: ConversationKey(.ref(ref)))
-        let data = try await VigilLink.call(linked(), device: host.id, .conversation(ask))
-        return try JSONDecoder().decode(ConversationAnswer<[TranscriptProgress]>.self, from: data).value
+    func progressChanges(_ ref: ConversationRef, at host: Host) throws -> AsyncStream<Local.ProgressStep> {
+        VigilLink.progressChanges(try linked(), device: host.id, ref: ref)
     }
 
     /// One ask about a pane’s documents, answered by its Mac (harness/DOCUMENTS.md).

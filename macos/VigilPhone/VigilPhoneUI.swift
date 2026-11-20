@@ -1879,22 +1879,22 @@ struct PhoneCopyDetails: View, Identifiable {
     var id: String { host.id + "/" + conversation.key }
     @Environment(\.dismiss) private var dismiss
 
-    let read: @MainActor (ConversationRef, VigilPhone.Host) async throws -> [TranscriptProgress]
+    let follow: @MainActor (ConversationRef, VigilPhone.Host) throws -> AsyncStream<Local.ProgressStep>
 
     init(conversation: ConversationRef, host: VigilPhone.Host,
-         read: @escaping @MainActor (ConversationRef, VigilPhone.Host) async throws -> [TranscriptProgress] = {
-             try await VigilPhone.shared.transcriptProgress($0, at: $1)
+         follow: @escaping @MainActor (ConversationRef, VigilPhone.Host) throws -> AsyncStream<Local.ProgressStep> = {
+             try VigilPhone.shared.progressChanges($0, at: $1)
          }) {
         self.conversation = conversation
         self.host = host
-        self.read = read
+        self.follow = follow
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VigilTranscriptCopies(conversation: conversation, home: host.name) { ref in
-                    try await read(ref, host)
+                    try follow(ref, host)
                 }.padding()
             }
             .navigationTitle("Conversation Details")

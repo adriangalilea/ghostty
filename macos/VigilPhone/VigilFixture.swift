@@ -205,7 +205,7 @@ struct VigilFixtureView: View {
                     reported.reportedAt = Date().timeIntervalSince1970 - 480
                     reported.verifiedAt = reported.reportedAt
                     let unknown = TranscriptProgress(sourceRoot: host.id, sourceMac: host.name, copyRoot: "m5", copyMac: "M5", ref: ref)
-                    return [reported, unknown]
+                    return AsyncStream { $0.yield(.current([reported, unknown])) }
                 }
             case .conversationWaiting:
                 ConversationFixture(conversation: Self.conversation(Self.asking, live: Self.askingLive, offer: Self.consent))

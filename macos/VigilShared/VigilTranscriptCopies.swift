@@ -2,11 +2,11 @@ import SwiftUI
 import VigilWire
 
 /// What the addressed Mac last compared or heard about one conversation.
-/// Opening these details reads recorded observations. Only Refresh asks again.
+/// On every connection the home sends a complete snapshot of its recorded comparisons.
 struct VigilTranscriptCopies: View {
     let conversation: ConversationRef
     let home: String
-    let read: (ConversationRef) async throws -> [TranscriptProgress]
+    let follow: (ConversationRef) async throws -> AsyncStream<Local.ProgressStep>
     @State private var observations: [TranscriptProgress]?
     @State private var problem: String?
     @State private var reading = false
@@ -18,10 +18,19 @@ struct VigilTranscriptCopies: View {
             reading = true
             defer { if !Task.isCancelled { reading = false } }
             do {
-                let rows = try await read(conversation)
-                try Task.checkCancellation()
-                observations = rows
-                problem = nil
+                let steps = try await follow(conversation)
+                for await step in steps {
+                    try Task.checkCancellation()
+                    reading = false
+                    switch step {
+                    case .current(let rows):
+                        observations = rows
+                        problem = nil
+                    case .waiting(let reason):
+                        problem = reason
+                    }
+                }
+                if !Task.isCancelled, problem == nil { problem = "The connection closed." }
             } catch {
                 if !Task.isCancelled { problem = String(describing: error) }
             }
@@ -41,14 +50,12 @@ struct VigilTranscriptCopyReport: View {
             HStack {
                 Text("Transcript copies").font(.headline)
                 Spacer()
-                Button(action: reload) {
-                    Label("Refresh copies", systemImage: "arrow.clockwise").labelStyle(.iconOnly)
+                if problem != nil {
+                    Button("Reconnect", action: reload).disabled(reading)
                 }
-                .accessibilityLabel("Refresh copies")
-                .disabled(reading)
             }
             if let problem {
-                Label("Couldn’t read the reports from \(home). \(problem)", systemImage: "exclamationmark.triangle")
+                Label("Updates from \(home) are unavailable. \(problem)", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.secondary)
             }
             if let observations {
