@@ -360,6 +360,7 @@ struct TreeNodeView: View {
                 .buttonStyle(.plain)
                 .simultaneousGesture(TapGesture().onEnded { model.receipts.info("tap", "preview", ["title": node.title, "pane": ref.pane]) })
             }
+            subagentRows
             if foldable && !folded {
                 ThreadChildren(level: depth, metrics: Self.tree, fold: toggle) {
                     ForEach(node.children) { child in
@@ -484,6 +485,38 @@ struct TreeNodeView: View {
         .sheet(item: $copyDetails) { $0 }
         .sheet(isPresented: $showingWatches) {
             if let ref = node.pane { PhonePaneWatches(ref: ref) }
+        }
+    }
+
+    /// Its agent's running subagents under its row, as the Mac's sidebar
+    /// draws them: from the pane's glance (`member`, its Mac's `#subagent`
+    /// tuples), each by `MemberGlance.Line`'s one rule (what it is doing
+    /// now, else its call's description, else its type), deeper ones
+    /// further in. A press opens the pane, where its agent is.
+    @ViewBuilder private var subagentRows: some View {
+        if let ref = node.pane, let member = node.glance?.member {
+            ForEach(member.subagents.filter(\.running), id: \.key) { sub in
+                NavigationLink(value: ref) {
+                    HStack(spacing: Self.gap) {
+                        Image(systemName: "arrow.turn.down.right").font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: Self.tree.face)
+                        Text(sub.title).font(.footnote).lineLimit(1)
+                        if let caption = sub.caption {
+                            Text(caption).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        Circle().fill(Color.green.opacity(0.8)).frame(width: 6, height: 6)
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, Self.tree.leading(depth + sub.depth))
+                    .padding(.trailing, Self.tree.edge)
+                    .frame(minHeight: 26)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(sub.said)
+            }
         }
     }
 
