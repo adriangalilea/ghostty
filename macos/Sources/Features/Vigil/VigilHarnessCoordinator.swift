@@ -145,21 +145,45 @@ final class VigilHarnessCoordinator {
     /// (the registry says which), else a remote Mac's directory lists it.
     @objc private func handleURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
         guard let text = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
-              let url = URL(string: text), url.scheme == "vigil", url.host == "pane",
-              let pane = url.pathComponents.dropFirst().first, !pane.isEmpty
+              let url = URL(string: text), url.scheme == "vigil"
         else {
             handoffLog.warn("unreadable link")
             return
         }
+        let ref = VigilRef(url: url)
+        guard ref?.kind == .pane || (url.host == "pane" && url.pathComponents.count == 2) else {
+            return handoffLog.warn("link names no pane")
+        }
+        let pane = url.lastPathComponent
+        guard Open.validPane(pane) else { return }
+        if let ref {
+            Task {
+                let here = await Task.detached { try? Local.Client(socket: VigilPaths.hub).me() }.value
+                guard let here else { return handoffLog.warn("local device identity unavailable") }
+                openLinkedPane(pane, local: ref.home == here, home: ref.home)
+            }
+        } else {
+            openLinkedPane(pane, local: true, home: nil)
+        }
+    }
+
+    private func openLinkedPane(_ pane: String, local: Bool, home: String?) {
         let manager = VigilWorkspaces.shared
+        let name = local ? manager.owner(ofPane: pane) : nil
+        let hosts = VigilRemote.shared.hosts.filter {
+            (home == nil || home == $0.device) && $0.directory?.place(of: pane) != nil
+        }
+        guard hosts.count + (name == nil ? 0 : 1) == 1 else {
+            return handoffLog.warn("pane link has no unique destination", ["pane": pane])
+        }
         NSApp.activate()
-        if let name = manager.owner(ofPane: pane) {
+        if let name {
             let controller = (NSApp.keyWindow?.windowController as? TerminalController) ?? TerminalController.lastMain
             manager.activatePane(name: name, paneId: pane, in: controller)
             handoffLog.info("link to a local pane", ["workspace": name, "pane": pane])
             return
         }
-        for host in VigilRemote.shared.hosts where host.directory?.panes[pane] != nil {
+        if let host = hosts.first {
             handoffLog.info("link to a remote pane", ["host": host.device, "pane": pane])
             manager.openRemotePane(device: host.device, pane: pane)
             return
