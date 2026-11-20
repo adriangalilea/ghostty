@@ -1370,10 +1370,6 @@ struct VigilSidebarView: View {
         }
     }
 
-    /// Moved from another Mac and not opened here: that Mac's name (one
-    /// pane's, or a workspace's panes rolled up). It leaves a pane's row
-    /// when the pane is opened, since from then it runs here.
-    @ViewBuilder
     /// A move of the row's workspace being decided or done, its destination's
     /// word for how it stands ("mbp-m4: Waiting for your yes in Authz").
     @ViewBuilder
@@ -1386,6 +1382,10 @@ struct VigilSidebarView: View {
         }
     }
 
+    /// Moved from another Mac and not opened here: that Mac's name (one
+    /// pane's, or a workspace's panes rolled up). It leaves a pane's row
+    /// when the pane is opened, since from then it runs here.
+    @ViewBuilder
     private func arrivedMark(_ arrivals: [Registry.Arrival]) -> some View {
         if let first = arrivals.first {
             HStack(spacing: 1) {
