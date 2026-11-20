@@ -239,7 +239,9 @@ final class VigilMessageStore: ObservableObject {
             for pane in row.tabs.flatMap(\.panes) {
                 guard let paneId = pane.paneId else { continue }
                 next["\(here)/\(paneId)"] = Named(
-                    pane: VigilChatPane.of(conversation: pane.conversationName, title: pane.title, face: row.emoji, mac: nil),
+                    pane: VigilChatPane.of(
+                        member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
+                        face: row.emoji, mac: nil),
                     workspace: row.id, navigation: paneId)
             }
         }
@@ -248,11 +250,20 @@ final class VigilMessageStore: ObservableObject {
             for pane in row.tabs.flatMap(\.panes) {
                 guard let (_, name) = VigilRemote.split(pane.id) else { continue }
                 next["\(device)/\(name)"] = Named(
-                    pane: VigilChatPane.of(conversation: pane.conversationName, title: pane.title, face: row.emoji, mac: row.host?.name),
+                    pane: VigilChatPane.of(
+                        member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
+                        face: row.emoji, mac: row.host?.name),
                     workspace: row.id, navigation: pane.id)
             }
         }
         if next != panes { panes = next }
+    }
+
+    /// The member a pane holds, as its glance carries it (`MemberGlance`:
+    /// its name and minted tint, the broker's one look of it).
+    private static func member(_ glance: MemberGlance?) -> (name: String, face: String?, tint: String?)? {
+        guard let glance, let name = glance.name else { return nil }
+        return (name, nil, glance.tint)
     }
 
     // MARK: The host the views ask
