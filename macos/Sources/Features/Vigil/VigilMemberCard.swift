@@ -80,8 +80,8 @@ enum VigilMemberCard {
                             if member.subagents.isEmpty { line("none") }
                             ForEach(member.subagents, id: \.key) { sub in
                                 HStack(spacing: 6) {
-                                    Text(String(repeating: "   ", count: sub.depth - 1) + "↳ " + (sub.name.isEmpty ? sub.handle : sub.name))
-                                    if let type = sub.type { Text(type).foregroundStyle(.secondary) }
+                                    Text(String(repeating: "   ", count: sub.depth - 1) + "↳ " + sub.title)
+                                    if let caption = sub.caption { Text(caption).foregroundStyle(.secondary) }
                                     Text(sub.running ? "running" : "finished").foregroundStyle(sub.running ? .green : .secondary)
                                     Spacer()
                                     Text("@\(sub.handle)").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)

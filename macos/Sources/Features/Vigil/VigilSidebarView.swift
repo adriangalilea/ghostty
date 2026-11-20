@@ -935,8 +935,10 @@ struct VigilSidebarView: View {
     /// in front; its menu moves it to a window or closes it (which ends
     /// nothing).
     /// Its agent's running subagents under its row, as its Mac's
-    /// `#subagent` tuples fold them (the glance's `member`): each by name
-    /// and type, deeper ones further in. Finished ones are the member
+    /// `#subagent` tuples fold them (the glance's `member`): each by the
+    /// best fact there is (`MemberGlance.Line.title`: what it is doing now,
+    /// else its call's description, else its type), deeper ones further
+    /// in. Finished ones are the member
     /// card's to list (a long conversation spawns dozens). A press opens
     /// the card.
     @ViewBuilder private func subagentRows(_ pane: VigilWorkspaces.SidebarPane, level: Int) -> some View {
@@ -949,9 +951,9 @@ struct VigilSidebarView: View {
                     HStack(spacing: 4 * scale) {
                         Image(systemName: "arrow.turn.down.right").font(.system(size: 8 * scale, weight: .semibold))
                             .frame(width: VigilNameCell<EmptyView>.face * scale)
-                        Text(sub.name.isEmpty ? sub.handle : sub.name).font(.system(size: 11 * scale)).lineLimit(1)
-                        if let type = sub.type {
-                            Text(type).font(.system(size: 9 * scale)).foregroundStyle(.tertiary).lineLimit(1)
+                        Text(sub.title).font(.system(size: 11 * scale)).lineLimit(1)
+                        if let caption = sub.caption {
+                            Text(caption).font(.system(size: 9 * scale)).foregroundStyle(.tertiary).lineLimit(1)
                         }
                         Spacer(minLength: 0)
                         Circle().fill(sub.running ? Color.green.opacity(0.8) : Color.secondary.opacity(0.35))
@@ -966,7 +968,7 @@ struct VigilSidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .onHover { inside in hovered = inside ? hoverId : (hovered == hoverId ? nil : hovered) }
-                .help("@\(sub.handle)" + (sub.running ? " · running" : " · finished") + "\nvigil send @\(sub.handle) reaches it through its parent")
+                .help(sub.said + (sub.running ? " · running" : " · finished") + "\nvigil send @\(sub.handle) reaches it through its parent")
             }
         }
     }
