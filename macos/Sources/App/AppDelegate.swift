@@ -907,7 +907,7 @@ class AppDelegate: NSObject,
             .compactMap { $0.windowController as? BaseTerminalController }
             .reduce(0) { $0 + ($1.bell ? 1 : 0) }
         let bells = ghostty.config.bellFeatures.contains(.attention) ? bellCount : 0
-        // vigil: and every message an agent addressed to the person, unread.
+        // vigil: and every message for the person: unread, or waiting on their yes.
         let count = bells + MainActor.assumeIsolated { VigilMessageStore.shared.forYouCount }
         let label = count > 0 ? (count > 99 ? "99+" : String(count)) : nil
         NSApp.dockTile.badgeLabel = label

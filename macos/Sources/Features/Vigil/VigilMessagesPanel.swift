@@ -203,19 +203,25 @@ final class VigilMessageStore: ObservableObject {
         let due = MessageThreads.forYou(threads)
         VigilMessageAlerts.shared.due(due, names: host)
         let waits = awaiting.values.flatMap(\.values).reduce(into: Set<String>()) { $0.formUnion($1) }
-        let needs = Set(due.map(\.item.id)).union(waits).count
-        if needs != forYouCount {
-            forYouCount = needs
+        let unread = Set(due.map(\.item.id))
+        if unread.count != unreadCount || waits.count != waitingCount {
+            unreadCount = unread.count
+            waitingCount = waits.count
             NotificationCenter.default.post(name: Self.forYouDidChange, object: nil)
         }
     }
 
-    /// What needs the person in Messages, each once: the messages agents
-    /// addressed to them that they have not read (`MessageThreads.forYou`)
-    /// and the messages waiting on their yes (`MessageThreads.awaitingYou`).
-    /// What the Dock's badge and the menu bar count.
-    private(set) var forYouCount = 0
-    /// `forYouCount` changed.
+    /// The messages agents addressed to the person that they have not read
+    /// (`MessageThreads.forYou`): the menu bar's ✉.
+    private(set) var unreadCount = 0
+    /// The messages waiting on the person's yes, each once
+    /// (`MessageThreads.awaitingYou`): the menu bar's hand, as every row's
+    /// `WaitingMark`.
+    private(set) var waitingCount = 0
+    /// What needs the person in Messages, each once: the two together, the
+    /// Dock's one number (an awaited message is never one addressed to them).
+    var forYouCount: Int { unreadCount + waitingCount }
+    /// `unreadCount` or `waitingCount` changed.
     static let forYouDidChange = Notification.Name("vigilMessagesForYouDidChange")
 
     // MARK: Names (from the sidebar's own rows: the one naming rule)
