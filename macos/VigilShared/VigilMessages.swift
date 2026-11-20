@@ -76,6 +76,11 @@ struct VigilChatHost {
     /// pane of the thread it was pressed in (`key`). Nil: the conversation
     /// pushes its page itself (the phone).
     var openFile: (@MainActor (_ file: VigilMentionedFile, _ key: MessageThread.Key) -> Void)? = nil
+    /// Whether the press being handled now is a person's: on the Mac, a
+    /// hardware click (no posted event, no accessibility action), which an
+    /// answer on a request needs, as Authz's own input guard does
+    /// (authz.space SECURITY-REVIEW.md). Read inside the button's action.
+    var pressedByPerson: @MainActor () -> Bool = { true }
 
     /// Whether a folder on the Mac `root` can be shown here: revealed in
     /// this Mac's Finder, so only this Mac's own.
@@ -564,6 +569,12 @@ struct VigilThreadConversation: View {
 
     /// The person's answer on a message waiting for their yes.
     private func answer(_ act: Message.Act, on id: String) {
+        // Checked in the press's own turn, where its event is the one being
+        // handled: a program driving the app answers nothing.
+        guard host.pressedByPerson() else {
+            answered[id] = "Not answered: only a click of yours answers it here."
+            return
+        }
         let run = host.act, root = root(of: id)
         Task {
             do {
@@ -598,11 +609,13 @@ struct VigilThreadConversation: View {
 /// 2026-11-19: "A request sits on the message it is about … never a detached
 /// bar"), drawn inside its bubble: "Waiting for you" and how long it has
 /// waited, the one mark every surface draws for it, then its answers. It is
-/// answered here or in Authz, whichever comes first; vigil decides and
-/// records it and takes the other down. Refuse; Deliver, this one message,
-/// where its urgency takes a plain yes (`Message.Urgency.requirement`: a
-/// stop is allowed on its card in Authz, owner authenticated); Allow both ways…,
-/// which puts its card up in Authz to give a standing yes for both agents.
+/// answered here or in Authz, whichever comes first, and the other comes
+/// down: on the Mac a press answers its card through authzd (`answer.own`),
+/// only from a person's click (`VigilChatHost.pressedByPerson`). Refuse;
+/// Deliver, this one message, where its urgency takes a plain yes
+/// (`Message.Urgency.requirement`); a stop's Allow in Authz…, which opens
+/// its card in Authz on this Mac for the owner's authentication; Allow both
+/// ways…, which opens its card there to give a standing yes for both agents.
 /// Nothing is offered on an older Mac's records (`answerable`). Once
 /// answered here, what came of it, in the Mac's words.
 struct VigilMessageRequest: View {
@@ -626,8 +639,13 @@ struct VigilMessageRequest: View {
                     HStack(spacing: 8) {
                         Button("Refuse") { act(.refuse(item.id)) }.buttonStyle(.ink)
                         if message.declared.requirement == .ownerAuthenticated {
-                            Text("A stop is allowed on its card in Authz, once the device that shows it is unlocked.")
-                                .inkText(.detail)
+                            #if os(macOS)
+                                // Its card opens in Authz on this Mac, where the owner authenticates.
+                                Button("Allow in Authz…") { act(.allow(item.id)) }.buttonStyle(.ink)
+                            #else
+                                Text("A stop is allowed on its card in Authz, once the device that shows it is unlocked.")
+                                    .inkText(.detail)
+                            #endif
                         } else {
                             if message.from.kind == .agent, message.from.root == nil, message.from.conversation != nil,
                                message.to.conversation != nil {
