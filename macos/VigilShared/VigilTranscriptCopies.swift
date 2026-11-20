@@ -92,15 +92,16 @@ struct VigilTranscriptCopyRow: View {
                 Text("Verified in the archive · \(bytes(archive.length))")
             }
             if let report = row.reportedAt, let reporter = row.reporterMac {
+                let receiver = row.receivedOnMac
                 if let tip = row.reportedTip {
-                    clock("\(reporter) reported \(bytes(tip.length))", at: report)
+                    clock("\(receiver) received \(reporter)’s report of \(bytes(tip.length))", at: report)
                 } else {
-                    clock("Last report from \(reporter)", at: report)
+                    clock("\(receiver) received the last report from \(reporter)", at: report)
                 }
                 if !row.peerOnline { Text("\(reporter) was offline when these details were read.") }
             }
-            if let verified = row.verifiedAt {
-                clock("Compared", at: verified)
+            if let verified = row.verifiedAt, let verifier = row.verifiedByMac {
+                clock("\(verifier) verified the prefix", at: verified)
             }
             if row.sourceTip != nil || row.native != nil || row.archive != nil || row.reportedTip != nil {
                 DisclosureGroup("Checkpoint details") {
