@@ -272,8 +272,11 @@ extension VigilWorkspaces {
     /// awaited before its edit: the main thread runs other work meanwhile,
     /// so the edit is checked against the revision asked for once the pane
     /// runs, and a pane born for an edit that no longer applies is closed.
-    func applySessionCommand(_ request: VigilSessionControl.Request) async -> VigilSessionControl.Reply {
-        if request.operation == "move_to" { return orderMove(request) }
+    /// `fromThisApp`: asked by this app's own process (its sidebar, its
+    /// dialogs), never through the socket: the one fact a move's card names
+    /// the person's own button by.
+    func applySessionCommand(_ request: VigilSessionControl.Request, fromThisApp: Bool = false) async -> VigilSessionControl.Reply {
+        if request.operation == "move_to" { return await orderMove(request, fromThisApp: fromThisApp) }
         if request.operation == "retire_move" {
             return .failure(request, "upgrade_required", "Update the destination and move again. This source requires a handoff before another Mac can open the pane.")
         }

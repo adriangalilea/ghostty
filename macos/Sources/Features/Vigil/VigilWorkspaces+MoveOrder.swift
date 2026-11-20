@@ -12,8 +12,7 @@ import VigilWire
 /// ticket with why. The source asks nothing of its own: it releases.
 extension VigilWorkspaces {
     /// `move_to`: taken or refused now, decided and done after.
-    func orderMove(_ request: VigilSessionControl.Request) -> VigilSessionControl.Reply {
-        guard let asker = request.asker else { return .failure(request, "invalid_request", "A move names who asked for it.") }
+    func orderMove(_ request: VigilSessionControl.Request, fromThisApp: Bool) async -> VigilSessionControl.Reply {
         if let same = moveTickets[request.id] {
             return .init(id: request.id, ok: true, code: "asked", message: same.words(destination: Self.thisMac), session: same.arrival)
         }
@@ -28,6 +27,21 @@ extension VigilWorkspaces {
         }
         if let open = moveTickets.values.first(where: { $0.open && same($0) }) {
             return .failure(request, "moving", "That move is already asked here: \(open.words(destination: Self.thisMac)).")
+        }
+        // Who asked, from facts this Mac holds: its own button, the device
+        // its hub says sent the order, else a process of this Mac.
+        let asker: Move.Asker
+        if fromThisApp {
+            asker = Move.Asker(.thisApp, name: Self.thisMac)
+        } else {
+            let id = request.id
+            let relayed = try? await Task.detached(priority: .userInitiated) {
+                try Local.Client(socket: VigilPaths.hub).moveAsker(id)
+            }.value
+            asker = (relayed ?? nil) ?? Move.Asker(.local, name: Self.thisMac)
+        }
+        guard moveTickets[request.id] == nil, !moveTickets.values.contains(where: { $0.open && same($0) }) else {
+            return .failure(request, "moving", "That move is already asked here.")
         }
         for (id, ticket) in moveTickets where same(ticket) { moveTickets[id] = nil }
         let what = Self.moving(whole.label, request.part)
@@ -118,18 +132,10 @@ extension VigilWorkspaces {
     /// this Mac's own, and each other Mac's as it publishes them.
     func moveNote(home: String?, workspace name: String) -> String? {
         guard let source = home ?? moveRoot else { return nil }
-        let destinations = [(Self.thisMac, Array(moveTickets.values))] + VigilRemote.shared.hosts.map { ($0.name, $0.moves) }
-        for (destination, tickets) in destinations {
-            if let ticket = tickets.first(where: { $0.open && $0.from == source && $0.workspace == name }) {
-                return "\(destination): \(ticket.words(destination: destination))"
-            }
-        }
-        return nil
+        let destinations = [(name: Self.thisMac, tickets: Array(moveTickets.values))]
+            + VigilRemote.shared.hosts.map { (name: $0.name, tickets: $0.moves) }
+        return Move.note(workspace: name, source: source, destinations: destinations)
     }
-
-    /// Who asks when this app's own sidebar asks for a move: the person, in
-    /// Vigil on this Mac (a hub stamps this Mac's root when it goes to another).
-    static var asker: Move.Asker { Move.Asker(mac: thisMac, via: .app) }
 
     /// This Mac as a card and a ticket name it.
     static var thisMac: String { Host.current().localizedName ?? "this Mac" }
@@ -137,6 +143,9 @@ extension VigilWorkspaces {
     /// The tickets, whole, where the hub serves them (tmp + rename: its
     /// folder watch hears every document and never half of one).
     func publishMoveTickets() {
+        // Ended tickets retire by one rule, every device's (`Move.retired`).
+        let kept = Set(Move.retired(Array(moveTickets.values)).map(\.id))
+        moveTickets = moveTickets.filter { kept.contains($0.key) }
         let tickets = moveTickets.values.sorted { $0.since < $1.since }
         do {
             try FileManager.default.createDirectory(at: VigilPaths.movesFolder, withIntermediateDirectories: true,

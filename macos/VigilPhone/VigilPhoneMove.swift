@@ -80,7 +80,7 @@ extension VigilPhone {
         model.submitMove = { [weak self, weak model] revision in
             guard let self, let model else { return }
             let request = WorkspaceCommand.Request.moveTo(
-                subject.workspace, from: source.id, asker: Move.Asker(mac: UIDevice.current.name, via: .phone),
+                subject.workspace, from: source.id,
                 anchor: subject.anchor, part: subject.part, checkoutRevision: revision)
             model.moveID = request.id
             model.moveNotice = "Asking \(target.name)…"
@@ -103,13 +103,13 @@ extension VigilPhone {
             let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
             guard outcome.ok else {
                 receipts.warn("move", "refused", fields.merging(["why": outcome.message]) { a, _ in a })
-                model.moveNotice = outcome.message
+                model.moveNotice = Move.olderVigil(outcome.message, mac: name)
                 return
             }
             receipts.info("move", "asked", fields)
         } catch {
             receipts.error("move", "not asked", fields.merging(["err": error]) { a, _ in a })
-            model.moveNotice = "\(name) did not take it: \(VigilLink.reason(error))"
+            model.moveNotice = Move.olderVigil("\(name) did not take it: \(VigilLink.reason(error))", mac: name)
             return
         }
         for await line in VigilLink.movesLines(node, device: device) {
