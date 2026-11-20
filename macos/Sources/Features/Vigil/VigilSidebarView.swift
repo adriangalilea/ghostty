@@ -1430,8 +1430,14 @@ struct VigilSidebarView: View {
             }
         }
         let writers = pane.liveConversation.flatMap { model.writerProblems[$0] }
+        func restart() {
+            if let local = pane.paneId { VigilWorkspaces.shared.restartAgent(pane: local, device: nil) }
+            else if let remote = VigilRemote.split(pane.id) { VigilWorkspaces.shared.restartAgent(pane: remote.name, device: remote.device) }
+        }
         var items = (pane.problems + [writers].compactMap { $0 }).map { issue in
-            PaneProblemItem(pane: pane.id, problem: issue, button: "Open pane", act: visit)
+            issue.restarts
+                ? PaneProblemItem(pane: pane.id, problem: issue, button: "Restart", act: restart)
+                : PaneProblemItem(pane: pane.id, problem: issue, button: "Open pane", act: visit)
         }
         if let ended = pane.ended, !ended.clean {
             items.append(PaneProblemItem(pane: pane.id, problem: ended.problem, button: "Open pane", act: visit, ended: ended))

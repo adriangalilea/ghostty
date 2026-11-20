@@ -110,6 +110,16 @@ struct VigilPhoneRoot: View {
         } message: {
             Text(model.failure?.message ?? "")
         }
+        // A restart asked while the agent works: offered for its turn's end.
+        .alert("The agent is still working", isPresented: Binding(
+            get: { model.restartOffer != nil },
+            set: { if !$0 { model.restartOffer = nil } }
+        ), presenting: model.restartOffer) { offer in
+            Button("Restart When Its Turn Ends") { Task { await model.restart(offer.ref, whenIdle: true) } }
+            Button("Not Now", role: .cancel) {}
+        } message: { offer in
+            Text(offer.said)
+        }
         // The Mac's one close question: asked only when something runs,
         // naming it (undo stays in Recently closed either way).
         .alert(closeTitle, isPresented: Binding(
@@ -632,7 +642,9 @@ private struct PhonePaneProblems: View {
             let glance = leaf.glance
             let writers = glance.flatMap { g in g.conversation.flatMap { model.writerProblems[ConversationRef(agent: g.agent, id: $0)] } }
             var items = ((glance?.problems ?? []) + [writers, leaf.continuation?.problem].compactMap { $0 }).map { issue in
-                PaneProblemItem(pane: ref.pane, problem: issue, button: "Open pane") { open(ref) }
+                issue.restarts
+                    ? PaneProblemItem(pane: ref.pane, problem: issue, button: "Restart") { Task { await model.restart(ref) } }
+                    : PaneProblemItem(pane: ref.pane, problem: issue, button: "Open pane") { open(ref) }
             }
             if let ended = leaf.ended, !ended.clean {
                 items.append(PaneProblemItem(pane: id, problem: ended.problem, button: "Open pane", act: {
