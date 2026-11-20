@@ -111,7 +111,9 @@ final class VigilPhoneMessages: ObservableObject {
         // A pane's hand counts what vigil asks about it too.
         var awaiting = MessageThreads.awaitingYou(mailboxes)
         for (root, list) in asks {
-            for ask in list { awaiting[root, default: [:]][ask.pane, default: []].insert(ask.id) }
+            for ask in list {
+                for pane in ask.panes { awaiting[root, default: [:]][pane, default: []].insert(ask.id) }
+            }
         }
         if awaiting != marks.awaiting { marks.awaiting = awaiting }
     }
@@ -136,7 +138,7 @@ final class VigilPhoneMessages: ObservableObject {
             // when nobody holds it.
             handAfter: { _ in true },
             mention: { call, root in try await Self.mention(call, root: root) },
-            asks: { key in VigilPhoneMessages.shared.asks[key.root]?.filter { $0.pane == key.pane } ?? [] })
+            asks: { key in VigilPhoneMessages.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] })
     }
 
     /// An ask about the files a message names, of the Mac they are on.
