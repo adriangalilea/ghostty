@@ -1,3 +1,4 @@
+import AuthzProtocol
 import Combine
 import Ink
 import SwiftUI
@@ -159,6 +160,22 @@ final class VigilPhoneMessages: ObservableObject {
     }
 
     private static func act(_ act: Message.Act, root: String) async throws -> Message.Acted {
+        // Deliver or Refuse on a message whose card stands: answered on that
+        // card through this phone's Authz endpoint, as its notification's
+        // buttons do, so Authz closes it on every device and its Mac hears
+        // the answer from authzd. A card this phone cannot answer (its Mac
+        // does not let vigil answer, the card already gone) falls through to
+        // the Mac's mailbox.
+        if act.kind == .allow || act.kind == .refuse, let id = act.id,
+           let record = shared.mailboxes[root]?[id], record.ask?.stage == .asking, let request = record.ask?.request,
+           act.kind == .refuse || record.message.declared.requirement == .answered
+        {
+            let decision = Decision.action(act.kind == .allow ? "allow" : "deny", feedback: nil)
+            if await VigilAuthz.shared.answer(device: root, request: request, decision) == nil {
+                return Message.Acted(
+                    records: [record], said: act.kind == .allow ? "Allowed: it goes to its agent." : "Refused: it is not delivered.")
+            }
+        }
         let output: Data
         do { output = try await VigilLink.call(linked(), device: root, .messageAct(act)) } catch {
             throw Failed(description: VigilLink.reason(error))
