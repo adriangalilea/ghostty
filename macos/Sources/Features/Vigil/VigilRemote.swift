@@ -640,7 +640,7 @@ final class VigilRemote: ObservableObject {
                             member: truth?.meaning?.member,
                             background: truth?.meaning?.background,
                             ended: truth?.abnormalEnd,
-                            problems: (truth?.problemGlance?.problems ?? []) + [session.offlineContinuations?[pane.id]?.problem].compactMap { $0 },
+                            problems: (truth?.liveProblems ?? []) + [session.offlineContinuations?[pane.id]?.problem].compactMap { $0 },
                             restart: truth?.problemGlance?.restart,
                             conflict: truth?.conflict)
                     }

@@ -243,7 +243,7 @@ extension VigilWorkspaces {
                 background: meaning?.background,
                 ended: facts.ended,
                 arrived: pane.dormant == true ? pane.from : nil,
-                problems: (facts.problemGlance?.problems ?? []) + [continuations[pane.id]?.problem].compactMap { $0 },
+                problems: facts.liveProblems + [continuations[pane.id]?.problem].compactMap { $0 },
                 restart: facts.problemGlance?.restart,
                 conflict: facts.conflict)
         }

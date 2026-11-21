@@ -43,13 +43,13 @@ struct PaneProblemItem: Identifiable {
     let subject: Subject
     let problem: ConversationProblem
     var visit: (() -> Void)?
-    var cancelRestart: ((UUID) async throws -> Restart.Answer)?
+    var requestRestart: ((Restart.Intent) async throws -> Restart.Answer)?
     var button: String?
     var act: (() -> Void)?
     var ended: PaneEnd?
     var writers: PaneConflict.Writers?
     var id: String { subject.key + "/" + problem.kind.rawValue }
-    var operationID: String { subject.key + "/" + (subject.conversation?.key ?? "") }
+    var operationID: String { id + "/" + (subject.conversation?.key ?? "") + "/" + (problem.relayRetry?.uuidString ?? "") }
 }
 
 /// A row and its folded ancestor can present the same request. Keep its
@@ -69,15 +69,15 @@ struct PaneProblemItem: Identifiable {
         return r
     }
 
-    func cancel(_ id: UUID, for item: PaneProblemItem) {
-        guard let cancel = item.cancelRestart, receipt(item)?.sending != true else { return }
+    func perform(_ intent: Restart.Intent, for item: PaneProblemItem, progress: String) {
+        guard let request = item.requestRestart, receipt(item)?.sending != true else { return }
         let key = item.operationID
-        var r = Receipt(note: item.subject.note, status: .working("Cancelling restart…"))
+        var r = Receipt(note: item.subject.note, status: .working(progress))
         receipts[key] = r
         Task {
             do {
-                let answer = try await cancel(id)
-                r.status = answer.outcome == .cancelled ? .succeeded(answer.said) : .failed(answer.said)
+                let answer = try await request(intent)
+                r.status = [.relayUpdated, .cancelled].contains(answer.outcome) ? .succeeded(answer.said) : .failed(answer.said)
             } catch {
                 r.status = .failed(error.localizedDescription)
             }
@@ -96,6 +96,7 @@ struct PaneProblemsMark: View {
     @State private var showing = false
     @State private var selected: String?
     @State private var copied: String?
+    @State private var manualRestart: String?
     private let feedback = PaneRestartFeedback.shared
 
     private var tone: Color {
@@ -131,7 +132,7 @@ struct PaneProblemsMark: View {
                 }
             }
             .onChange(of: showing) { _, open in
-                if !open { selected = nil; copied = nil }
+                if !open { selected = nil; copied = nil; manualRestart = nil }
             }
             .onChange(of: items.map(\.operationID)) { old, new in
                 for key in Set(old).subtracting(new) { feedback.forget(key) }
@@ -144,7 +145,9 @@ struct PaneProblemsMark: View {
         let title = folded && item.problem.kind == .receiver ? "\(items.count) panes can’t receive messages" : item.problem.title
         let showReceipt = [.restartFailed, .restarting, .restarted].contains(item.problem.kind)
         let detail = showReceipt ? item.problem.says : folded ? "Choose a pane to resume its conversation." : item.subject.title
-        let panel = InkActionPanel(title, detail: detail,
+        let manual = manualRestart == item.operationID
+        let panel = InkActionPanel(manual ? "Restart Claude manually" : title,
+            detail: manual ? "Finish the turn and background work, save drafts, then quit Claude and resume it from its original project and account." : detail,
             tone: statusOnly ? .ok : item.writers == .both || item.problem.kind == .twoLive ? .bad : .warn,
             actions: folded ? .group("Choose pane", items.map { target in
                 InkHUD.Action(target.subject.title) { selected = target.id }
@@ -189,13 +192,21 @@ struct PaneProblemsMark: View {
         if let note = item.subject.note, item.problem.needsManualResume || item.problem.kind == .restartScheduled {
             switch note.state {
             case .armed:
-                let cancel: [InkHUD.Action] = if let id = note.scheduleID, item.cancelRestart != nil {
-                    [.init("Cancel restart") { feedback.cancel(id, for: item) }]
+                let cancel: [InkHUD.Action] = if let id = note.scheduleID, item.requestRestart != nil {
+                    [.init("Cancel restart") { feedback.perform(.cancel(id), for: item, progress: "Cancelling restart…") }]
                 } else { [] }
                 return .feedback(.waiting(note.said), actions: cancel + alongside)
             case .ending: return .feedback(.working(note.said), actions: alongside)
             case .notRun, .ran: break
             }
+        }
+        if item.problem.kind == .outdated, manualRestart != item.operationID {
+            if let id = item.problem.relayRetry, item.requestRestart != nil {
+                return .buttons([.init("Restart relay") {
+                    feedback.perform(.relay(id), for: item, progress: "Restarting relay…")
+                }] + alongside)
+            }
+            return .buttons([.init("Restart manually…") { manualRestart = item.operationID }] + alongside)
         }
         if item.problem.needsManualResume, let command = item.subject.conversation?.manualResumeCommand {
             if copied == item.operationID {

@@ -121,6 +121,7 @@ extension VigilWorkspaces {
         // Not alive: its daemon was found gone with its pidfile left.
         Directory.Facts(alive: !facts.gone.contains(pane), tree: paneFileLines(pane, "tree"),
                         pid: paneFileLines(pane, "pid").joined(separator: "\n"),
+                        blankOutput: facts.files["panes/\(pane).blank-output"] != nil,
                         title: paneFileLines(pane, "title").first, glance: paneGlance(pane),
                         // A row is marked by an end that keeps its pane; a
                         // clean one's pane is closing.
