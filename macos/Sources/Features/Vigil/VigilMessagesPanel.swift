@@ -77,14 +77,10 @@ final class VigilMessageStore: ObservableObject {
     private nonisolated static let hub = Local.Client(socket: VigilPaths.hub)
     /// The mailboxes followed, by device (nil key: this Mac's, as "").
     private var following: [String: Task<Void, Never>] = [:]
-    private var renaming: DispatchWorkItem?
-    private var stateObserver: NSObjectProtocol?
+    /// The sidebar's rows as its model last built them (`rows(_:)`).
+    private var lastRows: [VigilWorkspaces.SidebarWorkspaceRow] = []
 
-    private init() {
-        stateObserver = NotificationCenter.default.addObserver(forName: VigilWorkspaces.stateDidChange, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { VigilMessageStore.shared.renameSoon() }
-        }
-    }
+    private init() {}
 
     var threads: [MessageThread] { index.threads }
     /// Every conversation listed once (`MessageThreads.conversations`): what
@@ -279,40 +275,36 @@ final class VigilMessageStore: ObservableObject {
 
     // MARK: Names (from the sidebar's own rows: the one naming rule)
 
-    private func renameSoon() {
-        guard renaming == nil else { return }
-        let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated {
-                self?.renaming = nil
-                self?.rename()
-            }
-        }
-        renaming = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    /// The sidebar's rows, each time its model built new ones
+    /// (`VigilSidebarModel.refresh`): names come from them, never from a
+    /// snapshot of their own. Messages built one of its own at every change
+    /// of a pane's state, a fifth of the main thread's work measured on the
+    /// M4 (740 of 3,441 ms over 40 s).
+    func rows(_ rows: [VigilWorkspaces.SidebarWorkspaceRow]) {
+        guard rows != lastRows else { return }
+        lastRows = rows
+        rename()
     }
 
     private func rename() {
         guard let here else { return }
         var next: [String: Named] = [:]
-        for row in VigilWorkspaces.shared.sidebarSnapshot() {
+        for row in lastRows {
+            let remote = VigilRemote.split(row.id)?.0
             for pane in row.tabs.flatMap(\.panes) {
-                guard let paneId = pane.paneId else { continue }
-                next["\(here)/\(paneId)"] = Named(
+                let key: String, navigation: String
+                if let remote {
+                    guard let (_, name) = VigilRemote.split(pane.id) else { continue }
+                    (key, navigation) = ("\(remote)/\(name)", pane.id)
+                } else {
+                    guard let paneId = pane.paneId else { continue }
+                    (key, navigation) = ("\(here)/\(paneId)", paneId)
+                }
+                next[key] = Named(
                     pane: VigilChatPane.of(
                         member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
-                        face: row.emoji, mac: nil, program: pane.conversationRef?.agent),
-                    workspace: row.id, navigation: paneId)
-            }
-        }
-        for row in VigilRemote.shared.sidebarRows() {
-            guard let (device, _) = VigilRemote.split(row.id) else { continue }
-            for pane in row.tabs.flatMap(\.panes) {
-                guard let (_, name) = VigilRemote.split(pane.id) else { continue }
-                next["\(device)/\(name)"] = Named(
-                    pane: VigilChatPane.of(
-                        member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
-                        face: row.emoji, mac: row.host?.name, program: pane.conversationRef?.agent),
-                    workspace: row.id, navigation: pane.id)
+                        face: row.emoji, mac: remote == nil ? nil : row.host?.name, program: pane.conversationRef?.agent),
+                    workspace: row.id, navigation: navigation)
             }
         }
         if next != panes { panes = next }

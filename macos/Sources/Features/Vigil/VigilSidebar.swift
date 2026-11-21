@@ -377,6 +377,8 @@ final class VigilSidebarModel: ObservableObject {
                 }
             })
             rows = fresh
+            // Messages names its panes from these very rows.
+            VigilMessageStore.shared.rows(fresh)
         }
         let histories = VigilWorkspaces.shared.savedMoveHistories.values.filter { !$0.pending.isEmpty }.sorted { $0.id.uuidString < $1.id.uuidString }
         if histories != moveHistories { moveHistories = histories }
