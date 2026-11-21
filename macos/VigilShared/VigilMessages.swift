@@ -636,8 +636,8 @@ struct VigilThreadConversation: View {
         let run = host.act, root = root(of: id)
         Task {
             do {
-                // A yes that needs the owner: Touch ID, Face ID or this
-                // device's password, here, before it is sent.
+                // A yes that needs the owner: owner authentication on this
+                // device, before it is sent.
                 if act.authenticated == true {
                     let context = LAContext()
                     _ = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "allow a stop")
