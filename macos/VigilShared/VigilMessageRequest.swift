@@ -16,8 +16,8 @@ import VigilWire
 /// carries (`Record.request`), and the answer is a `Decision` on it, which
 /// that Mac decides at once, Authz reachable or not (harness/README.md
 /// "Messages"); only from a person's click (`VigilChatHost.pressedByPerson`).
-/// A yes that needs the owner (a stop's) asks for Touch ID or the device's
-/// password first (`authenticated`). Nothing is offered on an older Mac's
+/// A yes that needs the owner (a stop's) asks for owner authentication on
+/// this device first (`authenticated`). Nothing is offered on an older Mac's
 /// records. Once answered here, what came of it, in the Mac's words.
 struct VigilMessageRequest: View {
     let item: MessageThread.Item
