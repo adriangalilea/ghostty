@@ -465,3 +465,67 @@ struct AntennaMark: View {
         }
     }
 }
+
+/// One command and acknowledgement for a pane, reached from either platform's menu.
+struct PaneResumeReceipt {
+    let id = UUID()
+    let row: String
+    let title: String
+    var answer: Restart.Answer?
+}
+
+struct PaneResumeItems: View {
+    let menu: PaneGlance.ResumeMenu
+    let conversation: String
+    let account: String?
+    let title: String
+    let row: String
+    @Binding var receipt: PaneResumeReceipt?
+    let request: (Restart.Intent) async throws -> Restart.Answer
+
+    var body: some View {
+        if let ticket = menu.scheduled {
+            Button("Cancel resume as " + (menu.destination ?? "selected account")) { send(.cancel(ticket)) }
+        } else {
+            Button("Resume") { if let account { resume(as: account) } }
+                .disabled(!menu.accounts.contains(account ?? ""))
+            Menu("Resume as") {
+                ForEach(menu.accounts, id: \.self) { choice in Button(choice) { resume(as: choice) } }
+            }
+        }
+    }
+
+    private func resume(as account: String) {
+        send(.resume(.init(instance: menu.instance, revision: menu.revision, conversation: conversation, account: account)))
+    }
+
+    private func send(_ intent: Restart.Intent) {
+        let pending = PaneResumeReceipt(row: row, title: title)
+        receipt = pending
+        Task { @MainActor in
+            let answer: Restart.Answer
+            do { answer = try await request(intent) }
+            catch { answer = .init(.refused, error.localizedDescription) }
+            if receipt?.id == pending.id { receipt?.answer = answer }
+        }
+    }
+}
+
+extension View {
+    func paneResumeFeedback(row: String, receipt: Binding<PaneResumeReceipt?>) -> some View {
+        inkActionPopover(isPresented: Binding(get: { receipt.wrappedValue?.row == row }, set: { shown in
+            if !shown, receipt.wrappedValue?.row == row { receipt.wrappedValue = nil }
+        })) {
+            if let result = receipt.wrappedValue {
+                let actions: InkActionPanel.Actions = result.answer?.manualCommand.map { command in
+                    .buttons([InkHUD.Action("Copy resume command") {
+                        VigilPasteboard.copy(command)
+                        receipt.wrappedValue = nil
+                    }])
+                } ?? []
+                InkActionPanel(result.title, detail: result.answer?.said ?? "Contacting the pane’s Mac…",
+                               tone: result.answer?.outcome == .refused ? .warn : .neutral, actions: actions)
+            }
+        }
+    }
+}

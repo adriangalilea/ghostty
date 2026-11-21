@@ -348,6 +348,7 @@ struct TreeNodeView: View {
 
     /// The pane's watches, over the tree (its long press).
     @State private var showingWatches = false
+    @State private var resumeReceipt: PaneResumeReceipt?
     @State private var copyDetails: PhoneCopyDetails?
     @ObservedObject private var watches = VigilPhoneWatches.shared.marks
     private var foldable: Bool { !node.children.isEmpty }
@@ -447,7 +448,13 @@ struct TreeNodeView: View {
                 content.onTapGesture { if foldable { toggle() } }
             }
         }
+        .paneResumeFeedback(row: node.id, receipt: $resumeReceipt)
         .contextMenu {
+            if let pane = node.pane, let glance = node.glance, let menu = glance.resumeMenu, let ref = glance.reference {
+                PaneResumeItems(menu: menu, conversation: ref.id, account: glance.account, title: node.title, row: node.id, receipt: $resumeReceipt) {
+                    try await model.restart(pane, request: Restart($0))
+                }
+            }
             if let ref = node.glance?.reference, let host = model.host(of: node) {
                 Button { copyDetails = PhoneCopyDetails(conversation: ref, host: host) } label: {
                     Label("Conversation Details", systemImage: "info.circle")
@@ -779,6 +786,7 @@ struct GlanceRow<Marks: View>: View {
                     Text(e).font(.subheadline)
                 }
                 Text(node.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                if let account = glance.resumeMenu?.accountLabel(current: glance.account) ?? glance.account { Text(account).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                 Image(systemName: "bubble.left.and.text.bubble.right")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
