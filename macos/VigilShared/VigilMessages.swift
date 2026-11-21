@@ -2,6 +2,7 @@ import AuthzProtocol
 import Foundation
 import GitViews
 import Ink
+import LocalAuthentication
 import MarkdownText
 import SwiftUI
 import VigilWire
@@ -430,6 +431,8 @@ struct VigilThreadConversation: View {
     #endif
 
     private var items: [MessageThread.Item] { thread?.items ?? [] }
+    /// The newest message a standing yes let through: where its revoke is.
+    private var newestByStandingYes: String? { items.last { $0.record.byStandingYes }?.id }
 
     var body: some View {
         let messages = thread.map { VigilThreadWords.messages($0, people: people) } ?? []
@@ -443,6 +446,8 @@ struct VigilThreadConversation: View {
                 // 2026-11-19), with what came of an answer given here.
                 if let item = item(message.id), item.record.awaitsYou || answered[item.id] != nil {
                     VigilMessageRequest(item: item, answered: answered[item.id]) { answer($0, on: item.id) }
+                } else if let item = item(message.id), item.id == newestByStandingYes {
+                    VigilStandingYes(item: item) { answer($0, on: item.id) }
                 }
             }
         } picture: {
@@ -575,7 +580,8 @@ struct VigilThreadConversation: View {
     /// words (`Message.Acted.said`): shown on the message, never discarded.
     @State private var answered: [String: String] = [:]
 
-    /// The person's answer on a message waiting for their yes.
+    /// The person's answer on a message waiting for their yes, or their
+    /// revoke of the standing yes that let one through.
     private func answer(_ act: Message.Act, on id: String) {
         // Checked in the press's own turn, where its event is the one being
         // handled: a program driving the app answers nothing.
@@ -586,10 +592,16 @@ struct VigilThreadConversation: View {
         let run = host.act, root = root(of: id)
         Task {
             do {
+                // A yes that needs the owner: Touch ID, Face ID or this
+                // device's password, here, before it is sent.
+                if act.authenticated == true {
+                    let context = LAContext()
+                    _ = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "allow a stop")
+                }
                 let acted = try await run(act, root)
                 answered[id] = acted.said
             } catch {
-                answered[id] = "Not answered: \(error)"
+                answered[id] = "Not answered: " + ((error as? LAError)?.localizedDescription ?? "\(error)")
             }
         }
     }
@@ -610,67 +622,6 @@ struct VigilThreadConversation: View {
                 do { _ = try await run(.read(ids), root) } catch { marking.subtract(ids) }
             }
         }
-    }
-}
-
-/// The request on a message waiting for the person's yes (CHATS.md, decided
-/// 2026-11-19: "A request sits on the message it is about … never a detached
-/// bar"), drawn inside its bubble: "Waiting for you" and how long it has
-/// waited, the one mark every surface draws for it, then its answers. It is
-/// answered here or in Authz, whichever comes first, and the other comes
-/// down: on the Mac a press answers its card through authzd (`answer.own`),
-/// only from a person's click (`VigilChatHost.pressedByPerson`). Refuse;
-/// Deliver, this one message, where its urgency takes a plain yes
-/// (`Message.Urgency.requirement`); a stop's Allow in Authz…, which opens
-/// its card in Authz on this Mac for the owner's authentication; Allow both
-/// ways…, which opens its card there to give a standing yes for both agents.
-/// Nothing is offered on an older Mac's records (`answerable`). Once
-/// answered here, what came of it, in the Mac's words.
-struct VigilMessageRequest: View {
-    let item: MessageThread.Item
-    let answered: String?
-    let act: (Message.Act) -> Void
-
-    var body: some View {
-        let record = item.record, message = record.message
-        VStack(alignment: .leading, spacing: 6) {
-            if let answered, !record.awaitsYou {
-                Text(answered).inkText(.detail)
-            } else {
-                HStack(spacing: 4) {
-                    Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-                    (Text("Waiting for you · asked ")
-                        + Text(Date(timeIntervalSince1970: record.arrived), format: .relative(presentation: .named)))
-                        .inkText(.detail)
-                }
-                if record.answerable == true {
-                    HStack(spacing: 8) {
-                        Button("Refuse") { act(.refuse(item.id)) }.buttonStyle(.ink)
-                        if message.declared.requirement == .ownerAuthenticated {
-                            #if os(macOS)
-                                // Its card opens in Authz on this Mac, where the owner authenticates.
-                                Button("Allow in Authz…") { act(.allow(item.id)) }.buttonStyle(.ink)
-                            #else
-                                Text("A stop is allowed on its card in Authz, once the device that shows it is unlocked.")
-                                    .inkText(.detail)
-                            #endif
-                        } else {
-                            if message.from.kind == .agent, message.from.root == nil, message.from.conversation != nil,
-                               message.to.conversation != nil {
-                                Button("Allow both ways…") { act(.allowPair(item.id)) }.buttonStyle(.ink)
-                            }
-                            // Never a default button: Return is the composer's.
-                            Button("Deliver") { act(.allow(item.id)) }.buttonStyle(.inkProminent)
-                        }
-                    }
-                    .focusable(false)
-                } else {
-                    Text("Its Mac's vigil is older: answer it on its card in Authz there.").inkText(.detail)
-                }
-                if let answered { Text(answered).inkText(.detail) }
-            }
-        }
-        .padding(.top, 2)
     }
 }
 
