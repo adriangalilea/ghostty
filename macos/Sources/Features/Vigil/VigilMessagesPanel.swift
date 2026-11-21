@@ -207,11 +207,14 @@ final class VigilMessageStore: ObservableObject {
         mailboxes[root] = changes.applied(to: mailboxes[root] ?? [:])
         // An older Mac tells none: a whole with no asks says it holds none.
         if let told = changes.asks { asks[root] = told } else if changes.whole { asks[root] = [] }
+        if let told = changes.chats { chats[root] = told } else if changes.whole { chats[root] = [] }
         recount()
     }
 
     /// The questions each Mac asks about its panes now (`PaneAsk`), by root.
     @Published private(set) var asks: [String: [PaneAsk]] = [:]
+    /// The group chats each Mac keeps (`Chat`), by root.
+    @Published private(set) var chats: [String: [Chat]] = [:]
 
     /// One build of the index at a time, off the main thread; changes that
     /// arrive meanwhile are folded into the next one, so a burst of them is
@@ -224,11 +227,11 @@ final class VigilMessageStore: ObservableObject {
         guard !building else { return }
         building = true
         stale = false
-        let mailboxes = mailboxes, asks = asks
+        let mailboxes = mailboxes, asks = asks, chats = chats
         let records = mailboxes.values.reduce(0) { $0 + $1.count }
         Task.detached(priority: .userInitiated) {
             let start = ContinuousClock.now
-            let next = Index(mailboxes, asks: asks)
+            let next = Index(mailboxes, asks: asks, chats: chats)
             let took = ContinuousClock.now - start
             await MainActor.run { VigilMessageStore.shared.publish(next, took: took, records: records) }
         }
@@ -338,7 +341,9 @@ final class VigilMessageStore: ObservableObject {
                 VigilFilePanel.show(file, beside: key.root == here ? key.pane : "\(key.root)/\(key.pane)")
             },
             pressedByPerson: { Self.pressedByPerson() },
-            asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] })
+            asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] },
+            chat: { root, id in VigilMessageStore.shared.chats[root]?.first { $0.id == id } },
+            postInChat: { chat, body, replyTo, root in try await Self.postInChat(chat, body: body, replyTo: replyTo, root: root, here: here) })
     }
 
     /// Whether the event being handled is a person's click: a mouse button
@@ -390,6 +395,19 @@ final class VigilMessageStore: ObservableObject {
         }.value
         messagesLog.info("posted", ["id": message.id, "pane": message.to.pane, "state": standing.state.kind.rawValue])
         if case .refused(let why) = standing.state { throw Failed(description: "refused: \(why)") }
+    }
+
+    /// The person's post in a group this Mac keeps (`chat.post`, from the app
+    /// alone): its broker gives every agent in it a message.
+    private nonisolated static func postInChat(_ chat: String, body: String, replyTo: String?, root: String, here: String?) async throws {
+        guard root == here else { throw Failed(description: "a group on another Mac is written in from that Mac for now") }
+        try await Task.detached {
+            var payload: [String: JSONValue] = ["chat": .string(chat), "body": .string(body)]
+            if let replyTo { payload["replyTo"] = .string(replyTo) }
+            let response = try HarnessWire.call(RPCRequest("chat.post", .object(payload)))
+            guard response.ok else { throw Failed(description: response.refusal) }
+        }.value
+        messagesLog.info("posted in a group", ["chat": String(chat.prefix(8))])
     }
 
     private nonisolated static func act(_ act: Message.Act, root: String, here: String?) async throws -> Message.Acted {
@@ -466,6 +484,8 @@ enum VigilMessagesPanel {
         guard let thread = store.conversations.first(where: { $0.id == id }) else {
             return messagesLog.warn("messages: that thread is gone", ["thread": id])
         }
+        // A group is no pane's: it opens in the Messages window.
+        if thread.chat != nil { return window(thread: id) }
         let key = thread.key
         store.open(root: key.root, pane: key.pane, in: controller)
         // A mount builds its tree in this turn; a mirror of another Mac's tab

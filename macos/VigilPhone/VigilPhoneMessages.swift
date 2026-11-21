@@ -92,6 +92,7 @@ final class VigilPhoneMessages: ObservableObject {
                     self.mailboxes[root] = changes.applied(to: self.mailboxes[root] ?? [:])
                     // An older Mac tells none: a whole with no asks says it holds none.
                     if let told = changes.asks { self.asks[root] = told } else if changes.whole { self.asks[root] = [] }
+                    if let told = changes.chats { self.chats[root] = told } else if changes.whole { self.chats[root] = [] }
                     self.recount()
                 case .waiting:
                     self.receipts.warn("messages", "mailbox out of reach", ["mac": self.macName(root), "why": step.reason ?? ""])
@@ -105,6 +106,8 @@ final class VigilPhoneMessages: ObservableObject {
 
     /// The questions each Mac asks about its panes now (`PaneAsk`), by root.
     @Published private(set) var asks: [String: [PaneAsk]] = [:]
+    /// The group chats each Mac keeps (`Chat`), by root.
+    @Published private(set) var chats: [String: [Chat]] = [:]
 
     /// One build of the index at a time, off the main thread; changes that
     /// arrive meanwhile are folded into the next one.
@@ -116,9 +119,9 @@ final class VigilPhoneMessages: ObservableObject {
         guard !building else { return }
         building = true
         stale = false
-        let mailboxes = mailboxes, asks = asks
+        let mailboxes = mailboxes, asks = asks, chats = chats
         Task.detached(priority: .userInitiated) {
-            let next = VigilMessageIndex(mailboxes, asks: asks)
+            let next = VigilMessageIndex(mailboxes, asks: asks, chats: chats)
             await MainActor.run { VigilPhoneMessages.shared.publish(next) }
         }
     }
@@ -158,7 +161,8 @@ final class VigilPhoneMessages: ObservableObject {
             // when nobody holds it.
             handAfter: { _ in true },
             mention: { call, root in try await Self.mention(call, root: root) },
-            asks: { key in VigilPhoneMessages.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] })
+            asks: { key in VigilPhoneMessages.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] },
+            chat: { root, id in VigilPhoneMessages.shared.chats[root]?.first { $0.id == id } })
     }
 
     /// An ask about the files a message names, of the Mac they are on.

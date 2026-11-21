@@ -40,9 +40,19 @@ struct VigilMessageIndex: Equatable, Sendable {
     var forYou: [MessageThreads.ForYou] = []
 
     init() {}
-    init(_ mailboxes: [String: [String: Message.Record]], asks: [String: [PaneAsk]]) {
+    init(_ mailboxes: [String: [String: Message.Record]], asks: [String: [PaneAsk]], chats: [String: [Chat]] = [:]) {
         threads = MessageThreads.threads(mailboxes)
-        conversations = MessageThreads.conversations(mailboxes)
+        var conversations = MessageThreads.conversations(mailboxes)
+        // A group with nothing said yet is listed too, and one that waits for
+        // the person's yes first of all.
+        let listed = Set(conversations.compactMap(\.chat))
+        for (root, held) in chats {
+            for chat in held where !listed.contains(chat.id) {
+                let empty = MessageThread(key: .init(root: root, pane: MessageThread.chatPane(chat.id), conversation: nil), items: [])
+                if chat.allowed { conversations.append(empty) } else { conversations.insert(empty, at: 0) }
+            }
+        }
+        self.conversations = conversations
         panes = MessageThreads.panes(threads)
         pending = MessageThreads.pending(mailboxes)
         var awaiting = MessageThreads.awaitingYou(mailboxes)
@@ -100,6 +110,12 @@ struct VigilChatPane: Equatable, Sendable {
     }
 }
 
+/// What a host that cannot do something says.
+enum VigilChatError: Error, CustomStringConvertible {
+    case notHere
+    var description: String { "group chats are written in from a Mac's Messages for now" }
+}
+
 /// What the views ask of the app that holds them.
 struct VigilChatHost {
     /// This Mac's tether root: a record of another Mac is acted on there.
@@ -134,6 +150,12 @@ struct VigilChatHost {
     /// (`PaneAsk`), as its Mac holds them now: drawn in the thread above the
     /// composer, answered there on their card.
     var asks: @MainActor (_ key: MessageThread.Key) -> [PaneAsk] = { _ in [] }
+    /// A group chat of the Mac `root`, as it keeps it (`Chat`).
+    var chat: @MainActor (_ root: String, _ id: String) -> Chat? = { _, _ in nil }
+    /// The person's post in a group chat of the Mac `root` (`chat.post`).
+    var postInChat: @Sendable (_ chat: String, _ body: String, _ replyTo: String?, _ root: String) async throws -> Void = { _, _, _, _ in
+        throw VigilChatError.notHere
+    }
 
     /// Whether a folder on the Mac `root` can be shown here: revealed in
     /// this Mac's Finder, so only this Mac's own.
@@ -398,7 +420,13 @@ struct VigilChatPeople {
     /// A thread's name: its pane's, or both ends' for a conversation between
     /// two agents, listed once.
     @MainActor func title(of thread: MessageThread) -> String {
-        thread.with.map { "\(title(of: thread.key)) ↔ \(title(of: $0))" } ?? title(of: thread.key)
+        // A group says it is one: its face (people when it has none), its
+        // name and how many are in it, you among them.
+        if let id = thread.chat {
+            let chat = host.chat(thread.key.root, id)
+            return "\(chat?.face ?? "👥") \(chat?.name ?? "a group") · \((chat?.members.count ?? 0) + 1)"
+        }
+        return thread.with.map { "\(title(of: thread.key)) ↔ \(title(of: $0))" } ?? title(of: thread.key)
     }
     /// An end of the list's picker (`VigilThreadList.end`, "root/pane") by name.
     @MainActor func title(ofEnd end: String) -> String {
@@ -552,12 +580,16 @@ struct VigilThreadConversation: View {
         .onChange(of: thread?.items.filter { $0.record.unread }.map(\.id), initial: true) { markRead() }
         .onChange(of: front) { markRead() }
         .onContinuousHover { _ in markRead() }
+        // A group an agent made waits for the person's one yes, here.
+        if let id = MessageThread(key: key, items: []).chat, let chat = host.chat(key.root, id), !chat.allowed {
+            VigilChatRequest(chat: chat, answered: answered[chat.id]) { answer($0, on: chat.id) }
+        }
         // What vigil asks about this pane, answered here on its card.
         ForEach(host.asks(key)) { ask in
             VigilPaneAskRequest(ask: ask, answered: answered[ask.id]) { answer($0, on: ask.id) }
         }
         InkComposer(
-            text: $draft, prompt: "Message \(people.title(of: key))",
+            text: $draft, prompt: "Message \(thread.map { people.title(of: $0) } ?? people.title(of: key))",
             replying: replying.flatMap { id in messages.first { $0.id == id } }.map { InkChat.Answered($0, people: people.all) },
             editing: editing != nil, blocked: failure, cancel: { cancel() }
         ) { words in
@@ -641,6 +673,15 @@ struct VigilThreadConversation: View {
         if let editing {
             act(.edit(editing, body: words), on: editing)
             cancel()
+            return
+        }
+        // In a group: one post, which its Mac gives every agent in it.
+        if let chat = MessageThread(key: key, items: []).chat {
+            let postInChat = host.postInChat, root = key.root, replyTo = replying
+            cancel()
+            Task {
+                do { try await postInChat(chat, words, replyTo, root) } catch { failure = "Not sent: \(error)" }
+            }
             return
         }
         let message = Message(
