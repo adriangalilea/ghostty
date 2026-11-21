@@ -18,8 +18,11 @@ import VigilWire
 final class VigilPhoneMessages: ObservableObject {
     static let shared = VigilPhoneMessages()
 
-    /// Each Mac's records by its tether root.
-    @Published private(set) var mailboxes: [String: [String: Message.Record]] = [:]
+    /// Each Mac's records by its tether root, as followed: never drawn from
+    /// directly. The views draw `index`, built once per change, off the main
+    /// thread (`VigilMessageIndex`).
+    private var mailboxes: [String: [String: Message.Record]] = [:]
+    @Published private(set) var index = VigilMessageIndex()
     /// What the tree's rows draw of the mailboxes, apart from them: a
     /// receipt or a reaction moves `mailboxes` and repaints the chat, never
     /// the tree; only a changed count does.
@@ -46,15 +49,13 @@ final class VigilPhoneMessages: ObservableObject {
 
     private init() {}
 
-    var threads: [MessageThread] { MessageThreads.threads(mailboxes) }
+    var threads: [MessageThread] { index.threads }
     /// Every conversation listed once: what the Messages screen lists.
-    var conversations: [MessageThread] { MessageThreads.conversations(mailboxes) }
+    var conversations: [MessageThread] { index.conversations }
 
     /// A pane's every thread as one: what its mode shows, holding exactly
     /// what its row mark counts.
-    func paneThread(_ key: MessageThread.Key) -> MessageThread? {
-        MessageThreads.pane(mailboxes, root: key.root, pane: key.pane, conversation: key.conversation)
-    }
+    func paneThread(_ key: MessageThread.Key) -> MessageThread? { index.pane(key) }
 
     // MARK: Following (VigilPhone says when the node is up and which Macs there are)
 
@@ -105,17 +106,36 @@ final class VigilPhoneMessages: ObservableObject {
     /// The questions each Mac asks about its panes now (`PaneAsk`), by root.
     @Published private(set) var asks: [String: [PaneAsk]] = [:]
 
+    /// One build of the index at a time, off the main thread; changes that
+    /// arrive meanwhile are folded into the next one.
+    private var building = false
+    private var stale = false
+
     private func recount() {
-        let next = MessageThreads.pending(mailboxes)
-        if next != marks.pending { marks.pending = next }
-        // A pane's hand counts what vigil asks about it too.
-        var awaiting = MessageThreads.awaitingYou(mailboxes)
-        for (root, list) in asks {
-            for ask in list {
-                for pane in ask.panes { awaiting[root, default: [:]][pane, default: []].insert(ask.id) }
+        stale = true
+        guard !building else { return }
+        building = true
+        stale = false
+        let mailboxes = mailboxes, asks = asks
+        Task.detached(priority: .userInitiated) {
+            let next = VigilMessageIndex(mailboxes, asks: asks)
+            await MainActor.run { VigilPhoneMessages.shared.publish(next) }
+        }
+    }
+
+    private func publish(_ next: VigilMessageIndex) {
+        building = false
+        if next != index {
+            // Drawn in one step, never animated row by row.
+            var quiet = Transaction()
+            quiet.disablesAnimations = true
+            withTransaction(quiet) {
+                index = next
+                if next.pending != marks.pending { marks.pending = next.pending }
+                if next.awaiting != marks.awaiting { marks.awaiting = next.awaiting }
             }
         }
-        if awaiting != marks.awaiting { marks.awaiting = awaiting }
+        if stale { recount() }
     }
 
     private func macName(_ root: String) -> String {

@@ -20,6 +20,45 @@ import VigilWire
 /// `MessageThreads` from each Mac's mailbox; where a message goes, what an
 /// act does and where "go to" leads are the host's (`VigilChatHost`).
 
+/// The threads and counts every view reads, worked out once per change of
+/// the mailboxes, off the main thread, by the store that follows them (the
+/// Mac's `VigilMessageStore`, the phone's): no view computes them. Each view
+/// once rebuilt every thread of every Mac at every render, and every record
+/// that changed was a render: a read of 220 drained the count one by one.
+struct VigilMessageIndex: Equatable, Sendable {
+    var threads: [MessageThread] = []
+    var conversations: [MessageThread] = []
+    /// Each pane's every thread as one, by "root/pane" (`MessageThreads.panes`).
+    var panes: [String: MessageThread] = [:]
+    var pending: [String: [String: MessageThreads.Pending]] = [:]
+    var awaiting: [String: [String: Set<String>]] = [:]
+    var forYou: [MessageThreads.ForYou] = []
+
+    init() {}
+    init(_ mailboxes: [String: [String: Message.Record]], asks: [String: [PaneAsk]]) {
+        threads = MessageThreads.threads(mailboxes)
+        conversations = MessageThreads.conversations(mailboxes)
+        panes = MessageThreads.panes(threads)
+        pending = MessageThreads.pending(mailboxes)
+        var awaiting = MessageThreads.awaitingYou(mailboxes)
+        // A pane's hand counts what vigil asks about it too.
+        for (root, list) in asks {
+            for ask in list {
+                for pane in ask.panes { awaiting[root, default: [:]][pane, default: []].insert(ask.id) }
+            }
+        }
+        self.awaiting = awaiting
+        forYou = MessageThreads.forYou(threads)
+    }
+
+    /// A pane's every thread as one, keyed by `key` (the conversation it holds).
+    func pane(_ key: MessageThread.Key) -> MessageThread? {
+        guard var thread = panes["\(key.root)/\(key.pane)"] else { return nil }
+        thread.key = key
+        return thread
+    }
+}
+
 /// A pane as a thread names it: its agent's name and face in every bubble
 /// and every thread's head.
 struct VigilChatPane: Equatable, Sendable {

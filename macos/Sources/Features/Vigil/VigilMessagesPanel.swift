@@ -17,8 +17,13 @@ import VigilWire
 final class VigilMessageStore: ObservableObject {
     static let shared = VigilMessageStore()
 
-    /// Each Mac's records by its tether root.
-    @Published private(set) var mailboxes: [String: [String: Message.Record]] = [:]
+    /// Each Mac's records by its tether root, as followed: never drawn from
+    /// directly. What the views draw is `index`, built from it once per
+    /// change (however many records a change carries) and off the main thread.
+    private var mailboxes: [String: [String: Message.Record]] = [:]
+
+    typealias Index = VigilMessageIndex
+    @Published private(set) var index = Index()
     /// This Mac's tether root, said by the hub when this Mac's mailbox opens.
     @Published private(set) var here: String? {
         didSet { if marks.here != here { marks.here = here } }
@@ -81,17 +86,15 @@ final class VigilMessageStore: ObservableObject {
         }
     }
 
-    var threads: [MessageThread] { MessageThreads.threads(mailboxes) }
+    var threads: [MessageThread] { index.threads }
     /// Every conversation listed once (`MessageThreads.conversations`): what
     /// the Messages list draws.
-    var conversations: [MessageThread] { MessageThreads.conversations(mailboxes) }
+    var conversations: [MessageThread] { index.conversations }
     var pendingTotal: Int { marks.pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread + $1.waiting } }
 
     /// A pane's every thread as one: what its aside shows, holding exactly
     /// what its row mark counts.
-    func paneThread(_ key: MessageThread.Key) -> MessageThread? {
-        MessageThreads.pane(mailboxes, root: key.root, pane: key.pane, conversation: key.conversation)
-    }
+    func paneThread(_ key: MessageThread.Key) -> MessageThread? { index.pane(key) }
 
     /// The message a press on a pane's waiting hand asked to be shown, by
     /// Mac and pane (`MessageThread.firstAwaitingYou`).
@@ -214,26 +217,51 @@ final class VigilMessageStore: ObservableObject {
     /// The questions each Mac asks about its panes now (`PaneAsk`), by root.
     @Published private(set) var asks: [String: [PaneAsk]] = [:]
 
+    /// One build of the index at a time, off the main thread; changes that
+    /// arrive meanwhile are folded into the next one, so a burst of them is
+    /// one or two builds, never one per record.
+    private var building = false
+    private var stale = false
+
     private func recount() {
-        let next = MessageThreads.pending(mailboxes)
-        if next != marks.pending { marks.pending = next }
-        // A pane's hand counts what vigil asks about it too.
-        var awaiting = MessageThreads.awaitingYou(mailboxes)
-        for (root, list) in asks {
-            for ask in list {
-                for pane in ask.panes { awaiting[root, default: [:]][pane, default: []].insert(ask.id) }
+        stale = true
+        guard !building else { return }
+        building = true
+        stale = false
+        let mailboxes = mailboxes, asks = asks
+        let records = mailboxes.values.reduce(0) { $0 + $1.count }
+        Task.detached(priority: .userInitiated) {
+            let start = ContinuousClock.now
+            let next = Index(mailboxes, asks: asks)
+            let took = ContinuousClock.now - start
+            await MainActor.run { VigilMessageStore.shared.publish(next, took: took, records: records) }
+        }
+    }
+
+    private func publish(_ next: Index, took: Duration, records: Int) {
+        building = false
+        // Every build said, with what it cost: the receipt that a change is
+        // one build (`mise run log 'index built'`).
+        messagesLog.info("index built", ["records": records, "ms": (took / .milliseconds(1)).rounded()])
+        if next != index {
+            // Drawn in one step, never animated row by row.
+            var quiet = Transaction()
+            quiet.disablesAnimations = true
+            withTransaction(quiet) {
+                index = next
+                if next.pending != marks.pending { marks.pending = next.pending }
+                if next.awaiting != marks.awaiting { marks.awaiting = next.awaiting }
+            }
+            VigilMessageAlerts.shared.due(next.forYou, names: host)
+            let waits = next.awaiting.values.flatMap(\.values).reduce(into: Set<String>()) { $0.formUnion($1) }
+            let unread = Set(next.forYou.map(\.item.id))
+            if unread.count != unreadCount || waits.count != waitingCount {
+                unreadCount = unread.count
+                waitingCount = waits.count
+                NotificationCenter.default.post(name: Self.forYouDidChange, object: nil)
             }
         }
-        if awaiting != marks.awaiting { marks.awaiting = awaiting }
-        let due = MessageThreads.forYou(threads)
-        VigilMessageAlerts.shared.due(due, names: host)
-        let waits = awaiting.values.flatMap(\.values).reduce(into: Set<String>()) { $0.formUnion($1) }
-        let unread = Set(due.map(\.item.id))
-        if unread.count != unreadCount || waits.count != waitingCount {
-            unreadCount = unread.count
-            waitingCount = waits.count
-            NotificationCenter.default.post(name: Self.forYouDidChange, object: nil)
-        }
+        if stale { recount() }
     }
 
     /// The messages agents addressed to the person that they have not read
