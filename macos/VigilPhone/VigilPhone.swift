@@ -728,8 +728,7 @@ final class VigilPhone: ObservableObject {
         Task {
             do {
                 let request = WorkspaceCommand.Request.burial(burial.name, operation)
-                let data = try await VigilLink.command(linked(), device: burial.host.id, try request.line)
-                let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+                let outcome = try await command(request, on: burial.host.id)
                 let fields: LogFields = ["op": operation, "mac": burial.host.name, "workspace": burial.name]
                 if outcome.ok {
                     receipts.info("burial", "committed", fields)
@@ -842,12 +841,11 @@ final class VigilPhone: ObservableObject {
                               "command": birth.command ?? (request.operation == "fork" ? "fork" : "shell"), "anchor": request.anchor]
         receipts.info("create", "sent", fields)
         // Not connected is nothing sent: said as a refusal, never "may have".
-        let node: TetherNode
-        do { node = try linked() } catch { throw CreateError.refused(VigilLink.reason(error)) }
         let outcome: WorkspaceCommand.Outcome
         do {
-            let data = try await VigilLink.command(node, device: host.id, try request.line)
-            outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+            outcome = try await command(request, on: host.id)
+        } catch let refusal as CreateError {
+            throw refusal
         } catch {
             receipts.error("create", "outcome unknown", fields.merging(["err": error]) { a, _ in a })
             throw CreateError.unknown(VigilLink.reason(error), id: request.id)
@@ -890,6 +888,17 @@ final class VigilPhone: ObservableObject {
     /// Whether `host` can take a creation now (its directory followed).
     func reachable(_ host: Host) -> Bool { directories[host.id] != nil && down[host.id] == nil }
 
+    /// A structural edit is sent once, to the home the directory identified.
+    func command(_ request: WorkspaceCommand.Request, on device: String) async throws -> WorkspaceCommand.Outcome {
+        if let link = down[device] { throw CreateError.refused(link.reason) }
+        let node: TetherNode
+        do { node = try linked() } catch { throw CreateError.refused(VigilLink.reason(error)) }
+        let data = try await VigilLink.command(node, device: device, try request.line)
+        let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+        guard outcome.id == request.id else { throw WireError.invalid("The reply did not match this workspace command.") }
+        return outcome
+    }
+
     /// The Mac a new workspace goes to without asking: the only one that
     /// can take it. With several, which one is yours to choose.
     var onlyReachable: Host? {
@@ -928,7 +937,7 @@ final class VigilPhone: ObservableObject {
     struct Closing: Identifiable {
         let id = UUID()
         let host: Host
-        let anchor: String
+        let request: WorkspaceCommand.Request
         let tab: Bool
         let busy: [String]
         let done: @MainActor () -> Void
@@ -950,12 +959,15 @@ final class VigilPhone: ObservableObject {
     }
 
     func bury(_ anchor: String, tab: Bool, on host: Host, done: @escaping @MainActor () -> Void = {}) {
-        guard let dir = directories[host.id], let place = dir.place(of: anchor) else {
+        guard let dir = directories[host.id], let place = dir.place(of: anchor),
+              let revision = place.workspace.layoutRevision else {
             failure = .init(title: "Not closed", message: "That pane is no longer in a workspace on \(host.name).")
             return
         }
-        let busy = (tab ? place.tab.paneIds : [anchor]).compactMap { dir.panes[$0]?.busy }
-        let closing = Closing(host: host, anchor: anchor, tab: tab, busy: busy, done: done)
+        let busy = place.tab.closingPanes(anchor, tab: tab).flatMap { dir.panes[$0]?.closingPrograms ?? [] }
+        let request = WorkspaceCommand.Request(session: place.workspace.name, revision: revision,
+                                               operation: tab ? "close_tab" : "close_pane", anchor: anchor)
+        let closing = Closing(host: host, request: request, tab: tab || place.tab.closesWithPane(anchor), busy: busy, done: done)
         if busy.isEmpty { confirm(closing) } else { self.closing = closing }
     }
 
@@ -970,8 +982,7 @@ final class VigilPhone: ObservableObject {
         }
         let request = WorkspaceCommand.Request(session: place.workspace.name, revision: revision, operation: "open_pane", anchor: ref.pane)
         do {
-            let data = try await VigilLink.command(linked(), device: ref.host.id, try request.line)
-            let answer = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+            let answer = try await command(request, on: ref.host.id)
             guard answer.ok else { throw CreateError.refused(answer.message) }
             opening = ref
         } catch {
@@ -982,18 +993,12 @@ final class VigilPhone: ObservableObject {
     /// Sends a close (asked, or nothing to ask).
     func confirm(_ closing: Closing) {
         let host = closing.host
-        guard let place = directories[host.id]?.place(of: closing.anchor), let revision = place.workspace.layoutRevision else {
-            failure = .init(title: "Not closed", message: "That pane is no longer in a workspace on \(host.name).")
-            return
-        }
-        let request = WorkspaceCommand.Request(session: place.workspace.name, revision: revision,
-                                               operation: closing.tab ? "close_tab" : "close_pane", anchor: closing.anchor)
-        let fields: LogFields = ["id": request.id.uuidString, "op": request.operation, "mac": host.name, "anchor": closing.anchor]
+        let request = closing.request
+        let fields: LogFields = ["id": request.id.uuidString, "op": request.operation, "mac": host.name, "anchor": request.anchor]
         receipts.info("close", "sent", fields)
         Task {
             do {
-                let data = try await VigilLink.command(linked(), device: host.id, try request.line)
-                let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+                let outcome = try await command(request, on: host.id)
                 guard outcome.ok else {
                     receipts.warn("close", "refused", fields.merging(["code": outcome.code, "why": outcome.message]) { a, _ in a })
                     failure = .init(title: "Not closed", message: outcome.message)
@@ -1021,7 +1026,7 @@ final class VigilPhone: ObservableObject {
     /// Whether closing `pane` closes its whole tab, dock and all: it is the
     /// tab's only pane (the home's rule for `close_pane`).
     func closesTab(_ pane: String, on host: Host) -> Bool {
-        directories[host.id]?.place(of: pane)?.tab.panes.map(\.id) == [pane]
+        directories[host.id]?.place(of: pane)?.tab.closesWithPane(pane) == true
     }
 
     /// The folder a pane started in, as its Mac lists it.

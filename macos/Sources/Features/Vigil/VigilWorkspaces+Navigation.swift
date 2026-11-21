@@ -138,16 +138,17 @@ extension VigilWorkspaces {
             self.remoteSessionCommand(in: controller, from: target, operation: operation, expectedRevision: revision)
         }
         guard confirm, let anchor = target?.vigilAttachId else { proceed(); return true }
-        let what = operation == "close_tab" ? "Tab" : "Pane"
         if let remote = VigilRemote.shared.session(composite) {
             let facts = VigilRemote.shared.host(remote.device)?.directory?.panes ?? [:]
             let tab = (remote.session.tabs ?? []).first { $0.paneIds.contains(anchor) }
-            let panes = operation == "close_tab" ? tab?.paneIds ?? [anchor] : [anchor]
-            confirmClose(what, busy: panes.compactMap { facts[$0]?.busy },
+            let whole = operation == "close_tab" || tab?.closesWithPane(anchor) == true
+            let panes = whole ? tab?.paneIds ?? [anchor] : [anchor]
+            confirmClose(whole ? "Tab" : "Pane", busy: panes.flatMap { facts[$0]?.closingPrograms ?? [] },
                          mac: VigilRemote.shared.host(remote.device)?.name, in: controller, proceed)
         } else {
             let tab = workspaces[composite]?.tabs.first { $0.paneIds.contains(anchor) }
-            confirmClose(what, busy: busyPrograms(panes: operation == "close_tab" ? tab?.paneIds ?? [anchor] : [anchor]),
+            let whole = operation == "close_tab" || tab?.closesWithPane(anchor) == true
+            confirmClose(whole ? "Tab" : "Pane", busy: busyPrograms(panes: whole ? tab?.paneIds ?? [anchor] : [anchor]),
                          in: controller, proceed)
         }
         return true
@@ -545,6 +546,9 @@ extension VigilWorkspaces {
             setPriority(pane: request.anchor, priority)
             return done("Priority set.")
         case "close_workspace":
+            if !request.revision.isEmpty, session.layoutRevision != request.revision {
+                return .failure(request, "conflict", "The workspace changed after the close was reviewed. Review it again.")
+            }
             kill(name: request.session)
             sessionLog.info("session command committed", ["id": request.id.uuidString, "operation": request.operation, "workspace": request.session])
             return Reply(id: request.id, ok: true, code: "committed", message: "Closed on its Mac; its undo keeps it for its grace.",
@@ -559,16 +563,25 @@ extension VigilWorkspaces {
         guard let index = session.tabs.firstIndex(where: { $0.paneIds.contains(request.anchor) }) else {
             return .failure(request, "not_found", "That pane is no longer in this workspace.")
         }
+        if request.operation == "close_tab" || request.operation == "close_pane" {
+            let tab = session.tabs[index]
+            let whole = request.operation == "close_tab" || tab.closesWithPane(request.anchor)
+            let closing = Set(whole ? tab.paneIds : [request.anchor])
+            let staying = ownedPaneIds(session).subtracting(closing)
+            closeMember(in: request.session, tab: tab, anchor: request.anchor, whole: whole)
+            reconcileViews(of: request.session)
+            guard persist(), let burial = locate(request.anchor), burial.buried,
+                  let buried = graveyard[burial.owner], ownedPaneIds(buried) == closing,
+                  (workspaces[request.session].map(ownedPaneIds) ?? []) == staying else {
+                return .failure(request, "commit_failed", "The close could not be confirmed on its Mac. Check Recently closed before retrying.")
+            }
+            return done("Closed on its Mac.")
+        }
         guard session.float == nil else {
             return .failure(request, "presentation_busy", "This workspace is in the floating terminal on its Mac. Put it back before changing its tabs or splits.")
         }
         var tab = session.tabs[index]
         var created: Registry.Pane?
-        var removed: [Registry.Pane] = []
-        /// A whole tab closed: buried as one, where it stood.
-        var closedTab: Registry.Tab?
-        /// The closed pane was a dock tenant (it goes back into the dock).
-        var closedFromDock = false
         switch request.operation {
         case "split", "new_tab", "fork", "fork_checked":
             guard let anchor = tab.panes.first(where: { $0.id == request.anchor }) else {
@@ -612,20 +625,7 @@ extension VigilWorkspaces {
                 tab.panes.append(pane)
                 session.tabs[index] = tab
             }
-        case "close_tab":
-            closedTab = session.tabs.remove(at: index)
-        case "close_pane" where tab.panes.map(\.id) == [request.anchor]:
-            // Its tab's last pane: closing it closes the tab, dock and all.
-            closedTab = session.tabs.remove(at: index)
-        case "close_pane":
-            closedFromDock = !tab.panes.contains { $0.id == request.anchor }
-            removed = (tab.panes + (tab.dock?.panes ?? [])).filter { $0.id == request.anchor }
-            let ids = Set(removed.map(\.id))
-            guard let remaining = Self.select(tab, keeping: Set(tab.paneIds).subtracting(ids)) else {
-                return .failure(request, "source_changed", "This tab has no remaining member.")
-            }
-            tab = remaining
-            session.tabs[index] = tab
+
         default:
             return .failure(request, "unsupported_operation", "vigil on that Mac can't do this; update it.")
         }
@@ -635,17 +635,7 @@ extension VigilWorkspaces {
         session.held = []
         workspaces[request.session] = session
         reconcileViews(of: request.session)
-        if let closedTab {
-            buryTab(closedTab, held: [], thumbnail: nil, from: request.session, at: index)
-        }
-        // A closed pane rests beside a pane its tab keeps (a dock tenant
-        // goes back into the dock).
-        for pane in removed {
-            buryPane(pane, from: request.session, origin: Registry.Origin(
-                workspace: request.session, tab: index, beside: session.tabs[index].panes.first?.id,
-                dock: closedFromDock ? true : nil))
-        }
-        if session.tabs.isEmpty { workspaces.removeValue(forKey: request.session) }
+
         persist()
         // Success is the committed registry, not merely a spawned process.
         guard let data = try? Data(contentsOf: persistURL),
