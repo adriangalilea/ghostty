@@ -300,7 +300,7 @@ final class VigilMessageStore: ObservableObject {
                 next["\(here)/\(paneId)"] = Named(
                     pane: VigilChatPane.of(
                         member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
-                        face: row.emoji, mac: nil),
+                        face: row.emoji, mac: nil, program: pane.conversationRef?.agent),
                     workspace: row.id, navigation: paneId)
             }
         }
@@ -311,7 +311,7 @@ final class VigilMessageStore: ObservableObject {
                 next["\(device)/\(name)"] = Named(
                     pane: VigilChatPane.of(
                         member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
-                        face: row.emoji, mac: row.host?.name),
+                        face: row.emoji, mac: row.host?.name, program: pane.conversationRef?.agent),
                     workspace: row.id, navigation: pane.id)
             }
         }

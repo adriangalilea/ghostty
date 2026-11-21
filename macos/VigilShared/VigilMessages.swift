@@ -77,6 +77,9 @@ struct VigilChatPane: Equatable, Sendable {
     var tint: String?
     /// Its Mac's name, when it is not this one.
     var mac: String?
+    /// The agent program it holds ("claude", "codex"), from its conversation;
+    /// nil: none known (a shell, a command).
+    var program: String? = nil
 
     var said: String { mac.map { "\(title) on \($0)" } ?? title }
 
@@ -89,10 +92,11 @@ struct VigilChatPane: Equatable, Sendable {
     /// is not this one.
     static func of(
         member: (name: String?, face: String?, tint: String?)? = nil, conversation: String?, title: String, face: String?,
-        mac: String?
+        mac: String?, program: String? = nil
     ) -> VigilChatPane {
         let emoji = face.flatMap { $0.isEmpty ? nil : $0 }
-        return VigilChatPane(title: member?.name ?? conversation ?? title, face: emoji ?? member?.face, tint: member?.tint, mac: mac)
+        return VigilChatPane(
+            title: member?.name ?? conversation ?? title, face: emoji ?? member?.face, tint: member?.tint, mac: mac, program: program)
     }
 }
 
@@ -268,7 +272,25 @@ struct VigilChatMember: Equatable {
 
     /// The pane's agent or command, named by the pane's rows.
     static func pane(_ key: String, _ pane: VigilChatPane, kind: Kind, program: String?) -> VigilChatMember {
-        VigilChatMember(key: key, name: pane.said, short: pane.title, face: pane.face, kind: kind, program: program, tint: pane.tint)
+        VigilChatMember(
+            key: key, name: pane.said, short: pane.title, face: pane.face, kind: kind, program: program ?? pane.program, tint: pane.tint)
+    }
+
+    /// What kind of member it is, as the badge on its face says it (CHATS.md,
+    /// decided 2026-11-19: every agent has one look): Claude, Codex, a watch,
+    /// a command. Nil for the person and anything with no badge of its own.
+    var badge: (symbol: String, color: Color)? {
+        switch kind {
+        case .agent, .subagent:
+            switch program {
+            case "claude": ("asterisk", Color(red: 0.85, green: 0.47, blue: 0.34))
+            case "codex": ("chevron.left.forwardslash.chevron.right", Color(red: 0.06, green: 0.64, blue: 0.50))
+            default: ("terminal", .gray)
+            }
+        case .watch: ("binoculars", .indigo)
+        case .tool: ("terminal", .gray)
+        case .person, .system, .device: nil
+        }
     }
 
     /// The member as Ink draws a sender, in its own colour.
@@ -333,14 +355,29 @@ struct VigilChatPeople {
         self.members = members
     }
 
-    /// A sender's face: their pane's workspace emoji where it wears one, else
-    /// Ink's own (the agent's mark, the person's initial).
+    /// A sender's face: their pane's workspace emoji where it wears one, with
+    /// its kind's badge at its corner (Claude, Codex, a watch, a command), so
+    /// two agents of one workspace are told apart; else Ink's own (the
+    /// agent's mark, the person's initial). Its colour is the member's tint,
+    /// which Ink draws around it.
     @ViewBuilder func picture(_ person: InkChat.Person) -> some View {
-        if let face = members[person.id]?.face {
+        if let member = members[person.id], let face = member.face {
             GeometryReader { g in
+                let side = min(g.size.width, g.size.height)
                 Text(face)
-                    .font(.system(size: (min(g.size.width, g.size.height) * 0.62).rounded()))
+                    .font(.system(size: (side * 0.62).rounded()))
                     .frame(width: g.size.width, height: g.size.height)
+                    .overlay(alignment: .bottomTrailing) {
+                        if let badge = member.badge {
+                            Image(systemName: badge.symbol)
+                                .font(.system(size: (side * 0.22).rounded(), weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: side * 0.42, height: side * 0.42)
+                                .background(badge.color, in: Circle())
+                                .overlay(Circle().stroke(.background, lineWidth: 1.5))
+                                .accessibilityLabel(member.program ?? "\(member.kind)")
+                        }
+                    }
             }
         }
     }
@@ -480,17 +517,25 @@ struct VigilThreadConversation: View {
 
     var body: some View {
         let messages = thread.map { VigilThreadWords.messages($0, people: people) } ?? []
+        // Each row finds its record by id once, never by a walk of the thread.
+        let byID = Dictionary(items.map { ($0.id, $0) }) { first, _ in first }
+        let revokable = newestByStandingYes
         InkConversation(
             messages, people: people.all, me: Message.you, unread: thread?.firstUnread, focus: focus, acts: acts(messages)
         ) { message in
+            let item = byID[message.id]
+            // A request sits on the message it is about (CHATS.md, decided
+            // 2026-11-19), with what came of an answer given here.
+            let asks = item.map { $0.record.awaitsYou || answered[$0.id] != nil } ?? false
+            let revokes = !asks && item?.id == revokable
             VStack(alignment: .leading, spacing: 6) {
-                VigilMessageWords(
-                    id: message.id, words: message.words, place: item(message.id)?.mentionPlace, host: host, open: open)
-                // A request sits on the message it is about (CHATS.md, decided
-                // 2026-11-19), with what came of an answer given here.
-                if let item = item(message.id), item.record.awaitsYou || answered[item.id] != nil {
+                VigilMessageWords(id: message.id, words: message.words, place: item?.mentionPlace, host: host, open: open)
+                    // Something stands under the words: the foot (its time) takes
+                    // a row of its own under it, never over its buttons.
+                    .transformEnvironment(\.inkTailRoom) { if asks || revokes { $0 = nil } }
+                if let item, asks {
                     VigilMessageRequest(item: item, answered: answered[item.id]) { answer($0, on: item.id) }
-                } else if let item = item(message.id), item.id == newestByStandingYes {
+                } else if let item, revokes {
                     VigilStandingYes(item: item) { answer($0, on: item.id) }
                 }
             }
