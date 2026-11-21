@@ -8,6 +8,34 @@ import GhosttyKit
 import VigilHarness
 import VigilWire
 
+/// What a pane's facts come to (its program, what its agent means) and what
+/// a tab's panes are called, worked out again only when the facts they come
+/// from changed. Worked out at every refresh of every window, they were most
+/// of the main thread's work at idle (the Time Profiler on the M4: the
+/// snapshot 1,800 of 3,441 ms over 40 s, of which `Program.of` reading the
+/// process trees 1,197 ms and the names 439 ms).
+@MainActor
+private final class SidebarDerived {
+    static let shared = SidebarDerived()
+    private var panes: [String: (facts: Directory.Facts, program: String?, meaning: PaneGlance?)] = [:]
+    private var titles: [[String]: (facts: [String: Directory.Facts], members: [Registry.Pane], names: [String])] = [:]
+
+    func pane(_ id: String, _ facts: Directory.Facts) -> (program: String?, meaning: PaneGlance?) {
+        if let held = panes[id], held.facts == facts { return (held.program, held.meaning) }
+        let derived = (facts: facts, program: facts.program, meaning: facts.meaning)
+        panes[id] = derived
+        return (derived.program, derived.meaning)
+    }
+
+    func titles(_ members: [Registry.Pane], _ facts: [String: Directory.Facts]) -> [String] {
+        let key = members.map(\.id)
+        if let held = titles[key], held.facts == facts, held.members == members { return held.names }
+        let names = Directory.titles(of: members, facts: facts, home: NSHomeDirectory())
+        titles[key] = (facts, members, names)
+        return names
+    }
+}
+
 extension VigilWorkspaces {
     // MARK: Sidebar snapshot (the left bar's tree, one immutable read)
 
@@ -212,15 +240,14 @@ extension VigilWorkspaces {
         func paneRows(_ tab: Registry.Tab) -> [SidebarPane] {
             let members = tab.members
             let known = Dictionary(uniqueKeysWithValues: members.map { ($0.id, paneFacts($0.id)) })
-            let names = Directory.titles(of: members, facts: known, home: NSHomeDirectory())
+            let names = SidebarDerived.shared.titles(members, known)
             return members.indices.map {
                 paneRow(members[$0], title: names[$0], facts: known[members[$0].id]!, isDock: $0 >= tab.panes.count)
             }
         }
 
         func paneRow(_ pane: Registry.Pane, title: String, facts: Directory.Facts, isDock: Bool) -> SidebarPane {
-            let program = facts.program
-            let meaning = facts.meaning
+            let (program, meaning) = SidebarDerived.shared.pane(pane.id, facts)
             return SidebarPane(
                 id: pane.id,
                 paneId: pane.id,
