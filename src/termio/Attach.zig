@@ -557,6 +557,8 @@ test "Vigil local surface sends no size and claims nothing before its viewport" 
     // Layout lands: the real grid, then the claim focus asked for.
     try attach.resize(.{ .columns = 153, .rows = 53 }, undefined);
     attach.vigilViewport();
+    // Another pixel layout at the same grid adds no pty resize.
+    try attach.resize(.{ .columns = 153, .rows = 53 }, undefined);
     try std.testing.expectEqualSlices(u8, "r\x04\x00\x35\x00\x99\x00o\x00\x00", attach.write_buf.items);
 }
 
@@ -748,6 +750,7 @@ pub fn resize(
     screen_size: renderer.ScreenSize,
 ) !void {
     _ = screen_size;
+    if (std.meta.eql(self.grid_size, grid_size)) return;
     self.grid_size = grid_size;
     self.sendResize(.grid);
 }

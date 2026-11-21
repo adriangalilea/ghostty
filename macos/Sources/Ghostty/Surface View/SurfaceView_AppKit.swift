@@ -275,9 +275,11 @@ extension Ghostty {
         /// vigil: its pane shows its conversation over this view, so this
         /// terminal is not on screen and takes no keys (a key typed into a
         /// dialog nobody sees is consent nobody gave): it refuses focus,
-        /// drops what reaches it, and hands focus asked of it to `vigilHeldFocus`.
-        private(set) var vigilKeysHeld = false
-        private var vigilHeldFocus: (() -> Void)?
+        /// drops what reaches it, and hands focus to the conversation.
+        var vigilKeysHeld: Bool {
+            guard let row = VigilPaneFaces.row(of: self) else { return false }
+            return VigilPaneFaces.shared.face(of: row) == .conversation
+        }
         @Published private(set) var vigilTransportState: UInt8 = 0
         @Published private(set) var vigilInputPending = false
         /// How this Mac's pane stands while this view has no stream to it,
@@ -426,8 +428,9 @@ extension Ghostty {
 
         func vigilSetViewportSize(_ size: CGSize) {
             guard size != vigilViewportSize else { return }
-            let first = vigilViewportSize == .zero && size.width > 0 && size.height > 0
+            let first = vigilViewportSize.width <= 0 || vigilViewportSize.height <= 0
             vigilViewportSize = size
+            guard size.width > 0, size.height > 0 else { return }
             if vigilWantsSize { sizeDidChange(size) }
             if first, vigilAttachId != nil, let surface {
                 // The core's grid until now came from the placeholder
@@ -859,6 +862,7 @@ extension Ghostty {
                 // During SwiftUI's transition out of letterboxing, old frame
                 // callbacks still arrive. The owning layout is the viewport.
                 let pixels = convertToBacking(vigilViewportSize)
+                guard pixels.width >= 1, pixels.height >= 1 else { return }
                 ghostty_surface_set_size(surface, UInt32(pixels.width), UInt32(pixels.height))
             } else {
                 ghostty_surface_set_size(surface, width, height)
@@ -1219,32 +1223,13 @@ extension Ghostty {
 
         // MARK: - NSView
 
-        /// vigil: holds this view's keys while its pane's conversation covers
-        /// it (`vigilKeysHeld`), giving up the keyboard if it has it. Let go
-        /// with `refocus` (the person turned the pane to its terminal), the
-        /// terminal takes the keyboard back.
-        func vigilHoldKeys(_ held: Bool, refocus: Bool = false, focus: (() -> Void)? = nil) {
-            guard held != vigilKeysHeld else {
-                if held { vigilHeldFocus = focus }
-                return
-            }
-            vigilKeysHeld = held
-            vigilHeldFocus = held ? focus : nil
-            daemonLog.info(held ? "keys held: the conversation covers this terminal" : "keys back: the terminal shows",
-                           ["pane": vigilAttachId ?? "?"])
-            if held, window?.firstResponder === self {
-                window?.makeFirstResponder(nil)
-                focus?()
-            } else if !held, refocus, let window, window.isKeyWindow {
-                window.makeFirstResponder(self)
-            }
-        }
-
         override func becomeFirstResponder() -> Bool {
             if vigilKeysHeld {
                 // Asked by a landing, a split move, a click that reached it:
                 // the keyboard goes to what is on screen instead.
-                DispatchQueue.main.async { [weak self] in self?.vigilHeldFocus?() }
+                DispatchQueue.main.async { [weak self] in
+                    if let self, self.vigilKeysHeld { VigilPaneFaces.shared.focusReply(in: self) }
+                }
                 return false
             }
             let result = super.becomeFirstResponder()
@@ -1768,6 +1753,7 @@ extension Ghostty {
 
         /// Special case handling for some control keys
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            guard !vigilKeysHeld else { return false }
             // We only care about key down events. It might not even be possible
             // to receive any other event type here.
             guard event.type == .keyDown else { return false }

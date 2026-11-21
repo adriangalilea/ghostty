@@ -40,6 +40,8 @@ final class VigilPaneFaces: ObservableObject {
     /// The conversations followed, one per pane however many views show it
     /// (a mirror in another window shares it), with how many show it.
     private var conversations: [String: (model: Conversation, views: Int)] = [:]
+    /// Only the viewport where the person pressed the switch takes focus.
+    private weak var focusAfterSwitch: Ghostty.SurfaceView?
     private var observer: NSObjectProtocol?
     private var pending = false
 
@@ -65,12 +67,25 @@ final class VigilPaneFaces: ObservableObject {
         return terminals.contains(row) ? .terminal : .conversation
     }
 
-    func show(_ face: Face, of row: String) {
+    func show(_ face: Face, in view: Ghostty.SurfaceView) {
+        guard let row = Self.row(of: view) else { return }
         let next = face == .terminal ? terminals.union([row]) : terminals.subtracting([row])
         guard next != terminals else { return }
+        focusAfterSwitch = view
         terminals = next
         UserDefaults.standard.set(Array(next).sorted(), forKey: Self.terminalsKey)
         conversationLog.info("face", ["pane": row, "face": face.rawValue])
+    }
+
+    func takeFocusAfterSwitch(in view: Ghostty.SurfaceView) -> Bool {
+        guard focusAfterSwitch === view else { return false }
+        focusAfterSwitch = nil
+        return view.window?.isKeyWindow == true
+    }
+
+    func focusReply(in view: Ghostty.SurfaceView) {
+        guard let row = Self.row(of: view), face(of: row) == .conversation else { return }
+        conversations[row]?.model.askReply()
     }
 
     /// The row id a view of a pane is known by (every aside's, every row's).
@@ -268,26 +283,28 @@ struct VigilPaneFace: View {
     @ObservedObject var surfaceView: Ghostty.SurfaceView
     /// The terminal's background, the conversation's ground.
     let ground: Color
-    @ObservedObject private var faces = VigilPaneFaces.shared
+    let face: VigilPaneFaces.Face?
+    let shown: AgentState?
 
     var body: some View {
-        ZStack {
-            // A view just mounted may show an agent no fact change named yet.
-            Color.clear.allowsHitTesting(false).onAppear { faces.refreshSoon() }
-            drawn
-        }
+        // The viewport proposes its size to either face. A conversation's
+        // content must never enlarge the terminal underneath it.
+        Color.clear.allowsHitTesting(false)
+            .overlay { drawn }
+            .clipped()
+            .onAppear { VigilPaneFaces.shared.refreshSoon() }
     }
 
     @ViewBuilder private var drawn: some View {
-        if let row = VigilPaneFaces.row(of: surfaceView), let face = faces.face(of: row) {
+        if let row = VigilPaneFaces.row(of: surfaceView), let face {
             switch face {
             case .conversation:
-                VigilPaneConversationView(row: row, surfaceView: surfaceView, shown: faces.agents[row]?.shown, ground: ground)
+                VigilPaneConversationView(row: row, surfaceView: surfaceView, shown: shown, ground: ground)
             case .terminal:
                 VStack {
                     HStack {
                         Spacer()
-                        Button { faces.show(.conversation, of: row) } label: {
+                        Button { VigilPaneFaces.shared.show(.conversation, in: surfaceView) } label: {
                             Label("Conversation", systemImage: "text.bubble")
                         }
                         .font(.caption)
@@ -325,13 +342,13 @@ private struct VigilPaneConversationView: View {
             ground
             if let conversation {
                 ConversationView(conversation: conversation, shown: shown, ground: ground) {
-                    VigilPaneFaces.shared.show(.terminal, of: row)
+                    VigilPaneFaces.shared.show(.terminal, in: surfaceView)
                 }
             }
         }
         .environment(\.colorScheme, Self.scheme(of: ground))
         .overlay(alignment: .topTrailing) {
-            Button { VigilPaneFaces.shared.show(.terminal, of: row) } label: {
+            Button { VigilPaneFaces.shared.show(.terminal, in: surfaceView) } label: {
                 Label("Terminal", systemImage: "terminal")
             }
             .buttonStyle(.borderless)
@@ -345,15 +362,13 @@ private struct VigilPaneConversationView: View {
         .onAppear {
             let taken = VigilPaneFaces.shared.take(row)
             conversation = taken
-            // From this moment the terminal under it takes no keys; focus
-            // asked of it goes to the reply box.
-            surfaceView.vigilHoldKeys(true) { taken.askReply() }
+            if VigilPaneFaces.shared.takeFocusAfterSwitch(in: surfaceView) ||
+                surfaceView.window?.firstResponder === surfaceView {
+                surfaceView.window?.makeFirstResponder(nil)
+                taken.askReply()
+            }
         }
         .onDisappear {
-            // The keyboard goes back to the terminal only when the person
-            // turned the pane to it, never when the view merely left (a tab
-            // switch: another pane has the keyboard then).
-            surfaceView.vigilHoldKeys(false, refocus: VigilPaneFaces.shared.face(of: row) == .terminal)
             VigilPaneFaces.shared.release(row)
             conversation = nil
         }
