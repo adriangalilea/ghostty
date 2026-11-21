@@ -602,6 +602,7 @@ final class VigilRemote: ObservableObject {
             let header = VigilWorkspaces.SidebarWorkspaceRow.HostHeader(
                 name: hostLabel,
                 standing: host.away ? host.received.map(Self.awaySince) ?? host.error : host.error,
+                renewalURL: host.withheld ? VigilWire.renewalLink(refusal: host.error, root: host.device) : nil,
                 machine: host.machine)
             guard let dir = host.directory else {
                 rows.append(.init(

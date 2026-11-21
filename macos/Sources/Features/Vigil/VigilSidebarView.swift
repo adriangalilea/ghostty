@@ -493,7 +493,8 @@ struct VigilSidebarView: View {
     ) -> some View {
         let title = host.name
         let hoverId = Self.hostHover + device
-        return Button {
+        return VStack(alignment: .leading, spacing: 2) {
+        Button {
             if collapse.hosts.contains(device) { collapse.hosts.remove(device) } else { collapse.hosts.insert(device) }
         } label: {
             HStack(spacing: Grid.gap) {
@@ -550,6 +551,10 @@ struct VigilSidebarView: View {
                     }
                 }
             }
+        }
+        if let url = host.renewalURL {
+            Link("Open in Authz Devices", destination: url).font(.caption)
+        }
         }
         .padding(.top, 6)
         .padding(.trailing, tree.edge + Grid.inset)

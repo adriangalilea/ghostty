@@ -1,3 +1,4 @@
+import AuthzProtocol
 import AuthzEndpoint
 import AuthzGlance
 import AuthzUI
@@ -414,6 +415,10 @@ struct TreeNodeView: View {
             // A glance row wears its state as its glyph.
             if node.glance == nil { cluster }
             // A Mac's own `+`: a workspace there, its Mac obvious.
+            if node.kind == .host, let host = model.host(of: node), let down = model.down[host.id],
+               down.withheld, let url = VigilWire.renewalLink(refusal: down.reason, root: host.id) {
+                Link("Open in Authz Devices", destination: url).font(.caption)
+            }
             if node.kind == .host, let host = model.host(of: node), model.reachable(host) {
                 Menu { QuickCreateItems(host: host) } label: {
                     Image(systemName: "plus").font(.body.weight(.medium))
@@ -1839,9 +1844,12 @@ struct SettingsView: View {
                                 Text(requests(mac)).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
-                            if mac.state == .onAccount {
+                            if let row = mac.enrollment, row.action == .pair {
                                 Button("Pair") { authz.pair(mac) }.buttonStyle(.borderedProminent)
-                            } else if mac.state == .pairing {
+                            } else if let row = mac.enrollment, row.action != nil,
+                                      let url = DeviceSettingsLink.url(root: mac.id) {
+                                Link("Open in Authz Devices", destination: url)
+                            } else if mac.enrollment?.isPending == true || mac.state == .pairing {
                                 ProgressView()
                             }
                         }

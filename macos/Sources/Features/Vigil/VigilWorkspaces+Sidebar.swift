@@ -133,6 +133,7 @@ extension VigilWorkspaces {
         struct HostHeader: Equatable {
             var name: String
             var standing: String?
+            var renewalURL: URL? = nil
             /// Its power, disk and heat as it last sent them (`Open.machine`);
             /// nil until it has (a Mac whose app predates it never does).
             var machine: MachineState?
