@@ -37,19 +37,19 @@ struct PaneProblemItem: Identifiable {
         let title: String
         let face: PaneFace
         let state: AgentState?
-        let conversation: String?
+        let conversation: ConversationRef?
         let note: Restart.Note?
     }
     let subject: Subject
     let problem: ConversationProblem
     var visit: (() -> Void)?
-    var restart: ((Restart) async throws -> Restart.Answer)?
+    var cancelRestart: ((UUID) async throws -> Restart.Answer)?
     var button: String?
     var act: (() -> Void)?
     var ended: PaneEnd?
     var writers: PaneConflict.Writers?
     var id: String { subject.key + "/" + problem.kind.rawValue }
-    var operationID: String { subject.key + "/" + (subject.conversation ?? "") }
+    var operationID: String { subject.key + "/" + (subject.conversation?.key ?? "") }
 }
 
 /// A row and its folded ancestor can present the same request. Keep its
@@ -60,9 +60,7 @@ struct PaneProblemItem: Identifiable {
         let id = UUID()
         var note: Restart.Note?
         var status: InkNotice.ActionFeedback
-        var next: Restart.Intent?
         var sending = true
-        var canDismiss = false
     }
     private var receipts: [String: Receipt] = [:]
 
@@ -71,31 +69,17 @@ struct PaneProblemItem: Identifiable {
         return r
     }
 
-    func send(_ intent: Restart.Intent, to item: PaneProblemItem) {
-        guard let request = item.restart, receipt(item)?.sending != true else { return }
+    func cancel(_ id: UUID, for item: PaneProblemItem) {
+        guard let cancel = item.cancelRestart, receipt(item)?.sending != true else { return }
         let key = item.operationID
-        var r = Receipt(note: item.subject.note, status: .working(Restart(intent).cancellation != nil ? "Cancelling restart…" : "Requesting restart…"))
+        var r = Receipt(note: item.subject.note, status: .working("Cancelling restart…"))
         receipts[key] = r
         Task {
             do {
-                let answer = try await request(Restart(intent))
-                switch answer.outcome {
-                case .restarting: r.status = .working("Restarting the agent…")
-                case .armed:
-                    r.status = .waiting(answer.said)
-                    r.next = answer.scheduleID.map(Restart.Intent.cancel)
-                case .busy:
-                    r.status = .waiting(answer.said)
-                    if intent != .whenIdle && answer.canSchedule == true { r.next = .whenIdle }
-                    else { r.canDismiss = true }
-                case .refused:
-                    r.status = .failed(answer.said)
-                    if Restart(intent).cancellation != nil { r.canDismiss = true } else { r.next = .now }
-                case .cancelled: r.status = .succeeded(answer.said); r.canDismiss = true
-                }
+                let answer = try await cancel(id)
+                r.status = answer.outcome == .cancelled ? .succeeded(answer.said) : .failed(answer.said)
             } catch {
                 r.status = .failed(error.localizedDescription)
-                r.canDismiss = true
             }
             guard receipts[key]?.id == r.id else { return }
             r.sending = false
@@ -111,6 +95,7 @@ struct PaneProblemsMark: View {
     let sizes: PaneMarkSizes
     @State private var showing = false
     @State private var selected: String?
+    @State private var copied: String?
     private let feedback = PaneRestartFeedback.shared
 
     private var tone: Color {
@@ -135,14 +120,18 @@ struct PaneProblemsMark: View {
             .inkActionPopover(isPresented: $showing) {
                 let current = items.first(where: { $0.id == selected }) ?? first
                 VStack(alignment: .leading, spacing: 0) {
-                    if items.count > 1 && (!oneRestartProblem || items.contains(where: { feedback.receipt($0) != nil || $0.subject.note != nil })) {
-                        Picker("Problem", selection: Binding(get: { current.id }, set: { selected = $0 })) {
+                    if items.count > 1 && (!grouped || selected != nil) {
+                        Picker("Problem", selection: Binding(get: { current.id }, set: { selected = $0.isEmpty ? nil : $0 })) {
+                            if grouped { Text("All affected panes").tag("") }
                             ForEach(items) { item in Text(item.subject.title + " · " + item.problem.title).tag(item.id) }
                         }
                         .pickerStyle(.menu).padding(.horizontal, .inkBlock).padding(.vertical, .inkGap)
                     }
-                    panel(current).id(current.id)
+                    panel(current, folded: grouped && !items.contains { $0.id == selected }).id(current.id)
                 }
+            }
+            .onChange(of: showing) { _, open in
+                if !open { selected = nil; copied = nil }
             }
             .onChange(of: items.map(\.operationID)) { old, new in
                 for key in Set(old).subtracting(new) { feedback.forget(key) }
@@ -150,18 +139,18 @@ struct PaneProblemsMark: View {
         }
     }
 
-    private func panel(_ item: PaneProblemItem) -> InkActionPanel {
+    private func panel(_ item: PaneProblemItem, folded: Bool) -> InkActionPanel {
         let statusOnly = item.problem.kind == .restarted
-        let affected = restartItems
-        let folded = oneRestartProblem && affected.count > 1
-        let title = folded && item.problem.kind == .receiver ? "\(affected.count) panes can’t receive messages" : item.problem.title
+        let title = folded && item.problem.kind == .receiver ? "\(items.count) panes can’t receive messages" : item.problem.title
         let showReceipt = [.restartFailed, .restarting, .restarted].contains(item.problem.kind)
-        let detail = showReceipt ? item.problem.says : folded ? nil : item.subject.title
+        let detail = showReceipt ? item.problem.says : folded ? "Choose a pane to resume its conversation." : item.subject.title
         let panel = InkActionPanel(title, detail: detail,
             tone: statusOnly ? .ok : item.writers == .both || item.problem.kind == .twoLive ? .bad : .warn,
-            actions: actions(item), style: statusOnly ? .status : .problem)
-        if item.restart != nil && affected.count > 1 {
-            return panel.affectedItems(affected.map { other in
+            actions: folded ? .group("Choose pane", items.map { target in
+                InkHUD.Action(target.subject.title) { selected = target.id }
+            }, alongside: []) : actions(item), style: statusOnly ? .status : .problem)
+        if folded {
+            return panel.affectedItems(items.map { other in
                 InkActionPanel.Item(other.subject.title, id: other.operationID,
                     status: feedback.receipt(other)?.status.text ?? other.subject.note?.said ?? other.subject.state?.rawValue.capitalized ?? "Unknown") {
                     switch other.subject.face {
@@ -181,14 +170,9 @@ struct PaneProblemsMark: View {
         }
     }
 
-    private var oneRestartProblem: Bool {
-        guard let first = items.first, first.restart != nil else { return false }
-        return items.allSatisfy { $0.restart != nil && $0.problem.kind == first.problem.kind }
-    }
-
-    private var restartItems: [PaneProblemItem] {
-        var seen = Set<String>()
-        return items.filter { $0.restart != nil && seen.insert($0.operationID).inserted }
+    private var grouped: Bool {
+        guard items.count > 1, let first = items.first, first.problem.needsManualResume else { return false }
+        return items.allSatisfy { $0.problem.kind == first.problem.kind && $0.problem.needsManualResume && $0.subject.note == nil }
     }
 
     private func actions(_ item: PaneProblemItem) -> InkActionPanel.Actions {
@@ -198,50 +182,32 @@ struct PaneProblemsMark: View {
         } else if let visit = item.visit {
             alongside.append(.init(items.count > 1 ? "Open " + item.subject.title : "Open pane", symbol: "arrow.up.forward") { showing = false; visit() })
         }
-        guard item.restart != nil else { return .buttons(alongside) }
-        func command(_ label: String, _ intent: Restart.Intent) -> InkHUD.Action {
-            .init(label) { feedback.send(intent, to: item) }
-        }
         if let r = feedback.receipt(item) {
-            var next: [InkHUD.Action] = []
-            if let intent = r.next {
-                switch intent {
-                case .cancel: next = [command("Cancel restart", intent)]
-                case .whenIdle: next = [command("Restart when idle", intent)]
-                default: next = [command("Retry", intent)]
-                }
-            }
-            if !r.sending && (r.canDismiss) {
-                next.append(.init("Done") { feedback.forget(item.operationID) })
-            }
-            return .feedback(r.status, actions: next + alongside)
+            let done: [InkHUD.Action] = r.sending ? [] : [.init("Done") { feedback.forget(item.operationID) }]
+            return .feedback(r.status, actions: done + alongside)
         }
-        if let note = item.subject.note {
+        if let note = item.subject.note, item.problem.needsManualResume || item.problem.kind == .restartScheduled {
             switch note.state {
-            case .ending: return .feedback(.working(note.said), actions: alongside)
             case .armed:
-                let cancel = note.scheduleID.map { command("Cancel restart", .cancel($0)) }
-                return .feedback(.waiting(note.said), actions: [cancel].compactMap { $0 } + alongside)
-            case .notRun: return .feedback(.failed(note.said), actions: [command("Retry", .now)] + alongside)
-            case .ran: return .feedback(.waiting(note.said), actions: alongside)
+                let cancel: [InkHUD.Action] = if let id = note.scheduleID, item.cancelRestart != nil {
+                    [.init("Cancel restart") { feedback.cancel(id, for: item) }]
+                } else { [] }
+                return .feedback(.waiting(note.said), actions: cancel + alongside)
+            case .ending: return .feedback(.working(note.said), actions: alongside)
+            case .notRun, .ran: break
             }
         }
-        let targets = restartItems.filter { target in
-            (target.subject.note == nil || target.subject.note?.state == .notRun) && feedback.receipt(target) == nil
-        }
-        if targets.count > 1 {
-            var choices = targets.map { target in
-                InkHUD.Action("Restart " + target.subject.title) {
-                    selected = target.id
-                    feedback.send(.now, to: target)
-                }
+        if item.problem.needsManualResume, let command = item.subject.conversation?.manualResumeCommand {
+            if copied == item.operationID {
+                return .feedback(.succeeded("Command copied. After quitting, run it in the original project folder with the same account."), actions: alongside)
             }
-            choices.append(.init("Restart all \(targets.count) when idle") {
-                for target in targets { feedback.send(.whenIdle, to: target) }
-            })
-            return .group("Restart", choices, alongside: alongside)
+            let copy = InkHUD.Action("Copy resume command", symbol: "doc.on.doc") {
+                VigilPasteboard.copy(command)
+                copied = item.operationID
+            }
+            return .buttons([copy] + alongside)
         }
-        return .buttons([command("Restart", .now)] + alongside)
+        return .buttons(alongside)
     }
 }
 

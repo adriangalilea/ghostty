@@ -1433,18 +1433,18 @@ struct VigilSidebarView: View {
         guard !pane.problems.isEmpty || writers != nil || pane.ended != nil || pane.conflict != nil else { return [] }
         let subject = PaneProblemItem.Subject(key: pane.id, title: pane.title,
             face: .of(emoji: pane.emoji, program: pane.program), state: pane.state,
-            conversation: pane.conversation, note: pane.restart)
+            conversation: pane.conversationRef, note: pane.restart)
         let onScreen = !folded && TerminalController.all.contains { controller in
             controller.window?.isVisible == true && VigilBars.shared.panesOnScreen(in: controller).contains(pane.id)
         }
-        func restart(_ request: Restart) async throws -> Restart.Answer {
+        func cancelRestart(_ schedule: UUID) async throws -> Restart.Answer {
             let remote = VigilRemote.split(pane.id)
             guard let id = pane.paneId ?? remote?.name else { throw WireError.refused("This pane has no running agent.") }
-            return try await VigilWorkspaces.shared.restartAgent(pane: id, device: remote?.device, request: request)
+            return try await VigilWorkspaces.shared.restartAgent(pane: id, device: remote?.device, request: Restart(.cancel(schedule)))
         }
         var items = (pane.problems + [writers].compactMap { $0 }).map { issue in
             PaneProblemItem(subject: subject, problem: issue, visit: onScreen ? nil : visit,
-                            restart: issue.restarts ? restart : nil)
+                            cancelRestart: pane.restart?.scheduleID != nil ? cancelRestart : nil)
         }
         if let ended = pane.ended, !ended.clean {
             items.append(PaneProblemItem(subject: subject, problem: ended.problem, button: "Open pane", act: visit, ended: ended))

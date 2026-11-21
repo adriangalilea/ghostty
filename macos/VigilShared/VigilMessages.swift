@@ -519,7 +519,7 @@ struct VigilThreadConversation: View {
                     act(.remove(one.id), on: one.id)
                 }
             },
-            copy: { message in VigilChatPasteboard.copy(item(message.id)?.words ?? message.words) },
+            copy: { message in VigilPasteboard.copy(item(message.id)?.words ?? message.words) },
             open: { message in
                 guard let item = items.first(where: { $0.id == message.id }) else { return }
                 let message = item.record.message
@@ -719,7 +719,7 @@ struct VigilPaneAskRequest: View {
 }
 
 /// The pasteboard of the platform the view runs on.
-enum VigilChatPasteboard {
+enum VigilPasteboard {
     @MainActor static func copy(_ text: String) {
         #if os(macOS)
             NSPasteboard.general.clearContents()
