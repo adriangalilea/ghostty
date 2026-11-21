@@ -20,6 +20,11 @@ import VigilWire
 /// `MessageThreads` from each Mac's mailbox; where a message goes, what an
 /// act does and where "go to" leads are the host's (`VigilChatHost`).
 
+/// vigil's message, named where AuthzUI's own `Message` is in scope too
+/// (`VigilMessageRequest`); the module's name is an enum's too, so it cannot
+/// qualify it.
+typealias VigilMessage = Message
+
 /// The threads and counts every view reads, worked out once per change of
 /// the mailboxes, off the main thread, by the store that follows them (the
 /// Mac's `VigilMessageStore`, the phone's): no view computes them. Each view

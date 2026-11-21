@@ -4,7 +4,7 @@ import Ink
 import SwiftUI
 import VigilWire
 
-// AuthzUI names a `Message` of its own: vigil's is spelled whole here.
+// AuthzUI names a `Message` of its own: vigil's is `VigilMessage` here.
 
 /// The request on a message waiting for the person's yes (CHATS.md, decided
 /// 2026-11-19: "A request sits on the message it is about … never a detached
@@ -22,7 +22,7 @@ import VigilWire
 struct VigilMessageRequest: View {
     let item: MessageThread.Item
     let answered: String?
-    let act: (VigilWire.Message.Act) -> Void
+    let act: (VigilMessage.Act) -> Void
     @State private var position = 0
     @State private var minutes: Int?
 
@@ -71,7 +71,7 @@ struct VigilMessageRequest: View {
 /// the pair waits for the person again.
 struct VigilStandingYes: View {
     let item: MessageThread.Item
-    let act: (VigilWire.Message.Act) -> Void
+    let act: (VigilMessage.Act) -> Void
 
     var body: some View {
         HStack(spacing: 6) {
@@ -83,7 +83,7 @@ struct VigilStandingYes: View {
 
     static func said(_ allowance: Envelope.Allowance?) -> String {
         guard case .standing(let until) = allowance else { return "" }
-        let end = until.map { "until " + VigilWire.Message.clock($0, zone: .current) } ?? "until you revoke it"
+        let end = until.map { "until " + VigilMessage.clock($0, zone: .current) } ?? "until you revoke it"
         return "These two message each other without asking you, \(end)"
     }
 }
