@@ -21,6 +21,7 @@ extension Ghostty {
 
         // Observe SecureInput to detect when its enabled
         @ObservedObject private var secureInput = SecureInput.shared
+        @ObservedObject private var faces = VigilPaneFaces.shared
 
         @EnvironmentObject private var ghostty: Ghostty.App
         @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
@@ -31,6 +32,9 @@ extension Ghostty {
 
         var body: some View {
             let center = NotificationCenter.default
+            let row = VigilPaneFaces.row(of: surfaceView)
+            let face = row.flatMap { faces.face(of: $0) }
+            let covered = face == .conversation
 
             ZStack {
                 // We use a GeometryReader to get the frame bounds so that our metal surface
@@ -56,10 +60,12 @@ extension Ghostty {
                             .resizable(resizingMode: .tile)
                             .ignoresSafeArea()
                     }
-                    SurfaceRepresentable(view: surfaceView, size: surfaceSize)
+                    SurfaceRepresentable(view: surfaceView, size: surfaceSize, covered: covered)
                         .frame(width: surfaceSize.width, height: surfaceSize.height)
                         .frame(width: geo.size.width, height: geo.size.height, alignment: letterbox == nil ? .topLeading : .bottom)
                         .clipped()
+                        .allowsHitTesting(!covered)
+                        .accessibilityHidden(covered)
                         .focused($surfaceFocus)
                         .focusedValue(\.ghosttySurfacePwd, surfaceView.pwd)
                         .focusedValue(\.ghosttySurfaceView, surfaceView)
@@ -174,7 +180,8 @@ extension Ghostty {
 
                 // vigil: an agent pane shows its conversation over its
                 // terminal, or the toggle back to it (VigilPaneConversation).
-                VigilPaneFace(surfaceView: surfaceView, ground: ghostty.config.backgroundColor)
+                VigilPaneFace(surfaceView: surfaceView, ground: ghostty.config.backgroundColor,
+                              face: face, shown: row.flatMap { faces.agents[$0]?.shown })
 
                 // If we're part of a split view and don't have focus, we put a semi-transparent
                 // rectangle above our view to make it look unfocused. We include the last
@@ -660,12 +667,22 @@ extension Ghostty {
         ///
         /// The best approach is to wrap this view in a GeometryReader and pass in the geo.size.
         let size: CGSize
+        let covered: Bool
 
         func makeNSView(context: Context) -> SurfaceScrollView {
             return SurfaceScrollView(contentSize: size, surfaceView: view)
         }
 
         func updateNSView(_ scrollView: SurfaceScrollView, context: Context) {
+            // Keep the scroll host in layout on both faces. Only its Metal
+            // view is covered, and revealing it requests a fresh frame.
+            if view.isHidden != covered {
+                view.isHidden = covered
+                if !covered, let surface = view.surface { ghostty_surface_refresh(surface) }
+            }
+            if !covered, VigilPaneFaces.shared.takeFocusAfterSwitch(in: view) {
+                view.window?.makeFirstResponder(view)
+            }
             // SwiftUI may defer frame updates under system load (e.g., memory
             // pressure, heavy I/O) or when external window managers trigger rapid
             // layout changes. When that happens, the scroll view's bounds can

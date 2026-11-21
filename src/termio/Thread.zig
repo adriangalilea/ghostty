@@ -29,6 +29,9 @@ const Coalesce = struct {
     /// The number of milliseconds to coalesce certain messages like resize for.
     /// Not all message types are coalesced.
     const min_ms = 25;
+    // AppKit reports intermediate frames while a window or sidebar animates.
+    // An attached TUI reflows only once the viewport has stopped moving.
+    const attach_settle_ms = 150;
 
     resize: ?renderer.Size = null,
 };
@@ -414,16 +417,14 @@ fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {
 fn handleResize(self: *Thread, cb: *CallbackData, resize: renderer.Size) void {
     self.coalesce_data.resize = resize;
 
-    // If the timer is already active we just return. In the future we want
-    // to reset the timer up to a maximum wait time but for now this ensures
-    // relatively smooth resizing.
-    if (self.coalesce_c.state() == .active) return;
+    const settle = builtin.os.tag == .macos and cb.io.backend == .attach;
+    if (!settle and self.coalesce_c.state() == .active) return;
 
     self.coalesce.reset(
         &self.loop,
         &self.coalesce_c,
         &self.coalesce_cancel_c,
-        Coalesce.min_ms,
+        if (settle) Coalesce.attach_settle_ms else Coalesce.min_ms,
         CallbackData,
         cb,
         coalesceCallback,
