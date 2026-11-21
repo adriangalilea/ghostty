@@ -15,24 +15,55 @@ import VigilWire
 /// snapshot 1,800 of 3,441 ms over 40 s, of which `Program.of` reading the
 /// process trees 1,197 ms and the names 439 ms).
 @MainActor
-private final class SidebarDerived {
+final class SidebarDerived {
     static let shared = SidebarDerived()
-    private var panes: [String: (facts: Directory.Facts, program: String?, meaning: PaneGlance?)] = [:]
-    private var titles: [[String]: (facts: [String: Directory.Facts], members: [Registry.Pane], names: [String])] = [:]
+
+    /// The facts a pane's program, meaning and name read, and nothing else
+    /// (`Facts.program`: the tree and the tty's foreground; `Facts.meaning`:
+    /// those and the glance; `Pane.ownName`: those and the title it set), so
+    /// a screen that changes on a busy pane keeps what was worked out.
+    struct Read: Equatable {
+        var tree: [String]?
+        var foreground: Int32?
+        var glance: PaneGlance?
+        var title: String?
+        init(_ facts: Directory.Facts) {
+            tree = facts.tree; foreground = facts.foreground; glance = facts.glance; title = facts.title
+        }
+    }
+
+    private var panes: [String: (read: Read, program: String?, meaning: PaneGlance?)] = [:]
+    private var titles: [[String]: (members: [Registry.Pane], read: [Read?], names: [String])] = [:]
+    /// The panes and tabs the snapshot being built asked for: everything else
+    /// is dropped when it is done (`keepOnly`).
+    private var askedPanes: Set<String> = []
+    private var askedTabs: Set<[String]> = []
 
     func pane(_ id: String, _ facts: Directory.Facts) -> (program: String?, meaning: PaneGlance?) {
-        if let held = panes[id], held.facts == facts { return (held.program, held.meaning) }
-        let derived = (facts: facts, program: facts.program, meaning: facts.meaning)
+        askedPanes.insert(id)
+        let read = Read(facts)
+        if let held = panes[id], held.read == read { return (held.program, held.meaning) }
+        let derived = (read: read, program: facts.program, meaning: facts.meaning)
         panes[id] = derived
         return (derived.program, derived.meaning)
     }
 
     func titles(_ members: [Registry.Pane], _ facts: [String: Directory.Facts]) -> [String] {
         let key = members.map(\.id)
-        if let held = titles[key], held.facts == facts, held.members == members { return held.names }
+        askedTabs.insert(key)
+        let read: [Read?] = members.map { facts[$0.id].map(Read.init) }
+        if let held = titles[key], held.members == members, held.read == read { return held.names }
         let names = Directory.titles(of: members, facts: facts, home: NSHomeDirectory())
-        titles[key] = (facts, members, names)
+        titles[key] = (members, read, names)
         return names
+    }
+
+    /// The snapshot is built: what it no longer holds is forgotten.
+    func keepOnly() {
+        panes = panes.filter { askedPanes.contains($0.key) }
+        titles = titles.filter { askedTabs.contains($0.key) }
+        askedPanes.removeAll()
+        askedTabs.removeAll()
     }
 }
 
@@ -316,6 +347,7 @@ extension VigilWorkspaces {
                 states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.dots)),
                 tabs: tabs))
         }
+        SidebarDerived.shared.keepOnly()
         // A move under way, on the row of what moves, wherever it is asked
         // and wherever it goes.
         return (rows + VigilRemote.shared.sidebarRows()).map { row in

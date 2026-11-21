@@ -144,10 +144,15 @@ struct VigilSidebarView: View {
             .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "titles") }
         .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.stateDidChange)
             .receive(on: DispatchQueue.main)) { _ in model.refresh(reason: "facts") }
+        // Focus and the key window move where you are (`ActiveChain`), its
+        // own instant channel; the rows carry no focus, so they are not built
+        // again for it. Built again for every focus sync, they were the
+        // largest share of the main thread at idle (the Time Profiler on the
+        // M4: 990 of 3,441 ms over 40 s).
         .onReceive(NotificationCenter.default.publisher(for: VigilWorkspaces.focusDidChange)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "focus") }
+            .receive(on: DispatchQueue.main)) { _ in model.refreshFocus() }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)
-            .receive(on: DispatchQueue.main)) { _ in model.refresh(immediate: true, reason: "key window") }
+            .receive(on: DispatchQueue.main)) { _ in model.refreshFocus() }
     }
 
     /// The Workspaces section: the tree, and the burial tray under it.
