@@ -181,8 +181,12 @@ enum VigilSessionControl {
     /// which otherwise means the app stopped during it).
     @MainActor private static var underWay: Set<UUID> = []
 
+    enum Origin {
+        case transport, localMove, gesture
+    }
+
     @MainActor
-    static func transact(_ request: Request, fromThisApp: Bool = false) async -> Reply {
+    static func transact(_ request: Request, origin: Origin = .transport) async -> Reply {
         guard request.version == 1 else { return .failure(request, "unsupported_version", "Workspace command version 1 is required.") }
         // The rule the hub asks of another device's request, asked of every
         // sender (this Mac's own included).
@@ -219,6 +223,11 @@ enum VigilSessionControl {
             return await VigilWorkspaces.shared.handoffCommand(request)
         }
         if request.operation == "describe" { return VigilWorkspaces.shared.applySessionEdit(request) }
+        // A native gesture is submitted once. Commands crossing a transport
+        // need a durable receipt so their sender can recover a lost reply.
+        if origin == .gesture {
+            return await VigilWorkspaces.shared.applySessionCommand(request, fromThisApp: true)
+        }
         guard !underWay.contains(request.id) else {
             return .failure(request, "in_progress", "This command is still being done on its Mac. Ask again in a moment for its outcome.")
         }
@@ -256,7 +265,7 @@ enum VigilSessionControl {
             try Durable.create(file, with: encoder.encode(Receipt(request: request, reply: nil)), exclusive: true)
             underWay.insert(request.id)
             defer { underWay.remove(request.id) }
-            let reply = await VigilWorkspaces.shared.applySessionCommand(request, fromThisApp: fromThisApp)
+            let reply = await VigilWorkspaces.shared.applySessionCommand(request, fromThisApp: origin != .transport)
             do { try Durable.replace(file, with: encoder.encode(Receipt(request: request, reply: reply))) } catch {
                 return .init(id: request.id, ok: false, code: "indeterminate", message: "The command was taken. Its outcome could not be recorded. Check the workspace before acting again.", pane: reply.pane, session: reply.session)
             }

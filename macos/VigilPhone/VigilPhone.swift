@@ -834,7 +834,6 @@ final class VigilPhone: ObservableObject {
                 request = .birth(in: place.workspace.name, revision: revision, anchor: anchor, split: nil, command: birth.command)
             }
         }
-        if let why = request.refusal { throw CreateError.refused(why) }
         creating = birth
         defer { creating = nil }
         let fields: LogFields = ["id": request.id.uuidString, "what": birth.noun, "mac": host.name,

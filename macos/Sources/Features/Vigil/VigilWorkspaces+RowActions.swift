@@ -57,7 +57,7 @@ extension VigilWorkspaces {
         guard let device = home.device else {
             // A birth among them is awaited off the main thread.
             Task { @MainActor in
-                let reply = await self.applySessionCommand(request, fromThisApp: true)
+                let reply = await VigilSessionControl.transact(request, origin: .gesture)
                 said(reply.ok ? nil : reply.message)
             }
             return
@@ -163,7 +163,7 @@ extension VigilWorkspaces {
             // Its birth is awaited off the main thread; the pane is landed
             // on when the reply comes.
             Task { @MainActor [weak host] in
-                let reply = await self.applySessionCommand(request)
+                let reply = await VigilSessionControl.transact(request, origin: .gesture)
                 guard reply.ok, let pane = reply.pane else {
                     sidebarLog.error("row action not committed", [
                         "op": request.operation, "workspace": home.workspace, "anchor": request.anchor, "why": reply.message])
