@@ -638,6 +638,8 @@ final class VigilRemote: ObservableObject {
                             priority: pane.priority ?? .normal,
                             conversationRef: truth?.meaning?.reference,
                             conversationName: truth?.meaning?.title,
+                            resumeMenu: truth?.meaning?.resumeMenu,
+                            account: truth?.meaning?.account,
                             liveConversation: !host.away && host.error == nil && truth?.alive == true ? truth?.meaning?.reference : nil,
                             forkedFrom: truth?.meaning?.forkedFrom,
                             member: truth?.meaning?.member,

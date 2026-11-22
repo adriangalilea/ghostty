@@ -113,6 +113,8 @@ extension VigilWorkspaces {
         var conversationRef: ConversationRef?
         var conversation: String? { conversationRef?.id }
         var conversationName: String?
+        var resumeMenu: PaneGlance.ResumeMenu?
+        var account: String?
         var liveConversation: ConversationRef?
         /// The conversation its own was forked from, by id (its glance).
         var forkedFrom: String?
@@ -295,6 +297,8 @@ extension VigilWorkspaces {
                 priority: pane.priority ?? .normal,
                 conversationRef: meaning?.reference,
                 conversationName: meaning?.title,
+                resumeMenu: meaning?.resumeMenu,
+                account: meaning?.account,
                 liveConversation: facts.alive ? meaning?.reference : nil,
                 forkedFrom: meaning?.forkedFrom,
                 member: meaning?.member,

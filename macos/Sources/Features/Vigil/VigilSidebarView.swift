@@ -23,6 +23,7 @@ struct VigilSidebarView: View {
     /// ending, a conflict, who looks, a pin, a priority) is sized from the
     /// row's text, by the one rule the phone's rows use (`PaneMarkSizes`).
     private var marks: PaneMarkSizes { PaneMarkSizes(text: 11 * scale) }
+    @State private var resumeReceipt: PaneResumeReceipt?
     @State private var hovered: String?
     /// The row whose fold control (its thread line open, its count folded)
     /// is under the pointer. While one is, no row wears the hover: a press
@@ -880,6 +881,9 @@ struct VigilSidebarView: View {
                     .font(.system(size: 9 * scale))
                     .foregroundColor(tab.captured ? .secondary : .primary.opacity(0.8))
             }
+            if collapsed, tab.panes.count == 1, let account = tab.panes.first?.account {
+                Text(account).font(.system(size: 9 * scale)).foregroundStyle(.secondary).lineLimit(1)
+            }
             if collapsed { unfold(tab.id, tab.panes.count) { model.collapsedTabs.remove(tab.id) } }
             Spacer(minLength: 4)
             HStack(spacing: marks.gap) {
@@ -902,6 +906,7 @@ struct VigilSidebarView: View {
         .background(reportHit(id: tab.id, kind: .tab(session: session, anchor: tab.anchor)))
         .contentShape(Rectangle())
         .id(tab.id)
+        .paneResumeFeedback(row: tab.id, receipt: $resumeReceipt)
         .onDrag {
             if let anchor = tab.anchor {
                 model.beginDrag(.tab(session: session, anchor: anchor))
@@ -911,6 +916,9 @@ struct VigilSidebarView: View {
         .contextMenu {
             let home = VigilWorkspaces.RowHome(row: session)
             menu {
+                if tab.panes.count == 1, let pane = tab.panes.first {
+                    resumeItems(pane, home: home, row: tab.id)
+                }
                 if let anchor = tab.anchor.map(home.there) {
                     Button {
                         VigilWorkspaces.shared.renameRow(
@@ -1120,6 +1128,7 @@ struct VigilSidebarView: View {
             kind: .pane(session: session, tabAnchor: tab.anchor, paneId: pane.navigationId)))
         .contentShape(Rectangle())
         .id(id)
+        .paneResumeFeedback(row: id, receipt: $resumeReceipt)
         .onDrag {
             if let paneId = pane.paneId {
                 model.beginDrag(.pane(session: session, paneId: paneId, isDock: pane.isDock))
@@ -1134,6 +1143,7 @@ struct VigilSidebarView: View {
             // The pane as its home names it; nil for a row with no daemon.
             let there = pane.paneId ?? (home.device != nil ? VigilRemote.split(pane.id)?.name : nil)
             menu {
+                resumeItems(pane, home: home, row: id)
                 if let there {
                     Button {
                         VigilWorkspaces.shared.renameRow(
@@ -1289,12 +1299,26 @@ struct VigilSidebarView: View {
     @ViewBuilder
     private func paneIdentity(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         let named = pane.conversationName.flatMap { $0 == pane.title ? nil : $0 }
+        if let account = pane.resumeMenu?.accountLabel(current: pane.account) ?? pane.account {
+            Text(account).font(.system(size: 9 * scale)).foregroundStyle(.secondary)
+                .lineLimit(1).help("Agent account: \(account)")
+        }
         if let dim = named ?? pane.identifiers.first?.value {
             InkMiddleTruncate(dim, tail: named == nil ? "-" : 6)
                 .font(.system(size: 9 * scale, design: named == nil ? .monospaced : .default))
                 .foregroundStyle(.secondary.opacity(0.7))
                 .layoutPriority(-1)
                 .help(pane.identifiers.map { "\($0.label): \($0.value)" }.joined(separator: "\n"))
+        }
+    }
+
+    @ViewBuilder private func resumeItems(_ pane: VigilWorkspaces.SidebarPane, home: VigilWorkspaces.RowHome, row: String) -> some View {
+        if let menu = pane.resumeMenu, let ref = pane.liveConversation {
+            let there = pane.paneId ?? home.there(pane.id)
+            PaneResumeItems(menu: menu, conversation: ref.id, account: pane.account, title: pane.title, row: row, receipt: $resumeReceipt) {
+                try await VigilWorkspaces.shared.restartAgent(pane: there, device: home.device, request: Restart($0))
+            }
+            Divider()
         }
     }
 
