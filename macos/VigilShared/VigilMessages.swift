@@ -40,9 +40,19 @@ struct VigilMessageIndex: Equatable, Sendable {
     var forYou: [MessageThreads.ForYou] = []
 
     init() {}
-    init(_ mailboxes: [String: [String: Message.Record]], asks: [String: [PaneAsk]]) {
+    init(_ mailboxes: [String: [String: Message.Record]], asks: [String: [PaneAsk]], chats: [String: [Chat]] = [:]) {
         threads = MessageThreads.threads(mailboxes)
-        conversations = MessageThreads.conversations(mailboxes)
+        var conversations = MessageThreads.conversations(mailboxes)
+        // A group with nothing said yet is listed too, and one that waits for
+        // the person's yes first of all.
+        let listed = Set(conversations.compactMap(\.chat))
+        for (root, held) in chats {
+            for chat in held where !listed.contains(chat.id) {
+                let empty = MessageThread(key: .init(root: root, pane: MessageThread.chatPane(chat.id), conversation: nil), items: [])
+                if chat.allowed { conversations.append(empty) } else { conversations.insert(empty, at: 0) }
+            }
+        }
+        self.conversations = conversations
         panes = MessageThreads.panes(threads)
         pending = MessageThreads.pending(mailboxes)
         var awaiting = MessageThreads.awaitingYou(mailboxes)
@@ -77,6 +87,9 @@ struct VigilChatPane: Equatable, Sendable {
     var tint: String?
     /// Its Mac's name, when it is not this one.
     var mac: String?
+    /// The agent program it holds ("claude", "codex"), from its conversation;
+    /// nil: none known (a shell, a command).
+    var program: String? = nil
 
     var said: String { mac.map { "\(title) on \($0)" } ?? title }
 
@@ -89,11 +102,18 @@ struct VigilChatPane: Equatable, Sendable {
     /// is not this one.
     static func of(
         member: (name: String?, face: String?, tint: String?)? = nil, conversation: String?, title: String, face: String?,
-        mac: String?
+        mac: String?, program: String? = nil
     ) -> VigilChatPane {
         let emoji = face.flatMap { $0.isEmpty ? nil : $0 }
-        return VigilChatPane(title: member?.name ?? conversation ?? title, face: emoji ?? member?.face, tint: member?.tint, mac: mac)
+        return VigilChatPane(
+            title: member?.name ?? conversation ?? title, face: emoji ?? member?.face, tint: member?.tint, mac: mac, program: program)
     }
+}
+
+/// What a host that cannot do something says.
+enum VigilChatError: Error, CustomStringConvertible {
+    case notHere
+    var description: String { "group chats are written in from a Mac's Messages for now" }
 }
 
 /// What the views ask of the app that holds them.
@@ -130,6 +150,12 @@ struct VigilChatHost {
     /// (`PaneAsk`), as its Mac holds them now: drawn in the thread above the
     /// composer, answered there on their card.
     var asks: @MainActor (_ key: MessageThread.Key) -> [PaneAsk] = { _ in [] }
+    /// A group chat of the Mac `root`, as it keeps it (`Chat`).
+    var chat: @MainActor (_ root: String, _ id: String) -> Chat? = { _, _ in nil }
+    /// The person's post in a group chat of the Mac `root` (`chat.post`).
+    var postInChat: @Sendable (_ chat: String, _ body: String, _ replyTo: String?, _ root: String) async throws -> Void = { _, _, _, _ in
+        throw VigilChatError.notHere
+    }
 
     /// Whether a folder on the Mac `root` can be shown here: revealed in
     /// this Mac's Finder, so only this Mac's own.
@@ -268,7 +294,25 @@ struct VigilChatMember: Equatable {
 
     /// The pane's agent or command, named by the pane's rows.
     static func pane(_ key: String, _ pane: VigilChatPane, kind: Kind, program: String?) -> VigilChatMember {
-        VigilChatMember(key: key, name: pane.said, short: pane.title, face: pane.face, kind: kind, program: program, tint: pane.tint)
+        VigilChatMember(
+            key: key, name: pane.said, short: pane.title, face: pane.face, kind: kind, program: program ?? pane.program, tint: pane.tint)
+    }
+
+    /// What kind of member it is, as the badge on its face says it (CHATS.md,
+    /// decided 2026-11-19: every agent has one look): Claude, Codex, a watch,
+    /// a command. Nil for the person and anything with no badge of its own.
+    var badge: (symbol: String, color: Color)? {
+        switch kind {
+        case .agent, .subagent:
+            switch program {
+            case "claude": ("asterisk", Color(red: 0.85, green: 0.47, blue: 0.34))
+            case "codex": ("chevron.left.forwardslash.chevron.right", Color(red: 0.06, green: 0.64, blue: 0.50))
+            default: ("terminal", .gray)
+            }
+        case .watch: ("binoculars", .indigo)
+        case .tool: ("terminal", .gray)
+        case .person, .system, .device: nil
+        }
     }
 
     /// The member as Ink draws a sender, in its own colour.
@@ -333,14 +377,29 @@ struct VigilChatPeople {
         self.members = members
     }
 
-    /// A sender's face: their pane's workspace emoji where it wears one, else
-    /// Ink's own (the agent's mark, the person's initial).
+    /// A sender's face: their pane's workspace emoji where it wears one, with
+    /// its kind's badge at its corner (Claude, Codex, a watch, a command), so
+    /// two agents of one workspace are told apart; else Ink's own (the
+    /// agent's mark, the person's initial). Its colour is the member's tint,
+    /// which Ink draws around it.
     @ViewBuilder func picture(_ person: InkChat.Person) -> some View {
-        if let face = members[person.id]?.face {
+        if let member = members[person.id], let face = member.face {
             GeometryReader { g in
+                let side = min(g.size.width, g.size.height)
                 Text(face)
-                    .font(.system(size: (min(g.size.width, g.size.height) * 0.62).rounded()))
+                    .font(.system(size: (side * 0.62).rounded()))
                     .frame(width: g.size.width, height: g.size.height)
+                    .overlay(alignment: .bottomTrailing) {
+                        if let badge = member.badge {
+                            Image(systemName: badge.symbol)
+                                .font(.system(size: (side * 0.22).rounded(), weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: side * 0.42, height: side * 0.42)
+                                .background(badge.color, in: Circle())
+                                .overlay(Circle().stroke(.background, lineWidth: 1.5))
+                                .accessibilityLabel(member.program ?? "\(member.kind)")
+                        }
+                    }
             }
         }
     }
@@ -361,7 +420,13 @@ struct VigilChatPeople {
     /// A thread's name: its pane's, or both ends' for a conversation between
     /// two agents, listed once.
     @MainActor func title(of thread: MessageThread) -> String {
-        thread.with.map { "\(title(of: thread.key)) ↔ \(title(of: $0))" } ?? title(of: thread.key)
+        // A group says it is one: its face (people when it has none), its
+        // name and how many are in it, you among them.
+        if let id = thread.chat {
+            let chat = host.chat(thread.key.root, id)
+            return "\(chat?.face ?? "👥") \(chat?.name ?? "a group") · \((chat?.members.count ?? 0) + 1)"
+        }
+        return thread.with.map { "\(title(of: thread.key)) ↔ \(title(of: $0))" } ?? title(of: thread.key)
     }
     /// An end of the list's picker (`VigilThreadList.end`, "root/pane") by name.
     @MainActor func title(ofEnd end: String) -> String {
@@ -480,17 +545,25 @@ struct VigilThreadConversation: View {
 
     var body: some View {
         let messages = thread.map { VigilThreadWords.messages($0, people: people) } ?? []
+        // Each row finds its record by id once, never by a walk of the thread.
+        let byID = Dictionary(items.map { ($0.id, $0) }) { first, _ in first }
+        let revokable = newestByStandingYes
         InkConversation(
             messages, people: people.all, me: Message.you, unread: thread?.firstUnread, focus: focus, acts: acts(messages)
         ) { message in
+            let item = byID[message.id]
+            // A request sits on the message it is about (CHATS.md, decided
+            // 2026-11-19), with what came of an answer given here.
+            let asks = item.map { $0.record.awaitsYou || answered[$0.id] != nil } ?? false
+            let revokes = !asks && item?.id == revokable
             VStack(alignment: .leading, spacing: 6) {
-                VigilMessageWords(
-                    id: message.id, words: message.words, place: item(message.id)?.mentionPlace, host: host, open: open)
-                // A request sits on the message it is about (CHATS.md, decided
-                // 2026-11-19), with what came of an answer given here.
-                if let item = item(message.id), item.record.awaitsYou || answered[item.id] != nil {
+                VigilMessageWords(id: message.id, words: message.words, place: item?.mentionPlace, host: host, open: open)
+                    // Something stands under the words: the foot (its time) takes
+                    // a row of its own under it, never over its buttons.
+                    .transformEnvironment(\.inkTailRoom) { if asks || revokes { $0 = nil } }
+                if let item, asks {
                     VigilMessageRequest(item: item, answered: answered[item.id]) { answer($0, on: item.id) }
-                } else if let item = item(message.id), item.id == newestByStandingYes {
+                } else if let item, revokes {
                     VigilStandingYes(item: item) { answer($0, on: item.id) }
                 }
             }
@@ -507,12 +580,16 @@ struct VigilThreadConversation: View {
         .onChange(of: thread?.items.filter { $0.record.unread }.map(\.id), initial: true) { markRead() }
         .onChange(of: front) { markRead() }
         .onContinuousHover { _ in markRead() }
+        // A group an agent made waits for the person's one yes, here.
+        if let id = MessageThread(key: key, items: []).chat, let chat = host.chat(key.root, id), !chat.allowed {
+            VigilChatRequest(chat: chat, answered: answered[chat.id]) { answer($0, on: chat.id) }
+        }
         // What vigil asks about this pane, answered here on its card.
         ForEach(host.asks(key)) { ask in
             VigilPaneAskRequest(ask: ask, answered: answered[ask.id]) { answer($0, on: ask.id) }
         }
         InkComposer(
-            text: $draft, prompt: "Message \(people.title(of: key))",
+            text: $draft, prompt: "Message \(thread.map { people.title(of: $0) } ?? people.title(of: key))",
             replying: replying.flatMap { id in messages.first { $0.id == id } }.map { InkChat.Answered($0, people: people.all) },
             editing: editing != nil, blocked: failure, cancel: { cancel() }
         ) { words in
@@ -596,6 +673,15 @@ struct VigilThreadConversation: View {
         if let editing {
             act(.edit(editing, body: words), on: editing)
             cancel()
+            return
+        }
+        // In a group: one post, which its Mac gives every agent in it.
+        if let chat = MessageThread(key: key, items: []).chat {
+            let postInChat = host.postInChat, root = key.root, replyTo = replying
+            cancel()
+            Task {
+                do { try await postInChat(chat, words, replyTo, root) } catch { failure = "Not sent: \(error)" }
+            }
             return
         }
         let message = Message(

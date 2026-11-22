@@ -77,14 +77,10 @@ final class VigilMessageStore: ObservableObject {
     private nonisolated static let hub = Local.Client(socket: VigilPaths.hub)
     /// The mailboxes followed, by device (nil key: this Mac's, as "").
     private var following: [String: Task<Void, Never>] = [:]
-    private var renaming: DispatchWorkItem?
-    private var stateObserver: NSObjectProtocol?
+    /// The sidebar's rows as its model last built them (`rows(_:)`).
+    private var lastRows: [VigilWorkspaces.SidebarWorkspaceRow] = []
 
-    private init() {
-        stateObserver = NotificationCenter.default.addObserver(forName: VigilWorkspaces.stateDidChange, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { VigilMessageStore.shared.renameSoon() }
-        }
-    }
+    private init() {}
 
     var threads: [MessageThread] { index.threads }
     /// Every conversation listed once (`MessageThreads.conversations`): what
@@ -211,11 +207,14 @@ final class VigilMessageStore: ObservableObject {
         mailboxes[root] = changes.applied(to: mailboxes[root] ?? [:])
         // An older Mac tells none: a whole with no asks says it holds none.
         if let told = changes.asks { asks[root] = told } else if changes.whole { asks[root] = [] }
+        if let told = changes.chats { chats[root] = told } else if changes.whole { chats[root] = [] }
         recount()
     }
 
     /// The questions each Mac asks about its panes now (`PaneAsk`), by root.
     @Published private(set) var asks: [String: [PaneAsk]] = [:]
+    /// The group chats each Mac keeps (`Chat`), by root.
+    @Published private(set) var chats: [String: [Chat]] = [:]
 
     /// One build of the index at a time, off the main thread; changes that
     /// arrive meanwhile are folded into the next one, so a burst of them is
@@ -228,11 +227,11 @@ final class VigilMessageStore: ObservableObject {
         guard !building else { return }
         building = true
         stale = false
-        let mailboxes = mailboxes, asks = asks
+        let mailboxes = mailboxes, asks = asks, chats = chats
         let records = mailboxes.values.reduce(0) { $0 + $1.count }
         Task.detached(priority: .userInitiated) {
             let start = ContinuousClock.now
-            let next = Index(mailboxes, asks: asks)
+            let next = Index(mailboxes, asks: asks, chats: chats)
             let took = ContinuousClock.now - start
             await MainActor.run { VigilMessageStore.shared.publish(next, took: took, records: records) }
         }
@@ -279,40 +278,36 @@ final class VigilMessageStore: ObservableObject {
 
     // MARK: Names (from the sidebar's own rows: the one naming rule)
 
-    private func renameSoon() {
-        guard renaming == nil else { return }
-        let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated {
-                self?.renaming = nil
-                self?.rename()
-            }
-        }
-        renaming = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    /// The sidebar's rows, each time its model built new ones
+    /// (`VigilSidebarModel.refresh`): names come from them, never from a
+    /// snapshot of their own. Messages built one of its own at every change
+    /// of a pane's state, a fifth of the main thread's work measured on the
+    /// M4 (740 of 3,441 ms over 40 s).
+    func rows(_ rows: [VigilWorkspaces.SidebarWorkspaceRow]) {
+        guard rows != lastRows else { return }
+        lastRows = rows
+        rename()
     }
 
     private func rename() {
         guard let here else { return }
         var next: [String: Named] = [:]
-        for row in VigilWorkspaces.shared.sidebarSnapshot() {
+        for row in lastRows {
+            let remote = VigilRemote.split(row.id)?.0
             for pane in row.tabs.flatMap(\.panes) {
-                guard let paneId = pane.paneId else { continue }
-                next["\(here)/\(paneId)"] = Named(
+                let key: String, navigation: String
+                if let remote {
+                    guard let (_, name) = VigilRemote.split(pane.id) else { continue }
+                    (key, navigation) = ("\(remote)/\(name)", pane.id)
+                } else {
+                    guard let paneId = pane.paneId else { continue }
+                    (key, navigation) = ("\(here)/\(paneId)", paneId)
+                }
+                next[key] = Named(
                     pane: VigilChatPane.of(
                         member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
-                        face: row.emoji, mac: nil),
-                    workspace: row.id, navigation: paneId)
-            }
-        }
-        for row in VigilRemote.shared.sidebarRows() {
-            guard let (device, _) = VigilRemote.split(row.id) else { continue }
-            for pane in row.tabs.flatMap(\.panes) {
-                guard let (_, name) = VigilRemote.split(pane.id) else { continue }
-                next["\(device)/\(name)"] = Named(
-                    pane: VigilChatPane.of(
-                        member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
-                        face: row.emoji, mac: row.host?.name),
-                    workspace: row.id, navigation: pane.id)
+                        face: row.emoji, mac: remote == nil ? nil : row.host?.name, program: pane.conversationRef?.agent),
+                    workspace: row.id, navigation: navigation)
             }
         }
         if next != panes { panes = next }
@@ -346,7 +341,9 @@ final class VigilMessageStore: ObservableObject {
                 VigilFilePanel.show(file, beside: key.root == here ? key.pane : "\(key.root)/\(key.pane)")
             },
             pressedByPerson: { Self.pressedByPerson() },
-            asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] })
+            asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] },
+            chat: { root, id in VigilMessageStore.shared.chats[root]?.first { $0.id == id } },
+            postInChat: { chat, body, replyTo, root in try await Self.postInChat(chat, body: body, replyTo: replyTo, root: root, here: here) })
     }
 
     /// Whether the event being handled is a person's click: a mouse button
@@ -398,6 +395,19 @@ final class VigilMessageStore: ObservableObject {
         }.value
         messagesLog.info("posted", ["id": message.id, "pane": message.to.pane, "state": standing.state.kind.rawValue])
         if case .refused(let why) = standing.state { throw Failed(description: "refused: \(why)") }
+    }
+
+    /// The person's post in a group this Mac keeps (`chat.post`, from the app
+    /// alone): its broker gives every agent in it a message.
+    private nonisolated static func postInChat(_ chat: String, body: String, replyTo: String?, root: String, here: String?) async throws {
+        guard root == here else { throw Failed(description: "a group on another Mac is written in from that Mac for now") }
+        try await Task.detached {
+            var payload: [String: JSONValue] = ["chat": .string(chat), "body": .string(body)]
+            if let replyTo { payload["replyTo"] = .string(replyTo) }
+            let response = try HarnessWire.call(RPCRequest("chat.post", .object(payload)))
+            guard response.ok else { throw Failed(description: response.refusal) }
+        }.value
+        messagesLog.info("posted in a group", ["chat": String(chat.prefix(8))])
     }
 
     private nonisolated static func act(_ act: Message.Act, root: String, here: String?) async throws -> Message.Acted {
@@ -474,6 +484,8 @@ enum VigilMessagesPanel {
         guard let thread = store.conversations.first(where: { $0.id == id }) else {
             return messagesLog.warn("messages: that thread is gone", ["thread": id])
         }
+        // A group is no pane's: it opens in the Messages window.
+        if thread.chat != nil { return window(thread: id) }
         let key = thread.key
         store.open(root: key.root, pane: key.pane, in: controller)
         // A mount builds its tree in this turn; a mirror of another Mac's tab

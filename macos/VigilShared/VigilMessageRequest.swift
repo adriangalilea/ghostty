@@ -66,6 +66,41 @@ struct VigilMessageRequest: View {
     }
 }
 
+/// A group an agent made, waiting for the person's one yes (`Chat.request`),
+/// drawn above the group's composer with Authz's controls: Allow lets its
+/// members talk there, Refuse takes it away.
+struct VigilChatRequest: View {
+    let chat: Chat
+    let answered: String?
+    let act: (VigilMessage.Act) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+                Text("Waiting for you").inkText(.detail)
+            }
+            if let request = chat.request, let consent = request.consent {
+                Text(request.title).font(.headline)
+                if let detail = request.detail { Text(detail).inkText(.detail) }
+                if let subtitle = request.subtitle { Text(subtitle).inkText(.detail) }
+                HStack(spacing: 8) {
+                    Button(request.actions[consent.refusal].label) { answer(request, .no) }.buttonStyle(.ink)
+                    Button(ConsentAnswers.yes(consent, position: 0)) { answer(request, .yes(0, lasting: nil)) }.buttonStyle(.inkProminent)
+                }
+                .focusable(false)
+            }
+            if let answered { Text(answered).inkText(.detail) }
+        }
+        .padding(8)
+    }
+
+    private func answer(_ request: AskRequest, _ pick: Pick) {
+        guard let decision = request.form?.decision(for: pick, of: request) else { return }
+        act(.answer(chat.id, decision))
+    }
+}
+
 /// The standing yes that let a thread's newest message of a pair through,
 /// said under it with a way to revoke it (`Act.revoke`): the next message of
 /// the pair waits for the person again.
