@@ -59,7 +59,7 @@ final class VigilCreation: ObservableObject, CreationModel {
             defer { creationBusy = false }
             let reply: VigilSessionControl.Reply
             if id == Self.here {
-                reply = await VigilWorkspaces.shared.applySessionCommand(request, fromThisApp: true)
+                reply = await VigilSessionControl.transact(request, origin: .gesture)
             } else {
                 do { reply = try await VigilRemote.shared.command(id, request: request) } catch {
                     creationProblem = "\(VigilRemote.shared.host(id)?.name ?? "That Mac") did not answer (\(error)). It may have been made: look at its rows before trying again."

@@ -2439,7 +2439,7 @@ extension VigilWorkspaces {
                 if model.moveNotice != said { model.moveNotice = said }
             }
             Task { @MainActor [weak model] in
-                let reply = await VigilSessionControl.transact(request, fromThisApp: true)
+                let reply = await VigilSessionControl.transact(request, origin: .localMove)
                 if !reply.ok || reply.code == "copied" { model?.moveNotice = reply.message }
             }
         }

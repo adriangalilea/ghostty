@@ -60,9 +60,7 @@ extension VigilWorkspaces {
         // The program holding each tty, and what its agent runs beside the
         // conversation (background agents and shells, processes a turn left
         // running): a close ends those too, so the question names them.
-        panes.flatMap { pane in
-            [paneForegroundLabel(pane), paneGlance(pane)?.background.map { "\($0.words) in the background" }].compactMap { $0 }
-        }
+        panes.flatMap { paneFacts($0).closingPrograms }
     }
 
     /// The busy programs of everything a session owns.

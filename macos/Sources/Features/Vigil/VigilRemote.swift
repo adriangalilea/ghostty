@@ -524,6 +524,9 @@ final class VigilRemote: ObservableObject {
     /// One finite call per user edit. The held directory stream publishes
     /// the result to every viewport; pane proxy streams remain untouched.
     func command(_ device: String, request: VigilSessionControl.Request) async throws -> VigilSessionControl.Reply {
+        if let host = host(device), let reason = host.error {
+            throw NSError(domain: "VigilRemote", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(host.name): \(reason)"])
+        }
         let payload = try JSONEncoder().encode(request) + Data([10])
         let data = try await Task.detached(priority: .userInitiated) {
             try Self.hub.call(device: device, .session(payload))

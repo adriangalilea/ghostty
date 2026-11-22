@@ -99,8 +99,7 @@ extension VigilPhone {
         let node: TetherNode
         do {
             node = try linked()
-            let data = try await VigilLink.command(node, device: device, try request.line)
-            let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+            let outcome = try await command(request, on: device)
             guard outcome.ok else {
                 receipts.warn("move", "refused", fields.merging(["why": outcome.message]) { a, _ in a })
                 model.moveNotice = Move.olderVigil(outcome.message, mac: name)

@@ -8,11 +8,7 @@ import VigilWire
 /// always closed and created things. The sidebar asks a row's home, never
 /// "is this row remote".
 ///
-/// Two things stay where they are on purpose. A close on this Mac goes
-/// through its own functions (`closePaneFromSidebar`, `killWithConfirm`):
-/// they carry what only the home's windows know (which viewport hands over,
-/// what a live view runs). And merging needs both workspaces on one Mac,
-/// so it is offered among this Mac's alone.
+/// The home chooses how to bury a mounted, floating or captured tab.
 extension VigilWorkspaces {
     /// Where a row's workspace lives, and what it is called there.
     struct RowHome: Equatable {
@@ -61,24 +57,21 @@ extension VigilWorkspaces {
         guard let device = home.device else {
             // A birth among them is awaited off the main thread.
             Task { @MainActor in
-                let reply = await self.applySessionCommand(request, fromThisApp: true)
+                let reply = await VigilSessionControl.transact(request, origin: .gesture)
                 said(reply.ok ? nil : reply.message)
             }
             return
         }
         let mac = home.mac ?? "its Mac"
-        DispatchQueue.global(qos: .userInitiated).async {
+        Task { @MainActor in
             let problem: String?
             do {
-                let data = try Local.Client(socket: VigilPaths.hub).call(device: device, .session(try request.line))
-                let outcome = try JSONDecoder().decode(WorkspaceCommand.Outcome.self, from: data)
+                let outcome = try await VigilRemote.shared.command(device, request: request)
                 problem = outcome.ok ? nil : outcome.message
             } catch {
-                problem = "\(mac) did not answer (\(error)). It may have been done: look at its rows before trying again."
+                problem = "\(mac): \(error.localizedDescription)"
             }
-            // A Mac on another Vigil does not know a move's words: said so.
-            let told = request.operation == "move_to" ? problem.map { Move.olderVigil($0, mac: mac) } : problem
-            DispatchQueue.main.async { said(told) }
+            said(request.operation == "move_to" ? problem.map { Move.olderVigil($0, mac: mac) } : problem)
         }
     }
 
@@ -116,11 +109,16 @@ extension VigilWorkspaces {
     /// bringing the workspace back as itself. Always asked first, by its
     /// name (and its Mac's, when that is not this one).
     func killRow(_ home: RowHome, label: String) {
-        guard let device = home.device else { return killWithConfirm(name: home.workspace) }
+        guard let device = home.device else {
+            refreshWorkspaceRevisions()
+            guard let session = workspaces[home.workspace] else { return }
+            let request = WorkspaceCommand.Request.closeWorkspace(home.workspace, revision: session.layoutRevision)
+            return confirmKill(name: home.workspace) { self.ask(home, request, failing: "Not closed") }
+        }
         guard let remote = VigilRemote.shared.host(device),
               let session = remote.directory?.live.first(where: { $0.name == home.workspace }) else { return }
         let panes = (session.tabs ?? []).flatMap(\.members).map(\.id)
-        let busy = panes.compactMap { remote.directory?.panes[$0]?.busy }
+        let busy = panes.flatMap { remote.directory?.panes[$0]?.closingPrograms ?? [] }
         let alert = NSAlert()
         alert.messageText = "Kill \(label) on \(remote.name)?"
         alert.informativeText = (busy.isEmpty ? "" : "\(busy.joined(separator: ", ")) still running there. ")
@@ -130,7 +128,7 @@ extension VigilWorkspaces {
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        ask(home, .closeWorkspace(home.workspace), failing: "Not killed on \(remote.name)")
+        ask(home, .closeWorkspace(home.workspace, revision: session.layoutRevision ?? ""), failing: "Not killed on \(remote.name)")
     }
 
     // MARK: Births: a new tab, a fork
@@ -165,7 +163,7 @@ extension VigilWorkspaces {
             // Its birth is awaited off the main thread; the pane is landed
             // on when the reply comes.
             Task { @MainActor [weak host] in
-                let reply = await self.applySessionCommand(request)
+                let reply = await VigilSessionControl.transact(request, origin: .gesture)
                 guard reply.ok, let pane = reply.pane else {
                     sidebarLog.error("row action not committed", [
                         "op": request.operation, "workspace": home.workspace, "anchor": request.anchor, "why": reply.message])
@@ -202,15 +200,28 @@ extension VigilWorkspaces {
     /// home, open here or not; asked first only when something runs in it
     /// (`Facts.busy`), as every close is.
     func closeRow(_ home: RowHome, anchor: String, tab: Bool, in host: TerminalController?) {
-        guard let device = home.device, let remote = VigilRemote.shared.host(device), let directory = remote.directory,
-              let session = directory.live.first(where: { $0.name == home.workspace }), let revision = session.layoutRevision else {
-            return sidebarLog.warn("close refused: not in that Mac's directory", ["workspace": home.workspace])
+        let revision: String
+        let member: Registry.Tab
+        let busy: [String]
+        if let device = home.device {
+            guard let dir = VigilRemote.shared.host(device)?.directory,
+                  let place = dir.place(of: anchor), place.workspace.name == home.workspace,
+                  let current = place.workspace.layoutRevision else { return }
+            revision = current
+            member = place.tab
+            busy = member.closingPanes(anchor, tab: tab).flatMap { dir.panes[$0]?.closingPrograms ?? [] }
+        } else {
+            refreshWorkspaceRevisions()
+            guard let session = workspaces[home.workspace],
+                  let found = session.tabs.first(where: { $0.paneIds.contains(anchor) }) else { return }
+            revision = session.layoutRevision
+            member = found
+            busy = busyPrograms(panes: member.closingPanes(anchor, tab: tab))
         }
-        let ending = tab ? (session.tabs ?? []).first { $0.paneIds.contains(anchor) }?.paneIds ?? [anchor] : [anchor]
-        confirmClose(tab ? "Tab" : "Pane", busy: ending.compactMap { directory.panes[$0]?.busy }, mac: remote.name, in: host) { [weak self] in
-            self?.ask(home, WorkspaceCommand.Request(
-                session: home.workspace, revision: revision, operation: tab ? "close_tab" : "close_pane", anchor: anchor),
-                      failing: "Not closed on \(remote.name)")
+        let request = WorkspaceCommand.Request(session: home.workspace, revision: revision,
+                                               operation: tab ? "close_tab" : "close_pane", anchor: anchor)
+        confirmClose(tab || member.closesWithPane(anchor) ? "Tab" : "Pane", busy: busy, mac: home.mac, in: host) { [weak self] in
+            self?.ask(home, request, failing: "Not closed\(home.mac.map { " on \($0)" } ?? "")")
         }
     }
 }

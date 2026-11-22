@@ -1035,28 +1035,16 @@ extension VigilWorkspaces {
         return true
     }
 
-    /// Right-click Close Tab from the sidebar: the native flow for
-    /// whatever form the tab is in. Live → its window's close-tab (which
-    /// carries the viewport semantics and confirms); COLD → buried from
-    /// the registry (daemons alive, exhumable), confirming when the tree
-    /// files say something runs.
     func closeTabFromSidebar(name: String, anchor: String?, in host: TerminalController?) {
-        // Another Mac's tab is closed at its home, open here or not.
+        guard let anchor else { return }
         let home = RowHome(row: name)
-        if home.device != nil, let anchor {
-            closeRow(home, anchor: home.there(anchor), tab: true, in: host)
-            return
-        }
-        guard workspaces[name] != nil, let anchor else { return }
-        if let view = liveView(attachId: anchor),
-           let controller = view.window?.windowController as? TerminalController {
-            controller.closeTab(nil)
-            return
-        }
-        guard let tab = workspaces[name]!.tabs.first(where: { $0.paneIds.contains(anchor) }) else { return }
-        confirmClose("Tab", busy: busyPrograms(panes: tab.paneIds), in: host) { [weak self] in
-            self?.buryColdTab(tab, from: name)
-        }
+        closeRow(home, anchor: home.there(anchor), tab: true, in: host)
+    }
+
+    func closePaneFromSidebar(name: String, paneId: String?, in host: TerminalController?) {
+        guard let paneId else { return }
+        let home = RowHome(row: name)
+        closeRow(home, anchor: home.there(paneId), tab: false, in: host)
     }
 
     private func buryColdTab(_ tab: Registry.Tab, from name: String) {
@@ -1069,49 +1057,53 @@ extension VigilWorkspaces {
         persist()
     }
 
-    /// Right-click Close Pane: live panes ride the native close flow
-    /// (dock tenants included: a collapsed dock's tenant has a live view
-    /// and NO window, so the owner is resolved by RUNTIME, never by
-    /// window); captured panes leave the registry for the graveyard. Confirms
-    /// exactly when something runs.
-    func closePaneFromSidebar(name: String, paneId: String?, in host: TerminalController?) {
-        guard let paneId else { return }
-        // Another Mac's pane is closed at its home, open here or not.
-        let home = RowHome(row: name)
-        if home.device != nil {
-            closeRow(home, anchor: home.there(paneId), tab: false, in: host)
+    /// Commit a reviewed close where this Mac currently holds the member.
+    /// The native tab and split operations preserve warm views and their undo.
+    func closeMember(in name: String, tab: Registry.Tab, anchor: String, whole: Bool) {
+        guard let session = workspaces[name] else { return }
+        if whole, session.tabs.count == 1 {
+            kill(name: name)
             return
         }
-        if let view = liveView(attachId: paneId) {
-            for case let controller as TerminalController in dockMap.keyEnumerator()
-            where closeDockTenantIfHosted(view, in: controller, withConfirmation: true) {
-                return
-            }
-            if let controller = view.window?.windowController as? TerminalController {
-                controller.closeSurface(view, withConfirmation: true)
-                return
-            }
-            // A held runtime's tenant (background/floating session): the
-            // registry edit is the close, the runtime releases the view.
-            if locate(paneId) != nil {
-                confirmClose("Dock Pane", busy: busyPrograms(panes: [paneId]), in: host) { [weak self] in
-                    self?.removeCapturedPane(name: name, paneId: paneId)
+        if whole {
+            if let controller = members(of: name).first(where: { member in
+                member.surfaceTree.contains { $0.vigilAttachId.map(tab.paneIds.contains) == true }
+            }) {
+                if members(of: name).count > 1 {
+                    closeTabStructurally(controller)
+                } else if let next = session.tabs.first(where: { !$0.paneIds.contains(anchor) }) {
+                    buryMountedTab(thenMount: next, name: name, in: controller)
                 }
-                return
+            } else if session.float != nil, let quick = quickController(create: false) {
+                let selected = quick.focusedSurface?.vigilAttachId
+                reclaim(name, from: quick)
+                buryColdTab(tab, from: name)
+                let landing = selected.flatMap { tab.paneIds.contains($0) ? nil : $0 }
+                    ?? workspaces[name]?.tabs.first?.panes.first?.id
+                if let landing { float(name: name, landOn: landing) }
+            } else {
+                buryColdTab(tab, from: name)
             }
-            graveyardLog.error("pane close refused: live view held by nothing", ["pane": paneId])
-            return
-        }
-        guard workspaces[name] != nil else { return }
-        confirmClose("Pane", busy: busyPrograms(panes: [paneId]), in: host) { [weak self] in
-            self?.removeCapturedPane(name: name, paneId: paneId)
+        } else if let view = liveView(attachId: anchor), let controller = treeHome(of: view) {
+            controller.closeSurface(view, withConfirmation: false)
+        } else if let controller = members(of: name).first(where: { controller in
+            dockMap.object(forKey: controller)?.views.contains { $0.vigilAttachId == anchor } == true
+        }), let index = dockMap.object(forKey: controller)?.views.firstIndex(where: { $0.vigilAttachId == anchor }) {
+            closeDockTenant(controller, index: index)
+        } else {
+            removeCapturedPane(name: name, paneId: anchor)
         }
     }
 
     /// A pane that has no window leaves its registry for the graveyard
     /// (takePane releases any held view; the daemon runs until reap).
     private func removeCapturedPane(name: String, paneId: String) {
+        guard let at = locate(paneId), !at.buried, at.owner == name,
+              let original = workspaces[name]?.tabs[at.tab] else { return }
         guard let taken = takePane(paneId) else { return }
+        if let remaining = Self.select(original, keeping: Set(original.paneIds).subtracting([paneId])) {
+            workspaces[name]?.tabs[at.tab] = remaining
+        }
         buryPane(taken.pane, from: name, origin: taken.origin)
         persist()
     }
