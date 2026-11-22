@@ -660,7 +660,7 @@ private struct VigilMessagesWindow: View {
     @ObservedObject private var store = VigilMessageStore.shared
 
     var body: some View {
-        VigilChat(threads: store.conversations, host: store.host, chosen: $chosen.id)
+        VigilChat(list: store.index.list, host: store.host, chosen: $chosen.id)
     }
 }
 
@@ -740,10 +740,10 @@ struct VigilSidebarThreads: View {
     @ObservedObject private var store = VigilMessageStore.shared
 
     var body: some View {
-        let threads = store.conversations
-        let people = VigilChatPeople(threads: threads, host: store.host)
+        let list = store.index.list
+        let people = VigilChatPeople(list: list, host: store.host)
         VigilThreadList(
-            threads: threads, people: people, selection: Binding(get: { model.thread }, set: { model.choose(thread: $0) }),
+            list: list, people: people, selection: Binding(get: { model.thread }, set: { model.choose(thread: $0) }),
             only: $model.showing)
     }
 }

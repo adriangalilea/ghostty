@@ -50,8 +50,6 @@ final class VigilPhoneMessages: ObservableObject {
     private init() {}
 
     var threads: [MessageThread] { index.threads }
-    /// Every conversation listed once: what the Messages screen lists.
-    var conversations: [MessageThread] { index.conversations }
 
     /// A pane's every thread as one: what its mode shows, holding exactly
     /// what its row mark counts.
@@ -249,7 +247,7 @@ struct PhoneMessagesScreen: View {
     @State private var chosen: String?
 
     var body: some View {
-        VigilChat(threads: store.conversations, host: store.host, chosen: $chosen)
+        VigilChat(list: store.index.list, host: store.host, chosen: $chosen)
             .navigationTitle("Messages")
             .toolbarTitleDisplayMode(.inline)
     }
