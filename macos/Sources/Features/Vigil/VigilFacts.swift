@@ -195,7 +195,7 @@ final class VigilFacts: @unchecked Sendable {
         guard parts.count == 2 else { return false }
         let ext = parts[1].split(separator: ".").last.map(String.init) ?? ""
         switch parts[0] {
-        case "panes": return ["pid", "up", "tree", "died", "size", "screen", "viewers", "command", "title", "ended"].contains(ext)
+        case "panes": return ["pid", "up", "tree", "died", "size", "screen", "viewers", "command", "title", "ended", "blank-output"].contains(ext)
         // `work`: what a pane depends on, which a Move to's dialog follows.
         case "state": return ["state", "seen", "glance", "conflict", "work"].contains(ext)
         case "leases": return ext == "json"
@@ -301,7 +301,7 @@ final class VigilFacts: @unchecked Sendable {
         }
         let receiver = object["receiver"] as? [String: String]
         return [receiver?["status"] ?? "", receiver?["reason"] ?? ""]
-            + ["agent", "conversation", "name"].map { object[$0] as? String ?? "" }
+            + ["agent", "conversation", "name", "relayRetry"].map { object[$0] as? String ?? "" }
             + [object["refused"] == nil ? "" : "refused", object["outdated"] == nil ? "" : "outdated", background ?? ""]
     }
 

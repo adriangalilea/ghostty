@@ -640,9 +640,9 @@ private struct PhonePaneProblems: View {
             let subject = PaneProblemItem.Subject(key: host.id + "/" + id, title: leaf.title, face: leaf.face,
                                                   state: leaf.state, conversation: glance?.reference, note: glance?.restart)
             let visit: (() -> Void)? = onScreen ? nil : { open(ref) }
-            var items = ((glance?.problems ?? []) + [writers, leaf.continuation?.problem].compactMap { $0 }).map { issue in
+            var items = (leaf.liveProblems + [writers, leaf.continuation?.problem].compactMap { $0 }).map { issue in
                 PaneProblemItem(subject: subject, problem: issue, visit: visit,
-                                cancelRestart: glance?.restart?.scheduleID != nil ? { id in try await model.restart(ref, request: Restart(.cancel(id))) } : nil)
+                                requestRestart: { intent in try await model.restart(ref, request: Restart(intent)) })
             }
             if let ended = leaf.ended, !ended.clean {
                 items.append(PaneProblemItem(subject: subject, problem: ended.problem,

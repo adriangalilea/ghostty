@@ -1447,14 +1447,14 @@ struct VigilSidebarView: View {
         let onScreen = !folded && TerminalController.all.contains { controller in
             controller.window?.isVisible == true && VigilBars.shared.panesOnScreen(in: controller).contains(pane.id)
         }
-        func cancelRestart(_ schedule: UUID) async throws -> Restart.Answer {
+        func requestRestart(_ intent: Restart.Intent) async throws -> Restart.Answer {
             let remote = VigilRemote.split(pane.id)
             guard let id = pane.paneId ?? remote?.name else { throw WireError.refused("This pane has no running agent.") }
-            return try await VigilWorkspaces.shared.restartAgent(pane: id, device: remote?.device, request: Restart(.cancel(schedule)))
+            return try await VigilWorkspaces.shared.restartAgent(pane: id, device: remote?.device, request: Restart(intent))
         }
         var items = (pane.problems + [writers].compactMap { $0 }).map { issue in
             PaneProblemItem(subject: subject, problem: issue, visit: onScreen ? nil : visit,
-                            cancelRestart: pane.restart?.scheduleID != nil ? cancelRestart : nil)
+                            requestRestart: requestRestart)
         }
         if let ended = pane.ended, !ended.clean {
             items.append(PaneProblemItem(subject: subject, problem: ended.problem, button: "Open pane", act: visit, ended: ended))
