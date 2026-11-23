@@ -629,6 +629,7 @@ final class VigilRemote: ObservableObject {
                             id: Self.compositeId(host.device, pane.id),
                             paneId: nil,
                             title: dir.title(of: pane),
+                            messageAlias: pane.label ?? (all.count == 1 ? tab.label : nil),
                             program: program,
                             state: truth?.shown,
                             isDock: offset >= tab.panes.count,

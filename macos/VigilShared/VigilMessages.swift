@@ -39,6 +39,7 @@ struct VigilMessageIndex: Equatable, Sendable {
     var pending: [String: [String: MessageThreads.Pending]] = [:]
     var awaiting: [String: [String: Set<String>]] = [:]
     var forYou: [MessageThreads.ForYou] = []
+    var traffic = MessageThreads.Traffic()
 
     init() {}
     init(_ mailboxes: [String: [String: Message.Record]], asks: [String: [PaneAsk]], chats: [String: [Chat]] = [:]) {
@@ -46,16 +47,18 @@ struct VigilMessageIndex: Equatable, Sendable {
         var conversations = MessageThreads.conversations(mailboxes)
         // A group with nothing said yet is listed too, and one that waits for
         // the person's yes first of all.
-        let listed = Set(conversations.compactMap(\.chat))
+        let listed = Set(conversations.filter { $0.chat != nil }.map { $0.key.root + "/" + $0.key.pane })
         for (root, held) in chats {
-            for chat in held where !listed.contains(chat.id) {
+            for chat in held where !listed.contains(root + "/" + MessageThread.chatPane(chat.id)) {
                 let empty = MessageThread(key: .init(root: root, pane: MessageThread.chatPane(chat.id), conversation: nil), items: [])
                 if chat.allowed { conversations.append(empty) } else { conversations.insert(empty, at: 0) }
             }
         }
+        traffic = MessageThreads.Traffic(mailboxes, conversations: conversations)
         list = conversations.map(VigilListedThread.init)
         panes = MessageThreads.panes(threads)
-        pending = MessageThreads.pending(mailboxes)
+        forYou = MessageThreads.forYou(conversations)
+        pending = MessageThreads.pending(forYou: forYou)
         var awaiting = MessageThreads.awaitingYou(mailboxes)
         // A pane's hand counts what vigil asks about it too.
         for (root, list) in asks {
@@ -64,7 +67,11 @@ struct VigilMessageIndex: Equatable, Sendable {
             }
         }
         self.awaiting = awaiting
-        forYou = MessageThreads.forYou(threads)
+        for (root, groups) in chats {
+            for group in groups where group.request != nil {
+                for member in group.members { self.awaiting[root, default: [:]][member.pane, default: []].insert(group.id) }
+            }
+        }
     }
 
     /// A pane's every thread as one, keyed by `key` (the conversation it holds).
@@ -146,12 +153,12 @@ struct VigilChatPane: Equatable, Sendable {
     /// pane's or workspace's emoji, else its member's face; its Mac when it
     /// is not this one.
     static func of(
-        member: (name: String?, face: String?, tint: String?)? = nil, conversation: String?, title: String, face: String?,
+        alias: String? = nil, member: (name: String?, face: String?, tint: String?)? = nil, conversation: String?, title: String, face: String?,
         mac: String?, program: String? = nil
     ) -> VigilChatPane {
         let emoji = face.flatMap { $0.isEmpty ? nil : $0 }
         return VigilChatPane(
-            title: member?.name ?? conversation ?? title, face: emoji ?? member?.face, tint: member?.tint, mac: mac, program: program)
+            title: alias ?? conversation ?? member?.name ?? title, face: emoji ?? member?.face, tint: member?.tint, mac: mac, program: program)
     }
 }
 
@@ -202,6 +209,10 @@ struct VigilChatHost {
         throw VigilChatError.notHere
     }
 
+    var activity: [MessageThreads.Activity] = []
+    var groupPanes: [String: String] = [:]
+    var createGroup: (@Sendable (String, [String]) async throws -> Chat)?
+
     /// Whether a folder on the Mac `root` can be shown here: revealed in
     /// this Mac's Finder, so only this Mac's own.
     func reveals(_ root: String) -> Bool {
@@ -230,20 +241,56 @@ struct VigilThreadList: View {
     @Binding var selection: String?
     @Binding var only: String?
 
+    @State private var activity = false
+    @State private var creating = false
+
     /// The agent a pane's end names, by Mac and pane.
     static func end(_ key: MessageThread.Key) -> String { "\(key.root)/\(key.pane)" }
 
     var body: some View {
-        let ends = Array(Set(list.flatMap { [$0.thread.key] + [$0.thread.with].compactMap { $0 } }.map(Self.end))).sorted()
-        let shown = only.map { one in list.filter { Self.end($0.thread.key) == one || $0.thread.with.map(Self.end) == one } } ?? list
+        let host = people.host
+        let ends = Set(list.flatMap { listed -> [String] in
+            let thread = listed.thread
+            if let id = thread.chat, let group = host.chat(thread.key.root, id) {
+                return group.members.map { thread.key.root + "/" + $0.pane }
+            }
+            return ([thread.key] + [thread.with].compactMap { $0 }).map(Self.end)
+        }).sorted()
+        let shown = list.filter { row in
+            guard let only else { return true }
+            let thread = row.thread
+            if let id = thread.chat, let group = host.chat(thread.key.root, id) {
+                return group.members.contains { thread.key.root + "/" + $0.pane == only }
+            }
+            return Self.end(thread.key) == only || thread.with.map(Self.end) == only
+        }
+        let pending = shown.filter { row in row.thread.chat.flatMap { host.chat(row.thread.key.root, $0)?.request } != nil }
         VStack(spacing: 0) {
-            InkConversations(
-                shown.map { $0.summary(title: people.title(of: $0.thread)) }, selection: $selection, people: people.all, me: Message.you,
-                picture: { people.picture($0) },
-                empty: {
-                    Text(only == nil ? "When an agent writes to another agent or to you, it shows here." : "Nothing with this agent yet.")
-                        .inkText(.detail)
-                })
+            HStack {
+                Picker("View", selection: $activity) {
+                    Text("Threads").tag(false)
+                    Text("Activity").tag(true)
+                }.pickerStyle(.segmented).labelsHidden()
+                if host.createGroup != nil {
+                    Button { creating = true } label: { Image(systemName: "person.2.badge.plus") }
+                        .accessibilityLabel("New Group").help("New Group")
+                }
+            }.padding(.inkGap)
+            if activity {
+                VigilActivityList(rows: host.activity, only: only, people: people)
+            } else {
+                ForEach(pending, id: \.thread.id) { row in
+                    Button { selection = row.thread.id } label: {
+                        Label("Review group · " + people.title(of: row.thread), systemImage: "hand.raised")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.padding(.inkGap)
+                }
+                InkConversations(
+                    shown.filter { row in !pending.contains { $0.thread.id == row.thread.id } }
+                        .map { $0.summary(title: people.title(of: $0.thread)) },
+                    selection: $selection, people: people.all, me: Message.you, picture: { people.picture($0) },
+                    empty: { if pending.isEmpty { Text("No conversations").inkText(.detail) } })
+            }
             if ends.count > 1 {
                 InkSelect(
                     "Show", selection: $only,
@@ -253,6 +300,169 @@ struct VigilThreadList: View {
                 .padding(.inkGap)
             }
         }
+        .sheet(isPresented: $creating) { VigilNewMessageGroup(host: host) }
+
+    }
+}
+
+/// Observation on this device only. The cursor advances when a person sees traffic.
+@MainActor final class VigilActivityWatches: ObservableObject {
+    static let shared = VigilActivityWatches()
+    private let defaults: UserDefaults
+    private let key = "vigil.messages.watchedPanes"
+    private var state: MessageThreads.Watches
+    private var traffic = MessageThreads.Traffic()
+    @Published private(set) var dots: Set<String> = []
+    @Published private(set) var watched: Set<String> = []
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        state = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(MessageThreads.Watches.self, from: $0) } ?? .init()
+        watched = Set(state.cursors.keys)
+    }
+
+    func update(_ traffic: MessageThreads.Traffic) {
+        self.traffic = traffic
+        let before = state
+        state.receive(traffic)
+        publish(since: before)
+    }
+
+    func toggle(_ pane: String) {
+        let before = state
+        state.toggle(pane, in: traffic)
+        publish(since: before)
+    }
+
+    func seen(_ pane: String, at time: Double, id: String) {
+        guard dots.contains(pane) else { return }
+        let before = state
+        state.see(pane, at: time, id: id)
+        publish(since: before)
+    }
+
+    func seen(_ thread: MessageThread) {
+        guard !dots.isEmpty else { return }
+        // A pane can speak in many chats. Only clear the latest posts this thread shows.
+        let visible = Set(thread.items.map { $0.root + "/" + ($0.record.message.post ?? $0.id) })
+        for pane in dots {
+            guard let newest = traffic.latest[pane] else { continue }
+            for id in newest.ids.intersection(visible) { seen(pane, at: newest.at, id: id) }
+        }
+    }
+
+    private func publish(since before: MessageThreads.Watches) {
+        if state != before {
+            defaults.set(try? JSONEncoder().encode(state), forKey: key)
+            let keys = Set(state.cursors.keys)
+            if watched != keys { watched = keys }
+        }
+        let changed = state.dots(in: traffic)
+        if changed != dots { dots = changed }
+    }
+}
+
+struct VigilTrafficDot: View {
+    let panes: [String]
+    @ObservedObject private var watches = VigilActivityWatches.shared
+    var body: some View {
+        if !watches.dots.isDisjoint(with: panes) {
+            Circle().fill(.secondary).frame(width: 5, height: 5)
+                .accessibilityLabel("New watched activity").help("New watched activity")
+        }
+    }
+}
+
+struct VigilWatchPaneActivity: View {
+    let pane: String
+    @ObservedObject private var watches = VigilActivityWatches.shared
+    var body: some View {
+        Button { watches.toggle(pane) } label: {
+            Label(!watches.watched.contains(pane) ? "Watch activity" : "Stop watching activity", systemImage: "eye")
+        }
+    }
+}
+
+private struct VigilActivityList: View {
+    let rows: [MessageThreads.Activity]
+    let only: String?
+    let people: VigilChatPeople
+    #if os(macOS)
+    @Environment(\.controlActiveState) private var active
+    private var front: Bool { active == .key }
+    #else
+    @Environment(\.scenePhase) private var phase
+    private var front: Bool { phase == .active }
+    #endif
+
+    var body: some View {
+        let shown = only.map { pane in rows.filter { $0.panes.contains(pane) } } ?? rows
+        List(shown) { row in
+            let sender = people.name(VigilChatPeople.key(row.from, root: row.senderRoot))
+            let to = row.recipients.map { people.title(ofEnd: $0) }.joined(separator: ", ")
+            let group = row.chat.flatMap { people.host.chat(row.root, $0)?.name }
+            VStack(alignment: .leading) {
+                HStack {
+                    Text(sender + " → " + (to.isEmpty ? (group ?? "You") : to)).lineLimit(2)
+                    Spacer()
+                    Text(Date(timeIntervalSince1970: row.sent), style: .time).font(.caption)
+                }
+                if let group, !to.isEmpty { Text(group).font(.caption).foregroundStyle(.secondary) }
+                Text(InkChat.line(of: row.words)).lineLimit(1).foregroundStyle(.secondary)
+            }
+            .contextMenu {
+                ForEach(row.panes.sorted(), id: \.self) { pane in
+                    Menu(people.title(ofEnd: pane)) { VigilWatchPaneActivity(pane: pane) }
+                }
+            }
+            .onAppear { mark(row) }
+            .onChange(of: front) { mark(row) }
+        }
+        .overlay { if shown.isEmpty { Text("No activity").foregroundStyle(.secondary) } }
+    }
+
+    private func mark(_ row: MessageThreads.Activity) {
+        guard front else { return }
+        for end in row.panes where only == nil || only == end {
+            VigilActivityWatches.shared.seen(end, at: row.arrived, id: row.id)
+        }
+    }
+}
+
+private struct VigilNewMessageGroup: View {
+    let host: VigilChatHost
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var selected: Set<String> = []
+    @State private var failure: String?
+    @State private var creating = false
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            Text("New Group").font(.headline)
+            TextField("Group name", text: $name)
+            List(host.groupPanes.keys.sorted { (host.groupPanes[$0] ?? "", $0) < (host.groupPanes[$1] ?? "", $1) }, id: \.self) { pane in
+                Toggle(host.groupPanes[pane] ?? pane, isOn: Binding(
+                    get: { selected.contains(pane) },
+                    set: { if $0 { selected.insert(pane) } else { selected.remove(pane) } }))
+            }
+            if let failure { Text(failure).foregroundStyle(.red) }
+            HStack {
+                Button("Cancel") { dismiss() }
+                Spacer()
+                Button("Create") {
+                    guard host.pressedByPerson(), let create = host.createGroup else {
+                        failure = "Press Create directly to make this group."
+                        return
+                    }
+                    creating = true
+                    Task {
+                        do { _ = try await create(name, selected.sorted()); dismiss() }
+                        catch { failure = String(describing: error); creating = false }
+                    }
+                }.disabled(creating || !Chat.validName(name) || !(2...32).contains(selected.count))
+            }
+        }.padding().frame(minWidth: 280, minHeight: 320)
     }
 }
 
@@ -461,10 +671,13 @@ struct VigilChatPeople {
 
     /// The sender's key among the people.
     static func key(of item: MessageThread.Item) -> String {
-        let from = item.record.message.from
+        key(item.record.message.from, root: item.senderRoot)
+    }
+
+    static func key(_ from: Message.Sender, root: String) -> String {
         switch from.kind {
         case .person: return Message.you
-        case .agent, .tool: return from.pane.map { key(root: item.senderRoot, pane: $0) } ?? "\(from.kind.rawValue):\(from.agent ?? "")"
+        case .agent, .tool: return from.pane.map { key(root: root, pane: $0) } ?? "\(from.kind.rawValue):\(from.agent ?? "")"
         case .watch, .feed: return "\(from.kind.rawValue):\(from.watch ?? "")"
         }
     }
@@ -492,16 +705,50 @@ struct VigilChatPeople {
 
 /// A record as Ink's message, in vigil's words.
 enum VigilThreadWords {
-    @MainActor static func messages(_ thread: MessageThread, people: VigilChatPeople) -> [InkChat.Message] {
-        thread.items.map { message($0, in: thread, people: people) }
+    /// Mailbox changes arrive as snapshots. Most append a row or change one
+    /// delivery state. Keep the previous rendering inputs for this conversation.
+    @MainActor final class Projection {
+        private var items: [MessageThread.Item] = []
+        private var rendered: [InkChat.Message] = []
+        private var people: [InkChat.Person] = []
+
+        func messages(_ thread: MessageThread?, people current: VigilChatPeople) -> [InkChat.Message] {
+            let next = thread?.items ?? []
+            let samePeople = people == current.all
+            var places: [MessageThread.Key: String] = [:]
+            if rendered.count > next.count { rendered.removeLast(rendered.count - next.count) }
+            for (index, item) in next.enumerated() {
+                let end = VigilThreadWords.otherEnd(of: item, from: thread?.key)
+                let place: String
+                if let known = places[end] {
+                    place = known
+                } else {
+                    place = current.host.name(end.root, end.pane).said
+                    places[end] = place
+                }
+                if index < rendered.count, items[index] == item, rendered[index].place == place,
+                   samePeople || item.record.reactions.isEmpty { continue }
+                let row = VigilThreadWords.message(item, place: place, people: current)
+                if index < rendered.count { rendered[index] = row } else { rendered.append(row) }
+            }
+            items = next
+            people = current.all
+            return rendered
+        }
     }
 
-    @MainActor static func message(_ item: MessageThread.Item, in thread: MessageThread, people: VigilChatPeople) -> InkChat.Message {
+    /// Where “go to” leads from this thread's pane. Conversations in the
+    /// same pane share a display name.
+    private static func otherEnd(of item: MessageThread.Item, from key: MessageThread.Key?) -> MessageThread.Key {
+        let message = item.record.message
+        if let pane = message.from.pane, item.senderRoot != key?.root || pane != key?.pane {
+            return .init(root: item.senderRoot, pane: pane, conversation: nil)
+        }
+        return .init(root: item.root, pane: message.to.pane, conversation: nil)
+    }
+
+    @MainActor private static func message(_ item: MessageThread.Item, place: String, people: VigilChatPeople) -> InkChat.Message {
         let record = item.record, message = record.message
-        // Where "go to" leads: the other end of the message from this thread's pane.
-        let elsewhere = message.from.pane.map { (item.senderRoot, $0) }
-            .flatMap { $0 == (thread.key.root, thread.key.pane) ? nil : $0 }
-        let place = people.host.name(elsewhere?.0 ?? item.root, elsewhere?.1 ?? message.to.pane).said
         // One bubble per message: its corrections are its edits (`MessageThreads`
         // folds them), so it says its newest words, stands as they stand, and
         // its "edited" opens the words before.
@@ -564,6 +811,7 @@ struct VigilThreadConversation: View {
     /// person (InkConversation's `focus`); nil, its newest.
     var focus: String? = nil
 
+    @State private var projection = VigilThreadWords.Projection()
     @State private var draft = ""
     @State private var replying: String?
     @State private var editing: String?
@@ -587,7 +835,7 @@ struct VigilThreadConversation: View {
     private var newestByStandingYes: String? { items.last { $0.record.byStandingYes }?.id }
 
     var body: some View {
-        let messages = thread.map { VigilThreadWords.messages($0, people: people) } ?? []
+        let messages = projection.messages(thread, people: people)
         // Each row finds its record by id once, never by a walk of the thread.
         let byID = Dictionary(items.map { ($0.id, $0) }) { first, _ in first }
         let revokable = newestByStandingYes
@@ -620,9 +868,17 @@ struct VigilThreadConversation: View {
         // Read is asked when what is unread changes, when the window comes to
         // the front, and when a hand moves over the thread: each an event,
         // and the hand itself is the host's seen rule.
-        .onChange(of: thread?.items.filter { $0.record.unread }.map(\.id), initial: true) { markRead() }
-        .onChange(of: front) { markRead() }
-        .onContinuousHover { _ in markRead() }
+        .onChange(of: thread?.unreadIDs, initial: true) { markRead() }
+        .onChange(of: thread?.items.last?.id, initial: true) {
+            if front, let thread { VigilActivityWatches.shared.seen(thread) }
+        }
+        .onChange(of: front) {
+            if front, let thread { VigilActivityWatches.shared.seen(thread) }
+            markRead()
+        }
+        #if os(macOS)
+        .onHover { if $0 { markRead() } }
+        #endif
         // A group an agent made waits for the person's one yes, here.
         if let id = MessageThread(key: key, items: []).chat, let chat = host.chat(key.root, id), !chat.allowed {
             VigilChatRequest(chat: chat, answered: answered[chat.id]) { answer($0, on: chat.id) }

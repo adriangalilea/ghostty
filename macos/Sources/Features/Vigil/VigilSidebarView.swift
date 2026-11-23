@@ -1182,6 +1182,9 @@ struct VigilSidebarView: View {
                 // Its thread: what agents and you said to its agent and what
                 // it said back, beside it (another Mac's pane too). Where an
                 // agent holds a conversation, or messages already wait.
+                if let end = messages.activityKey(paneId: pane.paneId, id: pane.id) {
+                    VigilWatchPaneActivity(pane: end)
+                }
                 if pane.conversation != nil || messages.pending(paneId: pane.paneId, id: pane.id) != nil {
                     Button {
                         VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, in: model.hostController)
@@ -1393,9 +1396,12 @@ struct VigilSidebarView: View {
             }
             // Messages for it that wait on its agent, or that you have not
             // read: a press opens its thread in the bar's Messages.
+            if let end = messages.activityKey(paneId: pane.paneId, id: pane.id) {
+                VigilTrafficDot(panes: [end])
+            }
             if let pending = messages.pending(paneId: pane.paneId, id: pane.id) {
                 MessagesMark(pending: [pending], sizes: marks) {
-                    VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, in: model.hostController)
+                    VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, unread: true, in: model.hostController)
                 }
             }
             // Watches whose verdict will reach it, in the care tone when
@@ -1459,6 +1465,7 @@ struct VigilSidebarView: View {
 
         WaitingMark(
             messages: panes.reduce(into: Set<String>()) { $0.formUnion(messages.awaiting(paneId: $1.paneId, id: $1.id)) }, sizes: marks)
+        VigilTrafficDot(panes: panes.compactMap { messages.activityKey(paneId: $0.paneId, id: $0.id) })
         MessagesMark(pending: panes.compactMap { messages.pending(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         WatchMark(watches: panes.flatMap { watches.watches(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         PaneProblemsMark(items: panes.flatMap { problemItems($0, folded: true) }, sizes: marks)

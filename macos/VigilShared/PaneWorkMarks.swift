@@ -345,15 +345,14 @@ struct MessagesMark: View {
     var press: (() -> Void)?
 
     private var unread: Int { pending.reduce(0) { $0 + $1.unread } }
-    private var waiting: Int { pending.reduce(0) { $0 + $1.waiting } }
 
     var body: some View {
-        if unread + waiting > 0 {
+        if unread > 0 {
             let mark = HStack(spacing: 1) {
                 Image(systemName: "envelope.fill").font(sizes.symbol)
-                Text("\(unread > 0 ? unread : waiting)").font(sizes.count)
+                Text("\(unread)").font(sizes.count)
             }
-            .foregroundStyle(unread > 0 ? AnyShapeStyle(.blue) : AnyShapeStyle(.secondary))
+            .foregroundStyle(.blue)
             .fixedSize()
             .help(said)
             .accessibilityElement(children: .ignore)
@@ -367,10 +366,8 @@ struct MessagesMark: View {
     }
 
     private var said: String {
-        var lines: [String] = []
-        if unread > 0 { lines.append(unread == 1 ? "1 message you have not read" : "\(unread) messages you have not read") }
-        if waiting > 0 { lines.append(waiting == 1 ? "1 of yours waits to be handed to its agent" : "\(waiting) of yours wait to be handed to its agent") }
-        return lines.joined(separator: "\n") + (press == nil ? "" : "\nPress to open its thread.")
+        (unread == 1 ? "1 unread message for you" : "\(unread) unread messages for you")
+            + (press == nil ? "" : "\nPress to open its thread.")
     }
 }
 
