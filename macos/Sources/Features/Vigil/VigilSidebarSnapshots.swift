@@ -43,13 +43,19 @@ final class VigilSidebarSnapshots {
     }
 
     private func start() {
+        let began = ContinuousClock.now
         let inputs = VigilWorkspaces.shared.sidebarInputs()
+        let read = ContinuousClock.now - began
+        if read > .milliseconds(2) {
+            sidebarLog.info("snapshot read slow", ["took": read])
+        }
         captures += 1
         let capture = captures
         building = true
         let builder = builder
         let last = built.rows
         queue.async {
+            let began = ContinuousClock.now
             let rows = builder.build(inputs)
             let changed = rows != last
             let writers = changed ? ConversationCards.writerProblems(rows.flatMap { row in
@@ -57,6 +63,10 @@ final class VigilSidebarSnapshots {
                     pane.liveConversation.map { ($0, row.host?.name ?? "this Mac", pane.paneId ?? VigilRemote.split(pane.id)?.name ?? pane.id) }
                 }
             }) : [:]
+            let took = ContinuousClock.now - began
+            if took > .milliseconds(100) {
+                sidebarLog.info("snapshot built slow", ["took": took])
+            }
             DispatchQueue.main.async { [self] in
                 finish(capture: capture, rows: changed ? rows : nil, writers: writers)
             }

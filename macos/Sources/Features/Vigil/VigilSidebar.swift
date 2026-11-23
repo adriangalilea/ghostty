@@ -358,6 +358,7 @@ final class VigilSidebarModel: ObservableObject {
             return
         }
         lastRefresh = now
+        let began = ContinuousClock.now
         // Focus re-derives under the same gate: the INSTANT focus channel
         // is refresh(immediate:) from focusDidChange/didBecomeKey; the
         // throttled path must not re-walk windows 20×/s under a rename
@@ -387,6 +388,10 @@ final class VigilSidebarModel: ObservableObject {
         if freshBurials != burials { burials = freshBurials }
         let hint = VigilWorkspaces.shared.nextAskHint()
         if hint != followHint { followHint = hint }
+        let took = ContinuousClock.now - began
+        if took > .milliseconds(2) {
+            sidebarLog.info("refresh slow", ["took": took, "reason": reason])
+        }
     }
 
     /// Built rows land (`VigilSidebarSnapshots`): this bar shows them,
