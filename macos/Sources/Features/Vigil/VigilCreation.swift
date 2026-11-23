@@ -52,25 +52,25 @@ final class VigilCreation: ObservableObject, CreationModel {
         return counts.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
     }
 
+    /// The sheet's creation, the way a Mac header's New Workspace goes
+    /// (`VigilWorkspaces.create(_:on:from:)`): it takes the window the sheet
+    /// was opened over once its Mac lists it, if the person is still there.
+    /// The sheet stays up, busy, until then; what keeps it from opening is
+    /// said in the sheet.
     func create(_ plan: CreationPlan, onMac id: String, done: @escaping @MainActor () -> Void) {
         let request = plan.request
+        let origin = origin ?? VigilWorkspaces.CreationOrigin.now(VigilWorkspaces.shared)
         creationBusy = true
         Task { @MainActor in
             defer { creationBusy = false }
-            let reply: VigilSessionControl.Reply
-            if id == Self.here {
-                reply = await VigilSessionControl.transact(request, origin: .gesture)
-            } else {
-                do { reply = try await VigilRemote.shared.command(id, request: request) } catch {
-                    creationProblem = "\(VigilRemote.shared.host(id)?.name ?? "That Mac") did not answer (\(error)). It may have been made: look at its rows before trying again."
-                    return
-                }
-            }
-            guard reply.ok else { creationProblem = reply.message; return }
-            sidebarLog.info("created from the sheet", ["mac": id.isEmpty ? "here" : id, "session": reply.session ?? "", "pane": reply.pane ?? ""])
-            done()
+            let created = await VigilWorkspaces.shared.create(
+                request, on: id == Self.here ? nil : id, from: origin, opening: done)
+            if case .problem(let problem) = created { creationProblem = problem }
         }
     }
+
+    /// Where the sheet was opened from: a creation lands there.
+    private var origin: VigilWorkspaces.CreationOrigin?
 
     func conversations(onMac id: String) async throws -> [ConversationRow] {
         let ask = ConversationAsk(op: .list, filter: .init(limit: 200))
@@ -112,6 +112,7 @@ final class VigilCreation: ObservableObject, CreationModel {
     func present(on mac: String? = nil, folder: String? = nil) {
         dismiss()
         creationProblem = nil
+        origin = VigilWorkspaces.CreationOrigin.now(VigilWorkspaces.shared)
         let panel = NSPanel(contentRect: .zero, styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
