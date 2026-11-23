@@ -353,6 +353,14 @@ struct TreeNodeView: View {
     @ObservedObject private var watches = VigilPhoneWatches.shared.marks
     private var foldable: Bool { !node.children.isEmpty }
 
+    /// What the pane's Resume items are drawn from, nil where it offers none.
+    private func resumeFacts(_ node: VigilPhone.Node) -> PaneResumeFacts? {
+        guard let pane = node.pane, let glance = node.glance, let menu = glance.resumeMenu, let ref = glance.reference else { return nil }
+        return PaneResumeFacts(menu: menu, agent: ref.agent, conversation: ref.id, account: glance.account,
+                               block: glance.accountBlock, restart: glance.restart,
+                               accounts: .init(mac: pane.host.id, agent: ref.agent))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             row
@@ -448,10 +456,19 @@ struct TreeNodeView: View {
                 content.onTapGesture { if foldable { toggle() } }
             }
         }
-        .paneResumeFeedback(row: node.id, receipt: $resumeReceipt)
+        .paneResumeFeedback(row: node.id, receipt: $resumeReceipt,
+                            live: node.glance.map { PaneResumeLive(menu: $0.resumeMenu, restart: $0.restart, agent: $0.agent) })
+        // A row that offers a resume reads its Mac's accounts as it comes
+        // on screen (unless read in the last half minute): its menu opens on them.
+        .onAppear {
+            if let pane = node.pane, let facts = resumeFacts(node) {
+                let key = facts.accounts
+                VigilAccountFacts.shared.want(key) { try await model.accounts(pane, agent: key.agent) }
+            }
+        }
         .contextMenu {
-            if let pane = node.pane, let glance = node.glance, let menu = glance.resumeMenu, let ref = glance.reference {
-                PaneResumeItems(menu: menu, conversation: ref.id, account: glance.account, title: node.title, row: node.id, receipt: $resumeReceipt) {
+            if let pane = node.pane, let facts = resumeFacts(node) {
+                PaneResumeItems(facts: facts, title: node.title, row: node.id, receipt: $resumeReceipt) {
                     try await model.restart(pane, request: Restart($0))
                 }
             }

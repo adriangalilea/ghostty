@@ -641,6 +641,7 @@ final class VigilRemote: ObservableObject {
                             conversationName: truth?.meaning?.title,
                             resumeMenu: truth?.meaning?.resumeMenu,
                             account: truth?.meaning?.account,
+                            accountBlock: truth?.meaning?.accountBlock,
                             liveConversation: !host.away && host.error == nil && truth?.alive == true ? truth?.meaning?.reference : nil,
                             forkedFrom: truth?.meaning?.forkedFrom,
                             member: truth?.meaning?.member,

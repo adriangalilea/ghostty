@@ -236,6 +236,9 @@ struct VigilSidebarView: View {
                     .onChange(of: model.selection) { _, selection in
                         if let selection { proxy.scrollTo(selection) }
                     }
+                    .onChange(of: hovered) { _, row in
+                        if let row { wantAccounts(row: row) }
+                    }
                     .onChange(of: activeLeafId) { _, id in
                         // The viewport moved (auto-follow, ⌘⇧J, a click):
                         // the lit chain must be on screen, or the
@@ -917,7 +920,8 @@ struct VigilSidebarView: View {
         .background(reportHit(id: tab.id, kind: .tab(session: session, anchor: tab.anchor)))
         .contentShape(Rectangle())
         .id(tab.id)
-        .paneResumeFeedback(row: tab.id, receipt: $resumeReceipt)
+        .paneResumeFeedback(row: tab.id, receipt: $resumeReceipt,
+                            live: tab.panes.count == 1 ? tab.panes.first.flatMap(resumeLive) : nil)
         .onDrag {
             if let anchor = tab.anchor {
                 model.beginDrag(.tab(session: session, anchor: anchor))
@@ -1139,7 +1143,7 @@ struct VigilSidebarView: View {
             kind: .pane(session: session, tabAnchor: tab.anchor, paneId: pane.navigationId)))
         .contentShape(Rectangle())
         .id(id)
-        .paneResumeFeedback(row: id, receipt: $resumeReceipt)
+        .paneResumeFeedback(row: id, receipt: $resumeReceipt, live: resumeLive(pane))
         .onDrag {
             if let paneId = pane.paneId {
                 model.beginDrag(.pane(session: session, paneId: paneId, isDock: pane.isDock))
@@ -1323,13 +1327,43 @@ struct VigilSidebarView: View {
         }
     }
 
+    /// What a pane's Resume items are drawn from, nil where it offers none.
+    private func resumeFacts(_ pane: VigilWorkspaces.SidebarPane, home: VigilWorkspaces.RowHome) -> PaneResumeFacts? {
+        guard let menu = pane.resumeMenu, let ref = pane.liveConversation else { return nil }
+        return PaneResumeFacts(menu: menu, agent: ref.agent, conversation: ref.id, account: pane.account,
+                               block: pane.accountBlock, restart: pane.restart,
+                               accounts: .init(mac: home.device, agent: ref.agent))
+    }
+
     @ViewBuilder private func resumeItems(_ pane: VigilWorkspaces.SidebarPane, home: VigilWorkspaces.RowHome, row: String) -> some View {
-        if let menu = pane.resumeMenu, let ref = pane.liveConversation {
+        if let facts = resumeFacts(pane, home: home) {
             let there = pane.paneId ?? home.there(pane.id)
-            PaneResumeItems(menu: menu, conversation: ref.id, account: pane.account, title: pane.title, row: row, receipt: $resumeReceipt) {
+            PaneResumeItems(facts: facts, title: pane.title, row: row, receipt: $resumeReceipt) {
                 try await VigilWorkspaces.shared.restartAgent(pane: there, device: home.device, request: Restart($0))
             }
             Divider()
+        }
+    }
+
+    /// The pane's facts its resume notice follows once the menu closed.
+    private func resumeLive(_ pane: VigilWorkspaces.SidebarPane) -> PaneResumeLive? {
+        guard let agent = pane.liveConversation?.agent ?? pane.conversationRef?.agent else { return nil }
+        return PaneResumeLive(menu: pane.resumeMenu, restart: pane.restart, agent: agent)
+    }
+
+    /// A row that offers a resume came under the pointer: its Mac's
+    /// accounts are read now (unless read in the last half minute), so its
+    /// menu opens on them.
+    private func wantAccounts(row: String) {
+        for workspace in model.rows {
+            for tab in workspace.tabs {
+                let pane = row == tab.id && tab.panes.count == 1 ? tab.panes.first : tab.panes.first { "\(tab.id)#\($0.id)" == row }
+                guard let pane else { continue }
+                guard let facts = resumeFacts(pane, home: VigilWorkspaces.RowHome(row: workspace.id)) else { return }
+                let key = facts.accounts
+                VigilAccountFacts.shared.want(key) { try await VigilWorkspaces.accounts(agent: key.agent, device: key.mac) }
+                return
+            }
         }
     }
 
