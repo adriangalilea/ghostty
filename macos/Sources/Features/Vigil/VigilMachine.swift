@@ -14,8 +14,9 @@ enum VigilMachine {
     /// What this app holds of another Mac's facts.
     enum Heard: Equatable, Sendable {
         case snapshot(MachineState.Snapshot)
-        /// Its app stopped reading its facts and said so: nothing it read
-        /// before is drawn, and its menu says since when.
+        /// Its facts are not being read, said by its app (its feed ended) or
+        /// by its hub (its app is not running): nothing read before is
+        /// drawn, and its menu says since when.
         case stopped(Stopped)
         /// Its last document is none this vigil reads (the two Macs run
         /// vigils of different releases): nothing of it is drawn, and nothing
@@ -27,25 +28,17 @@ enum VigilMachine {
         }
     }
 
-    /// The document a Mac's app writes in place of a snapshot when its facts
-    /// stopped being read: `{"stopped":{"at":…,"why":…}}`, a key no snapshot
-    /// has. It stands until that app's next start writes a snapshot again.
-    struct Stopped: Codable, Equatable, Sendable {
-        /// When the reading stopped.
-        var at: Date
-        /// Why, in the feed's own words.
-        var why: String
+    /// The document in place of a snapshot while a Mac's facts are not read
+    /// (VigilWire's `MachineStopped`, `{"stopped":{"at":…,"why":…}}`): its
+    /// app writes it when its feed ends, and its hub sends it while that app
+    /// is not running. It stands until the app's next snapshot.
+    typealias Stopped = MachineStopped
 
-        /// "Facts not read since 16:40", with the day when it is not today.
-        var words: String {
-            "Facts not read since "
-                + at.formatted(date: Calendar.current.isDateInToday(at) ? .omitted : .abbreviated, time: .shortened)
-        }
-    }
-
-    /// A stopped reading's place in the document, beside nothing else.
-    private struct Ended: Codable {
-        var stopped: Stopped
+    /// "Facts not read since 16:40", with the day when it is not today.
+    nonisolated static func words(_ stopped: Stopped) -> String {
+        "Facts not read since "
+            + stopped.at.formatted(
+                date: Calendar.current.isDateInToday(stopped.at) ? .omitted : .abbreviated, time: .shortened)
     }
 
     /// What a Mac's menu says when its facts are `unreadable`.
@@ -75,7 +68,7 @@ enum VigilMachine {
 
     /// The document that says the reading stopped.
     nonisolated static func document(_ stopped: Stopped) throws -> Data {
-        try encoded(Ended(stopped: stopped))
+        try stopped.document()
     }
 
     private nonisolated static func encoded(_ value: some Encodable) throws -> Data {
@@ -88,9 +81,8 @@ enum VigilMachine {
     /// reading stopped. Anything else throws, which a reader holds as
     /// `unreadable`.
     nonisolated static func read(_ document: Data) throws -> Heard {
-        let decoder = JSONDecoder()
-        if let ended = try? decoder.decode(Ended.self, from: document) { return .stopped(ended.stopped) }
-        return .snapshot(try decoder.decode(MachineState.Snapshot.self, from: document))
+        if let stopped = Stopped.read(document) { return .stopped(stopped) }
+        return .snapshot(try JSONDecoder().decode(MachineState.Snapshot.self, from: document))
     }
 
     /// For the app's life, from its first window's start. The feed is the
