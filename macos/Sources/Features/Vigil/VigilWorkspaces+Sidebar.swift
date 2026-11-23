@@ -116,6 +116,8 @@ extension VigilWorkspaces {
         var conversationName: String?
         var resumeMenu: PaneGlance.ResumeMenu?
         var account: String?
+        /// Its agent's account cannot run a turn (its glance).
+        var accountBlock: AccountBlock?
         var liveConversation: ConversationRef?
         /// The conversation its own was forked from, by id (its glance).
         var forkedFrom: String?
@@ -302,6 +304,7 @@ extension VigilWorkspaces {
                 conversationName: meaning?.title,
                 resumeMenu: meaning?.resumeMenu,
                 account: meaning?.account,
+                accountBlock: meaning?.accountBlock,
                 liveConversation: facts.alive ? meaning?.reference : nil,
                 forkedFrom: meaning?.forkedFrom,
                 member: meaning?.member,

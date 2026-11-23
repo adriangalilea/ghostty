@@ -11,4 +11,14 @@ extension VigilWorkspaces {
             return try JSONDecoder().decode(Restart.Answer.self, from: data)
         }.value
     }
+
+    /// The accounts of the pane's Mac as its router sees them, as the hub
+    /// there answers (`Open.accounts`): an `AgentAccounts` document.
+    nonisolated static func accounts(agent: String, device: String?) async throws -> Data {
+        try await Task.detached {
+            let client = Local.Client(socket: VigilPaths.hub)
+            let open = Open.accounts(agent)
+            return try device.map { try client.call(device: $0, open) } ?? client.here(open)
+        }.value
+    }
 }

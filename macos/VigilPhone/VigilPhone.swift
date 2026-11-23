@@ -967,6 +967,12 @@ final class VigilPhone: ObservableObject {
         return try JSONDecoder().decode(Restart.Answer.self, from: data)
     }
 
+    /// The accounts of the pane's Mac as its router reads them
+    /// (`Open.accounts`), for its Resume as menu.
+    func accounts(_ ref: PaneRef, agent: String) async throws -> Data {
+        try await VigilLink.call(linked(), device: ref.host.id, .accounts(agent))
+    }
+
     func settle(_ choice: ConflictSettle, on device: String) async throws -> ConflictSettle.Outcome {
         let data = try await VigilLink.call(linked(), device: device, .settleConflict(choice))
         return try JSONDecoder().decode(ConflictSettle.Outcome.self, from: data)
