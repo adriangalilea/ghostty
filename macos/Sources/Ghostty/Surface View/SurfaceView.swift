@@ -178,8 +178,8 @@ extension Ghostty {
                     SurfaceErrorView()
                 }
 
-                // vigil: an agent pane shows its conversation over its
-                // terminal, or the toggle back to it (VigilPaneConversation).
+                // vigil: an agent pane shows a toggle to its conversation,
+                // or the conversation over its terminal (VigilPaneConversation).
                 VigilPaneFace(surfaceView: surfaceView, ground: ghostty.config.backgroundColor,
                               face: face, shown: row.flatMap { faces.agents[$0]?.shown })
 

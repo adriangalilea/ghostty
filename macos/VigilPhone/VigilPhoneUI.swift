@@ -12,9 +12,9 @@ import VigilWire
 
 /// The phone's screens: ONE home tree (Macs → workspaces → tabs → panes,
 /// collapsible, the sidebar's rollup dots on every folded row) and a pane,
-/// full screen: an agent pane opens on its conversation
-/// (`VigilConversation.swift`), any other on its terminal, one toggle
-/// between them. The terminal IS a Ghostty surface (Metal, the Mac's
+/// full screen: a pane opens on its terminal, an agent pane on its
+/// conversation (`VigilConversation.swift`) once the person turned it
+/// there, one toggle between them. The terminal IS a Ghostty surface (Metal, the Mac's
 /// renderer) attached over tether (`vigil/1`); the model owns every
 /// surface, the screens borrow.
 ///
@@ -1414,8 +1414,8 @@ struct PaneScreen: View {
     @State private var fitZoom: CGFloat = 1
     @State private var screenVisible = false
     @State private var entryGeneration = UUID()
-    /// What the screen shows: an agent pane opens on its conversation, any
-    /// other on its terminal; the toggle switches.
+    /// What the screen shows: a pane opens on its terminal, an agent pane on
+    /// its conversation once the person turned it there; the toggle switches.
     @State private var mode: Mode
     /// The current pane's feed, followed while its conversation can show.
     @State private var conversation: Conversation?
@@ -1454,9 +1454,11 @@ struct PaneScreen: View {
         _mode = State(initialValue: VigilPhone.shared.typeInto == ref ? .terminal : Self.opens(ref))
     }
 
-    /// How a pane opens: its conversation when an agent runs in it.
+    /// How a pane opens: its terminal, or its conversation when an agent
+    /// runs in it and the person turned this pane to it.
     private static func opens(_ ref: PaneRef) -> Mode {
-        VigilPhone.shared.node(for: ref)?.agent == true ? .conversation : .terminal
+        let phone = VigilPhone.shared
+        return phone.node(for: ref)?.agent == true && phone.showsConversation(ref) ? .conversation : .terminal
     }
 
     private var node: VigilPhone.Node? { model.node(for: current) }
@@ -1710,6 +1712,7 @@ struct PaneScreen: View {
     private func setMode(_ next: Mode) {
         guard next != mode else { return }
         mode = next
+        if next == .conversation || next == .terminal { model.showConversation(next == .conversation, current) }
         model.receipts.info("pane", "\(next)", ["pane": current.pane])
         switch next {
         case .terminal:

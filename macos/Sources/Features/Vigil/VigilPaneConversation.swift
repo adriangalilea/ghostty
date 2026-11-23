@@ -9,7 +9,7 @@ let conversationLog = Log.log.scope("conversation")
 
 /// An agent pane on the Mac shows its conversation or its terminal, as the
 /// phone's pane screen does (`VigilShared/VigilConversation.swift`, the one
-/// implementation of both): the conversation by default, the terminal one
+/// implementation of both): the terminal by default, the conversation one
 /// press away, and the person's choice kept per pane across launches.
 /// Which panes run an agent is their facts' word (the glance, while it
 /// speaks for the pane's program): a pane whose agent exits shows its
@@ -31,11 +31,11 @@ final class VigilPaneFaces: ObservableObject {
     /// Every pane a view of this app shows that runs an agent, by row id
     /// (this Mac's daemon id, `<tether root>/<id>` for another Mac's).
     @Published private(set) var agents: [String: Agent] = [:]
-    /// The panes the person turned to their terminal, by row id; every
-    /// other agent pane shows its conversation. Kept in the app's defaults:
+    /// The panes the person turned to their conversation, by row id; every
+    /// other agent pane shows its terminal. Kept in the app's defaults:
     /// the choice of a pane outlives a launch, and dies with the pane.
-    @Published private(set) var terminals: Set<String>
-    private static let terminalsKey = "vigil.paneFaces.terminal"
+    @Published private(set) var conversationsShown: Set<String>
+    private static let conversationsKey = "vigil.paneFaces.conversation"
 
     /// The conversations followed, one per pane however many views show it
     /// (a mirror in another window shares it), with how many show it.
@@ -49,12 +49,13 @@ final class VigilPaneFaces: ObservableObject {
         // A pane of this Mac no workspace or burial lists any more is gone
         // for good (ids are never reused): its choice goes with it. Another
         // Mac's are kept, that Mac's registry is not here to ask.
-        let kept = Set(UserDefaults.standard.stringArray(forKey: Self.terminalsKey) ?? [])
+        UserDefaults.standard.removeObject(forKey: "vigil.paneFaces.terminal") // PURGE(every Mac launched a build with the terminal as the default)
+        let kept = Set(UserDefaults.standard.stringArray(forKey: Self.conversationsKey) ?? [])
         let workspaces = VigilWorkspaces.shared
         let listed = Set(workspaces.workspaces.values.flatMap { $0.tabs.flatMap(\.paneIds) })
             .union(workspaces.graveyard.values.flatMap { $0.tabs.flatMap(\.paneIds) })
-        terminals = kept.filter { VigilRemote.split($0) != nil || listed.contains($0) }
-        if terminals != kept { UserDefaults.standard.set(Array(terminals).sorted(), forKey: Self.terminalsKey) }
+        conversationsShown = kept.filter { VigilRemote.split($0) != nil || listed.contains($0) }
+        if conversationsShown != kept { UserDefaults.standard.set(Array(conversationsShown).sorted(), forKey: Self.conversationsKey) }
         observer = NotificationCenter.default.addObserver(forName: VigilWorkspaces.stateDidChange, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { VigilPaneFaces.shared.refreshSoon() }
         }
@@ -64,16 +65,16 @@ final class VigilPaneFaces: ObservableObject {
     /// The face `row` shows: nil for a pane that runs no agent.
     func face(of row: String) -> Face? {
         guard agents[row] != nil else { return nil }
-        return terminals.contains(row) ? .terminal : .conversation
+        return conversationsShown.contains(row) ? .conversation : .terminal
     }
 
     func show(_ face: Face, in view: Ghostty.SurfaceView) {
         guard let row = Self.row(of: view) else { return }
-        let next = face == .terminal ? terminals.union([row]) : terminals.subtracting([row])
-        guard next != terminals else { return }
+        let next = face == .conversation ? conversationsShown.union([row]) : conversationsShown.subtracting([row])
+        guard next != conversationsShown else { return }
         focusAfterSwitch = view
-        terminals = next
-        UserDefaults.standard.set(Array(next).sorted(), forKey: Self.terminalsKey)
+        conversationsShown = next
+        UserDefaults.standard.set(Array(next).sorted(), forKey: Self.conversationsKey)
         conversationLog.info("face", ["pane": row, "face": face.rawValue])
     }
 
@@ -277,7 +278,7 @@ enum VigilPaneConversation {
 }
 
 /// What a pane's view draws over its terminal for an agent pane: the
-/// conversation, or the toggle back to it. Placed by the surface's own
+/// conversation, or the toggle to it. Placed by the surface's own
 /// wrapper (one line there), on every view of a pane, mirrors included.
 struct VigilPaneFace: View {
     @ObservedObject var surfaceView: Ghostty.SurfaceView
