@@ -123,7 +123,11 @@ struct VigilListedThread: Equatable, Sendable {
             }
         }
         self.speakers = speakers
-        self.people = people
+        // A group's picture is its members' faces (the person is never one),
+        // said or silent: an empty group's row has a face too.
+        self.people = group.map { group in
+            group.members.prefix(3).map { VigilChatPeople.key(root: thread.key.root, pane: $0.pane) }
+        } ?? people
         let last = thread.items.last
         from = last.map(VigilChatPeople.key(of:))
         // A group with nothing said yet says how it stands: active, since it
@@ -305,7 +309,8 @@ struct VigilThreadList: View {
                 // what it is, who proposed it with whom, Refuse and Allow.
                 ForEach(pending, id: \.thread.id) { row in
                     if let group = row.group {
-                        VigilGroupAsk(group: group, root: row.thread.key.root, title: people.title(of: row.thread), host: host) {
+                        VigilGroupAsk(group: group, root: row.thread.key.root, title: people.title(of: row.thread), faces: row.people,
+                                      people: people) {
                             selection = row.thread.id
                         }
                     }
@@ -338,16 +343,29 @@ struct VigilGroupAsk: View {
     let group: Chat
     let root: String
     let title: String
-    let host: VigilChatHost
+    /// Its members' keys among `people`, as the list's rows draw them.
+    let faces: [String]
+    let people: VigilChatPeople
     let open: () -> Void
     @State private var answered: String?
+    private var host: VigilChatHost { people.host }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Button(action: open) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.headline).lineLimit(1)
-                    Text(proposal).inkText(.detail).lineLimit(2)
+                HStack(alignment: .center, spacing: 8) {
+                    // Its members' faces laid over one another, two at most, as a row's are.
+                    HStack(spacing: -12) {
+                        ForEach(faces.prefix(2), id: \.self) { key in
+                            if let person = people.all.first(where: { $0.id == key }) {
+                                InkChat.Face(person) { people.picture(person) }.frame(width: 30, height: 30)
+                            }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title).font(.headline).lineLimit(1)
+                        Text(proposal).inkText(.detail).lineLimit(2)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
@@ -683,14 +701,21 @@ struct VigilChatPeople {
     }
 
     @MainActor init(list: [VigilListedThread], host: VigilChatHost) {
-        self.init(speakers: list.map { ($0.thread.key, $0.speakers) }, host: host)
+        self.init(speakers: list.map { ($0.thread.key, $0.speakers) }, host: host,
+                  members: list.flatMap { row in (row.group?.members ?? []).map { (row.thread.key.root, $0) } })
     }
 
-    @MainActor private init(speakers: [(MessageThread.Key, [MessageThread.Item])], host: VigilChatHost) {
+    @MainActor private init(speakers: [(MessageThread.Key, [MessageThread.Item])], host: VigilChatHost,
+                            members groups: [(root: String, member: Chat.Member)] = []) {
         self.host = host
         var members: [String: VigilChatMember] = [
             Message.you: VigilChatMember(key: Message.you, name: "You", kind: .person)
         ]
+        // Every group's members, said or silent: a group's row draws their faces.
+        for (root, member) in groups {
+            let key = Self.key(root: root, pane: member.pane)
+            if members[key] == nil { members[key] = .pane(key, host.name(root, member.pane), kind: .agent, program: member.agent) }
+        }
         for (thread, items) in speakers {
             let own = Self.key(root: thread.root, pane: thread.pane)
             for item in items {
