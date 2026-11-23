@@ -276,10 +276,7 @@ class VigilWorkspaces {
         if let remote = VigilRemote.split(pane) {
             return VigilRemote.shared.host(remote.device)?.directory?.panes[remote.name]?.seen.map(Date.init(timeIntervalSince1970:))
         }
-        guard let state = facts.files["state/\(pane).state"],
-              facts.files["state/\(pane).seen"]?.text.trimmingCharacters(in: .whitespacesAndNewlines) == state.revision
-        else { return nil }
-        return state.since
+        return Self.localAck(facts, pane)
     }
 
     func markSeen(_ pane: String, revision: String? = nil) {

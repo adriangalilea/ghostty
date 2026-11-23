@@ -127,16 +127,6 @@ extension VigilWorkspaces {
         publishMoveTickets()
     }
 
-    /// What the row of workspace `name` (of `home`; nil: this Mac) says of a
-    /// move of it being decided or done, from every destination's tickets:
-    /// this Mac's own, and each other Mac's as it publishes them.
-    func moveNote(home: String?, workspace name: String) -> String? {
-        guard let source = home ?? moveRoot else { return nil }
-        let destinations = [(name: Self.thisMac, tickets: Array(moveTickets.values))]
-            + VigilRemote.shared.hosts.map { (name: $0.name, tickets: $0.moves) }
-        return Move.note(workspace: name, source: source, destinations: destinations)
-    }
-
     /// This Mac as a card and a ticket name it.
     static var thisMac: String { Host.current().localizedName ?? "this Mac" }
 

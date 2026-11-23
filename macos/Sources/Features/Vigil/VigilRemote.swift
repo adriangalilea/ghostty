@@ -63,7 +63,7 @@ final class VigilRemote: ObservableObject {
 
     /// Session ids of remote sessions are namespaced by the Mac so they can
     /// never collide with local ones: `<device>/<name>` (a tether root is hex).
-    static func compositeId(_ device: String, _ name: String) -> String { "\(device)/\(name)" }
+    nonisolated static func compositeId(_ device: String, _ name: String) -> String { "\(device)/\(name)" }
 
     nonisolated static func split(_ composite: String) -> (device: String, name: String)? {
         guard let slash = composite.firstIndex(of: "/") else { return nil }
@@ -593,89 +593,29 @@ final class VigilRemote: ObservableObject {
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
-    /// The sidebar's rows for every remote Mac, built like the local
-    /// snapshot: session → tabs → panes, program and state by the rules
-    /// every row follows (`Program`, `AgentState`). Everything captured
-    /// (no local views exist), row ids namespaced by the Mac.
-    func sidebarRows() -> [VigilWorkspaces.SidebarWorkspaceRow] {
-        var rows: [VigilWorkspaces.SidebarWorkspaceRow] = []
-        for host in hosts {
-            let hostLabel = host.directory?.host ?? host.name
+    /// Every remote Mac as the sidebar's rows need it (`SidebarBuilder`
+    /// builds them): its directory and its header, worked out here.
+    func sidebarInputs() -> [SidebarInputs.Remote] {
+        hosts.map { host in
             // Away, the header says since when; the reason is the log's (and
             // the row's tooltip would repeat "no path to …" on every row).
             let header = VigilWorkspaces.SidebarWorkspaceRow.HostHeader(
-                name: hostLabel,
+                name: host.directory?.host ?? host.name,
                 standing: host.away ? host.received.map(Self.awaySince) ?? host.error : host.error,
                 renewalURL: host.withheld ? VigilWire.renewalLink(refusal: host.error, root: host.device) : nil,
                 machine: host.machine)
-            guard let dir = host.directory else {
-                rows.append(.init(
-                    id: Self.compositeId(host.device, ""), emoji: nil, label: "…",
-                    stateTag: "remote", attention: .none, states: [], tabs: [], host: header))
-                continue
-            }
-            // An away Mac's workspaces by what last mattered; a live one's in
-            // its own order.
-            for session in host.away ? dir.byLastActivity : dir.ordered {
-                let composite = Self.compositeId(host.device, session.name)
-                var tabs: [VigilWorkspaces.SidebarTab] = []
-                for (index, tab) in (session.tabs ?? []).enumerated() {
-                    let all = tab.members
-                    guard !all.isEmpty else { continue }
-                    let panes = all.enumerated().map { offset, pane -> VigilWorkspaces.SidebarPane in
-                        let truth = dir.panes[pane.id]
-                        let program = truth?.program
-                        return .init(
-                            id: Self.compositeId(host.device, pane.id),
-                            paneId: nil,
-                            title: dir.title(of: pane),
-                            messageAlias: pane.label ?? (all.count == 1 ? tab.label : nil),
-                            program: program,
-                            state: truth?.shown,
-                            isDock: offset >= tab.panes.count,
-                            emoji: pane.emoji,
-                            // Another Mac looking at a remote pane is this
-                            // one (two Macs): only the phone is news.
-                            lookers: truth?.lookers.filter { $0 == .phone } ?? [],
-                            priority: pane.priority ?? .normal,
-                            conversationRef: truth?.meaning?.reference,
-                            conversationName: truth?.meaning?.title,
-                            resumeMenu: truth?.meaning?.resumeMenu,
-                            account: truth?.meaning?.account,
-                            accountBlock: truth?.meaning?.accountBlock,
-                            liveConversation: !host.away && host.error == nil && truth?.alive == true ? truth?.meaning?.reference : nil,
-                            forkedFrom: truth?.meaning?.forkedFrom,
-                            member: truth?.meaning?.member,
-                            background: truth?.meaning?.background,
-                            ended: truth?.abnormalEnd,
-                            problems: (truth?.liveProblems ?? []) + [session.offlineContinuations?[pane.id]?.problem].compactMap { $0 },
-                            restart: truth?.problemGlance?.restart,
-                            conflict: truth?.conflict)
-                    }
-                    let anchor = all.first.map { Self.compositeId(host.device, $0.id) }
-                    tabs.append(.init(
-                        id: VigilWorkspaces.tabRowId(composite, anchor: anchor, index: index),
-                        title: dir.title(ofTab: index, in: session),
-                        index: index,
-                        panes: panes,
-                        anchor: anchor,
-                        captured: true,
-                        emoji: tab.emoji,
-                        named: tab.label?.isEmpty == false || tab.emoji?.isEmpty == false))
-                }
-                let states = tabs.flatMap(\.panes).compactMap(\.state)
-                rows.append(.init(
-                    id: composite,
-                    emoji: session.emoji,
-                    label: session.label,
-                    stateTag: host.away ? "away" : "remote",
-                    attention: states.contains(.blocked) ? .input : (states.contains(.done) ? .done : .none),
-                    states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.dots)),
-                    tabs: tabs,
-                    host: header))
-            }
+            return SidebarInputs.Remote(device: host.device, header: header, directory: host.directory,
+                                        away: host.away, answering: !host.away && host.error == nil)
         }
-        return rows
+    }
+
+    /// The ids of every remote pane row (`SidebarBuilder.remoteRows`): each
+    /// pane of a tab of a live workspace, namespaced by its Mac.
+    func paneRowIds() -> Set<String> {
+        Set(hosts.flatMap { host in
+            (host.directory?.live ?? []).flatMap { ($0.tabs ?? []).flatMap(\.members) }
+                .map { Self.compositeId(host.device, $0.id) }
+        })
     }
 
     private var seenInFlight = Set<String>()

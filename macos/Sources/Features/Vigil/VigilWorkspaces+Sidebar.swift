@@ -8,210 +8,8 @@ import GhosttyKit
 import VigilHarness
 import VigilWire
 
-/// What a pane's facts come to (its program, what its agent means) and what
-/// a tab's panes are called, worked out again only when the facts they come
-/// from changed. Worked out at every refresh of every window, they were most
-/// of the main thread's work at idle (the Time Profiler on the M4: the
-/// snapshot 1,800 of 3,441 ms over 40 s, of which `Program.of` reading the
-/// process trees 1,197 ms and the names 439 ms).
-@MainActor
-final class SidebarDerived {
-    static let shared = SidebarDerived()
-
-    /// The facts a pane's program, meaning and name read, and nothing else
-    /// (`Facts.program`: the tree and the tty's foreground; `Facts.meaning`:
-    /// those and the glance; `Pane.ownName`: those and the title it set), so
-    /// a screen that changes on a busy pane keeps what was worked out.
-    struct Read: Equatable {
-        var tree: [String]?
-        var foreground: Int32?
-        var glance: PaneGlance?
-        var title: String?
-        init(_ facts: Directory.Facts) {
-            tree = facts.tree; foreground = facts.foreground; glance = facts.glance; title = facts.title
-        }
-    }
-
-    private var panes: [String: (read: Read, program: String?, meaning: PaneGlance?)] = [:]
-    private var titles: [[String]: (members: [Registry.Pane], read: [Read?], names: [String])] = [:]
-    /// The panes and tabs the snapshot being built asked for: everything else
-    /// is dropped when it is done (`keepOnly`).
-    private var askedPanes: Set<String> = []
-    private var askedTabs: Set<[String]> = []
-
-    func pane(_ id: String, _ facts: Directory.Facts) -> (program: String?, meaning: PaneGlance?) {
-        askedPanes.insert(id)
-        let read = Read(facts)
-        if let held = panes[id], held.read == read { return (held.program, held.meaning) }
-        let derived = (read: read, program: facts.program, meaning: facts.meaning)
-        panes[id] = derived
-        return (derived.program, derived.meaning)
-    }
-
-    func titles(_ members: [Registry.Pane], _ facts: [String: Directory.Facts]) -> [String] {
-        let key = members.map(\.id)
-        askedTabs.insert(key)
-        let read: [Read?] = members.map { facts[$0.id].map(Read.init) }
-        if let held = titles[key], held.members == members, held.read == read { return held.names }
-        let names = Directory.titles(of: members, facts: facts, home: NSHomeDirectory())
-        titles[key] = (members, read, names)
-        return names
-    }
-
-    /// The snapshot is built: what it no longer holds is forgotten.
-    func keepOnly() {
-        panes = panes.filter { askedPanes.contains($0.key) }
-        titles = titles.filter { askedTabs.contains($0.key) }
-        askedPanes.removeAll()
-        askedTabs.removeAll()
-    }
-}
-
 extension VigilWorkspaces {
     // MARK: Sidebar snapshot (the left bar's tree, one immutable read)
-
-    struct SidebarPane: Identifiable, Equatable {
-        let id: String            // attach id, or a synthetic id for daemon-less panes
-        let paneId: String?       // vigild daemon id when daemon-backed
-        /// Remote rows navigate by their full identity but have no local
-        /// daemon id: local rename, drag and close paths must stay separate.
-        var navigationId: String? { paneId ?? (VigilRemote.split(id) != nil ? id : nil) }
-        let title: String         // display: the one naming rule (`Directory.titles`)
-        var messageAlias: String? = nil
-        let program: String?      // the argv truth alone; nil = just a shell
-        let state: AgentState?
-        /// Its dots, by the one rule every surface draws (`PaneDot`): a dot
-        /// per background agent at work, then its main agent's.
-        var dots: [PaneDot] { state.map { $0.dots(background: background) } ?? [] }
-        let isDock: Bool
-        var emoji: String?        // the pane's custom face
-        /// Declared watch leases (notes) on this pane - the sentry's own
-        /// words ("vigía de Carlos: awaiting his TG reply").
-        var watchNotes: [String] = []
-        /// Underived truth: background processes alive under the pane
-        /// beyond its program (tree file argv, shortened).
-        var watchProcs: [String] = []
-        /// What a Claude pane's turns left running in no account of the
-        /// agent's, by command (its glance's `left`); nil where no broker
-        /// says (a shell, Codex, a pane with no agent).
-        var left: [String]?
-        /// What the antenna stands for: a declared watch, and what is alive
-        /// here that no agent accounts for. On a Claude pane that is the
-        /// broker's word (its own tool servers and the shells its gear
-        /// counts are not it); elsewhere, the processes beyond the pane's
-        /// program while it is quiet.
-        var sentries: [String] {
-            watchNotes + (left ?? (state != .working ? watchProcs : []))
-        }
-        /// Who looks at it from off its Mac (its daemon's `viewers`).
-        var lookers: [Viewer] = []
-        /// A phone follows it (the hub's board).
-        var followed: Bool = false
-        var priority: Registry.Priority = .normal
-        /// The agent's conversation (its glance), while one runs there: its
-        /// id (Claude's session id, what `c -r` and its logs name) and its
-        /// name (what the agent's own UI calls it).
-        var conversationRef: ConversationRef?
-        var conversation: String? { conversationRef?.id }
-        var conversationName: String?
-        var resumeMenu: PaneGlance.ResumeMenu?
-        var account: String?
-        /// Its agent's account cannot run a turn (its glance).
-        var accountBlock: AccountBlock?
-        var liveConversation: ConversationRef?
-        /// The conversation its own was forked from, by id (its glance).
-        var forkedFrom: String?
-        /// The member it holds, as its Mac's tuples say (its glance): the
-        /// handle, the subagent tree under its row, the member card.
-        var member: MemberGlance?
-        /// What its agent runs in the background now (its glance): counted,
-        /// with the first running task's title.
-        var background: PaneGlance.Background?
-        /// Its program ended badly and nobody opened it yet (`PaneEnd`).
-        var ended: PaneEnd?
-        /// Moved from another Mac and not opened here yet: the pane it
-        /// was there (`Registry.Arrival`).
-        var arrived: Registry.Arrival?
-        /// What its agent instance reports that needs the person's attention.
-        var problems: [ConversationProblem] = []
-        /// What became of its restart, as its Mac's broker says (its glance).
-        var restart: Restart.Note?
-
-        /// Its conversation was written on its Mac and on another, and
-        /// nobody has said which copy goes on (`PaneConflict`).
-        var conflict: PaneConflict?
-
-        /// The ids we communicate by, each only where it exists: the
-        /// pane's daemon id, its conversation's name and id.
-        var identifiers: [Identifier] {
-            [("Pane ID", paneId ?? VigilRemote.split(id)?.name), ("Conversation Name", conversationName),
-             ("Conversation ID", conversation), ("Handle", member.map { "@\($0.handle)" })]
-                .compactMap { label, value in value.map { Identifier(label: label, value: $0) } }
-        }
-    }
-
-    struct Identifier: Hashable {
-        let label: String
-        let value: String
-    }
-
-    struct SidebarTab: Identifiable, Equatable {
-        let id: String
-        let title: String
-        let index: Int
-        let panes: [SidebarPane]
-        /// Any pane id of this tab: the join key row clicks resolve by
-        /// (indices shift as tabs mount and release, pane ids never lie).
-        var anchor: String?
-        /// Exists as its capture only (lazy shapeshift): daemons run, no
-        /// views until a viewport mounts it.
-        var captured: Bool = false
-        /// The tab's custom face.
-        var emoji: String?
-        /// You gave this tab a name or a face: it carries information of
-        /// its own, so the tree never elides its row.
-        var named: Bool = false
-    }
-
-    struct SidebarWorkspaceRow: Identifiable, Equatable {
-        let id: String            // the session name (the identity)
-        let emoji: String?
-        let label: String
-        let stateTag: String      // Place.rawValue, or "remote"
-        let attention: Attention
-        /// The collapsed row's cluster: its panes' dots (`PaneDot.cluster`).
-        let states: [PaneDot]
-        let tabs: [SidebarTab]
-        /// A remote host's session (VigilRemote): the header text of the
-        /// host group it sits under; nil = this Mac. Row ids of remote
-        /// workspaces are `device/name`.
-        var host: HostHeader?
-        /// A move of it being decided or done ("mbp-m4: Waiting for your
-        /// yes in Authz"), from the destination's ticket (`moveNote`).
-        var moving: String?
-
-        /// A Mac's header: its name, and how it stands when that is not
-        /// "here and live" ("away since 12:34", why it cannot be read).
-        /// Two facts, drawn apart: joined in one string the standing read
-        /// as part of the Mac's name.
-        struct HostHeader: Equatable {
-            var name: String
-            var standing: String?
-            var renewalURL: URL? = nil
-            /// Its facts as it last sent them (`Open.machine`), or that what it
-            /// sent does not read here; nil until it has sent anything (a Mac
-            /// whose app predates it never does).
-            var machine: VigilMachine.Heard?
-        }
-
-        /// The ONE tab whose row the tree elides: a lone tab that carries
-        /// no information of its own (no name, no face). A lone NAMED tab
-        /// earns its row like any tab among many.
-        var soleTab: SidebarTab? {
-            guard tabs.count == 1, let only = tabs.first, !only.named else { return nil }
-            return only
-        }
-    }
 
     /// Where you ARE in one window: its session, mounted tab row, focused
     /// pane. PER WINDOW: a sidebar asks for its own host, never the key
@@ -250,122 +48,43 @@ extension VigilWorkspaces {
             pane: front.focusedSurface?.vigilAttachId)
     }
 
-    /// Row identity FOLLOWS THE TAB (its anchor pane), never its
-    /// position: index-based ids made selection, collapse and rename
-    /// UI stick to whatever tab happened to sit at that row after a
-    /// reorder (the renamed-tab-was-a-different-terminal bug).
-    static func tabRowId(_ session: String, anchor: String?, index: Int = 0) -> String {
-        anchor.map { "\(session)-tab-\($0)" } ?? "\(session)-t\(index)"
-    }
-
-    /// One immutable projection of everything the left bar shows, READ
-    /// FROM THE REGISTRY: every session, wherever displayed → its
-    /// tabs → their panes (splits AND dock tenants), each pane named and
-    /// decorated from its daemon's facts (program from the tree file,
-    /// title from `<pane>.title`) and its continuous AgentState, never from
-    /// a live view. Every registered row renders whether or not its view
-    /// exists yet: nothing flashes while a tab mounts.
-    func sidebarSnapshot() -> [SidebarWorkspaceRow] {
-        let continuations = offlineContinuations()
-        let leases = watchLeases()
-
-        /// A tab's panes (splits, then the dock) named by the one rule every
-        /// surface reads (`Directory.titles`: yours, an agent's conversation
-        /// from its glance, then its daemon's published title, what runs
-        /// there, ...), from this Mac's files in the directory's own shape,
-        /// so the phone reads the very same names.
-        func paneRows(_ tab: Registry.Tab) -> [SidebarPane] {
-            let members = tab.members
-            let known = Dictionary(uniqueKeysWithValues: members.map { ($0.id, paneFacts($0.id)) })
-            let names = SidebarDerived.shared.titles(members, known)
-            return members.indices.map {
-                paneRow(members[$0], title: names[$0], facts: known[members[$0].id]!, tabAlias: members.count == 1 ? tab.label : nil, isDock: $0 >= tab.panes.count)
-            }
-        }
-
-        func paneRow(_ pane: Registry.Pane, title: String, facts: Directory.Facts, tabAlias: String?, isDock: Bool) -> SidebarPane {
-            let (program, meaning) = SidebarDerived.shared.pane(pane.id, facts)
-            return SidebarPane(
-                id: pane.id,
-                paneId: pane.id,
-                title: title,
-                messageAlias: pane.label ?? tabAlias,
-                program: program,
-                state: paneDisplayState(pane.id),
-                isDock: isDock,
-                emoji: pane.emoji,
-                watchNotes: leases[pane.id]?.map(\.note) ?? [],
-                watchProcs: paneWatchers(pane.id),
-                left: meaning?.agent == "claude" ? (meaning?.background?.commands ?? []) : nil,
-                lookers: Viewer.parse(paneFileLines(pane.id, "viewers").joined(separator: "\n")),
-                followed: phoneFollows.contains(pane.id),
-                priority: pane.priority ?? .normal,
-                conversationRef: meaning?.reference,
-                conversationName: meaning?.title,
-                resumeMenu: meaning?.resumeMenu,
-                account: meaning?.account,
-                accountBlock: meaning?.accountBlock,
-                liveConversation: facts.alive ? meaning?.reference : nil,
-                forkedFrom: meaning?.forkedFrom,
-                member: meaning?.member,
-                background: meaning?.background,
-                ended: facts.ended,
-                arrived: pane.dormant == true ? pane.from : nil,
-                problems: facts.liveProblems + [continuations[pane.id]?.problem].compactMap { $0 },
-                restart: facts.problemGlance?.restart,
-                conflict: facts.conflict)
-        }
-
-        var rows: [SidebarWorkspaceRow] = []
-        let ordered = workspaces.values.sorted { ($0.order, $0.label) < ($1.order, $1.label) }
-        for session in ordered {
-            let name = session.name
+    /// What the left bar's rows are built from, read in one pass on the main
+    /// thread, where the registry, the views and the other Macs' directories
+    /// live: values only, copied (the registry, the facts revision and each
+    /// directory are copy-on-write). The rows are worked out from them off
+    /// the main thread (`VigilSidebarSnapshots`, `SidebarBuilder`).
+    func sidebarInputs() -> SidebarInputs {
+        let sessions = workspaces.values.map { session -> SidebarInputs.Workspace in
             // Every live view of this session by pane id: member trees and
             // docks when windowed, held runtimes otherwise.
-            var live: [String: Ghostty.SurfaceView] = [:]
+            var live = Set<String>()
             for runtime in runtimes(session) {
                 for view in Array(runtime.tree) + (runtime.dock?.views ?? []) {
-                    if let id = view.vigilAttachId { live[id] = view }
+                    if let id = view.vigilAttachId { live.insert(id) }
                 }
             }
-            var tabs: [SidebarTab] = []
-            // A tab's skim label: yours, else WHERE it lives (home as `~`),
-            // namesakes numbered: the phone's rule, the phone's strings.
-            let tabTitles = Directory.titles(ofTabs: session.tabs, home: NSHomeDirectory())
-            for (index, tab) in session.tabs.enumerated() {
-                let ids = Set(tab.paneIds)
-                guard !ids.isEmpty else { continue }
-                let panes = paneRows(tab)
-                let anchor = tab.panes.first?.id ?? tab.dock?.panes.first?.id
-                let title = tabTitles[index]
-                tabs.append(SidebarTab(
-                    id: Self.tabRowId(name, anchor: anchor, index: index),
-                    title: title,
-                    index: index,
-                    panes: panes,
-                    anchor: anchor,
-                    captured: !ids.contains { live[$0] != nil },
-                    emoji: tab.emoji,
-                    named: tab.label?.isEmpty == false || tab.emoji?.isEmpty == false))
-            }
-            rows.append(SidebarWorkspaceRow(
-                id: name,
-                emoji: session.emoji,
-                label: session.label,
-                stateTag: place(name).rawValue,
-                attention: session.attention,
-                states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.dots)),
-                tabs: tabs))
+            return SidebarInputs.Workspace(
+                name: session.name, label: session.label, emoji: session.emoji, order: session.order,
+                attention: session.attention, place: place(session.name), tabs: session.tabs, live: live)
         }
-        SidebarDerived.shared.keepOnly()
-        // A move under way, on the row of what moves, wherever it is asked
-        // and wherever it goes.
-        return (rows + VigilRemote.shared.sidebarRows()).map { row in
-            var row = row
-            let home = VigilRemote.split(row.id)
-            row.moving = moveNote(home: home?.device, workspace: home?.name ?? row.id)
-            return row
-        }
+        let remote = VigilRemote.shared
+        return SidebarInputs(
+            workspaces: sessions,
+            facts: facts,
+            phoneFollows: phoneFollows,
+            continuations: offlineContinuations(),
+            remotes: remote.sidebarInputs(),
+            moveRoot: moveRoot,
+            moveDestinations: [(name: Self.thisMac, tickets: Array(moveTickets.values))]
+                + remote.hosts.map { (name: $0.name, tickets: $0.moves) },
+            home: NSHomeDirectory())
+    }
+
+    private static let rowBuilder = SidebarBuilder()
+
+    /// The rows, built here from the inputs just read.
+    func sidebarSnapshot() -> [SidebarWorkspaceRow] {
+        Self.rowBuilder.build(sidebarInputs())
     }
 
     // MARK: Pin on top

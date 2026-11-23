@@ -399,7 +399,7 @@ final class VigilBars {
     func showAside(_ aside: Aside) {
         // One whose pane has ended is forgotten here, where the next is asked.
         let living = Set(VigilWorkspaces.shared.workspaces.values.flatMap { $0.tabs.flatMap(\.paneIds) })
-            .union(VigilRemote.shared.sidebarRows().flatMap(\.tabs).flatMap(\.panes).map(\.id))
+            .union(VigilRemote.shared.paneRowIds())
         asides = asides.filter { living.contains($0.value.pane) }
         if let standing = asides[aside.id] {
             standing.front = true

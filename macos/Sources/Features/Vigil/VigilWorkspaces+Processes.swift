@@ -26,15 +26,8 @@ extension VigilWorkspaces {
         return errno == EWOULDBLOCK
     }
 
-    /// Immutable file facts are loaded by the directory watcher off main.
-    struct PaneState {
-        let state: AgentState
-        let flavor: BlockFlavor?
-        let since: Date
-        let revision: String
-    }
     func paneFileLines(_ pane: String, _ ext: String) -> [String] {
-        facts.files["panes/\(pane).\(ext)"]?.lines ?? []
+        Self.lines(facts, pane, ext)
     }
 
     /// argv column of a tree/died file. Line 1 is the daemon's child: a
@@ -77,18 +70,13 @@ extension VigilWorkspaces {
     /// The tty's foreground pid (`<pane>.pid`'s third line, the tty's
     /// e_tpgid).
     private func paneForeground(_ pane: String) -> Int32? {
-        let lines = paneFileLines(pane, "pid")
-        return lines.count >= 3 ? Int32(lines[2].trimmingCharacters(in: .whitespaces)) : nil
-    }
-
-    private func paneForegroundLabel(_ pane: String) -> String? {
-        Program.foreground(tree: paneFileLines(pane, "tree"), pid: paneForeground(pane))
+        Self.foreground(facts, pane)
     }
 
     /// One pane's program, what you see in it (`Program.of`, the rule every
     /// row on every device names a pane by).
     func paneProgram(_ pane: String) -> String? {
-        Program.of(tree: paneFileLines(pane, "tree"), foreground: paneForeground(pane))
+        Self.program(facts, pane)
     }
 
     /// What this Mac knows of one of its panes, in the directory's own shape
@@ -116,15 +104,7 @@ extension VigilWorkspaces {
     }
 
     func paneFacts(_ pane: String) -> Directory.Facts {
-        // Not alive: its daemon was found gone with its pidfile left.
-        Directory.Facts(alive: !facts.gone.contains(pane), tree: paneFileLines(pane, "tree"),
-                        pid: paneFileLines(pane, "pid").joined(separator: "\n"),
-                        blankOutput: facts.files["panes/\(pane).blank-output"] != nil,
-                        title: paneFileLines(pane, "title").first, glance: paneGlance(pane),
-                        // A row is marked by an end that keeps its pane; a
-                        // clean one's pane is closing.
-                        ended: paneEnd(pane).flatMap { $0.clean ? nil : $0 },
-                        conflict: paneConflict(pane))
+        Self.directoryFacts(facts, pane, glance: paneGlance(pane), ended: paneEnd(pane), conflict: paneConflict(pane))
     }
 
     /// `state/<pane>.conflict`: its conversation was written on this Mac and
@@ -164,48 +144,6 @@ extension VigilWorkspaces {
         }
     }
 
-    /// Background SENTRIES under a pane: labeled tree processes that are
-    /// neither the shell nor the pane's program - "something is keeping
-    /// watch under this quiet pane" (a tg watch under an idle claude, a
-    /// build, a server). Truth from the daemon's kqueue tree file, never
-    /// inferred from the screen. QUIET is the gate, per pane class: an
-    /// adapter-managed pane (agent state file exists) is quiet when the
-    /// agent isn't working - the view applies that; a PLAIN pane is quiet
-    /// only when the shell itself holds the tty. A foreground TUI's own
-    /// subprocess churn (lazygit's git calls) is the program working, not
-    /// a sentry - antenna semantics, not process accounting. Declared
-    /// leases are never gated: the watcher said why it watches.
-    func paneWatchers(_ pane: String) -> [String] {
-        if paneAgentState(pane) == nil, paneForegroundLabel(pane) != nil { return [] }
-        let program = paneProgram(pane)
-        var out: [String] = []
-        for argv in paneCommands(pane, "tree") {
-            guard let label = Program.label(argv), label != program else { continue }
-            let short = argv.count > 90 ? String(argv.prefix(87)) + "…" : argv
-            if !out.contains(short) { out.append(short) }
-        }
-        return out
-    }
-
-    // MARK: Watch leases (the declared layer over process-tree truth)
-
-    /// A watcher's self-declaration (sd_notify's shape on vigil's rails):
-    /// one JSON file in leases/, written by the watching process itself,
-    /// removed on exit. The lease says WHY (note) and UNTIL WHEN
-    /// (deadline); liveness is NEVER trusted from the file - the pid must
-    /// be alive. Spec: PROTOCOL.md.
-    struct WatchLease: Equatable {
-        let pane: String
-        let note: String
-        let deadline: Date?
-    }
-
-    func watchLeases() -> [String: [WatchLease]] {
-        Dictionary(grouping: facts.leases.map {
-            WatchLease(pane: $0.pane, note: $0.note, deadline: $0.deadline.map(Date.init(timeIntervalSince1970:)))
-        }, by: \.pane)
-    }
-
     var agentStateDir: URL {
         VigilPaths.state
     }
@@ -223,20 +161,13 @@ extension VigilWorkspaces {
                   let token = truth.token, let revision = truth.stateRevision else { return nil }
             return PaneState(state: token.state, flavor: token.flavor, since: Date(timeIntervalSince1970: truth.since ?? 0), revision: revision)
         }
-        guard let file = facts.files["state/\(pane).state"] else { return nil }
-        guard let token = StateToken(file.text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            attentionLog.error("state file holds no state", ["pane": pane, "text": file.text])
-            return nil
-        }
-        return PaneState(state: token.state, flavor: token.flavor, since: file.since, revision: file.revision)
+        return Self.localAgentState(facts, pane)
     }
 
     /// Seen-ack changes presentation only; it never resolves a broker request.
     func paneDisplayState(_ pane: String) -> AgentState? {
         guard let state = paneAgentState(pane) else { return nil }
-        if state.state == .done || state.state == .blocked,
-           let ack = lastAck(pane), ack >= state.since { return .idle }
-        return state.state
+        return Self.shown(state, ack: lastAck(pane))
     }
 
     /// What a session is RUNNING right now, compact and deduped, straight
