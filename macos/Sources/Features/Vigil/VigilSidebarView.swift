@@ -30,6 +30,8 @@ struct VigilSidebarView: View {
     /// there folds or unfolds, it does not open the row behind the pointer,
     /// and the lit control says so.
     @State private var hoveredFold: String?
+    /// The Mac whose facts stand open beside its header, by its fold key.
+    @State private var machineDetails: String?
 
     private func rowHovered(_ id: String) -> Bool { hovered == id && hoveredFold == nil }
     /// What `hovered` holds while the pointer is on a row that is no row of
@@ -76,29 +78,33 @@ struct VigilSidebarView: View {
         static let inset: CGFloat = 2
     }
 
-    /// The rows of one Mac, in the tree's order: this Mac's (no header), or
-    /// another's under its header.
+    /// The rows of one Mac under its header, in the tree's order: this Mac
+    /// first (its header there with no workspace under it too), then each
+    /// other Mac.
     private struct MacRows: Identifiable {
         let id: String
-        let host: VigilWorkspaces.SidebarWorkspaceRow.HostHeader?
+        let host: VigilWorkspaces.SidebarWorkspaceRow.HostHeader
+        /// Its tether root; nil for this Mac.
         let device: String?
         var rows: [VigilWorkspaces.SidebarWorkspaceRow]
+        /// What its fold is kept under (`VigilSidebarCollapse.hosts`).
+        var fold: String { device ?? VigilSidebarCollapse.here }
     }
 
     private var macs: [MacRows] {
-        var out: [MacRows] = []
+        var out = [MacRows(id: "mac:here", host: model.here, device: nil, rows: model.rows.filter { $0.host == nil })]
         for row in model.rows {
-            let device = row.host.flatMap { _ in VigilRemote.split(row.id)?.device }
+            guard let host = row.host, let device = VigilRemote.split(row.id)?.device else { continue }
             if let last = out.last, last.device == device {
                 out[out.count - 1].rows.append(row)
             } else {
-                out.append(MacRows(id: "mac:\(device ?? "here")", host: row.host, device: device, rows: [row]))
+                out.append(MacRows(id: "mac:\(device)", host: host, device: device, rows: [row]))
             }
         }
         return out
     }
 
-    /// Another Mac's header sits at the tree's very edge with a narrow icon,
+    /// A Mac's header sits at the tree's very edge with a narrow icon,
     /// so its thread line costs its workspaces as little width as a line can:
     /// they start `macIndent` in, just clear of the line's press area.
     private static let macIcon: CGFloat = 14
@@ -175,32 +181,27 @@ struct VigilSidebarView: View {
                         VStack(spacing: 0) {
                             VStack(alignment: .leading, spacing: 5) {
                                 ForEach(macs) { mac in
-                                    if let host = mac.host, let device = mac.device {
-                                        // Another Mac: its header, and its
-                                        // workspaces as the header's
-                                        // children, under its thread line
-                                        // (the phone's tree draws a Mac the
-                                        // same way).
-                                        let folded = collapse.hosts.contains(device)
-                                        hostHeader(host, device: device, count: mac.rows.count, folded: folded)
-                                        if !folded {
-                                            ThreadChildren(
-                                                level: 0, metrics: Self.macLine, spacing: 5,
-                                                hovering: foldHover(mac.id),
-                                                fold: { collapse.hosts.insert(device) }
-                                            ) {
-                                                ForEach(mac.rows) { row in
-                                                    // An away Mac's rows are
-                                                    // what it last was, not
-                                                    // what it is: dimmed.
-                                                    sessionGroup(row)
-                                                        .opacity(row.stateTag == "away" ? 0.55 : 1)
-                                                        .padding(.leading, Self.macIndent)
-                                                }
+                                    // Each Mac, this one first: its header,
+                                    // and its workspaces as the header's
+                                    // children, under its thread line (the
+                                    // phone's tree draws a Mac the same way).
+                                    let folded = collapse.hosts.contains(mac.fold)
+                                    hostHeader(mac, folded: folded)
+                                    if !folded && !mac.rows.isEmpty {
+                                        ThreadChildren(
+                                            level: 0, metrics: Self.macLine, spacing: 5,
+                                            hovering: foldHover(mac.id),
+                                            fold: { collapse.hosts.insert(mac.fold) }
+                                        ) {
+                                            ForEach(mac.rows) { row in
+                                                // An away Mac's rows are
+                                                // what it last was, not
+                                                // what it is: dimmed.
+                                                sessionGroup(row)
+                                                    .opacity(row.stateTag == "away" ? 0.55 : 1)
+                                                    .padding(.leading, Self.macIndent)
                                             }
                                         }
-                                    } else {
-                                        ForEach(mac.rows) { row in sessionGroup(row) }
                                     }
                                 }
                             }
@@ -488,27 +489,35 @@ struct VigilSidebarView: View {
             : burial.waiting ? "Recovered from a backup. Bring it back or end it now." : "Closed; dies for real in \(burial.remaining)s. Click to bring it back where it was\(burial.mac.map { " on \($0)" } ?? " (⌘⇧T too)").")
     }
 
-    // MARK: Remote host header (one per other Mac)
+    // MARK: Mac header (one per Mac, this one first)
 
-    /// Another Mac's header. It folds as every row that holds others does:
-    /// a press anywhere on it folds it when open and opens it when folded
-    /// (`VigilSidebarModel.holderClicked`'s rule), as the thread line under
-    /// its icon does.
-    private func hostHeader(
-        _ host: VigilWorkspaces.SidebarWorkspaceRow.HostHeader, device: String, count: Int, folded collapsed: Bool
-    ) -> some View {
-        let title = host.name
-        let hoverId = Self.hostHover + device
+    /// A Mac's header, this one's and every other's alike. It folds as every
+    /// row that holds others does: a press anywhere on it folds it when open
+    /// and opens it when folded (`VigilSidebarModel.holderClicked`'s rule),
+    /// as the thread line under its icon does. This Mac's says so beside its
+    /// name, in the accent the tree draws where you are with.
+    private func hostHeader(_ mac: MacRows, folded collapsed: Bool) -> some View {
+        let host = mac.host
+        let hoverId = Self.hostHover + mac.fold
+        let here = mac.device == nil
         return VStack(alignment: .leading, spacing: 2) {
         Button {
-            if collapse.hosts.contains(device) { collapse.hosts.remove(device) } else { collapse.hosts.insert(device) }
+            if collapse.hosts.contains(mac.fold) { collapse.hosts.remove(mac.fold) } else { collapse.hosts.insert(mac.fold) }
         } label: {
             HStack(spacing: Grid.gap) {
                 // A laptop is a Mac with a battery, as its own power says.
                 Image(systemName: host.machine?.snapshot?.power.battery == nil ? "desktopcomputer" : "laptopcomputer")
                     .frame(width: Self.macIcon)
-                Text(title).lineLimit(1)
-                if collapsed { ThreadFoldedCount(count: count, size: 9 * scale) }
+                Text(host.name).lineLimit(1)
+                    .foregroundStyle(here ? .primary : .secondary)
+                if here {
+                    Text("This Mac")
+                        .font(.system(size: 9.5 * scale, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                if collapsed { ThreadFoldedCount(count: mac.rows.count, size: 9 * scale) }
                 Spacer(minLength: Grid.gap)
                 // How it stands, apart from its name: at the row's far
                 // end, smaller and plain, where a row's marks sit.
@@ -520,7 +529,7 @@ struct VigilSidebarView: View {
                         .layoutPriority(-1)
                 }
                 // What waits on your yes on that Mac, each message once.
-                WaitingMark(messages: messages.awaiting(root: device), sizes: marks)
+                WaitingMark(messages: (mac.device ?? messages.here).map { messages.awaiting(root: $0) } ?? [], sizes: marks)
                 // Its power on the rail, in the header's own size; away, what
                 // it last sent, dimmed with the rest of it. None from a
                 // reading that stopped or does not read.
@@ -542,32 +551,31 @@ struct VigilSidebarView: View {
         .buttonStyle(.plain)
         .onHover { inside in hovered = inside ? hoverId : (hovered == hoverId ? nil : hovered) }
         // A Mac's menu, as a workspace's offers a tab: a workspace born on
-        // it, then how it stands (`VigilMachine.lines`), or since when its
-        // facts are not read, or that what it sent does not read here.
+        // it, then its facts, which open beside the header
+        // (`VigilMachineDetails`). A Mac that has sent none has no item.
         .contextMenu {
             menu {
                 Button {
-                    VigilWorkspaces.shared.newWorkspace(on: device)
+                    VigilWorkspaces.shared.newWorkspace(on: mac.device)
                 } label: { Label("New Workspace", systemImage: "plus.square.on.square") }
                 Button {
-                    VigilCreation.shared.present(on: device)
+                    VigilCreation.shared.present(on: mac.device)
                 } label: { Label("New Workspace or Resume…", systemImage: "folder.badge.plus") }
-                switch host.machine {
-                case .snapshot(let machine)?:
+                if host.machine != nil {
                     Divider()
-                    ForEach(Array(VigilMachine.lines(machine).enumerated()), id: \.offset) { _, line in
-                        Text(line)
-                    }
-                case .stopped(let stopped)?:
-                    Divider()
-                    Text(VigilMachine.words(stopped))
-                case .unreadable?:
-                    Divider()
-                    Text(VigilMachine.unavailable)
-                case nil:
-                    EmptyView()
+                    Button {
+                        machineDetails = mac.fold
+                    } label: { Label("Details…", systemImage: "info.circle") }
                 }
             }
+        }
+        .popover(
+            isPresented: Binding(
+                get: { machineDetails == mac.fold && host.machine != nil },
+                set: { shown in if !shown, machineDetails == mac.fold { machineDetails = nil } }),
+            arrowEdge: .trailing
+        ) {
+            if let machine = host.machine { VigilMachineDetails(machine) }
         }
         if let url = host.renewalURL {
             Link("Open in Authz Devices", destination: url).font(.caption)

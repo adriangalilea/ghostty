@@ -16,7 +16,7 @@ enum VigilMachine {
         case snapshot(MachineState.Snapshot)
         /// Its facts are not being read, said by its app (its feed ended) or
         /// by its hub (its app is not running): nothing read before is
-        /// drawn, and its menu says since when.
+        /// drawn, and its details say since when.
         case stopped(Stopped)
         /// Its last document is none this vigil reads (the two Macs run
         /// vigils of different releases): nothing of it is drawn, and nothing
@@ -41,21 +41,19 @@ enum VigilMachine {
                 date: Calendar.current.isDateInToday(stopped.at) ? .omitted : .abbreviated, time: .shortened)
     }
 
-    /// What a Mac's menu says when its facts are `unreadable`.
+    /// What a Mac's details say when its facts are `unreadable`.
     nonisolated static let unavailable = "Facts unavailable: this vigil and that Mac's are different releases"
 
-    /// A Mac's menu lines: everything its power read, then its disk and its
-    /// heat in a line each (nominal heat says nothing). Memory, processors and
-    /// graphics are left out: a snapshot is written when the system posts a
-    /// change, so between changes those three are as they stood then, and a
-    /// menu would say them as now.
-    nonisolated static func lines(_ snapshot: MachineState.Snapshot) -> [String] {
-        var lines = snapshot.lines(of: .power).map { "\($0.label): \($0.value)" }
-        if let disk = snapshot.disk { lines.append("Disk: \(disk.summary) (\(disk.name))") }
-        if snapshot.heat != .nominal, let heat = snapshot.reading(of: .heat) {
-            lines.append("\(heat.title): \(heat.summary)")
-        }
-        return lines
+    /// This Mac's facts as this app last wrote them, for its own sidebar
+    /// header: the very document the other devices read, so this Mac is
+    /// drawn as they draw it. nil until the feed's first snapshot.
+    private(set) static var here: Heard?
+
+    /// What `here` holds now; each change is a sidebar refresh.
+    private static func heard(_ heard: Heard) {
+        guard here != heard else { return }
+        here = heard
+        NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
     private static var publishing: Task<Void, Never>?
@@ -113,6 +111,7 @@ enum VigilMachine {
                 do { try write(document(snapshot)) } catch {
                     remoteLog.error("machine state not written: other devices see what they last had", ["err": error])
                 }
+                await heard(.snapshot(snapshot))
             }
             why = "the feed ended"
         } catch {
@@ -124,11 +123,23 @@ enum VigilMachine {
             remoteLog.error(
                 "machine state not written: other devices still draw this Mac's last facts as current", ["err": error])
         }
+        await heard(.stopped(stopped))
     }
 
     private nonisolated static func write(_ document: Data) throws {
         try FileManager.default.createDirectory(
             at: VigilPaths.machine, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try document.write(to: VigilPaths.machineState, options: .atomic)
+    }
+}
+
+extension VigilMachineDetails {
+    /// What a Mac's details show of what this app holds of its facts.
+    init(_ heard: VigilMachine.Heard) {
+        switch heard {
+        case .snapshot(let snapshot): self.init(Shown.snapshot(snapshot))
+        case .stopped(let stopped): self.init(Shown.words(VigilMachine.words(stopped)))
+        case .unreadable: self.init(Shown.words(VigilMachine.unavailable))
+        }
     }
 }

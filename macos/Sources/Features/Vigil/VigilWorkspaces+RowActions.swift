@@ -188,10 +188,15 @@ extension VigilWorkspaces {
 
     // MARK: New workspace
 
-    /// A workspace born on the Mac `device`, a shell in its home folder, as
-    /// a Mac's row offers it: it appears in that Mac's rows from its own word,
-    /// as a remote new tab does.
-    func newWorkspace(on device: String) {
+    /// A workspace born on the Mac `device` (nil: this one), a shell in its
+    /// home folder, as a Mac's header offers it. Another Mac's appears in its
+    /// rows from its own word, as a remote new tab does; this Mac's takes the
+    /// window, as ⌘N's does.
+    func newWorkspace(on device: String?) {
+        guard let device else {
+            newWorkspace(cwd: FileManager.default.homeDirectoryForCurrentUser.path)
+            return
+        }
         ask(RowHome(device: device, workspace: ""), .create(cwd: "~", command: nil, label: nil),
             failing: "No workspace made on \(VigilRemote.shared.host(device)?.name ?? "its Mac")")
     }

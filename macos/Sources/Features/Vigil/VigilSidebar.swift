@@ -162,8 +162,9 @@ final class VigilSidebarCollapse: ObservableObject {
     @Published var tabs: Set<String> {
         didSet { UserDefaults.standard.set(Array(tabs), forKey: "vigil.sidebar.collapsedTabs") }
     }
-    /// Remote host groups (VigilRemote), keyed by the Mac's tether root: a
-    /// whole other Mac folds under its header.
+    /// Each Mac's group, folded under its header: another Mac keyed by its
+    /// tether root, this one by `here`.
+    static let here = "here"
     @Published var hosts: Set<String> {
         didSet { UserDefaults.standard.set(Array(hosts), forKey: "vigil.sidebar.collapsedHosts") }
     }
@@ -180,6 +181,9 @@ final class VigilSidebarCollapse: ObservableObject {
 @MainActor
 final class VigilSidebarModel: ObservableObject {
     @Published private(set) var rows: [VigilWorkspaces.SidebarWorkspaceRow] = []
+    /// This Mac's header, over its own rows: its name and its facts as its
+    /// app last wrote them (`VigilMachine.here`).
+    @Published private(set) var here = VigilWorkspaces.SidebarWorkspaceRow.HostHeader(name: VigilWorkspaces.thisMac)
     private(set) var writerProblems: [ConversationRef: ConversationProblem] = [:]
     /// The keyboard CURSOR: the row enter/collapse/expand would hit. It is
     /// NOT "where you are" (that's the derived active chain in the rows);
@@ -271,7 +275,7 @@ final class VigilSidebarModel: ObservableObject {
     /// (a Mac is shown, never entered).
     func go(to level: Level, of place: Place) {
         section = .workspaces
-        if let device = place.device { VigilSidebarCollapse.shared.hosts.remove(device) }
+        VigilSidebarCollapse.shared.hosts.remove(place.device ?? VigilSidebarCollapse.here)
         if level != .mac { collapsedSessions.remove(place.row.id) }
         if level == .pane { collapsedTabs.remove(place.tab.id) }
         switch level {
@@ -380,6 +384,9 @@ final class VigilSidebarModel: ObservableObject {
             // Messages names its panes from these very rows.
             VigilMessageStore.shared.rows(fresh)
         }
+        let freshHere = VigilWorkspaces.SidebarWorkspaceRow.HostHeader(
+            name: VigilWorkspaces.thisMac, machine: VigilMachine.here)
+        if freshHere != here { here = freshHere }
         let histories = VigilWorkspaces.shared.savedMoveHistories.values.filter { !$0.pending.isEmpty }.sorted { $0.id.uuidString < $1.id.uuidString }
         if histories != moveHistories { moveHistories = histories }
         let warnings = VigilWorkspaces.shared.pendingMoveWarnings
