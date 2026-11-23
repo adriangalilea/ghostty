@@ -474,6 +474,20 @@ struct PaneResumeReceipt {
     var answer: Restart.Answer?
     var confirm: (() -> Void)?
     var offerImmediate: (() -> Void)?
+
+    @MainActor
+    func actions(dismiss: @escaping () -> Void) -> InkActionPanel.Actions {
+        if let command = answer?.manualCommand {
+            return .buttons([InkHUD.Action("Copy resume command") {
+                VigilPasteboard.copy(command)
+                dismiss()
+            }])
+        }
+        if answer?.outcome == .armed, let offerImmediate {
+            return .buttons([InkHUD.Action("Resume now…") { offerImmediate() }])
+        }
+        return []
+    }
 }
 
 struct PaneResumeItems: View {
@@ -540,19 +554,9 @@ extension View {
                                        InkHUD.Action("Cancel") { receipt.wrappedValue = nil }
                                    ]))
                 } else {
-                    let actions: InkActionPanel.Actions
-                    if let command = result.answer?.manualCommand {
-                        actions = .buttons([InkHUD.Action("Copy resume command") {
-                            VigilPasteboard.copy(command)
-                            receipt.wrappedValue = nil
-                        }])
-                    } else if let confirm = result.offerImmediate, result.answer?.outcome == .armed {
-                        actions = .buttons([InkHUD.Action("Resume now…") { confirm() }])
-                    } else {
-                        actions = []
-                    }
                     InkActionPanel(result.title, detail: result.answer?.said ?? "Contacting the pane’s Mac…",
-                                   tone: result.answer?.outcome == .refused ? .warn : .neutral, actions: actions)
+                                   tone: result.answer?.outcome == .refused ? .warn : .neutral,
+                                   actions: result.actions { receipt.wrappedValue = nil })
                 }
             }
         }
