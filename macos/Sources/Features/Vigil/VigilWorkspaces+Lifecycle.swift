@@ -160,8 +160,17 @@ extension VigilWorkspaces {
             ?? FileManager.default.homeDirectoryForCurrentUser.path
         if explicitCwd == nil, let viewport, remoteSessionCommand(in: viewport, operation: "new_session") { return }
         guard let name = try? createWorkspace(cwd: cwd) else { return }
-        if let viewport {
-            shapeshift(in: viewport, to: name)
+        take(name, anchor: nil, in: viewport)
+    }
+
+    /// A workspace just born, this Mac's or another's (`device/name`), shown
+    /// where the person is: it takes `viewport` (the sidebar-click semantic,
+    /// a mirror for another Mac's); with no visible window, one of its own.
+    func take(_ name: String, anchor: String?, in viewport: TerminalController?) {
+        if let viewport, viewport.window?.isVisible == true {
+            shapeshift(in: viewport, to: name, anchor: anchor)
+        } else if VigilRemote.split(name) != nil {
+            mountRemote(nil, composite: name, anchor: anchor)
         } else {
             open(name: name)
         }

@@ -188,17 +188,73 @@ extension VigilWorkspaces {
 
     // MARK: New workspace
 
+    /// How long a Mac has to list a workspace it said it made before the
+    /// person is told it isn't listed yet: the phone's bound for the same wait.
+    static let createListedWithin: Duration = .seconds(10)
+
     /// A workspace born on the Mac `device` (nil: this one), a shell in its
-    /// home folder, as a Mac's header offers it. Another Mac's appears in its
-    /// rows from its own word, as a remote new tab does; this Mac's takes the
-    /// window, as ⌘N's does.
+    /// home folder, as a Mac's header offers it, taking the window the person
+    /// is in, as ⌘N's does (`take`). Another Mac's is taken once that Mac's
+    /// own directory lists it, never before: a create it refuses, an answer
+    /// that never comes, or a listing that does not arrive in time is said in
+    /// an alert, and nothing else opens in its place.
     func newWorkspace(on device: String?) {
         guard let device else {
             newWorkspace(cwd: FileManager.default.homeDirectoryForCurrentUser.path)
             return
         }
-        ask(RowHome(device: device, workspace: ""), .create(cwd: "~", command: nil, label: nil),
-            failing: "No workspace made on \(VigilRemote.shared.host(device)?.name ?? "its Mac")")
+        let viewport = TerminalController.preferredParent
+        let mac = VigilRemote.shared.host(device)?.name ?? "its Mac"
+        let request = WorkspaceCommand.Request.create(cwd: "~", command: nil, label: nil)
+        let fields: [String: Any] = ["id": request.id.uuidString, "mac": mac]
+        func said(_ problem: String) {
+            sidebarLog.error("new workspace not opened", fields.merging(["why": problem]) { a, _ in a })
+            let alert = NSAlert()
+            alert.messageText = "No workspace opened on \(mac)"
+            alert.informativeText = problem
+            alert.runModal()
+        }
+        Task { @MainActor in
+            let reply: VigilSessionControl.Reply
+            do {
+                reply = try await VigilRemote.shared.command(device, request: request)
+            } catch let error as NSError where error.domain == "VigilRemote" {
+                // Out of reach: nothing was sent.
+                return said(error.localizedDescription)
+            } catch {
+                return said("\(error.localizedDescription). It may have been made: check \(mac)'s workspaces before trying again.")
+            }
+            guard reply.ok, let pane = reply.pane else { return said(reply.message) }
+            sidebarLog.info("new workspace made", fields.merging(["pane": pane]) { a, _ in a })
+            guard let name = await listedWorkspace(of: pane, on: device, within: Self.createListedWithin) else {
+                return said("Made on \(mac), but it isn't listed yet. It appears in \(mac)'s workspaces once it is.")
+            }
+            sidebarLog.info("new workspace opened", fields.merging(["workspace": name]) { a, _ in a })
+            take(VigilRemote.compositeId(device, name), anchor: VigilRemote.compositeId(device, pane), in: viewport)
+        }
+    }
+
+    /// The workspace `device`'s own directory lists `pane` in, as soon as it
+    /// does; nil when it has not within `bound`. Read again at every
+    /// directory change, and once more at the bound.
+    private func listedWorkspace(of pane: String, on device: String, within bound: Duration) async -> String? {
+        // Among the workspaces a remote mount opens (`VigilRemote.session`).
+        func listed() -> String? {
+            VigilRemote.shared.host(device)?.directory?.live.first { $0.paneIds.contains(pane) }?.name
+        }
+        if let name = listed() { return name }
+        let waiting = Task { @MainActor () -> String? in
+            for await _ in NotificationCenter.default.notifications(named: Self.stateDidChange) {
+                if let name = listed() { return name }
+            }
+            return nil
+        }
+        let bounded = Task { @MainActor in
+            try? await Task.sleep(for: bound)
+            waiting.cancel()
+        }
+        defer { bounded.cancel() }
+        return await waiting.value ?? listed()
     }
 
     /// A tab (of its pane `anchor`) or a pane of another Mac closed at its
