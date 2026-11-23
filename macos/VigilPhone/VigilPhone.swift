@@ -592,6 +592,20 @@ final class VigilPhone: ObservableObject {
         didSet { UserDefaults.standard.set(Array(collapsed), forKey: "vigil.collapsed") }
     }
 
+    /// Agent panes the person turned to their conversation, by
+    /// `<Mac root>/<pane>`; every other pane opens on its terminal. Pane ids
+    /// are never reused, so a key outliving its pane names nothing.
+    @Published private(set) var conversationsShown: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vigil.paneFaces.conversation") ?? []) {
+        didSet { UserDefaults.standard.set(Array(conversationsShown).sorted(), forKey: "vigil.paneFaces.conversation") }
+    }
+
+    func showsConversation(_ ref: PaneRef) -> Bool { conversationsShown.contains("\(ref.host.id)/\(ref.pane)") }
+
+    func showConversation(_ shown: Bool, _ ref: PaneRef) {
+        let key = "\(ref.host.id)/\(ref.pane)"
+        if shown { conversationsShown.insert(key) } else { conversationsShown.remove(key) }
+    }
+
     func tree() -> [Node] { nodes }
 
     /// A made-up tree, for review only (`VigilFixture`): nothing is
