@@ -366,8 +366,8 @@ struct MessagesMark: View {
     }
 
     private var said: String {
-        (unread == 1 ? "1 unread message for you" : "\\(unread) unread messages for you")
-            + (press == nil ? "" : "\\nPress to open its thread.")
+        (unread == 1 ? "1 unread message for you" : "\(unread) unread messages for you")
+            + (press == nil ? "" : "\nPress to open its thread.")
     }
 }
 

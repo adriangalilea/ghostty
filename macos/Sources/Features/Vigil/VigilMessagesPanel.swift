@@ -311,7 +311,7 @@ final class VigilMessageStore: ObservableObject {
                 }
                 next[key] = Named(
                     pane: VigilChatPane.of(
-                        alias: pane.messageAlias,
+                        alias: pane.messageAlias ?? pane.member?.alias,
                         member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
                         face: row.emoji, mac: remote == nil ? nil : row.host?.name, program: pane.conversationRef?.agent),
                     workspace: row.id, navigation: navigation)

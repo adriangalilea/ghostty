@@ -47,9 +47,9 @@ struct VigilMessageIndex: Equatable, Sendable {
         var conversations = MessageThreads.conversations(mailboxes)
         // A group with nothing said yet is listed too, and one that waits for
         // the person's yes first of all.
-        let listed = Set(conversations.compactMap(\.chat))
+        let listed = Set(conversations.filter { $0.chat != nil }.map { $0.key.root + "/" + $0.key.pane })
         for (root, held) in chats {
-            for chat in held where !listed.contains(chat.id) {
+            for chat in held where !listed.contains(root + "/" + MessageThread.chatPane(chat.id)) {
                 let empty = MessageThread(key: .init(root: root, pane: MessageThread.chatPane(chat.id), conversation: nil), items: [])
                 if chat.allowed { conversations.append(empty) } else { conversations.insert(empty, at: 0) }
             }
@@ -866,7 +866,7 @@ struct VigilThreadConversation: View {
         // Read is asked when what is unread changes, when the window comes to
         // the front, and when a hand moves over the thread: each an event,
         // and the hand itself is the host's seen rule.
-        .onChange(of: thread?.items.filter { $0.record.unread }.map(\.id), initial: true) { markRead() }
+        .onChange(of: thread?.unreadIDs, initial: true) { markRead() }
         .onChange(of: thread?.items.last?.id, initial: true) {
             if front, let thread { VigilActivityWatches.shared.seen(thread) }
         }

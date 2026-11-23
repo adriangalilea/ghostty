@@ -228,7 +228,7 @@ final class VigilPhoneMessages: ObservableObject {
         let member = node.glance?.member.map { (name: $0.name, face: String?.none, tint: $0.tint) }
         let place = phone.directories[root]?.place(of: pane)
         let alias = place?.pane.label ?? place.flatMap { $0.tab.members.count == 1 ? $0.tab.label : nil }
-        return VigilChatPane.of(alias: alias, member: member, conversation: node.glance?.title, title: node.title, face: face, mac: mac)
+        return VigilChatPane.of(alias: alias ?? node.glance?.member?.alias, member: member, conversation: node.glance?.title, title: node.title, face: face, mac: mac)
     }
 
     /// Go to a pane from a message or a watch: the pane screen, over whatever shows.
