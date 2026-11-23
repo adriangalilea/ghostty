@@ -97,7 +97,8 @@ final class VigilMentions {
             do {
                 let data = try await mention(.look(paths, pane: place.pane, folder: place.folder), place.root)
                 let looks = try JSONDecoder().decode([MentionFound].self, from: data)
-                return Dictionary(looks.map { ($0.written, $0) }, uniquingKeysWith: { first, _ in first })
+                let files = looks.filter { $0.path != nil && $0.kind != nil }
+                return Dictionary(files.map { ($0.written, $0) }, uniquingKeysWith: { first, _ in first })
             } catch {
                 // Not kept: the next time the message is drawn asks again.
                 // The host's transport said why (its log, the phone's receipts).
@@ -145,43 +146,63 @@ struct VigilMessageWords: View {
     /// What a press on a file does: the host's, given the file.
     let open: (VigilMentionedFile) -> Void
 
-    @State private var found: VigilMentions.Found?
-
-    init(id: String, words: String, place: MentionPlace?, host: VigilChatHost, open: @escaping (VigilMentionedFile) -> Void) {
-        self.id = id
-        self.words = words
-        self.place = place
-        self.host = host
-        self.open = open
-        _found = State(initialValue: place.flatMap { VigilMentions.shared.cached(VigilMentions.key(id, words, $0)) })
-    }
-
     var body: some View {
-        let key = place.map { VigilMentions.key(id, words, $0) }
-        MarkdownView(words)
-            .markdownLinks(found.flatMap { found in place.map { VigilMentions.links(found, root: $0.root, folders: host.reveals($0.root)) } })
+        let input = Input(id: id, words: words, place: place)
+        BodyText(content: Content(input), host: host)
+            .id(input)
             .environment(\.openURL, OpenURLAction { url in
                 guard let file = VigilMentionedFile(url) else { return .systemAction }
                 open(file)
                 return .handled
             })
-            // A run of text takes one tooltip, not one per link: the words'
-            // files in full, under the pointer anywhere on them.
-            .help(Self.paths(found))
-            // Its words changed (an edit): what was found is asked again.
-            .task(id: key) {
-                found = key.flatMap { VigilMentions.shared.cached($0) }
-                guard let key, let place else { return }
-                guard found == nil else { return }
-                found = await VigilMentions.shared.look(key, words, place, host: host)
-            }
     }
 
-    /// Every path the words name that its Mac found, whole, one a line, sorted.
-    private static func paths(_ found: VigilMentions.Found?) -> String {
-        guard let found else { return "" }
-        let paths = found.values.compactMap(\.path)
-        return Array(Set(paths)).sorted().joined(separator: "\n")
+    private struct Input: Hashable {
+        let id: String
+        let words: String
+        let place: MentionPlace?
+    }
+
+    /// Scrolling, focus and the arrival of a file lookup can redraw a bubble.
+    /// Its markdown needs parsing only when its words change.
+    @MainActor private final class Content: ObservableObject {
+        let document: MarkdownDocument
+        let place: MentionPlace?
+        let key: String?
+        @Published private(set) var files: VigilMentions.Found
+
+        init(_ input: Input) {
+            document = MarkdownDocument(input.words)
+            place = input.place
+            key = input.place.map { VigilMentions.key(input.id, input.words, $0) }
+            files = key.flatMap { VigilMentions.shared.cached($0) } ?? [:]
+        }
+
+        func resolve(_ host: VigilChatHost) async {
+            guard let place, let key, files.isEmpty,
+                let found = await VigilMentions.shared.look(key, document.source, place, host: host),
+                !found.isEmpty, !Task.isCancelled
+            else { return }
+            files = found
+        }
+    }
+
+    private struct BodyText: View {
+        @StateObject var content: Content
+        let host: VigilChatHost
+
+        var body: some View {
+            Group {
+                if !content.files.isEmpty, let place = content.place {
+                    MarkdownView(content.document)
+                        .markdownLinks(VigilMentions.links(content.files, root: place.root, folders: host.reveals(place.root)))
+                        .help(Set(content.files.values.compactMap(\.path)).sorted().joined(separator: "\n"))
+                } else {
+                    MarkdownView(content.document)
+                }
+            }
+            .task { await content.resolve(host) }
+        }
     }
 }
 

@@ -32,7 +32,8 @@ typealias VigilMessage = Message
 /// that changed was a render: a read of 220 drained the count one by one.
 struct VigilMessageIndex: Equatable, Sendable {
     var threads: [MessageThread] = []
-    var conversations: [MessageThread] = []
+    var list: [VigilListedThread] = []
+    var conversations: [MessageThread] { list.map(\.thread) }
     /// Each pane's every thread as one, by "root/pane" (`MessageThreads.panes`).
     var panes: [String: MessageThread] = [:]
     var pending: [String: [String: MessageThreads.Pending]] = [:]
@@ -52,7 +53,7 @@ struct VigilMessageIndex: Equatable, Sendable {
                 if chat.allowed { conversations.append(empty) } else { conversations.insert(empty, at: 0) }
             }
         }
-        self.conversations = conversations
+        list = conversations.map(VigilListedThread.init)
         panes = MessageThreads.panes(threads)
         pending = MessageThreads.pending(mailboxes)
         var awaiting = MessageThreads.awaitingYou(mailboxes)
@@ -71,6 +72,50 @@ struct VigilMessageIndex: Equatable, Sendable {
         guard var thread = panes["\(key.root)/\(key.pane)"] else { return nil }
         thread.key = key
         return thread
+    }
+}
+
+/// The mailbox supplies everything in a list row except its live pane names.
+/// Opening the list should never build a conversation's bubbles for its preview.
+struct VigilListedThread: Equatable, Sendable {
+    let thread: MessageThread
+    let speakers: [MessageThread.Item]
+    let people: [String]
+    let from: String?
+    let line: String?
+    let at: Date?
+    let unread: Int
+    let waits: Bool
+    let delivery: InkChat.Delivery?
+
+    init(_ thread: MessageThread) {
+        self.thread = thread
+        var seen: Set<String> = [Message.you]
+        var speakers: [MessageThread.Item] = []
+        var people: [String] = []
+        for item in thread.items {
+            let sender = VigilChatPeople.key(of: item)
+            if seen.insert(sender).inserted {
+                speakers.append(item)
+                people.append(sender)
+            }
+        }
+        self.speakers = speakers
+        self.people = people
+        let last = thread.items.last
+        from = last.map(VigilChatPeople.key(of:))
+        line = last.map { InkChat.line(of: VigilThreadWords.words($0)) }
+        at = last.map { Date(timeIntervalSince1970: $0.record.message.sent) }
+        unread = thread.unread
+        waits = thread.items.contains { !$0.record.message.to.isPerson && $0.latest.state.kind == .awaitingApproval }
+        delivery = last.flatMap {
+            $0.record.message.from.kind == .person && !$0.record.message.to.isPerson ? VigilThreadWords.delivery($0.latest.state) : nil
+        }
+    }
+
+    func summary(title: String) -> InkChat.Summary {
+        InkChat.Summary(thread.id, title: title, people: people, from: from, line: line, at: at,
+                        unread: unread, waits: waits, delivery: delivery)
     }
 }
 
@@ -180,7 +225,7 @@ struct VigilChatHost {
 /// it (a pane's hand, envelope or menu on the Mac) says which agent. What
 /// the Mac's window, its bar and the phone each list.
 struct VigilThreadList: View {
-    let threads: [MessageThread]
+    let list: [VigilListedThread]
     let people: VigilChatPeople
     @Binding var selection: String?
     @Binding var only: String?
@@ -189,11 +234,11 @@ struct VigilThreadList: View {
     static func end(_ key: MessageThread.Key) -> String { "\(key.root)/\(key.pane)" }
 
     var body: some View {
-        let ends = Array(Set(threads.flatMap { [$0.key] + [$0.with].compactMap { $0 } }.map(Self.end))).sorted()
-        let shown = only.map { one in threads.filter { Self.end($0.key) == one || $0.with.map(Self.end) == one } } ?? threads
+        let ends = Array(Set(list.flatMap { [$0.thread.key] + [$0.thread.with].compactMap { $0 } }.map(Self.end))).sorted()
+        let shown = only.map { one in list.filter { Self.end($0.thread.key) == one || $0.thread.with.map(Self.end) == one } } ?? list
         VStack(spacing: 0) {
             InkConversations(
-                shown.map { people.summary($0) }, selection: $selection, people: people.all, me: Message.you,
+                shown.map { $0.summary(title: people.title(of: $0.thread)) }, selection: $selection, people: people.all, me: Message.you,
                 picture: { people.picture($0) },
                 empty: {
                     Text(only == nil ? "When an agent writes to another agent or to you, it shows here." : "Nothing with this agent yet.")
@@ -213,7 +258,7 @@ struct VigilThreadList: View {
 
 /// Every thread, and the one chosen beside the list.
 struct VigilChat: View {
-    let threads: [MessageThread]
+    let list: [VigilListedThread]
     let host: VigilChatHost
     @Binding var chosen: String?
     /// Whose conversations the list shows: opened from nothing in
@@ -221,14 +266,14 @@ struct VigilChat: View {
     @State private var only: String?
 
     var body: some View {
-        let thread = threads.first { $0.id == chosen }
-        let people = VigilChatPeople(threads: threads, host: host)
+        let thread = list.first { $0.thread.id == chosen }?.thread
+        let people = VigilChatPeople(list: list, host: host)
         InkChat(
             title: thread.map { people.title(of: $0) },
             detail: thread.map { VigilThreadWords.detail($0, people: people) },
             open: thread != nil
         ) {
-            VigilThreadList(threads: threads, people: people, selection: $chosen, only: $only)
+            VigilThreadList(list: list, people: people, selection: $chosen, only: $only)
         } conversation: {
             if let thread {
                 VigilThreadConversation(key: thread.key, thread: thread, people: people, host: host)
@@ -348,13 +393,21 @@ struct VigilChatPeople {
     private let members: [String: VigilChatMember]
 
     @MainActor init(threads: [MessageThread], host: VigilChatHost) {
+        self.init(speakers: threads.map { ($0.key, $0.items) }, host: host)
+    }
+
+    @MainActor init(list: [VigilListedThread], host: VigilChatHost) {
+        self.init(speakers: list.map { ($0.thread.key, $0.speakers) }, host: host)
+    }
+
+    @MainActor private init(speakers: [(MessageThread.Key, [MessageThread.Item])], host: VigilChatHost) {
         self.host = host
         var members: [String: VigilChatMember] = [
             Message.you: VigilChatMember(key: Message.you, name: "You", kind: .person)
         ]
-        for thread in threads {
-            let own = Self.key(root: thread.key.root, pane: thread.key.pane)
-            for item in thread.items {
+        for (thread, items) in speakers {
+            let own = Self.key(root: thread.root, pane: thread.pane)
+            for item in items {
                 let from = item.record.message.from
                 let key = Self.key(of: item)
                 guard members[key] == nil else { continue }
@@ -370,7 +423,7 @@ struct VigilChatPeople {
                 }
             }
             if members[own] == nil {
-                members[own] = .pane(own, host.name(thread.key.root, thread.key.pane), kind: .agent, program: nil)
+                members[own] = .pane(own, host.name(thread.root, thread.pane), kind: .agent, program: nil)
             }
         }
         all = members.values.map(\.person).sorted { $0.id < $1.id }
@@ -432,16 +485,6 @@ struct VigilChatPeople {
     @MainActor func title(ofEnd end: String) -> String {
         guard let slash = end.firstIndex(of: "/") else { return end }
         return host.name(String(end[..<slash]), String(end[end.index(after: slash)...])).said
-    }
-
-    @MainActor func summary(_ thread: MessageThread) -> InkChat.Summary {
-        let messages = VigilThreadWords.messages(thread, people: self)
-        let read = InkChat.Summary(thread.id, title: title(of: thread), messages: messages, me: Message.you)
-        // Unread is the thread's own count (its messages for the pane you have
-        // not read), never every message after the first of them.
-        return InkChat.Summary(
-            read.id, title: read.title, people: read.people, from: read.from, line: read.line, at: read.at,
-            unread: thread.unread, waits: read.waits, delivery: read.delivery)
     }
 
     func name(_ key: String) -> String { members[key]?.name ?? key }
