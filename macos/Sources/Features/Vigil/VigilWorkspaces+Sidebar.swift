@@ -79,14 +79,6 @@ extension VigilWorkspaces {
                 + remote.hosts.map { (name: $0.name, tickets: $0.moves) },
             home: NSHomeDirectory())
     }
-
-    private static let rowBuilder = SidebarBuilder()
-
-    /// The rows, built here from the inputs just read.
-    func sidebarSnapshot() -> [SidebarWorkspaceRow] {
-        Self.rowBuilder.build(sidebarInputs())
-    }
-
     // MARK: Pin on top
 
     /// Apply a pin state to a live window (Antinote-style float-on-top +

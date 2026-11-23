@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 import VigilWire
@@ -210,8 +211,19 @@ final class VigilSidebarModel: ObservableObject {
     weak var hostController: TerminalController?
 
     init() {
+        builtRows = VigilSidebarSnapshots.shared.$built.sink { [weak self] built in
+            MainActor.assumeIsolated { self?.apply(built) }
+        }
         refresh()
     }
+
+    private var builtRows: AnyCancellable?
+    /// The built rows this bar shows (`SidebarBuilt.revision`); 0 when its
+    /// rows are not built ones (a drag's preview reordered them).
+    private var appliedRevision: UInt64 = 0
+    /// A committed drag's preview stands until rows read after the commit
+    /// land (`VigilSidebarSnapshots.captures` at the commit).
+    private var previewUntil: UInt64?
 
     // MARK: Sections (the switch at the bar's top)
 
@@ -313,9 +325,10 @@ final class VigilSidebarModel: ObservableObject {
 
     /// Coalesced + throttled: any number of triggers (ticker, state
     /// notifications, bar syncs) collapse into at most ~4 snapshots/s.
-    /// The snapshot reads per-pane files; an unthrottled storm saturates
-    /// the main thread and starves the runloop so hard that launch restore
-    /// never runs. `immediate` bypasses the
+    /// The rows are built off the main thread (`VigilSidebarSnapshots`) and
+    /// land through `apply`; an unthrottled storm of reads would still
+    /// saturate the main thread and starve the runloop so hard that launch
+    /// restore never runs. `immediate` bypasses the
     /// throttle for human-rate triggers (a key-window or focus change):
     /// the tree must repaint with the click, never a tick later.
     func refresh(immediate: Bool = false, reason: String = "action") {
@@ -350,7 +363,7 @@ final class VigilSidebarModel: ObservableObject {
         // throttled path must not re-walk windows 20×/s under a rename
         // storm.
         refreshFocus()
-        // A live drag owns the row order; a snapshot would clobber the
+        // A live drag owns the row order; built rows would clobber the
         // preview. Staleness guard: a drag cancelled OUTSIDE the bar (no
         // delegate fires) un-dims and reverts within a tick or two.
         if draggingItem != nil {
@@ -360,30 +373,9 @@ final class VigilSidebarModel: ObservableObject {
                 return
             }
         }
-        let snapT0 = Date()
-        let fresh = VigilWorkspaces.shared.sidebarSnapshot()
-        let snapshotTook = Duration.seconds(Date().timeIntervalSince(snapT0))
-        if snapshotTook > .milliseconds(25) {
-            sidebarLog.info("snapshot slow", ["took": snapshotTook])
-        }
-        if fresh != rows {
-            // Each dot that moves, as this sidebar draws it: with the facts'
-            // own "state taken" line, a dot that lags its file names the
-            // step it lagged in (2026-10-30, two dots stale for minutes).
-            let before = Dictionary(rows.flatMap(\.tabs).flatMap(\.panes).map { ($0.id, $0.state) }, uniquingKeysWith: { a, _ in a })
-            for pane in fresh.flatMap(\.tabs).flatMap(\.panes) where before[pane.id].map({ $0 != pane.state }) ?? false {
-                sidebarLog.info("dot", ["pane": pane.id, "was": before[pane.id]??.rawValue ?? "none",
-                                         "now": pane.state?.rawValue ?? "none"])
-            }
-            writerProblems = ConversationCards.writerProblems(fresh.flatMap { row in
-                row.tabs.flatMap(\.panes).compactMap { pane in
-                    pane.liveConversation.map { ($0, row.host?.name ?? "this Mac", pane.paneId ?? VigilRemote.split(pane.id)?.name ?? pane.id) }
-                }
-            })
-            rows = fresh
-            // Messages names its panes from these very rows.
-            VigilMessageStore.shared.rows(fresh)
-        }
+        let snapshots = VigilSidebarSnapshots.shared
+        snapshots.request()
+        apply(snapshots.built)
         let freshHere = VigilWorkspaces.SidebarWorkspaceRow.HostHeader(
             name: VigilWorkspaces.thisMac, machine: VigilMachine.here)
         if freshHere != here { here = freshHere }
@@ -395,6 +387,30 @@ final class VigilSidebarModel: ObservableObject {
         if freshBurials != burials { burials = freshBurials }
         let hint = VigilWorkspaces.shared.nextAskHint()
         if hint != followHint { followHint = hint }
+    }
+
+    /// Built rows land (`VigilSidebarSnapshots`): this bar shows them,
+    /// unless a drag owns the order.
+    private func apply(_ built: SidebarBuilt) {
+        guard draggingItem == nil else { return }
+        if let held = previewUntil {
+            guard built.capture > held else { return }
+            previewUntil = nil
+        } else if built.revision == appliedRevision {
+            return
+        }
+        appliedRevision = built.revision
+        let fresh = built.rows
+        // Each dot that moves, as this sidebar draws it: with the facts'
+        // own "state taken" line, a dot that lags its file names the
+        // step it lagged in (2026-10-30, two dots stale for minutes).
+        let before = Dictionary(rows.flatMap(\.tabs).flatMap(\.panes).map { ($0.id, $0.state) }, uniquingKeysWith: { a, _ in a })
+        for pane in fresh.flatMap(\.tabs).flatMap(\.panes) where before[pane.id].map({ $0 != pane.state }) ?? false {
+            sidebarLog.info("dot", ["pane": pane.id, "was": before[pane.id]??.rawValue ?? "none",
+                                     "now": pane.state?.rawValue ?? "none"])
+        }
+        writerProblems = built.writerProblems
+        rows = fresh
     }
 
     /// The ⌘⇧J affordance (auto-follow off): the queue's head, re-derived
@@ -645,6 +661,7 @@ final class VigilSidebarModel: ObservableObject {
               let to = rows.firstIndex(where: { $0.id == target }) else { return }
         let row = rows.remove(at: from)
         rows.insert(row, at: to)
+        appliedRevision = 0
     }
 
     /// The tail zone's preview: dragged past the last row = last place.
@@ -654,6 +671,7 @@ final class VigilSidebarModel: ObservableObject {
               from != rows.count - 1 else { return }
         let row = rows.remove(at: from)
         rows.append(row)
+        appliedRevision = 0
     }
 
     // Session-drag handling shared by EVERY drop surface in the bar
@@ -698,6 +716,10 @@ final class VigilSidebarModel: ObservableObject {
             manager.setOrder(name: row.id, order: index)
         }
         draggingItem = nil
+        // The preview stands until rows read after the new order land.
+        let snapshots = VigilSidebarSnapshots.shared
+        previewUntil = snapshots.captures
+        snapshots.request()
     }
 
     // MARK: Geometry-resolved drop (the whole tree is ONE drop surface)
