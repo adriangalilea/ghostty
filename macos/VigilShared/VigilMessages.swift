@@ -492,16 +492,50 @@ struct VigilChatPeople {
 
 /// A record as Ink's message, in vigil's words.
 enum VigilThreadWords {
-    @MainActor static func messages(_ thread: MessageThread, people: VigilChatPeople) -> [InkChat.Message] {
-        thread.items.map { message($0, in: thread, people: people) }
+    /// Mailbox changes arrive as snapshots. Most append a row or change one
+    /// delivery state. Keep the previous rendering inputs for this conversation.
+    @MainActor final class Projection {
+        private var items: [MessageThread.Item] = []
+        private var rendered: [InkChat.Message] = []
+        private var people: [InkChat.Person] = []
+
+        func messages(_ thread: MessageThread?, people current: VigilChatPeople) -> [InkChat.Message] {
+            let next = thread?.items ?? []
+            let samePeople = people == current.all
+            var places: [MessageThread.Key: String] = [:]
+            if rendered.count > next.count { rendered.removeLast(rendered.count - next.count) }
+            for (index, item) in next.enumerated() {
+                let end = VigilThreadWords.otherEnd(of: item, from: thread?.key)
+                let place: String
+                if let known = places[end] {
+                    place = known
+                } else {
+                    place = current.host.name(end.root, end.pane).said
+                    places[end] = place
+                }
+                if index < rendered.count, items[index] == item, rendered[index].place == place,
+                   samePeople || item.record.reactions.isEmpty { continue }
+                let row = VigilThreadWords.message(item, place: place, people: current)
+                if index < rendered.count { rendered[index] = row } else { rendered.append(row) }
+            }
+            items = next
+            people = current.all
+            return rendered
+        }
     }
 
-    @MainActor static func message(_ item: MessageThread.Item, in thread: MessageThread, people: VigilChatPeople) -> InkChat.Message {
+    /// Where “go to” leads from this thread's pane. Conversations in the
+    /// same pane share a display name.
+    private static func otherEnd(of item: MessageThread.Item, from key: MessageThread.Key?) -> MessageThread.Key {
+        let message = item.record.message
+        if let pane = message.from.pane, item.senderRoot != key?.root || pane != key?.pane {
+            return .init(root: item.senderRoot, pane: pane, conversation: nil)
+        }
+        return .init(root: item.root, pane: message.to.pane, conversation: nil)
+    }
+
+    @MainActor private static func message(_ item: MessageThread.Item, place: String, people: VigilChatPeople) -> InkChat.Message {
         let record = item.record, message = record.message
-        // Where "go to" leads: the other end of the message from this thread's pane.
-        let elsewhere = message.from.pane.map { (item.senderRoot, $0) }
-            .flatMap { $0 == (thread.key.root, thread.key.pane) ? nil : $0 }
-        let place = people.host.name(elsewhere?.0 ?? item.root, elsewhere?.1 ?? message.to.pane).said
         // One bubble per message: its corrections are its edits (`MessageThreads`
         // folds them), so it says its newest words, stands as they stand, and
         // its "edited" opens the words before.
@@ -564,6 +598,7 @@ struct VigilThreadConversation: View {
     /// person (InkConversation's `focus`); nil, its newest.
     var focus: String? = nil
 
+    @State private var projection = VigilThreadWords.Projection()
     @State private var draft = ""
     @State private var replying: String?
     @State private var editing: String?
@@ -587,7 +622,7 @@ struct VigilThreadConversation: View {
     private var newestByStandingYes: String? { items.last { $0.record.byStandingYes }?.id }
 
     var body: some View {
-        let messages = thread.map { VigilThreadWords.messages($0, people: people) } ?? []
+        let messages = projection.messages(thread, people: people)
         // Each row finds its record by id once, never by a walk of the thread.
         let byID = Dictionary(items.map { ($0.id, $0) }) { first, _ in first }
         let revokable = newestByStandingYes
