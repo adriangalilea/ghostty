@@ -52,6 +52,11 @@ struct PaneResumeFacts {
         let title: String
         let icon: String
         let unusable: Bool
+        /// The router's facts of it, drawn as its table row where a menu
+        /// can show colour (`AccountTable`); nil for a name it did not list.
+        var account: AgentAccounts.Account? = nil
+        /// "this pane", "c’s pick".
+        var marks: String? = nil
     }
 
     /// An account a line per item: the broker's names are what it resumes
@@ -64,7 +69,8 @@ struct PaneResumeFacts {
         return known.map { entry in
             let current = entry.name == account
             let pick = entry.name == accounts?.pick
-            let marks = [entry.name, current ? "this pane" : nil, pick ? "\(router)’s pick" : nil].compactMap { $0 }
+            let said = [current ? "this pane" : nil, pick ? "\(router)’s pick" : nil].compactMap { $0 }
+            let marks = [entry.name] + said
             let icon = entry.loggedOut ? "person.crop.circle.badge.xmark"
                 : current && block != nil ? "exclamationmark.triangle"
                 : entry.spent ? "xmark.octagon"
@@ -72,7 +78,8 @@ struct PaneResumeFacts {
                 : current ? "checkmark.circle"
                 : "person.crop.circle"
             return Line(name: entry.name, title: (marks + [entry.facts(now: now)]).joined(separator: " · "),
-                        icon: icon, unusable: entry.loggedOut || (switching && current))
+                        icon: icon, unusable: entry.loggedOut || (switching && current),
+                        account: entry, marks: said.isEmpty ? nil : said.joined(separator: ", "))
         } + bare.map { name in
             Line(name: name, title: name == account ? name + " · this pane" : name, icon: "person.crop.circle",
                  unusable: switching && name == account)
@@ -190,11 +197,35 @@ struct PaneResumeItems: View {
     @ViewBuilder
     private func accountItems(switching: Bool) -> some View {
         let reading = store.reading(facts.accounts)
+        let now = Date()
         Text(facts.header(reading))
-        ForEach(facts.lines(reading?.facts, switching: switching, now: Date()), id: \.name) { line in
+        #if os(macOS)
+        let table = reading?.facts.map { accounts in
+            AccountTable(accounts, marks: { entry in
+                facts.lines(accounts, switching: switching, now: now).first { $0.name == entry.name }?.marks
+            }, now: now)
+        }
+        #endif
+        ForEach(facts.lines(reading?.facts, switching: switching, now: now), id: \.name) { line in
             Button {
                 switching ? switchAccount(to: line.name) : resume(as: line.name)
-            } label: { Label(line.title, systemImage: line.icon) }
+            } label: {
+                #if os(macOS)
+                // The table row, in agent-hud's colours and columns; a menu
+                // title would lose both.
+                if let table, let account = line.account, let read = reading?.at,
+                   let image = table.image(account, marks: line.marks, icon: line.icon, read: read,
+                                           scale: NSScreen.main?.backingScaleFactor ?? 2) {
+                    Label { Text(line.title) } icon: { Image(nsImage: image) }
+                        .labelStyle(.iconOnly)
+                        .accessibilityLabel(line.title)
+                } else {
+                    Label(line.title, systemImage: line.icon)
+                }
+                #else
+                Label(line.title, systemImage: line.icon)
+                #endif
+            }
             .disabled(line.unusable)
         }
     }
