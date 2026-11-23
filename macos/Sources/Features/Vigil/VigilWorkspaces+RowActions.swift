@@ -188,12 +188,145 @@ extension VigilWorkspaces {
 
     // MARK: New workspace
 
-    /// A workspace born on the Mac `device`, a shell in its home folder, as
-    /// a Mac's row offers it: it appears in that Mac's rows from its own word,
-    /// as a remote new tab does.
-    func newWorkspace(on device: String) {
-        ask(RowHome(device: device, workspace: ""), .create(cwd: "~", command: nil, label: nil),
-            failing: "No workspace made on \(VigilRemote.shared.host(device)?.name ?? "its Mac")")
+    /// How long a Mac has to list a workspace it said it made before the
+    /// person is told it isn't listed yet: the phone's bound for the same wait.
+    static let createListedWithin: Duration = .seconds(10)
+
+    /// A workspace born on the Mac `device` (nil: this one), a shell in its
+    /// home folder, as a Mac's header offers it, taking the window the person
+    /// is in, as ⌘N's does. This Mac's is ⌘N's own; another Mac's goes
+    /// through `create(_:on:from:)`, and what keeps it from opening is said
+    /// in an alert.
+    func newWorkspace(on device: String?) {
+        guard let device else {
+            newWorkspace(cwd: FileManager.default.homeDirectoryForCurrentUser.path)
+            return
+        }
+        let origin = CreationOrigin.now(self)
+        let mac = VigilRemote.shared.host(device)?.name ?? "its Mac"
+        Task { @MainActor in
+            guard case .problem(let problem) = await create(
+                .create(cwd: "~", command: nil, label: nil), on: device, from: origin) else { return }
+            let alert = NSAlert()
+            alert.messageText = "No workspace opened on \(mac)"
+            alert.informativeText = problem
+            alert.runModal()
+        }
+    }
+
+    /// Where a creation was asked from: the window the person was in and
+    /// what it showed, so a workspace that arrives later opens only if
+    /// they are still there.
+    struct CreationOrigin {
+        weak var viewport: TerminalController?
+        /// There was a window to be in at all.
+        let hadViewport: Bool
+        let showing: String?
+
+        @MainActor static func now(_ manager: VigilWorkspaces) -> CreationOrigin {
+            let viewport = TerminalController.preferredParent.flatMap { $0.window?.isVisible == true ? $0 : nil }
+            return CreationOrigin(viewport: viewport, hadViewport: viewport != nil,
+                                  showing: viewport.flatMap { manager.workspaceName(of: $0) ?? manager.mirroredWorkspace(of: $0) })
+        }
+    }
+
+    /// How a creation ended for the person.
+    enum Created {
+        /// It took the window they asked from (or one of its own, when
+        /// there was none).
+        case opened
+        /// They had moved on: it waits in the sidebar, said once by a pill.
+        case ready
+        /// Not made, not known to be made, or not listed in time: the
+        /// caller says it where the person looks. Nothing else opens.
+        case problem(String)
+    }
+
+    /// One creation, from a Mac's header or the creation sheet, on this Mac
+    /// or another (`device`). Another Mac's is opened only once that Mac's
+    /// own directory lists its pane, within the phone's bound. It takes the
+    /// window it was asked from (`take`) when the person is still there:
+    /// that window is the main one and shows what it showed then. Otherwise
+    /// nothing moves under them, and a pill says it is ready. `opening` runs
+    /// just before either (the sheet closes itself there).
+    func create(_ request: WorkspaceCommand.Request, on device: String?, from origin: CreationOrigin,
+                opening: @MainActor () -> Void = {}) async -> Created {
+        let mac = device.map { VigilRemote.shared.host($0)?.name ?? "its Mac" } ?? "this Mac"
+        var fields: [String: Any] = ["id": request.id.uuidString, "mac": mac]
+        func problem(_ why: String) -> Created {
+            sidebarLog.error("new workspace not opened", fields.merging(["why": why]) { a, _ in a })
+            return .problem(why)
+        }
+        let reply: VigilSessionControl.Reply
+        if let device {
+            do {
+                reply = try await VigilRemote.shared.command(device, request: request)
+            } catch let error as NSError where error.domain == "VigilRemote" {
+                // Out of reach: nothing was sent.
+                return problem(error.localizedDescription)
+            } catch {
+                return problem("\(error.localizedDescription). It may have been made: check \(mac)'s workspaces before trying again.")
+            }
+        } else {
+            reply = await VigilSessionControl.transact(request, origin: .gesture)
+        }
+        guard reply.ok, let pane = reply.pane else { return problem(reply.message) }
+        fields["pane"] = pane
+        sidebarLog.info("new workspace made", fields)
+        let name: String
+        let label: String
+        if let device {
+            guard let listed = await listedWorkspace(of: pane, on: device, within: Self.createListedWithin) else {
+                return problem("Made on \(mac), but it isn't listed yet. It appears in \(mac)'s workspaces once it is.")
+            }
+            name = VigilRemote.compositeId(device, listed.name)
+            label = listed.label
+        } else {
+            guard let session = reply.session, let here = workspaces[session] else {
+                return problem("Made on this Mac, but its workspace is not in the registry here.")
+            }
+            name = session
+            label = here.label
+        }
+        let anchor = device.map { VigilRemote.compositeId($0, pane) } ?? pane
+        fields["workspace"] = name
+        opening()
+        let viewport = origin.viewport
+        let stillThere = viewport.map { viewport in
+            viewport.window?.isVisible == true && NSApp.mainWindow === viewport.window
+                && (workspaceName(of: viewport) ?? mirroredWorkspace(of: viewport)) == origin.showing
+        } ?? !origin.hadViewport
+        guard stillThere else {
+            sidebarLog.info("new workspace ready: the person moved on, nothing opened", fields)
+            VigilFollowSplash.show(in: NSApp.mainWindow, text: "\(label) is ready on \(mac)")
+            return .ready
+        }
+        sidebarLog.info("new workspace opened", fields)
+        take(name, anchor: anchor, in: viewport)
+        return .opened
+    }
+
+    /// The workspace `device`'s own directory lists `pane` in, as soon as it
+    /// does; nil when it has not within `bound`. Read again at every
+    /// directory change, and once more at the bound.
+    private func listedWorkspace(of pane: String, on device: String, within bound: Duration) async -> Registry.Workspace? {
+        // Among the workspaces a remote mount opens (`VigilRemote.session`).
+        func listed() -> Registry.Workspace? {
+            VigilRemote.shared.host(device)?.directory?.live.first { $0.paneIds.contains(pane) }
+        }
+        if let name = listed() { return name }
+        let waiting = Task { @MainActor () -> Registry.Workspace? in
+            for await _ in NotificationCenter.default.notifications(named: Self.stateDidChange) {
+                if let name = listed() { return name }
+            }
+            return nil
+        }
+        let bounded = Task { @MainActor in
+            try? await Task.sleep(for: bound)
+            waiting.cancel()
+        }
+        defer { bounded.cancel() }
+        return await waiting.value ?? listed()
     }
 
     /// A tab (of its pane `anchor`) or a pane of another Mac closed at its
