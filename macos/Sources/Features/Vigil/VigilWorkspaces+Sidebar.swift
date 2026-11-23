@@ -77,6 +77,7 @@ extension VigilWorkspaces {
         /// daemon id: local rename, drag and close paths must stay separate.
         var navigationId: String? { paneId ?? (VigilRemote.split(id) != nil ? id : nil) }
         let title: String         // display: the one naming rule (`Directory.titles`)
+        var messageAlias: String? = nil
         let program: String?      // the argv truth alone; nil = just a shell
         let state: AgentState?
         /// Its dots, by the one rule every surface draws (`PaneDot`): a dot
@@ -276,16 +277,17 @@ extension VigilWorkspaces {
             let known = Dictionary(uniqueKeysWithValues: members.map { ($0.id, paneFacts($0.id)) })
             let names = SidebarDerived.shared.titles(members, known)
             return members.indices.map {
-                paneRow(members[$0], title: names[$0], facts: known[members[$0].id]!, isDock: $0 >= tab.panes.count)
+                paneRow(members[$0], title: names[$0], facts: known[members[$0].id]!, tabAlias: members.count == 1 ? tab.label : nil, isDock: $0 >= tab.panes.count)
             }
         }
 
-        func paneRow(_ pane: Registry.Pane, title: String, facts: Directory.Facts, isDock: Bool) -> SidebarPane {
+        func paneRow(_ pane: Registry.Pane, title: String, facts: Directory.Facts, tabAlias: String?, isDock: Bool) -> SidebarPane {
             let (program, meaning) = SidebarDerived.shared.pane(pane.id, facts)
             return SidebarPane(
                 id: pane.id,
                 paneId: pane.id,
                 title: title,
+                messageAlias: pane.label ?? tabAlias,
                 program: program,
                 state: paneDisplayState(pane.id),
                 isDock: isDock,

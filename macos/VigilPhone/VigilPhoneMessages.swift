@@ -131,7 +131,7 @@ final class VigilPhoneMessages: ObservableObject {
             var quiet = Transaction()
             quiet.disablesAnimations = true
             withTransaction(quiet) {
-                VigilActivityWatches.shared.update(next.lastTraffic)
+                VigilActivityWatches.shared.update(next.traffic)
                 index = next
                 if next.pending != marks.pending { marks.pending = next.pending }
                 if next.awaiting != marks.awaiting { marks.awaiting = next.awaiting }
@@ -161,7 +161,7 @@ final class VigilPhoneMessages: ObservableObject {
             handAfter: { _ in true },
             mention: { call, root in try await Self.mention(call, root: root) },
             asks: { key in VigilPhoneMessages.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] },
-            chat: { root, id in VigilPhoneMessages.shared.chats[root]?.first { $0.id == id } }, activity: index.activity)
+            chat: { root, id in VigilPhoneMessages.shared.chats[root]?.first { $0.id == id } }, activity: index.traffic.rows)
     }
 
     /// An ask about the files a message names, of the Mac they are on.
@@ -226,7 +226,9 @@ final class VigilPhoneMessages: ObservableObject {
         }
         // The member its glance carries: its name and tint, one look everywhere.
         let member = node.glance?.member.map { (name: $0.name, face: String?.none, tint: $0.tint) }
-        return VigilChatPane.of(member: member, conversation: node.glance?.title, title: node.title, face: face, mac: mac)
+        let place = phone.directories[root]?.place(of: pane)
+        let alias = place?.pane.label ?? place.flatMap { $0.tab.members.count == 1 ? $0.tab.label : nil }
+        return VigilChatPane.of(alias: alias, member: member, conversation: node.glance?.title, title: node.title, face: face, mac: mac)
     }
 
     /// Go to a pane from a message or a watch: the pane screen, over whatever shows.

@@ -91,7 +91,7 @@ final class VigilMessageStore: ObservableObject {
     /// Every conversation listed once (`MessageThreads.conversations`): what
     /// the Messages list draws.
     var conversations: [MessageThread] { index.conversations }
-    var pendingTotal: Int { marks.pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread + $1.waiting } }
+    var pendingTotal: Int { marks.pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread } }
 
     /// A pane's every thread as one: what its aside shows, holding exactly
     /// what its row mark counts.
@@ -252,7 +252,7 @@ final class VigilMessageStore: ObservableObject {
             var quiet = Transaction()
             quiet.disablesAnimations = true
             withTransaction(quiet) {
-                VigilActivityWatches.shared.update(next.lastTraffic)
+                VigilActivityWatches.shared.update(next.traffic)
                 index = next
                 if next.pending != marks.pending { marks.pending = next.pending }
                 if next.awaiting != marks.awaiting { marks.awaiting = next.awaiting }
@@ -311,6 +311,7 @@ final class VigilMessageStore: ObservableObject {
                 }
                 next[key] = Named(
                     pane: VigilChatPane.of(
+                        alias: pane.messageAlias,
                         member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
                         face: row.emoji, mac: remote == nil ? nil : row.host?.name, program: pane.conversationRef?.agent),
                     workspace: row.id, navigation: navigation)
@@ -329,7 +330,7 @@ final class VigilMessageStore: ObservableObject {
 
     var host: VigilChatHost {
         let here = here, panes = panes
-        let local = panes.filter { here != nil && $0.key.hasPrefix(here! + "/") }
+        let local = here.map { root in panes.filter { $0.key.hasPrefix(root + "/") } } ?? [:]
         return VigilChatHost(
             here: here, macName: Host.current().localizedName ?? "this Mac",
             name: { root, pane in
@@ -351,7 +352,7 @@ final class VigilMessageStore: ObservableObject {
             asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] },
             chat: { root, id in VigilMessageStore.shared.chats[root]?.first { $0.id == id } },
             postInChat: { chat, body, replyTo, root in try await Self.postInChat(chat, body: body, replyTo: replyTo, root: root, here: here) },
-            activity: index.activity, groupPanes: Dictionary(uniqueKeysWithValues: local.values.map { ($0.navigation, $0.pane.title) }),
+            activity: index.traffic.rows, groupPanes: Dictionary(uniqueKeysWithValues: local.values.map { ($0.navigation, $0.pane.title) }),
             createGroup: { name, panes in
                 try await Task.detached {
                     let reply = try HarnessWire.call(RPCRequest("chat.new", .object([
@@ -558,7 +559,7 @@ enum VigilMessagesPanel {
     /// its end. `id`: the row's pane id, a local daemon id or
     /// `<tether root>/id` for another Mac's.
     static func show(
-        paneId: String?, id: String, conversation: String?, waiting: Set<String> = [], in controller: TerminalController?
+        paneId: String?, id: String, conversation: String?, waiting: Set<String> = [], unread: Bool = false, in controller: TerminalController?
     ) {
         let store = VigilMessageStore.shared
         if let group = store.index.list.first(where: { $0.thread.chat.map(waiting.contains) == true }) {
@@ -568,6 +569,8 @@ enum VigilMessagesPanel {
         guard let key = store.key(paneId: paneId, id: id, conversation: conversation) else {
             return messagesLog.warn("messages: this Mac's mailbox has not answered yet", ["pane": id])
         }
+        if unread, let first = store.index.forYou.first(where: { $0.item.root == key.root && $0.item.record.message.to.pane == key.pane }),
+           first.item.record.message.chat != nil { return window(thread: first.thread) }
         guard let controller else { return messagesLog.warn("messages: no window to show them in", ["pane": id]) }
         let focus = store.paneThread(key)?.firstAwaitingYou(among: waiting)
         store.show(focus, on: key)

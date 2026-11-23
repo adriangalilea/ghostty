@@ -1401,7 +1401,7 @@ struct VigilSidebarView: View {
             }
             if let pending = messages.pending(paneId: pane.paneId, id: pane.id) {
                 MessagesMark(pending: [pending], sizes: marks) {
-                    VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, in: model.hostController)
+                    VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, unread: true, in: model.hostController)
                 }
             }
             // Watches whose verdict will reach it, in the care tone when
