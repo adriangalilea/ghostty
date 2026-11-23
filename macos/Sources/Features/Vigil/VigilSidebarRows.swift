@@ -17,9 +17,13 @@ extension VigilWorkspaces {
         var messageAlias: String? = nil
         let program: String?      // the argv truth alone; nil = just a shell
         let state: AgentState?
-        /// Its dots, by the one rule every surface draws (`PaneDot`): a dot
-        /// per background agent at work, then its main agent's.
-        var dots: [PaneDot] { state.map { $0.dots(background: background) } ?? [] }
+        /// Its row's dots, by the one rule every surface draws (`PaneDot`):
+        /// a dot per agent no subagent row of its own shows, then its main
+        /// agent's.
+        var dots: [PaneDot] { state.map { $0.dots(background: background, member: member, rowsShown: true) } ?? [] }
+        /// Its dots where its subagent rows are hidden (a folded row's
+        /// cluster): every agent of it.
+        var foldedDots: [PaneDot] { state.map { $0.dots(background: background, member: member, rowsShown: false) } ?? [] }
         let isDock: Bool
         var emoji: String?        // the pane's custom face
         /// Declared watch leases (notes) on this pane - the sentry's own
@@ -523,7 +527,7 @@ final class SidebarBuilder: @unchecked Sendable {
                 label: session.label,
                 stateTag: session.place.rawValue,
                 attention: session.attention,
-                states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.dots)),
+                states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.foldedDots)),
                 tabs: tabs))
         }
         derived.keepOnly()
@@ -624,7 +628,7 @@ final class SidebarBuilder: @unchecked Sendable {
                     label: session.label,
                     stateTag: host.away ? "away" : "remote",
                     attention: states.contains(.blocked) ? .input : (states.contains(.done) ? .done : .none),
-                    states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.dots)),
+                    states: PaneDot.cluster(tabs.flatMap(\.panes).flatMap(\.foldedDots)),
                     tabs: tabs,
                     host: host.header))
             }

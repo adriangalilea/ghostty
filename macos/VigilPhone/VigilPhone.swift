@@ -513,9 +513,13 @@ final class VigilPhone: ObservableObject {
         var emoji: String?
         /// A pane's own state as shown; nodes above carry the cluster.
         var state: AgentState?
-        /// A pane's dots (`PaneDot`, the rule the Mac's sidebar draws by):
-        /// a dot per background agent at work, then its main agent's.
+        /// A pane row's dots (`PaneDot`, the rule the Mac's sidebar draws
+        /// by): a dot per agent no subagent row below shows, then its main
+        /// agent's.
         var dots: [PaneDot] = []
+        /// A pane's dots with its subagent rows hidden (a folded node's
+        /// cluster): every agent of it.
+        var foldedDots: [PaneDot] = []
         /// Why a pane waits, when it waits.
         var flavor: BlockFlavor?
         var alive: Bool = true
@@ -577,7 +581,7 @@ final class VigilPhone: ObservableObject {
         /// The dots this node shows when collapsed (`PaneDot.cluster`, the
         /// Mac sidebar's rule), its own dot for a pane.
         var cluster: [PaneDot] {
-            PaneDot.cluster(leaves.filter(\.alive).flatMap { $0.dots.isEmpty ? [.state(.idle)] : $0.dots })
+            PaneDot.cluster(leaves.filter(\.alive).flatMap { $0.foldedDots.isEmpty ? [.state(.idle)] : $0.foldedDots })
         }
 
         /// Every pane node under this one.
@@ -1124,6 +1128,7 @@ final class VigilPhone: ObservableObject {
                     return Node(id: "\(sid)/\(p.id)", kind: .pane, title: title, emoji: p.emoji,
                                 state: truth?.shown,
                                 dots: truth?.dots ?? [],
+                                foldedDots: truth?.foldedDots ?? [],
                                 flavor: truth?.shown == .blocked ? truth?.token?.flavor : nil,
                                 alive: alive,
                                 ended: alive ? nil : truth?.abnormalEnd,

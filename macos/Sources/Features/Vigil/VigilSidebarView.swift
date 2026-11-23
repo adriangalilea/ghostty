@@ -912,7 +912,7 @@ struct VigilSidebarView: View {
                 if collapsed { foldedMarks(tab.panes) }
                 followKeycap(tab.id)
                 if collapsed { AntennaMark(what: tab.panes.flatMap(\.sentries), sizes: marks) }
-                PaneDots(dots: collapsed ? PaneDot.cluster(tab.panes.flatMap(\.dots)) : [], sizes: marks)
+                PaneDots(dots: collapsed ? PaneDot.cluster(tab.panes.flatMap(\.foldedDots)) : [], sizes: marks)
             }
         }
         .frame(height: 22 * scale)
@@ -923,7 +923,7 @@ struct VigilSidebarView: View {
             hovered: rowHovered(tab.id),
             activity: model.isFront(tab) ? (collapsed ? .leaf : .chain) : .none,
             state: collapsed
-                ? PaneDot.cluster(tab.panes.flatMap(\.dots)).first?.state
+                ? PaneDot.cluster(tab.panes.flatMap(\.foldedDots)).first?.state
                 : nil))
         .background(reportHit(id: tab.id, kind: .tab(session: session, anchor: tab.anchor)))
         .contentShape(Rectangle())
@@ -989,7 +989,7 @@ struct VigilSidebarView: View {
     /// the card.
     @ViewBuilder private func subagentRows(_ pane: VigilWorkspaces.SidebarPane, level: Int) -> some View {
         if let member = pane.member {
-            ForEach(member.subagents.filter(\.running), id: \.key) { sub in
+            ForEach(member.rows, id: \.key) { sub in
                 let hoverId = Self.hostHover + "subagent:" + sub.key
                 Button {
                     VigilMemberCard.show(pane)
@@ -1002,10 +1002,11 @@ struct VigilSidebarView: View {
                             Text(caption).font(.system(size: 9 * scale)).foregroundStyle(.tertiary).lineLimit(1)
                         }
                         Spacer(minLength: 0)
-                        Circle().fill(sub.running ? Color.green.opacity(0.8) : Color.secondary.opacity(0.35))
-                            .frame(width: 5 * scale, height: 5 * scale)
+                        // Its own dot, drawn as every agent's is; the pane's
+                        // row above no longer repeats it (`PaneDot`).
+                        PaneDots(dots: [.agent], sizes: marks)
                     }
-                    .foregroundStyle(sub.running ? .secondary : .tertiary)
+                    .foregroundStyle(.secondary)
                     .frame(height: 18 * scale)
                     .padding(rowInsets(level: level + sub.depth))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1133,8 +1134,9 @@ struct VigilSidebarView: View {
                 // nothing for an empty list).
                 AntennaMark(what: pane.sentries, sizes: marks)
                 // A dot per agent, drawn as a folded row's cluster is: each
-                // background agent not finished, then the pane's own on the
-                // rail. They grow inward; the rail's edge never moves.
+                // agent not finished that no subagent row below shows, then
+                // the pane's own on the rail. They grow inward; the rail's
+                // edge never moves.
                 PaneDots(dots: pane.dots, sizes: marks)
             }
         }

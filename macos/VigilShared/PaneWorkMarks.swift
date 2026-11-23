@@ -223,8 +223,9 @@ struct PaneProblemsMark: View {
 }
 
 /// A row's dots, by swift-utils' `InkStateDotCluster`: a pane's own (each
-/// background agent not finished, then its main agent's state) or a folded
-/// row's. How a dot looks for what it says is here and nowhere else.
+/// agent not finished that no subagent row shows, then its main agent's
+/// state), a subagent row's (its one agent), or a folded row's. How a dot
+/// looks for what it says is here and nowhere else.
 struct PaneDots: View {
     let dots: [PaneDot]
     let sizes: PaneMarkSizes
@@ -254,7 +255,7 @@ struct PaneDots: View {
 
     static func said(_ dot: PaneDot) -> String {
         switch dot {
-        case .agent: "A background agent, not finished"
+        case .agent: "A subagent, not finished"
         case .state(.working): "Working"
         case .state(.blocked): "Waiting for you"
         case .state(.done): "Done, not seen yet"

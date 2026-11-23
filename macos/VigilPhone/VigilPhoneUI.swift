@@ -533,7 +533,7 @@ struct TreeNodeView: View {
     /// further in. A press opens the pane, where its agent is.
     @ViewBuilder private var subagentRows: some View {
         if let ref = node.pane, let member = node.glance?.member {
-            ForEach(member.subagents.filter(\.running), id: \.key) { sub in
+            ForEach(member.rows, id: \.key) { sub in
                 NavigationLink(value: ref) {
                     HStack(spacing: Self.gap) {
                         Image(systemName: "arrow.turn.down.right").font(.caption2.weight(.semibold))
@@ -544,7 +544,9 @@ struct TreeNodeView: View {
                             Text(caption).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
                         }
                         Spacer(minLength: 4)
-                        Circle().fill(Color.green.opacity(0.8)).frame(width: 6, height: 6)
+                        // Its own dot, drawn as every agent's is; the pane's
+                        // row above no longer repeats it (`PaneDot`).
+                        PaneDots(dots: [.agent], sizes: Self.markSizes)
                     }
                     .foregroundStyle(.secondary)
                     .padding(.leading, Self.tree.leading(depth + sub.depth))
