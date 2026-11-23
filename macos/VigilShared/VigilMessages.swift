@@ -45,17 +45,26 @@ struct VigilMessageIndex: Equatable, Sendable {
     init(_ mailboxes: [String: [String: Message.Record]], asks: [String: [PaneAsk]], chats: [String: [Chat]] = [:]) {
         threads = MessageThreads.threads(mailboxes)
         var conversations = MessageThreads.conversations(mailboxes)
-        // A group with nothing said yet is listed too, and one that waits for
-        // the person's yes first of all.
+        // A group with nothing said yet is listed too: one that waits for the
+        // person's yes first of all, an active one where it was made among
+        // the others' newest messages.
+        var groups: [String: Chat] = [:]
+        for (root, held) in chats {
+            for chat in held { groups[root + "/" + MessageThread.chatPane(chat.id)] = chat }
+        }
         let listed = Set(conversations.filter { $0.chat != nil }.map { $0.key.root + "/" + $0.key.pane })
         for (root, held) in chats {
-            for chat in held where !listed.contains(root + "/" + MessageThread.chatPane(chat.id)) {
+            for chat in held.sorted(by: { $0.made < $1.made }) where !listed.contains(root + "/" + MessageThread.chatPane(chat.id)) {
                 let empty = MessageThread(key: .init(root: root, pane: MessageThread.chatPane(chat.id), conversation: nil), items: [])
-                if chat.allowed { conversations.append(empty) } else { conversations.insert(empty, at: 0) }
+                if chat.allowed {
+                    conversations.insert(empty, at: conversations.firstIndex { $0.last < chat.made } ?? conversations.endIndex)
+                } else {
+                    conversations.insert(empty, at: 0)
+                }
             }
         }
         traffic = MessageThreads.Traffic(mailboxes, conversations: conversations)
-        list = conversations.map(VigilListedThread.init)
+        list = conversations.map { VigilListedThread($0, group: groups[$0.key.root + "/" + $0.key.pane]) }
         panes = MessageThreads.panes(threads)
         forYou = MessageThreads.forYou(conversations)
         pending = MessageThreads.pending(forYou: forYou)
@@ -94,9 +103,15 @@ struct VigilListedThread: Equatable, Sendable {
     let unread: Int
     let waits: Bool
     let delivery: InkChat.Delivery?
+    /// The group it is, as its Mac keeps it (`Chat`); nil for a pane's thread.
+    let group: Chat?
 
-    init(_ thread: MessageThread) {
+    /// Waits for the person's yes: an agent's group they have not answered.
+    var asksYou: Bool { group?.request != nil }
+
+    init(_ thread: MessageThread, group: Chat? = nil) {
         self.thread = thread
+        self.group = group
         var seen: Set<String> = [Message.you]
         var speakers: [MessageThread.Item] = []
         var people: [String] = []
@@ -111,10 +126,17 @@ struct VigilListedThread: Equatable, Sendable {
         self.people = people
         let last = thread.items.last
         from = last.map(VigilChatPeople.key(of:))
-        line = last.map { InkChat.line(of: VigilThreadWords.words($0)) }
-        at = last.map { Date(timeIntervalSince1970: $0.record.message.sent) }
+        // A group with nothing said yet says how it stands: active, since it
+        // was made, or waiting for the person's yes.
+        let standing = group.flatMap { group -> String? in
+            guard last == nil else { return nil }
+            return group.request != nil ? "Waiting for your yes · nothing said yet" : "Active · nothing said yet"
+        }
+        line = last.map { InkChat.line(of: VigilThreadWords.words($0)) } ?? standing
+        at = last.map { Date(timeIntervalSince1970: $0.record.message.sent) } ?? group.map { Date(timeIntervalSince1970: $0.made) }
         unread = thread.unread
-        waits = thread.items.contains { !$0.record.message.to.isPerson && $0.latest.state.kind == .awaitingApproval }
+        waits = group?.request != nil
+            || thread.items.contains { !$0.record.message.to.isPerson && $0.latest.state.kind == .awaitingApproval }
         delivery = last.flatMap {
             $0.record.message.from.kind == .person && !$0.record.message.to.isPerson ? VigilThreadWords.delivery($0.latest.state) : nil
         }
@@ -264,7 +286,7 @@ struct VigilThreadList: View {
             }
             return Self.end(thread.key) == only || thread.with.map(Self.end) == only
         }
-        let pending = shown.filter { row in row.thread.chat.flatMap { host.chat(row.thread.key.root, $0)?.request } != nil }
+        let pending = shown.filter(\.asksYou)
         VStack(spacing: 0) {
             HStack {
                 Picker("View", selection: $activity) {
@@ -279,11 +301,14 @@ struct VigilThreadList: View {
             if activity {
                 VigilActivityList(rows: host.activity, only: only, people: people)
             } else {
+                // A group waiting for the person's yes is answered on its row:
+                // what it is, who proposed it with whom, Refuse and Allow.
                 ForEach(pending, id: \.thread.id) { row in
-                    Button { selection = row.thread.id } label: {
-                        Label("Review group · " + people.title(of: row.thread), systemImage: "hand.raised")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }.padding(.inkGap)
+                    if let group = row.group {
+                        VigilGroupAsk(group: group, root: row.thread.key.root, title: people.title(of: row.thread), host: host) {
+                            selection = row.thread.id
+                        }
+                    }
                 }
                 InkConversations(
                     shown.filter { row in !pending.contains { $0.thread.id == row.thread.id } }
@@ -302,6 +327,57 @@ struct VigilThreadList: View {
         }
         .sheet(isPresented: $creating) { VigilNewMessageGroup(host: host) }
 
+    }
+}
+
+/// An agent's group waiting for the person's yes, as its row in the list:
+/// its name, who proposed it with whom, and the request with Refuse and
+/// Allow (`VigilChatRequest`), answered here as in the group's thread.
+/// Pressing its name opens the group.
+struct VigilGroupAsk: View {
+    let group: Chat
+    let root: String
+    let title: String
+    let host: VigilChatHost
+    let open: () -> Void
+    @State private var answered: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button(action: open) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline).lineLimit(1)
+                    Text(proposal).inkText(.detail).lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            VigilChatRequest(chat: group, answered: answered) { answer($0) }
+        }
+        .padding(.inkGap)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 6)
+    }
+
+    /// Who proposed it and who else is in it, as their panes are named.
+    private var proposal: String {
+        let others = group.members.filter { $0.pane != group.madeBy }.map { host.name(root, $0.pane).said }
+        let with = ListFormatter.localizedString(byJoining: others)
+        guard let maker = group.madeBy else { return "Proposed by a command, with \(with)" }
+        return "\(host.name(root, maker).said) proposed it with \(with)"
+    }
+
+    private func answer(_ act: Message.Act) {
+        // Checked in the press's own turn: a program driving the app answers nothing.
+        guard host.pressedByPerson() else {
+            answered = "Not answered: only a click of yours answers it here."
+            return
+        }
+        let run = host.act, root = root
+        Task {
+            do { answered = try await run(act, root).said } catch { answered = "Not answered: \(error)" }
+        }
     }
 }
 

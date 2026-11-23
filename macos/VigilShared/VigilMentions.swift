@@ -196,7 +196,9 @@ struct VigilMessageWords: View {
                 if !content.files.isEmpty, let place = content.place {
                     MarkdownView(content.document)
                         .markdownLinks(VigilMentions.links(content.files, root: place.root, folders: host.reveals(place.root)))
-                        .help(Set(content.files.values.compactMap(\.path)).sorted().joined(separator: "\n"))
+                        // Ink's tip, not AppKit's tooltip: an AppKit tooltip came up
+                        // over a bubble scrolled under a still pointer and stayed there.
+                        .inkTip(Set(content.files.values.compactMap(\.path)).sorted().joined(separator: "\n"))
                 } else {
                     MarkdownView(content.document)
                 }
