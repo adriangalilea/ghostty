@@ -560,7 +560,7 @@ struct VigilSidebarView: View {
                     }
                 case .stopped(let stopped)?:
                     Divider()
-                    Text(stopped.words)
+                    Text(VigilMachine.words(stopped))
                 case .unreadable?:
                     Divider()
                     Text(VigilMachine.unavailable)
