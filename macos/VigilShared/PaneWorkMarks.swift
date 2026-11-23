@@ -472,6 +472,22 @@ struct PaneResumeReceipt {
     let row: String
     let title: String
     var answer: Restart.Answer?
+    var confirm: (() -> Void)?
+    var offerImmediate: (() -> Void)?
+
+    @MainActor
+    func actions(dismiss: @escaping () -> Void) -> InkActionPanel.Actions {
+        if let command = answer?.manualCommand {
+            return .buttons([InkHUD.Action("Copy resume command") {
+                VigilPasteboard.copy(command)
+                dismiss()
+            }])
+        }
+        if answer?.outcome == .armed, let offerImmediate {
+            return .buttons([InkHUD.Action("Resume now…") { offerImmediate() }])
+        }
+        return []
+    }
 }
 
 struct PaneResumeItems: View {
@@ -493,6 +509,16 @@ struct PaneResumeItems: View {
                 ForEach(menu.accounts, id: \.self) { choice in Button(choice) { resume(as: choice) } }
             }
         }
+        if let destination = menu.destination ?? account, menu.accounts.contains(destination) {
+            Button("Resume now…") { confirmResume(as: destination) }
+        }
+    }
+
+    private func confirmResume(as account: String) {
+        let choice = Restart.Selection(instance: menu.instance, revision: menu.revision,
+                                      conversation: conversation, account: account)
+        receipt = PaneResumeReceipt(row: row, title: "Resume now as " + account + "?",
+                                    confirm: { send(.resumeNow(choice)) })
     }
 
     private func resume(as account: String) {
@@ -500,13 +526,17 @@ struct PaneResumeItems: View {
     }
 
     private func send(_ intent: Restart.Intent) {
-        let pending = PaneResumeReceipt(row: row, title: title)
+        var pending = PaneResumeReceipt(row: row, title: title)
+        if case .resume(let choice) = intent {
+            pending.offerImmediate = { confirmResume(as: choice.account) }
+        }
+        let pendingID = pending.id
         receipt = pending
         Task { @MainActor in
             let answer: Restart.Answer
             do { answer = try await request(intent) }
             catch { answer = .init(.refused, error.localizedDescription) }
-            if receipt?.id == pending.id { receipt?.answer = answer }
+            if receipt?.id == pendingID { receipt?.answer = answer }
         }
     }
 }
@@ -517,14 +547,17 @@ extension View {
             if !shown, receipt.wrappedValue?.row == row { receipt.wrappedValue = nil }
         })) {
             if let result = receipt.wrappedValue {
-                let actions: InkActionPanel.Actions = result.answer?.manualCommand.map { command in
-                    .buttons([InkHUD.Action("Copy resume command") {
-                        VigilPasteboard.copy(command)
-                        receipt.wrappedValue = nil
-                    }])
-                } ?? []
-                InkActionPanel(result.title, detail: result.answer?.said ?? "Contacting the pane’s Mac…",
-                               tone: result.answer?.outcome == .refused ? .warn : .neutral, actions: actions)
+                if let confirm = result.confirm {
+                    InkActionPanel(result.title, detail: "This ends the current turn and stops any running tool or background task.",
+                                   tone: .warn, actions: .buttons([
+                                       InkHUD.Action("Resume now") { confirm() },
+                                       InkHUD.Action("Cancel") { receipt.wrappedValue = nil }
+                                   ]))
+                } else {
+                    InkActionPanel(result.title, detail: result.answer?.said ?? "Contacting the pane’s Mac…",
+                                   tone: result.answer?.outcome == .refused ? .warn : .neutral,
+                                   actions: result.actions { receipt.wrappedValue = nil })
+                }
             }
         }
     }
