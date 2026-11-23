@@ -398,18 +398,17 @@ private struct VigilActivityList: View {
     var body: some View {
         let shown = only.map { pane in rows.filter { $0.panes.contains(pane) } } ?? rows
         List(shown) { row in
-            let message = row.item.record.message
-            let sender = people.name(VigilChatPeople.key(of: row.item))
+            let sender = people.name(VigilChatPeople.key(row.from, root: row.senderRoot))
             let to = row.recipients.map { people.title(ofEnd: $0) }.joined(separator: ", ")
-            let group = message.chat.flatMap { people.host.chat(row.item.root, $0)?.name }
+            let group = row.chat.flatMap { people.host.chat(row.root, $0)?.name }
             VStack(alignment: .leading) {
                 HStack {
                     Text(sender + " → " + (to.isEmpty ? (group ?? "You") : to)).lineLimit(2)
                     Spacer()
-                    Text(Date(timeIntervalSince1970: message.sent), style: .time).font(.caption)
+                    Text(Date(timeIntervalSince1970: row.sent), style: .time).font(.caption)
                 }
                 if let group, !to.isEmpty { Text(group).font(.caption).foregroundStyle(.secondary) }
-                Text(InkChat.line(of: row.item.words)).lineLimit(1).foregroundStyle(.secondary)
+                Text(InkChat.line(of: row.words)).lineLimit(1).foregroundStyle(.secondary)
             }
             .contextMenu {
                 ForEach(row.panes.sorted(), id: \.self) { pane in
@@ -425,7 +424,7 @@ private struct VigilActivityList: View {
     private func mark(_ row: MessageThreads.Activity) {
         guard front else { return }
         for end in row.panes where only == nil || only == end {
-            VigilActivityWatches.shared.seen(end, at: row.item.record.arrived, id: row.id)
+            VigilActivityWatches.shared.seen(end, at: row.arrived, id: row.id)
         }
     }
 }
@@ -672,10 +671,13 @@ struct VigilChatPeople {
 
     /// The sender's key among the people.
     static func key(of item: MessageThread.Item) -> String {
-        let from = item.record.message.from
+        key(item.record.message.from, root: item.senderRoot)
+    }
+
+    static func key(_ from: Message.Sender, root: String) -> String {
         switch from.kind {
         case .person: return Message.you
-        case .agent, .tool: return from.pane.map { key(root: item.senderRoot, pane: $0) } ?? "\(from.kind.rawValue):\(from.agent ?? "")"
+        case .agent, .tool: return from.pane.map { key(root: root, pane: $0) } ?? "\(from.kind.rawValue):\(from.agent ?? "")"
         case .watch, .feed: return "\(from.kind.rawValue):\(from.watch ?? "")"
         }
     }
