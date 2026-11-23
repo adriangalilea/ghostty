@@ -422,7 +422,7 @@ final class VigilRemote: ObservableObject {
             let reader = Lines.Reader(fd: fd)
             while let line = try? reader.next() {
                 let heard: VigilMachine.Heard
-                do { heard = .snapshot(try VigilMachine.read(line)) } catch {
+                do { heard = try VigilMachine.read(line) } catch {
                     heard = .unreadable
                     Task { @MainActor in remoteLog.warn("machine state unreadable", ["device": device, "err": error]) }
                 }

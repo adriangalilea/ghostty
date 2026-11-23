@@ -522,7 +522,8 @@ struct VigilSidebarView: View {
                 // What waits on your yes on that Mac, each message once.
                 WaitingMark(messages: messages.awaiting(root: device), sizes: marks)
                 // Its power on the rail, in the header's own size; away, what
-                // it last sent, dimmed with the rest of it.
+                // it last sent, dimmed with the rest of it. None from a
+                // reading that stopped or does not read.
                 if let machine = host.machine?.snapshot {
                     MachineState.PowerMark(machine.power)
                         .inkControlMetrics(InkControlMetrics(font: 11 * scale, height: 22 * scale, inset: 0))
@@ -541,8 +542,8 @@ struct VigilSidebarView: View {
         .buttonStyle(.plain)
         .onHover { inside in hovered = inside ? hoverId : (hovered == hoverId ? nil : hovered) }
         // A Mac's menu, as a workspace's offers a tab: a workspace born on
-        // it, then how it stands (`machineLines`), or that its facts are
-        // unavailable when what it sent does not read here.
+        // it, then how it stands (`VigilMachine.lines`), or since when its
+        // facts are not read, or that what it sent does not read here.
         .contextMenu {
             menu {
                 Button {
@@ -557,6 +558,9 @@ struct VigilSidebarView: View {
                     ForEach(Array(VigilMachine.lines(machine).enumerated()), id: \.offset) { _, line in
                         Text(line)
                     }
+                case .stopped(let stopped)?:
+                    Divider()
+                    Text(stopped.words)
                 case .unreadable?:
                     Divider()
                     Text(VigilMachine.unavailable)
