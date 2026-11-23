@@ -195,9 +195,10 @@ extension VigilWorkspaces {
             var name: String
             var standing: String?
             var renewalURL: URL? = nil
-            /// Its power, disk and heat as it last sent them (`Open.machine`);
-            /// nil until it has (a Mac whose app predates it never does).
-            var machine: MachineState?
+            /// Its facts as it last sent them (`Open.machine`), or that what it
+            /// sent does not read here; nil until it has sent anything (a Mac
+            /// whose app predates it never does).
+            var machine: VigilMachine.Heard?
         }
 
         /// The ONE tab whose row the tree elides: a lone tab that carries

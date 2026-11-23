@@ -505,7 +505,7 @@ struct VigilSidebarView: View {
         } label: {
             HStack(spacing: Grid.gap) {
                 // A laptop is a Mac with a battery, as its own power says.
-                Image(systemName: host.machine?.power.battery == nil ? "desktopcomputer" : "laptopcomputer")
+                Image(systemName: host.machine?.snapshot?.power.battery == nil ? "desktopcomputer" : "laptopcomputer")
                     .frame(width: Self.macIcon)
                 Text(title).lineLimit(1)
                 if collapsed { ThreadFoldedCount(count: count, size: 9 * scale) }
@@ -523,7 +523,7 @@ struct VigilSidebarView: View {
                 WaitingMark(messages: messages.awaiting(root: device), sizes: marks)
                 // Its power on the rail, in the header's own size; away, what
                 // it last sent, dimmed with the rest of it.
-                if let machine = host.machine {
+                if let machine = host.machine?.snapshot {
                     MachineState.PowerMark(machine.power)
                         .inkControlMetrics(InkControlMetrics(font: 11 * scale, height: 22 * scale, inset: 0))
                         .opacity(host.standing == nil ? 1 : 0.55)
@@ -541,7 +541,8 @@ struct VigilSidebarView: View {
         .buttonStyle(.plain)
         .onHover { inside in hovered = inside ? hoverId : (hovered == hoverId ? nil : hovered) }
         // A Mac's menu, as a workspace's offers a tab: a workspace born on
-        // it, then how it stands (the whole reading, `MachineState.facts`).
+        // it, then how it stands (`machineLines`), or that its facts are
+        // unavailable when what it sent does not read here.
         .contextMenu {
             menu {
                 Button {
@@ -550,11 +551,17 @@ struct VigilSidebarView: View {
                 Button {
                     VigilCreation.shared.present(on: device)
                 } label: { Label("New Workspace or Resume…", systemImage: "folder.badge.plus") }
-                if let machine = host.machine {
+                switch host.machine {
+                case .snapshot(let machine)?:
                     Divider()
-                    ForEach(Array(machine.facts.enumerated()), id: \.offset) { _, fact in
-                        Text("\(fact.label): \(fact.value)")
+                    ForEach(Array(VigilMachine.lines(machine).enumerated()), id: \.offset) { _, line in
+                        Text(line)
                     }
+                case .unreadable?:
+                    Divider()
+                    Text(VigilMachine.unavailable)
+                case nil:
+                    EmptyView()
                 }
             }
         }

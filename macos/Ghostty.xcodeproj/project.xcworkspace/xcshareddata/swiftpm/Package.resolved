@@ -77,8 +77,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adriangalilea/swift-utils",
       "state" : {
-        "revision" : "e27b1f535c049939d9d150f4ac92011acb284f50",
-        "version" : "0.104.2"
+        "revision" : "9b8eb6774ab7005998400ee8864b4dc1333b8b06",
+        "version" : "0.105.1"
       }
     }
   ],

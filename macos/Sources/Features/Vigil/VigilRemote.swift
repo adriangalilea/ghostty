@@ -32,9 +32,9 @@ final class VigilRemote: ObservableObject {
         /// Out of reach with a directory still held: drawn as it last was.
         var withheld = false
         var away: Bool { !withheld && error != nil && directory != nil }
-        /// Its power, disk and heat as its app last wrote them
-        /// (`Open.machine`), followed beside its directory.
-        var machine: MachineState?
+        /// Its facts as its app last wrote them (`Open.machine`), followed
+        /// beside its directory, or that its last document does not read.
+        var machine: VigilMachine.Heard?
         /// The moves it decides and does as their destination
         /// (`Open.moves`), followed beside its directory.
         var moves: [Move.Ticket] = []
@@ -407,7 +407,9 @@ final class VigilRemote: ObservableObject {
 
     /// A Mac's state, followed through the hub: each document a line, kept
     /// alive by the hub across the Mac going out of reach. A document that
-    /// does not read is said and dropped; the last one stays drawn.
+    /// does not read (a vigil of another release wrote it) is said, and takes
+    /// the place of the last one: that Mac's facts are unavailable, never the
+    /// numbers it sent before drawn as if they were current.
     private func followMachine(_ device: String) {
         guard !stopped, followingMachine[device] == nil, host(device) != nil else { return }
         let fd: Int32
@@ -419,14 +421,14 @@ final class VigilRemote: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let reader = Lines.Reader(fd: fd)
             while let line = try? reader.next() {
-                do {
-                    let machine = try JSONDecoder().decode(MachineState.self, from: line)
-                    Task { @MainActor [weak self] in
-                        guard let self, self.host(device)?.pairing == pairing else { return }
-                        self.machine(device, machine)
-                    }
-                } catch {
+                let heard: VigilMachine.Heard
+                do { heard = .snapshot(try VigilMachine.read(line)) } catch {
+                    heard = .unreadable
                     Task { @MainActor in remoteLog.warn("machine state unreadable", ["device": device, "err": error]) }
+                }
+                Task { @MainActor [weak self] in
+                    guard let self, self.host(device)?.pairing == pairing else { return }
+                    self.machine(device, heard)
                 }
             }
             close(fd)
@@ -475,10 +477,9 @@ final class VigilRemote: ObservableObject {
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
 
-    private func machine(_ device: String, _ machine: MachineState) {
+    private func machine(_ device: String, _ machine: VigilMachine.Heard) {
         VigilWorkspaces.shared.moveContact(device)
-        guard let index = hosts.firstIndex(where: { $0.device == device }),
-              hosts[index].machine.map({ !$0.same(as: machine) }) ?? true else { return }
+        guard let index = hosts.firstIndex(where: { $0.device == device }), hosts[index].machine != machine else { return }
         hosts[index].machine = machine
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)
     }
