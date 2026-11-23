@@ -131,6 +131,7 @@ final class VigilPhoneMessages: ObservableObject {
             var quiet = Transaction()
             quiet.disablesAnimations = true
             withTransaction(quiet) {
+                VigilActivityWatches.shared.update(next.lastTraffic)
                 index = next
                 if next.pending != marks.pending { marks.pending = next.pending }
                 if next.awaiting != marks.awaiting { marks.awaiting = next.awaiting }
@@ -160,7 +161,7 @@ final class VigilPhoneMessages: ObservableObject {
             handAfter: { _ in true },
             mention: { call, root in try await Self.mention(call, root: root) },
             asks: { key in VigilPhoneMessages.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] },
-            chat: { root, id in VigilPhoneMessages.shared.chats[root]?.first { $0.id == id } })
+            chat: { root, id in VigilPhoneMessages.shared.chats[root]?.first { $0.id == id } }, activity: index.activity)
     }
 
     /// An ask about the files a message names, of the Mac they are on.
@@ -280,6 +281,7 @@ struct PhoneMessagesMark: View {
         // panes; then what you have not read.
         WaitingMark(
             messages: refs.reduce(into: Set<String>()) { $0.formUnion(marks.awaiting(root: $1.host.id, pane: $1.pane)) }, sizes: sizes)
+        VigilTrafficDot(panes: refs.map { $0.host.id + "/" + $0.pane })
         MessagesMark(pending: refs.compactMap { marks.pending(root: $0.host.id, pane: $0.pane) }, sizes: sizes)
     }
 }

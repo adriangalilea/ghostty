@@ -45,6 +45,11 @@ final class VigilMessageStore: ObservableObject {
 
         /// The count a pane row wears: `paneId` for this Mac's, the composite
         /// row id (`device/pane`) for another's.
+        func activityKey(paneId: String?, id: String) -> String? {
+            if let paneId { return here.map { $0 + "/" + paneId } }
+            return VigilRemote.split(id).map { $0.0 + "/" + $0.1 }
+        }
+
         func pending(paneId: String?, id: String) -> MessageThreads.Pending? {
             if let paneId { return here.flatMap { pending[$0]?[paneId] } }
             guard let (device, pane) = VigilRemote.split(id) else { return nil }
@@ -247,6 +252,7 @@ final class VigilMessageStore: ObservableObject {
             var quiet = Transaction()
             quiet.disablesAnimations = true
             withTransaction(quiet) {
+                VigilActivityWatches.shared.update(next.lastTraffic)
                 index = next
                 if next.pending != marks.pending { marks.pending = next.pending }
                 if next.awaiting != marks.awaiting { marks.awaiting = next.awaiting }
@@ -323,6 +329,7 @@ final class VigilMessageStore: ObservableObject {
 
     var host: VigilChatHost {
         let here = here, panes = panes
+        let local = panes.filter { here != nil && $0.key.hasPrefix(here! + "/") }
         return VigilChatHost(
             here: here, macName: Host.current().localizedName ?? "this Mac",
             name: { root, pane in
@@ -343,7 +350,16 @@ final class VigilMessageStore: ObservableObject {
             pressedByPerson: { Self.pressedByPerson() },
             asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] },
             chat: { root, id in VigilMessageStore.shared.chats[root]?.first { $0.id == id } },
-            postInChat: { chat, body, replyTo, root in try await Self.postInChat(chat, body: body, replyTo: replyTo, root: root, here: here) })
+            postInChat: { chat, body, replyTo, root in try await Self.postInChat(chat, body: body, replyTo: replyTo, root: root, here: here) },
+            activity: index.activity, groupPanes: Dictionary(uniqueKeysWithValues: local.values.map { ($0.navigation, $0.pane.title) }),
+            createGroup: { name, panes in
+                try await Task.detached {
+                    let reply = try HarnessWire.call(RPCRequest("chat.new", .object([
+                        "name": .string(name), "panes": .array(panes.map(JSONValue.string))])))
+                    guard reply.ok else { throw Failed(description: reply.refusal) }
+                    return try reply.value.decode(Chat.self)
+                }.value
+            })
     }
 
     /// Whether the event being handled is a person's click: a mouse button
@@ -545,6 +561,10 @@ enum VigilMessagesPanel {
         paneId: String?, id: String, conversation: String?, waiting: Set<String> = [], in controller: TerminalController?
     ) {
         let store = VigilMessageStore.shared
+        if let group = store.index.list.first(where: { $0.thread.chat.map(waiting.contains) == true }) {
+            return window(thread: group.thread.id)
+        }
+
         guard let key = store.key(paneId: paneId, id: id, conversation: conversation) else {
             return messagesLog.warn("messages: this Mac's mailbox has not answered yet", ["pane": id])
         }
