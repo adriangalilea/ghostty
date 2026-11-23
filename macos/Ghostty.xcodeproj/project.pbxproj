@@ -1914,7 +1914,7 @@
 			repositoryURL = "https://github.com/adriangalilea/swift-utils";
 			requirement = {
 				kind = upToNextMinorVersion;
-				minimumVersion = 0.105.1;
+				minimumVersion = 0.105.2;
 			};
 		};
 		A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */ = {

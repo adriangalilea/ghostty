@@ -69,7 +69,7 @@
       "location" : "https://github.com/adriangalilea/swift-senses",
       "state" : {
         "branch" : "main",
-        "revision" : "e95d5db7f51f9f61de3eced8c55514a449f0edf0"
+        "revision" : "d167f923d63bde4c3e21e8431729ba4888e38914"
       }
     },
     {
@@ -77,8 +77,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adriangalilea/swift-utils",
       "state" : {
-        "revision" : "9b8eb6774ab7005998400ee8864b4dc1333b8b06",
-        "version" : "0.105.1"
+        "revision" : "a7e5d3985919ae72f2dcd37ba78b1cfba3ef18de",
+        "version" : "0.105.2"
       }
     }
   ],
