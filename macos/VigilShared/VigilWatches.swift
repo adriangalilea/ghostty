@@ -46,15 +46,18 @@ enum VigilWatchList {
         items([root: boards[root] ?? [:]]).filter { $0.record.panes.contains(pane) || $0.record.armedIn == pane }
     }
 
-    /// Under three headings: what keeps a watch from its job comes first,
-    /// in the care tone; then what watches; then what ended this week.
+    /// Under four headings: what keeps a watch from its job comes first,
+    /// in the care tone; then what watches; then what vigil ended because
+    /// it could never fire again, each saying why (`WatchRecord.dead`);
+    /// then what else ended this week.
     static func sections(_ items: [VigilWatchItem]) -> [InkNotice.Section<VigilWatchItem>] {
         let broken = items.filter(\.record.isBroken), live = items.filter { !$0.record.isBroken && $0.record.live }
         let ended = items.filter { !$0.record.isBroken && !$0.record.live }
         return [
             InkNotice.Section("Broken", tone: .warn, broken),
             InkNotice.Section("Watching", live),
-            InkNotice.Section("Ended this week", ended),
+            InkNotice.Section("Dead: could never fire again", ended.filter { $0.record.dead != nil }),
+            InkNotice.Section("Ended this week", ended.filter { $0.record.dead == nil }),
         ].filter { !$0.items.isEmpty }
     }
 
@@ -142,6 +145,8 @@ struct VigilWatchRow: View {
                             .foregroundStyle(InkTone.warn.color)
                     }
                 }
+            } else if let dead = record.dead {
+                Label(dead, systemImage: "xmark.circle").foregroundStyle(.secondary)
             }
         } opened: {
             VigilWatchFacts(item: item, host: host)
