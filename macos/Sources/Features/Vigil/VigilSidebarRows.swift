@@ -77,6 +77,8 @@ extension VigilWorkspaces {
         var problems: [ConversationProblem] = []
         /// What became of its restart, as its Mac's broker says (its glance).
         var restart: Restart.Note?
+        /// Where its switch to an account stands, the same way.
+        var resume: Restart.Status?
 
         /// Its conversation was written on its Mac and on another, and
         /// nobody has said which copy goes on (`PaneConflict`).
@@ -497,6 +499,7 @@ final class SidebarBuilder: @unchecked Sendable {
                 arrived: pane.dormant == true ? pane.from : nil,
                 problems: paneFacts.liveProblems + [input.continuations[pane.id]?.problem].compactMap { $0 },
                 restart: paneFacts.problemGlance?.restart,
+                resume: paneFacts.problemGlance?.resume,
                 conflict: paneFacts.conflict)
         }
 
@@ -608,6 +611,7 @@ final class SidebarBuilder: @unchecked Sendable {
                             ended: truth?.abnormalEnd,
                             problems: (truth?.liveProblems ?? []) + [session.offlineContinuations?[pane.id]?.problem].compactMap { $0 },
                             restart: truth?.problemGlance?.restart,
+                            resume: truth?.problemGlance?.resume,
                             conflict: truth?.conflict)
                     }
                     let anchor = all.first.map { VigilRemote.compositeId(host.device, $0.id) }

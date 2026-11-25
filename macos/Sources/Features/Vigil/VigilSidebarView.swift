@@ -1344,7 +1344,7 @@ struct VigilSidebarView: View {
     private func resumeFacts(_ pane: VigilWorkspaces.SidebarPane, home: VigilWorkspaces.RowHome) -> PaneResumeFacts? {
         guard let menu = pane.resumeMenu, let ref = pane.liveConversation else { return nil }
         return PaneResumeFacts(menu: menu, agent: ref.agent, conversation: ref.id, account: pane.account,
-                               block: pane.accountBlock, restart: pane.restart,
+                               block: pane.accountBlock, restart: pane.restart, resume: pane.resume,
                                accounts: .init(mac: home.device, agent: ref.agent))
     }
 
@@ -1363,7 +1363,7 @@ struct VigilSidebarView: View {
     /// The pane's facts its resume notice follows once the menu closed.
     private func resumeLive(_ pane: VigilWorkspaces.SidebarPane) -> PaneResumeLive? {
         guard let agent = pane.liveConversation?.agent ?? pane.conversationRef?.agent else { return nil }
-        return PaneResumeLive(menu: pane.resumeMenu, restart: pane.restart, agent: agent)
+        return PaneResumeLive(menu: pane.resumeMenu, restart: pane.restart, resume: pane.resume, agent: agent)
     }
 
     /// A row that offers a resume came under the pointer: its Mac's

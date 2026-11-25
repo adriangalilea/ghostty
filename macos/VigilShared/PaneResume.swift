@@ -16,6 +16,7 @@ struct PaneResumeFacts {
     let account: String?
     let block: AccountBlock?
     let restart: Restart.Note?
+    let resume: Restart.Status?
     /// Where its Mac's accounts are read.
     let accounts: VigilAccountFacts.Key
 
@@ -24,7 +25,7 @@ struct PaneResumeFacts {
     var agentName: String { Restart.agentName(agent) }
 
     /// What the notice reads live, from the same row.
-    var live: PaneResumeLive { PaneResumeLive(menu: menu, restart: restart, agent: agent) }
+    var live: PaneResumeLive { PaneResumeLive(menu: menu, restart: restart, resume: resume, agent: agent) }
 
     /// The heading over the one-press switch: why no turn can run.
     func blockTitle(_ block: AccountBlock) -> String {
@@ -72,10 +73,27 @@ struct PaneResumeFacts {
 
 /// The pane's facts a notice follows after the menu closed: it resolves
 /// from them, not from the answer alone.
+private extension String {
+    /// A phase's words (`Restart.Phase.words`) opening a sentence.
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
+}
+
 struct PaneResumeLive {
     var menu: PaneGlance.ResumeMenu?
     var restart: Restart.Note?
+    /// The pane's switch as its broker publishes it (`Restart.Status`).
+    var resume: Restart.Status?
     var agent: String
+
+    init(_ glance: PaneGlance) {
+        self.init(menu: glance.resumeMenu, restart: glance.restart, resume: glance.resume, agent: glance.agent)
+    }
+    init(menu: PaneGlance.ResumeMenu?, restart: Restart.Note?, resume: Restart.Status?, agent: String) {
+        self.menu = menu
+        self.restart = restart
+        self.resume = resume
+        self.agent = agent
+    }
 }
 
 /// One command and what became of it, for one row, reached from either
@@ -100,6 +118,22 @@ struct PaneResumeReceipt {
     /// broker says since (a resume still waiting, done, not done).
     func notice(_ live: PaneResumeLive?) -> (detail: String, tone: InkTone, waiting: UUID?) {
         guard let answer else { return ("Asking the pane’s Mac…", .neutral, nil) }
+        // The switch this notice sent, as its broker publishes it (one state
+        // for the panel, the phone and `vigil pane resume`), followed by its
+        // ticket to its end.
+        if let sent = answer.scheduleID, answer.outcome == .armed || answer.outcome == .restarting {
+            guard let status = live?.resume, status.ticket == sent else {
+                return ("It no longer stands: another switch replaced it, or the pane’s agent or conversation changed.", .neutral, nil)
+            }
+            let said = status.said.map { ". " + $0 } ?? ""
+            switch status.phase {
+            case .waiting: return (answer.said, .neutral, status.ticket)
+            case .ending, .reopening: return (status.phase.words.capitalizedFirst + " as " + status.account + said, .neutral, nil)
+            case .reopened: return ("Restarted" + said, .neutral, nil)
+            case .reopenedOnAnotherLogin, .reopenedLoginUnread, .endUnknown, .notReopened:
+                return (status.phase.words.capitalizedFirst + said, .warn, nil)
+            }
+        }
         // What became of a restart since this was sent: the broker's word.
         if let note = live?.restart, note.at >= sentAt.timeIntervalSince1970 - 1,
            answer.outcome == .armed || answer.outcome == .restarting {

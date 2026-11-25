@@ -357,7 +357,7 @@ struct TreeNodeView: View {
     private func resumeFacts(_ node: VigilPhone.Node) -> PaneResumeFacts? {
         guard let pane = node.pane, let glance = node.glance, let menu = glance.resumeMenu, let ref = glance.reference else { return nil }
         return PaneResumeFacts(menu: menu, agent: ref.agent, conversation: ref.id, account: glance.account,
-                               block: glance.accountBlock, restart: glance.restart,
+                               block: glance.accountBlock, restart: glance.restart, resume: glance.resume,
                                accounts: .init(mac: pane.host.id, agent: ref.agent))
     }
 
@@ -457,7 +457,7 @@ struct TreeNodeView: View {
             }
         }
         .paneResumeFeedback(row: node.id, receipt: $resumeReceipt,
-                            live: node.glance.map { PaneResumeLive(menu: $0.resumeMenu, restart: $0.restart, agent: $0.agent) })
+                            live: node.glance.map(PaneResumeLive.init))
         // A row that offers a resume reads its Mac's accounts document as
         // kept, when none is held yet, as it comes on screen: its panel
         // opens on them.
