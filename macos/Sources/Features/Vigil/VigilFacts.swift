@@ -1,6 +1,6 @@
 #if os(macOS)
-import CoreServices
 import Darwin
+import Folders
 import Foundation
 
 /// Files are observations, never the session ownership registry. FSEvents
@@ -55,7 +55,7 @@ final class VigilFacts: @unchecked Sendable {
     private let report: @Sendable (Event) -> Void
     private let beforeRead: @Sendable () -> Void
     private var current = Snapshot()
-    private var stream: FSEventStreamRef?
+    private var events: FolderWatch?
     /// The root as FSEvents spells the paths it reports (symlinks resolved).
     private var resolvedRoot = ""
     /// Files FSEvents named since the last read (`folder/name`).
@@ -88,12 +88,7 @@ final class VigilFacts: @unchecked Sendable {
     func stop() {
         queue.async {
             self.stopped = true
-            if let stream = self.stream {
-                FSEventStreamStop(stream)
-                FSEventStreamInvalidate(stream)
-                FSEventStreamRelease(stream)
-                self.stream = nil
-            }
+            self.events = nil
             self.processes.values.forEach { $0.cancel() }
             self.processes.removeAll()
         }
@@ -131,7 +126,7 @@ final class VigilFacts: @unchecked Sendable {
     /// FSEvents follows a path, so a folder deleted and made again is still
     /// watched (its own event asks for a listing).
     private func watch() {
-        guard stream == nil else { return }
+        guard events == nil else { return }
         for folder in Self.folders {
             try? FileManager.default.createDirectory(atPath: root + "/" + folder, withIntermediateDirectories: true)
         }
@@ -143,41 +138,20 @@ final class VigilFacts: @unchecked Sendable {
         }
         resolvedRoot = String(cString: resolved)
         free(resolved)
-        var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
-                                           retain: nil, release: nil, copyDescription: nil)
-        let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
-            guard let info else { return }
-            let facts = Unmanaged<VigilFacts>.fromOpaque(info).takeUnretainedValue()
-            let names = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
-            facts.observed(names, Array(UnsafeBufferPointer(start: flags, count: count)))
+        // No latency: the first change after a quiet moment is read at once,
+        // and a burst arrives as one batch of names.
+        events = FolderWatch(Self.folders.map { resolvedRoot + "/" + $0 }, on: queue, latency: 0) { [weak self] batch in
+            self?.observed(batch)
         }
-        // No latency and no defer: the first change after a quiet moment is
-        // read at once, and a burst arrives as one batch of names.
-        let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer |
-                                             kFSEventStreamCreateFlagUseCFTypes)
-        let paths = Self.folders.map { resolvedRoot + "/" + $0 } as CFArray
-        guard let created = FSEventStreamCreate(nil, callback, &context, paths,
-                FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0, flags) else {
-            Self.folders.forEach { report(.unwatchable(folder: $0)) }
-            return
-        }
-        FSEventStreamSetDispatchQueue(created, queue)
-        guard FSEventStreamStart(created) else {
-            FSEventStreamInvalidate(created); FSEventStreamRelease(created)
-            Self.folders.forEach { report(.unwatchable(folder: $0)) }
-            return
-        }
-        stream = created
+        if events == nil { Self.folders.forEach { report(.unwatchable(folder: $0)) } }
     }
 
     /// What FSEvents named, as keys to read again; anything it could not name
     /// one by one is a folder to list whole.
-    private func observed(_ paths: [String], _ flags: [FSEventStreamEventFlags]) {
+    private func observed(_ batch: FolderWatch.Batch) {
         dispatchPrecondition(condition: .onQueue(queue))
-        let lost = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagUserDropped |
-                                           kFSEventStreamEventFlagKernelDropped | kFSEventStreamEventFlagRootChanged)
-        for (path, flag) in zip(paths, flags) {
-            if flag & lost != 0 { rescan.formUnion(Self.folders); continue }
+        if batch.mustScan { rescan.formUnion(Self.folders) }
+        for path in batch.paths {
             guard path.hasPrefix(resolvedRoot + "/") else { continue }
             let parts = path.dropFirst(resolvedRoot.count + 1).split(separator: "/", omittingEmptySubsequences: true)
             guard let folder = parts.first.map(String.init), Self.folders.contains(folder) else { continue }
