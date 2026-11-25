@@ -38,15 +38,18 @@ struct AccountRow: View {
                     InkStatus("\(router)’s pick", tone: .info)
                 }
             }
+            // Whose login it is, so the name is never taken for the account.
+            if let email = account.email { Text(email).inkText(.caption) }
+            if let detail = account.login.detail { Text(detail).inkText(.caption) }
             if account.login.state != .ready, let fix = account.login.fix {
                 Text(fix).inkText(.caption).textSelection(.enabled)
             }
             if !account.limits.isEmpty {
                 Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: .inkGap, verticalSpacing: .inkTight) {
-                    ForEach(account.limits, id: \.label) { limit in
+                    ForEach(Array(account.limits.enumerated()), id: \.offset) { _, limit in
                         let used = limit.percent(at: now)
                         GridRow {
-                            Text(limit.label).inkText(.caption)
+                            Text(Self.name(limit)).inkText(.caption)
                             ProgressView(value: min(max((used ?? 0) / 100, 0), 1))
                                 .progressViewStyle(.ink)
                                 .tint(Self.tone(limit, used: used).color)
@@ -63,6 +66,14 @@ struct AccountRow: View {
         }
         .opacity(loggedOut || spent ? .inkDimmed : 1)
         .accessibilityElement(children: .combine)
+    }
+
+    /// A window's name: its label, with the model whose own window it is
+    /// when the label does not already say it ("5h" of a model beside the
+    /// account's "5h").
+    static func name(_ limit: AgentAccounts.Limit) -> String {
+        guard let model = limit.model, !limit.label.lowercased().contains(model.lowercased()) else { return limit.label }
+        return "\(model) \(limit.label)"
     }
 
     /// How a limit reads: spent, near its end, or with room. A
@@ -84,9 +95,11 @@ struct AccountRow: View {
     /// and held resets.
     static func words(_ account: AgentAccounts.Account, now: Date) -> [String] {
         var lines: [String] = []
+        // A read that failed beside numbers a minute or two old is normal
+        // (the usage endpoint refuses some asks): it is said, not alarmed.
         if let error = account.usage.error {
             let since = account.usage.readAt.map { ", numbers from " + $0.formatted(date: .omitted, time: .shortened) } ?? ", never read"
-            lines.append("last read failed: \(error)\(since)")
+            lines.append("last read: \(error)\(since)")
         }
         for word in account.served ?? [] where word.refuses(at: now) {
             let until = word.until.map { " for " + span(from: now, to: $0) } ?? ""
@@ -129,6 +142,10 @@ struct AccountPicker: View {
         VStack(alignment: .leading, spacing: .inkTight) {
             Text(facts.header(reading, now: now)).inkText(.caption)
                 .padding(.horizontal, .inkBlock).padding(.top, .inkGap)
+            if let trouble = store.troubles[facts.accounts] {
+                Text("Not brought up to date: \(trouble)").inkText(.caption).foregroundStyle(InkTone.warn.color)
+                    .padding(.horizontal, .inkBlock)
+            }
             ForEach(facts.lines(reading?.facts), id: \.account.name) { line in
                 let name = line.account.name
                 Button { choose(name) } label: {

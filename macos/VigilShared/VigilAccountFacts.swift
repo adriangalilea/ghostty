@@ -37,6 +37,8 @@ final class VigilAccountFacts: ObservableObject {
     typealias Ask = @Sendable (_ current: Bool) async throws -> Data
 
     @Published private(set) var readings: [Key: Reading] = [:]
+    /// Why the facts drawn could not be brought up to date at the last ask.
+    @Published private(set) var troubles: [Key: String] = [:]
     /// The asks on their way, and whether each is for the current document.
     private var asking: [Key: Bool] = [:]
     /// A current document wanted while a kept one was on its way.
@@ -73,9 +75,18 @@ final class VigilAccountFacts: ObservableObject {
             case .failed(let why):
                 resumeLog.warn("accounts not read", ["mac": key.mac ?? "here", "agent": key.agent, "why": why, "ms": ms])
             }
-            // A failure never takes the place of facts already drawn.
-            if reading.facts != nil || readings[key]?.facts == nil { readings[key] = reading }
+            // A failure never takes the place of facts already drawn: it is
+            // said beside them until a reading succeeds.
+            if case .failed(let why) = reading, readings[key]?.facts != nil {
+                troubles[key] = why
+            } else {
+                readings[key] = reading
+                troubles[key] = nil
+            }
             if let next = wanted.removeValue(forKey: key) { want(key, current: true, ask: next) }
+            // The document could not be brought up to date and none is
+            // held: it is read as kept, so the panel is not empty for it.
+            else if current, readings[key]?.facts == nil { want(key, current: false, ask: ask) }
         }
     }
 
