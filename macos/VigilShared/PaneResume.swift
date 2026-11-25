@@ -106,6 +106,10 @@ struct PaneResumeReceipt {
     let sentAt = Date()
     var answer: Restart.Answer?
     var confirm: (() -> Void)?
+    /// The accounts to choose from, while the panel shows them, and what a
+    /// choice does.
+    var picking: PaneResumeFacts?
+    var choose: ((String) -> Void)?
     var offerImmediate: (() -> Void)?
     var cancel: ((UUID) -> Void)?
 
@@ -157,7 +161,6 @@ struct PaneResumeItems: View {
     let row: String
     @Binding var receipt: PaneResumeReceipt?
     let request: (Restart.Intent) async throws -> Restart.Answer
-    @ObservedObject private var store = VigilAccountFacts.shared
 
     private var menu: PaneGlance.ResumeMenu { facts.menu }
 
@@ -166,24 +169,21 @@ struct PaneResumeItems: View {
         // switch restarts at once, the accounts' facts in front.
         if let block = facts.block, menu.scheduled == nil {
             Section(blockTitle(block)) {
-                Menu {
-                    accountItems(switching: true)
-                } label: { Label("Switch account now", systemImage: "arrow.triangle.2.circlepath") }
+                Button { pick() } label: { Label("Switch account…", systemImage: "arrow.triangle.2.circlepath") }
             }
         }
         if let ticket = menu.scheduled {
             Button { send(.cancel(ticket)) } label: {
                 Label("Cancel resume as " + (menu.destination ?? "selected account"), systemImage: "xmark.circle")
             }
-        } else {
-            Button { if let account = facts.account { resume(as: account) } } label: {
-                Label("Resume" + (facts.account.map { " as " + $0 } ?? ""), systemImage: "arrow.clockwise")
-            }
-            .disabled(!menu.accounts.contains(facts.account ?? ""))
-            Menu {
-                accountItems(switching: false)
-            } label: { Label("Resume as", systemImage: "person.2") }
         }
+        Button { if let account = facts.account { resume(as: account) } } label: {
+            Label("Resume" + (facts.account.map { " as " + $0 } ?? ""), systemImage: "arrow.clockwise")
+        }
+        .disabled(!menu.accounts.contains(facts.account ?? ""))
+        // The accounts with their facts, in a panel on the row: a menu can
+        // draw neither a bar nor numbers that change while it is open.
+        Button { pick() } label: { Label("Resume as…", systemImage: "person.2") }
         if let destination = menu.destination ?? facts.account, menu.accounts.contains(destination) {
             Button { confirmResume(as: destination) } label: { Label("Resume now…", systemImage: "bolt") }
         }
@@ -191,43 +191,11 @@ struct PaneResumeItems: View {
 
     private func blockTitle(_ block: AccountBlock) -> String { facts.blockTitle(block) }
 
-    /// One line per account, as the router reads it on the pane's Mac and
-    /// in its order (its pick first, the spent after the rest): the facts of
-    /// `c accounts` / `cx accounts`, so a choice is made seeing them.
-    @ViewBuilder
-    private func accountItems(switching: Bool) -> some View {
-        let reading = store.reading(facts.accounts)
-        let now = Date()
-        Text(facts.header(reading))
-        #if os(macOS)
-        let table = reading?.facts.map { accounts in
-            AccountTable(accounts, marks: { entry in
-                facts.lines(accounts, switching: switching, now: now).first { $0.name == entry.name }?.marks
-            }, now: now)
-        }
-        #endif
-        ForEach(facts.lines(reading?.facts, switching: switching, now: now), id: \.name) { line in
-            Button {
-                switching ? switchAccount(to: line.name) : resume(as: line.name)
-            } label: {
-                #if os(macOS)
-                // The table row, in agent-hud's colours and columns; a menu
-                // title would lose both.
-                if let table, let account = line.account, let read = reading?.at,
-                   let image = table.image(account, marks: line.marks, icon: line.icon, read: read,
-                                           scale: NSScreen.main?.backingScaleFactor ?? 2) {
-                    Label { Text(line.title) } icon: { Image(nsImage: image) }
-                        .labelStyle(.iconOnly)
-                        .accessibilityLabel(line.title)
-                } else {
-                    Label(line.title, systemImage: line.icon)
-                }
-                #else
-                Label(line.title, systemImage: line.icon)
-                #endif
-            }
-            .disabled(line.unusable)
-        }
+    /// The row's panel opens on the accounts (`AccountPicker`): a press
+    /// there is the resume.
+    private func pick() {
+        resumeLog.info("accounts shown", ["row": row])
+        receipt = PaneResumeReceipt(row: row, title: "Resume as", picking: facts, choose: { resume(as: $0) })
     }
 
     private func selection(_ account: String) -> Restart.Selection {
@@ -242,7 +210,6 @@ struct PaneResumeItems: View {
 
     private func resume(as account: String) { send(.resume(selection(account))) }
 
-    private func switchAccount(to account: String) { send(.switchAccount(selection(account))) }
 
     private func send(_ intent: Restart.Intent) {
         let asked = Restart(intent)
@@ -288,7 +255,9 @@ extension View {
             if !shown, receipt.wrappedValue?.row == row { receipt.wrappedValue = nil }
         })) {
             if let result = receipt.wrappedValue {
-                if let confirm = result.confirm {
+                if let facts = result.picking, let choose = result.choose {
+                    AccountPicker(facts: facts, choose: choose)
+                } else if let confirm = result.confirm {
                     InkActionPanel(result.title, detail: "This ends the current turn and stops any running tool or background task.",
                                    tone: .warn, actions: .buttons([
                                        InkHUD.Action("Resume now") { confirm() },
