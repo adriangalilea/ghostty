@@ -133,7 +133,7 @@ struct PaneResumeReceipt {
             if answer.scheduleID == nil { return (answer.said, .neutral, nil) }
             return ("It no longer waits: the resume was cancelled, or the pane’s agent or conversation changed.", .neutral, nil)
         case .refused: return ("Not done: " + answer.said, .warn, nil)
-        case .restarting, .relayUpdated, .busy, .cancelled: return (answer.said, answer.outcome == .busy ? .warn : .neutral, nil)
+        case .restarting, .relayUpdated, .cancelled: return (answer.said, .neutral, nil)
         }
     }
 
@@ -167,11 +167,8 @@ struct PaneResumeItems: View {
     var body: some View {
         // Its account cannot run a turn: there is no turn to protect, so a
         // switch restarts at once, the accounts' facts in front.
-        if let block = facts.block, menu.scheduled == nil {
-            Section(blockTitle(block)) {
-                Button { pick() } label: { Label("Switch account…", systemImage: "arrow.triangle.2.circlepath") }
-            }
-        }
+        // Its account cannot run a turn: said over the items that mend it.
+        if let block = facts.block { Text(blockTitle(block)) }
         if let ticket = menu.scheduled {
             Button { send(.cancel(ticket)) } label: {
                 Label("Cancel resume as " + (menu.destination ?? "selected account"), systemImage: "xmark.circle")
@@ -223,9 +220,8 @@ struct PaneResumeItems: View {
         let title = switch intent {
         case .resume(let choice): "Resume as " + choice.account
         case .resumeNow(let choice): "Resume now as " + choice.account
-        case .switchAccount(let choice): "Switch to " + choice.account
         case .cancel: "Cancel resume"
-        default: self.title
+        case .relay: self.title
         }
         var pending = PaneResumeReceipt(row: row, title: title, intent: asked.kind)
         if case .resume(let choice) = intent {
