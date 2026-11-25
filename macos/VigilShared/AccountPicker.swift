@@ -65,19 +65,18 @@ struct AccountRow: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// How a limit reads: refused or spent, near its end, or with room. A
+    /// How a limit reads: spent, near its end, or with room. A
     /// window that rolled over since it was measured has no known use.
     static func tone(_ limit: AgentAccounts.Limit, used: Double?) -> InkTone {
         guard let used else { return .neutral }
-        return limit.denied == true || limit.spent ? .bad : used >= 80 ? .warn : .info
+        return limit.spent ? .bad : used >= 80 ? .warn : .info
     }
 
-    /// Beside a limit's number: the provider's refusal, when it resets, or
-    /// that it rolled over since anyone measured it.
+    /// Beside a limit's number: when it resets, or that it rolled over
+    /// since anyone measured it.
     static func note(_ limit: AgentAccounts.Limit, used: Double?, now: Date) -> String {
         guard used != nil else { return "reset since it was read" }
-        let resets = limit.resets.map { "resets in " + span(from: now, to: $0) } ?? ""
-        return limit.denied == true ? ["refused", resets].filter { !$0.isEmpty }.joined(separator: ", ") : resets
+        return limit.resets.map { "resets in " + span(from: now, to: $0) } ?? ""
     }
 
     /// What the document says of the account beyond its windows, a line
@@ -89,7 +88,10 @@ struct AccountRow: View {
             let since = account.usage.readAt.map { ", numbers from " + $0.formatted(date: .omitted, time: .shortened) } ?? ", never read"
             lines.append("last read failed: \(error)\(since)")
         }
-        if account.allowed?.value == false { lines.append("the provider refuses ordinary usage") }
+        for word in account.served ?? [] where word.refuses(at: now) {
+            let until = word.until.map { " for " + span(from: now, to: $0) } ?? ""
+            lines.append("the provider refuses \(word.model ?? "ordinary usage")\(until)")
+        }
         for gate in account.gates ?? [] where !gate.open {
             let back = gate.back.flatMap { $0 > now ? ", back in " + span(from: now, to: $0) : nil } ?? ""
             lines.append("\(gate.model) closed\(back)")
