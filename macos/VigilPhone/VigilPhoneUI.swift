@@ -458,17 +458,20 @@ struct TreeNodeView: View {
         }
         .paneResumeFeedback(row: node.id, receipt: $resumeReceipt,
                             live: node.glance.map { PaneResumeLive(menu: $0.resumeMenu, restart: $0.restart, agent: $0.agent) })
-        // A row that offers a resume reads its Mac's accounts as it comes
-        // on screen (unless read in the last half minute): its menu opens on them.
+        // A row that offers a resume reads its Mac's accounts document as
+        // kept, when none is held yet, as it comes on screen: its panel
+        // opens on them.
         .onAppear {
             if let pane = node.pane, let facts = resumeFacts(node) {
                 let key = facts.accounts
-                VigilAccountFacts.shared.want(key) { try await model.accounts(pane, agent: key.agent) }
+                VigilAccountFacts.shared.want(key, current: false) { try await model.accounts(pane, agent: key.agent, current: $0) }
             }
         }
         .contextMenu {
             if let pane = node.pane, let facts = resumeFacts(node) {
-                PaneResumeItems(facts: facts, title: node.title, row: node.id, receipt: $resumeReceipt) {
+                let agent = facts.accounts.agent
+                PaneResumeItems(facts: facts, title: node.title, row: node.id, receipt: $resumeReceipt,
+                                accounts: { try await model.accounts(pane, agent: agent, current: $0) }) {
                     try await model.restart(pane, request: Restart($0))
                 }
             }

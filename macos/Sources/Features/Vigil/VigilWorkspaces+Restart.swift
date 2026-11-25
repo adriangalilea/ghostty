@@ -12,12 +12,13 @@ extension VigilWorkspaces {
         }.value
     }
 
-    /// The accounts of the pane's Mac as its router sees them, as the hub
-    /// there answers (`Open.accounts`): an `AgentAccounts` document.
-    nonisolated static func accounts(agent: String, device: String?) async throws -> Data {
+    /// The accounts of the pane's Mac as its router knows them, as the hub
+    /// there answers (`Open.accounts`): an `AgentAccounts` document, as
+    /// kept or brought up to date first (`current`).
+    nonisolated static func accounts(agent: String, device: String?, current: Bool) async throws -> Data {
         try await Task.detached {
             let client = Local.Client(socket: VigilPaths.hub)
-            let open = Open.accounts(agent)
+            let open = Open.accounts(agent, current: current)
             return try device.map { try client.call(device: $0, open) } ?? client.here(open)
         }.value
     }

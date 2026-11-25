@@ -1351,7 +1351,9 @@ struct VigilSidebarView: View {
     @ViewBuilder private func resumeItems(_ pane: VigilWorkspaces.SidebarPane, home: VigilWorkspaces.RowHome, row: String) -> some View {
         if let facts = resumeFacts(pane, home: home) {
             let there = pane.paneId ?? home.there(pane.id)
-            PaneResumeItems(facts: facts, title: pane.title, row: row, receipt: $resumeReceipt) {
+            let key = facts.accounts
+            PaneResumeItems(facts: facts, title: pane.title, row: row, receipt: $resumeReceipt,
+                            accounts: { try await VigilWorkspaces.accounts(agent: key.agent, device: key.mac, current: $0) }) {
                 try await VigilWorkspaces.shared.restartAgent(pane: there, device: home.device, request: Restart($0))
             }
             Divider()
@@ -1365,8 +1367,8 @@ struct VigilSidebarView: View {
     }
 
     /// A row that offers a resume came under the pointer: its Mac's
-    /// accounts are read now (unless read in the last half minute), so its
-    /// menu opens on them.
+    /// accounts document is read as kept, when none is held yet, so its
+    /// panel opens on them. Nothing is asked of a vendor for it.
     private func wantAccounts(row: String) {
         for workspace in model.rows {
             for tab in workspace.tabs {
@@ -1374,7 +1376,7 @@ struct VigilSidebarView: View {
                 guard let pane else { continue }
                 guard let facts = resumeFacts(pane, home: VigilWorkspaces.RowHome(row: workspace.id)) else { return }
                 let key = facts.accounts
-                VigilAccountFacts.shared.want(key) { try await VigilWorkspaces.accounts(agent: key.agent, device: key.mac) }
+                VigilAccountFacts.shared.want(key, current: false) { try await VigilWorkspaces.accounts(agent: key.agent, device: key.mac, current: $0) }
                 return
             }
         }

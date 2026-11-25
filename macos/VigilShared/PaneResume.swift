@@ -35,55 +35,38 @@ struct PaneResumeFacts {
         }
     }
 
-    /// The first line of an accounts submenu: whose facts these are and when
-    /// they were read, or why there are none.
-    func header(_ reading: VigilAccountFacts.Reading?) -> String {
+    /// The first line of the accounts panel: whose facts these are, for
+    /// which model, and what a launch of it would do when that is not
+    /// simply "start on the pick"; or why there are none.
+    func header(_ reading: VigilAccountFacts.Reading?, now: Date) -> String {
         switch reading {
         case nil: return "Reading \(router) accounts on the pane’s Mac…"
-        case .failed(let why, _): return "No account facts: \(why)"
-        case .facts(let accounts, let at):
-            let model = accounts.model.map { " for " + $0 } ?? ""
-            return "\(router) accounts\(model), read \(at.formatted(date: .omitted, time: .standard))"
+        case .failed(let why): return "No account facts: \(why)"
+        case .facts(let accounts):
+            let model = (menu.model ?? accounts.model).map { " for " + $0 } ?? ""
+            guard let route = accounts.route(for: menu.model), route.verdict != .launch else { return "\(router) accounts\(model)" }
+            let back = route.back.flatMap { $0 > now ? ", back in " + AccountRow.span(from: now, to: $0) : nil } ?? ""
+            return "\(router) accounts\(model): \(route.verdict.said)\(back)"
         }
     }
 
     struct Line {
-        let name: String
-        let title: String
-        let icon: String
-        let unusable: Bool
-        /// The router's facts of it, drawn as its table row where a menu
-        /// can show colour (`AccountTable`); nil for a name it did not list.
-        var account: AgentAccounts.Account? = nil
-        /// "this pane", "c’s pick".
-        var marks: String? = nil
+        let account: AgentAccounts.Account
+        /// The router passes it over for the model while another is left.
+        let spent: Bool
+        /// A bare launch of the pane's model would start on it now.
+        let pick: Bool
     }
 
-    /// An account a line per item: the broker's names are what it resumes
-    /// on, the router's order and facts are what they are drawn with (a
-    /// name the router did not list keeps its place after, bare). Logged
-    /// out cannot be chosen; nor, for a switch, the account that is blocked.
-    func lines(_ accounts: AgentAccounts?, switching: Bool, now: Date) -> [Line] {
-        let known = accounts?.accounts.filter { menu.accounts.contains($0.name) } ?? []
-        let bare = menu.accounts.filter { name in !known.contains { $0.name == name } }
-        return known.map { entry in
-            let current = entry.name == account
-            let pick = entry.name == accounts?.pick
-            let said = [current ? "this pane" : nil, pick ? "\(router)’s pick" : nil].compactMap { $0 }
-            let marks = [entry.name] + said
-            let icon = entry.loggedOut ? "person.crop.circle.badge.xmark"
-                : current && block != nil ? "exclamationmark.triangle"
-                : entry.spent ? "xmark.octagon"
-                : pick ? "star.fill"
-                : current ? "checkmark.circle"
-                : "person.crop.circle"
-            return Line(name: entry.name, title: (marks + [entry.facts(now: now)]).joined(separator: " · "),
-                        icon: icon, unusable: entry.loggedOut || (switching && current),
-                        account: entry, marks: said.isEmpty ? nil : said.joined(separator: ", "))
-        } + bare.map { name in
-            Line(name: name, title: name == account ? name + " · this pane" : name, icon: "person.crop.circle",
-                 unusable: switching && name == account)
-        }
+    /// An account a line, as agent-hud's document lists and weighs them
+    /// for the model the pane runs: its route's order, then any account
+    /// the route did not weigh. Nothing here lists or ranks one.
+    func lines(_ accounts: AgentAccounts?) -> [Line] {
+        guard let accounts else { return [] }
+        let route = accounts.route(for: menu.model)
+        let ordered = (route?.order ?? []).compactMap { accounts.account($0) }
+        let listed = ordered + accounts.accounts.filter { entry in !ordered.contains { $0.name == entry.name } }
+        return listed.map { Line(account: $0, spent: route?.spent.contains($0.name) ?? false, pick: route?.pick == $0.name) }
     }
 }
 
@@ -160,13 +143,13 @@ struct PaneResumeItems: View {
     let title: String
     let row: String
     @Binding var receipt: PaneResumeReceipt?
+    /// The pane's Mac asked for its accounts document, as kept or current.
+    let accounts: VigilAccountFacts.Ask
     let request: (Restart.Intent) async throws -> Restart.Answer
 
     private var menu: PaneGlance.ResumeMenu { facts.menu }
 
     var body: some View {
-        // Its account cannot run a turn: there is no turn to protect, so a
-        // switch restarts at once, the accounts' facts in front.
         // Its account cannot run a turn: said over the items that mend it.
         if let block = facts.block { Text(blockTitle(block)) }
         if let ticket = menu.scheduled {
@@ -177,21 +160,22 @@ struct PaneResumeItems: View {
         Button { if let account = facts.account { resume(as: account) } } label: {
             Label("Resume" + (facts.account.map { " as " + $0 } ?? ""), systemImage: "arrow.clockwise")
         }
-        .disabled(!menu.accounts.contains(facts.account ?? ""))
+        .disabled(facts.account == nil)
         // The accounts with their facts, in a panel on the row: a menu can
         // draw neither a bar nor numbers that change while it is open.
         Button { pick() } label: { Label("Resume as…", systemImage: "person.2") }
-        if let destination = menu.destination ?? facts.account, menu.accounts.contains(destination) {
+        if let destination = menu.destination ?? facts.account {
             Button { confirmResume(as: destination) } label: { Label("Resume now…", systemImage: "bolt") }
         }
     }
 
     private func blockTitle(_ block: AccountBlock) -> String { facts.blockTitle(block) }
 
-    /// The row's panel opens on the accounts (`AccountPicker`): a press
-    /// there is the resume.
+    /// The row's panel opens on the accounts as last read (`AccountPicker`)
+    /// and asks for them brought up to date: a press there is the resume.
     private func pick() {
-        resumeLog.info("accounts shown", ["row": row])
+        resumeLog.info("accounts shown", ["row": row, "model": menu.model ?? ""])
+        VigilAccountFacts.shared.want(facts.accounts, current: true, ask: accounts)
         receipt = PaneResumeReceipt(row: row, title: "Resume as", picking: facts, choose: { resume(as: $0) })
     }
 

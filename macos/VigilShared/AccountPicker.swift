@@ -2,20 +2,25 @@ import Ink
 import SwiftUI
 import VigilWire
 
-/// One account as its router reads it, drawn from the facts themselves
-/// (`AgentAccounts.Account`): its name, its plan, where it stands, and a
-/// line per limit (how much is used, when it resets). One drawing for the
-/// Mac and the phone.
+/// One account as its router knows it, drawn from the facts themselves
+/// (`AgentAccounts.Account`): its name, its plan, how its login stands, a
+/// line per limit (how much is used, when it resets) and, for Codex, what
+/// the provider gates and the resets it holds. One drawing for the Mac and
+/// the phone.
 struct AccountRow: View {
     let account: AgentAccounts.Account
     /// The pane runs on it now.
     let current: Bool
-    /// A bare `c` / `cx` would pick it now.
+    /// A bare `c` / `cx` of the pane's model would start on it now.
     let pick: Bool
+    /// The router passes it over for the model while another is left.
+    let spent: Bool
     /// The router's command, for the pick's word ("c’s pick").
     let router: String
     let now: Date
     @InkMetrics private var metrics
+
+    private var loggedOut: Bool { account.login.state == .loggedOut }
 
     var body: some View {
         VStack(alignment: .leading, spacing: .inkGap) {
@@ -23,9 +28,9 @@ struct AccountRow: View {
                 Text(account.name).inkText(.label, emphasized: current)
                 if let plan = account.plan { Text(plan).inkText(.detail) }
                 Spacer(minLength: .inkGap)
-                if account.loggedOut {
-                    InkStatus("logged out", tone: .neutral)
-                } else if account.spent {
+                if account.login.state != .ready {
+                    InkStatus(account.login.state.said, tone: loggedOut ? .bad : .warn)
+                } else if spent {
                     InkStatus("spent", tone: .bad)
                 } else if current {
                     InkStatus("this pane", tone: .ok)
@@ -33,33 +38,66 @@ struct AccountRow: View {
                     InkStatus("\(router)’s pick", tone: .info)
                 }
             }
+            if account.login.state != .ready, let fix = account.login.fix {
+                Text(fix).inkText(.caption).textSelection(.enabled)
+            }
             if !account.limits.isEmpty {
                 Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: .inkGap, verticalSpacing: .inkTight) {
                     ForEach(account.limits, id: \.label) { limit in
+                        let used = limit.percent(at: now)
                         GridRow {
                             Text(limit.label).inkText(.caption)
-                            ProgressView(value: min(max(limit.percent / 100, 0), 1))
+                            ProgressView(value: min(max((used ?? 0) / 100, 0), 1))
                                 .progressViewStyle(.ink)
-                                .tint(Self.tone(limit).color)
+                                .tint(Self.tone(limit, used: used).color)
                                 .frame(width: metrics.height * 3)
                                 .gridCellAnchor(.leading)
-                            Text("\(Int(limit.percent.rounded()))%").inkText(.caption).monospacedDigit()
+                            Text(used.map { "\(Int($0.rounded()))%" } ?? "–").inkText(.caption).monospacedDigit()
                                 .gridColumnAlignment(.trailing)
-                            Text(limit.resets.map { "resets in " + Self.span(from: now, to: $0) } ?? "").inkText(.caption).monospacedDigit()
+                            Text(Self.note(limit, used: used, now: now)).inkText(.caption).monospacedDigit()
                         }
                     }
                 }
-            } else if let note = account.note {
-                Text(note).inkText(.caption)
             }
+            ForEach(Self.words(account, now: now), id: \.self) { Text($0).inkText(.caption) }
         }
-        .opacity(account.loggedOut || account.spent ? .inkDimmed : 1)
+        .opacity(loggedOut || spent ? .inkDimmed : 1)
         .accessibilityElement(children: .combine)
     }
 
-    /// How a limit reads: spent, near its end, or with room.
-    static func tone(_ limit: AgentAccounts.Limit) -> InkTone {
-        limit.spent ? .bad : limit.percent >= 80 ? .warn : .info
+    /// How a limit reads: refused or spent, near its end, or with room. A
+    /// window that rolled over since it was measured has no known use.
+    static func tone(_ limit: AgentAccounts.Limit, used: Double?) -> InkTone {
+        guard let used else { return .neutral }
+        return limit.denied == true || limit.spent ? .bad : used >= 80 ? .warn : .info
+    }
+
+    /// Beside a limit's number: the provider's refusal, when it resets, or
+    /// that it rolled over since anyone measured it.
+    static func note(_ limit: AgentAccounts.Limit, used: Double?, now: Date) -> String {
+        guard used != nil else { return "reset since it was read" }
+        let resets = limit.resets.map { "resets in " + span(from: now, to: $0) } ?? ""
+        return limit.denied == true ? ["refused", resets].filter { !$0.isEmpty }.joined(separator: ", ") : resets
+    }
+
+    /// What the document says of the account beyond its windows, a line
+    /// each: a read that failed, and Codex's standing word, closed gates
+    /// and held resets.
+    static func words(_ account: AgentAccounts.Account, now: Date) -> [String] {
+        var lines: [String] = []
+        if let error = account.usage.error {
+            let since = account.usage.readAt.map { ", numbers from " + $0.formatted(date: .omitted, time: .shortened) } ?? ", never read"
+            lines.append("last read failed: \(error)\(since)")
+        }
+        if account.allowed?.value == false { lines.append("the provider refuses ordinary usage") }
+        for gate in account.gates ?? [] where !gate.open {
+            let back = gate.back.flatMap { $0 > now ? ", back in " + span(from: now, to: $0) : nil } ?? ""
+            lines.append("\(gate.model) closed\(back)")
+        }
+        if let resets = account.resets, resets.held > 0 {
+            lines.append("\(resets.held) usage reset\(resets.held == 1 ? "" : "s") held, \(resets.applicable) usable now")
+        }
+        return lines
     }
 
     /// A span in its two largest units: "5d 4h", "4h 32m", "12m".
@@ -74,7 +112,9 @@ struct AccountRow: View {
 
 /// The accounts a pane's conversation can come back on, each a row to
 /// press: the choice acts at once when no turn runs, and is kept for the
-/// turn's end when one does (`Restart.Intent.resume`).
+/// turn's end when one does (`Restart.Intent.resume`). Only an account
+/// known to be logged out cannot be pressed: the agent would only ask to
+/// log in there.
 struct AccountPicker: View {
     let facts: PaneResumeFacts
     let choose: (String) -> Void
@@ -85,27 +125,22 @@ struct AccountPicker: View {
         let reading = store.reading(facts.accounts)
         let now = Date()
         VStack(alignment: .leading, spacing: .inkTight) {
-            Text(facts.header(reading)).inkText(.caption)
+            Text(facts.header(reading, now: now)).inkText(.caption)
                 .padding(.horizontal, .inkBlock).padding(.top, .inkGap)
-            ForEach(facts.lines(reading?.facts, switching: false, now: now), id: \.name) { line in
-                Button { choose(line.name) } label: {
-                    Group {
-                        if let account = line.account {
-                            AccountRow(account: account, current: line.name == facts.account, pick: line.name == reading?.facts?.pick,
-                                       router: facts.router, now: now)
-                        } else {
-                            Text(line.title).inkText(.label)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, .inkBlock).padding(.vertical, .inkGap)
-                    .background(hovered == line.name ? Color.inkRowHover : .clear)
-                    .contentShape(Rectangle())
+            ForEach(facts.lines(reading?.facts), id: \.account.name) { line in
+                let name = line.account.name
+                Button { choose(name) } label: {
+                    AccountRow(account: line.account, current: name == facts.account, pick: line.pick, spent: line.spent,
+                               router: facts.router, now: now)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, .inkBlock).padding(.vertical, .inkGap)
+                        .background(hovered == name ? Color.inkRowHover : .clear)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(line.unusable)
+                .disabled(line.account.login.state == .loggedOut)
                 #if os(macOS)
-                .onHover { hovered = $0 ? line.name : (hovered == line.name ? nil : hovered) }
+                .onHover { hovered = $0 ? name : (hovered == name ? nil : hovered) }
                 #endif
             }
         }
