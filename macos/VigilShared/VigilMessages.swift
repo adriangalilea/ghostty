@@ -980,8 +980,10 @@ struct VigilThreadConversation: View {
         #if os(macOS)
         .onHover { if $0 { markRead() } }
         #endif
-        // A group an agent made waits for the person's one yes, here.
-        if let id = MessageThread(key: key, items: []).chat, let chat = host.chat(key.root, id), !chat.allowed {
+        // What a group asks the person, answered here: an agent's group
+        // waiting for its one yes, or its agents waiting to go on after the
+        // loop guard stopped them.
+        if let id = MessageThread(key: key, items: []).chat, let chat = host.chat(key.root, id), chat.request != nil {
             VigilChatRequest(chat: chat, answered: answered[chat.id]) { answer($0, on: chat.id) }
         }
         // What vigil asks about this pane, answered here on its card.
