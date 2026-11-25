@@ -77,11 +77,14 @@ final class VigilAccountFacts: ObservableObject {
             }
             // A failure never takes the place of facts already drawn: it is
             // said beside them until a reading succeeds.
-            if case .failed(let why) = reading, readings[key]?.facts != nil {
-                troubles[key] = why
+            // Only a document brought up to date ends the warning: one read
+            // as kept says nothing of whether a refresh would succeed.
+            if case .failed(let why) = reading {
+                if current { troubles[key] = why }
+                if readings[key]?.facts == nil { readings[key] = reading }
             } else {
                 readings[key] = reading
-                troubles[key] = nil
+                if current { troubles[key] = nil }
             }
             if let next = wanted.removeValue(forKey: key) { want(key, current: true, ask: next) }
             // The document could not be brought up to date and none is

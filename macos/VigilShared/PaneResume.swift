@@ -92,7 +92,7 @@ struct PaneResumeReceipt {
     /// The accounts to choose from, while the panel shows them, and what a
     /// choice does.
     var picking: PaneResumeFacts?
-    var choose: ((String) -> Void)?
+    var choose: ((AgentAccounts.Account) -> Void)?
     var offerImmediate: (() -> Void)?
     var cancel: ((UUID) -> Void)?
 
@@ -165,7 +165,7 @@ struct PaneResumeItems: View {
         // draw neither a bar nor numbers that change while it is open.
         Button { pick() } label: { Label("Resume as…", systemImage: "person.2") }
         if let destination = menu.destination ?? facts.account {
-            Button { confirmResume(as: destination) } label: { Label("Resume now…", systemImage: "bolt") }
+            Button { confirmResume(selection(destination)) } label: { Label("Resume now…", systemImage: "bolt") }
         }
     }
 
@@ -176,16 +176,18 @@ struct PaneResumeItems: View {
     private func pick() {
         resumeLog.info("accounts shown", ["row": row, "model": menu.model ?? ""])
         VigilAccountFacts.shared.want(facts.accounts, current: true, ask: accounts)
-        receipt = PaneResumeReceipt(row: row, title: "Resume as", picking: facts, choose: { resume(as: $0) })
+        receipt = PaneResumeReceipt(row: row, title: "Resume as", picking: facts,
+                                    choose: { send(.resume(selection($0.name, login: $0.account))) })
     }
 
-    private func selection(_ account: String) -> Restart.Selection {
-        Restart.Selection(instance: menu.instance, revision: menu.revision, conversation: facts.conversation, account: account)
+    /// `login`: the provider's id of the login the pressed row showed, so
+    /// the pane's Mac refuses a profile that holds another by then.
+    private func selection(_ account: String, login: String? = nil) -> Restart.Selection {
+        Restart.Selection(instance: menu.instance, revision: menu.revision, conversation: facts.conversation, account: account, login: login)
     }
 
-    private func confirmResume(as account: String) {
-        let choice = selection(account)
-        receipt = PaneResumeReceipt(row: row, title: "Resume now as " + account + "?",
+    private func confirmResume(_ choice: Restart.Selection) {
+        receipt = PaneResumeReceipt(row: row, title: "Resume now as " + choice.account + "?",
                                     confirm: { send(.resumeNow(choice)) })
     }
 
@@ -209,7 +211,7 @@ struct PaneResumeItems: View {
         }
         var pending = PaneResumeReceipt(row: row, title: title, intent: asked.kind)
         if case .resume(let choice) = intent {
-            pending.offerImmediate = { confirmResume(as: choice.account) }
+            pending.offerImmediate = { confirmResume(choice) }
             pending.cancel = { ticket in send(.cancel(ticket)) }
         }
         let pendingID = pending.id

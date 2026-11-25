@@ -132,7 +132,7 @@ struct AccountRow: View {
 /// log in there.
 struct AccountPicker: View {
     let facts: PaneResumeFacts
-    let choose: (String) -> Void
+    let choose: (AgentAccounts.Account) -> Void
     @ObservedObject private var store = VigilAccountFacts.shared
     @State private var hovered: String?
 
@@ -148,7 +148,7 @@ struct AccountPicker: View {
             }
             ForEach(facts.lines(reading?.facts), id: \.account.name) { line in
                 let name = line.account.name
-                Button { choose(name) } label: {
+                Button { choose(line.account) } label: {
                     AccountRow(account: line.account, current: name == facts.account, pick: line.pick, spent: line.spent,
                                router: facts.router, now: now)
                         .frame(maxWidth: .infinity, alignment: .leading)
