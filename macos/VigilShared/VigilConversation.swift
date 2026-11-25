@@ -40,17 +40,6 @@ struct ConversationSource {
     let reason: @Sendable (Error) -> String
     /// Where this app runs, as a sentence names it: "this iPhone".
     let here: String
-
-    /// A source that reads and does nothing: a conversation drawn from rows
-    /// given to it (a fixture).
-    static let still = ConversationSource(
-        follow: { AsyncStream { $0.finish() } },
-        earlier: { _ in throw Still() }, press: { _ in throw Still() }, say: { _ in throw Still() },
-        authz: nil, log: .silent, reason: { "\($0)" }, here: "here")
-
-    private struct Still: Error, CustomStringConvertible {
-        var description: String { "nothing is followed here" }
-    }
 }
 
 /// A standing request read from its authz home and answered there.
@@ -80,8 +69,6 @@ struct ConversationLog {
     let info: @MainActor (String, String, LogFields) -> Void
     let warn: @MainActor (String, String, LogFields) -> Void
     let error: @MainActor (String, String, LogFields) -> Void
-
-    static let silent = ConversationLog(info: { _, _, _ in }, warn: { _, _, _ in }, error: { _, _, _ in })
 }
 
 /// An agent pane drawn as its conversation (harness/CLAUDE-FEED.md): what
@@ -131,8 +118,8 @@ final class Conversation: ObservableObject {
     /// How many of the newest rows are drawn: a page (`Feed.page`, the
     /// Mac's own: a snapshot is its first page, an earlier page the next),
     /// every row laid out to anchor the view at its bottom. Rows held beyond
-    /// those drawn (a Mac older than the paged snapshot sends 200) are
-    /// revealed as the top comes into view, before asking the Mac.
+    /// those drawn are revealed as the top comes into view, before asking
+    /// the Mac.
     @Published private(set) var drawn = Feed.page
     static let page = Feed.page
     /// The rows drawn, oldest first.
@@ -147,21 +134,6 @@ final class Conversation: ObservableObject {
         self.key = key
         self.pane = pane
         self.source = source
-    }
-
-    /// Drawn from made-up rows (`VigilFixture`): nothing followed.
-    init(key: String, pane: String, entries: [FeedEntry], live: FeedLive?, earlier: Bool = false, waiting: String? = nil,
-         offer: Offer? = nil, reply: Reply? = nil, queued: [FeedQueued] = []) {
-        self.key = key
-        self.pane = pane
-        self.source = .still
-        self.reply = reply
-        self.state = FeedState(live: live, queued: queued)
-        self.earlier = earlier
-        self.waiting = waiting
-        self.offer = live?.request.flatMap { request in offer.map { (request.id, $0) } }
-        opened = !entries.isEmpty
-        replace(entries)
     }
 
     // MARK: The request standing
@@ -287,8 +259,7 @@ final class Conversation: ObservableObject {
         task = nil
     }
 
-    /// One message of the pane's feed, as the Mac sent it: the feed's
-    /// follow calls it, and so does a fixture replaying a feed's timing.
+    /// One message of the pane's feed, as the Mac sent it.
     func receive(_ message: FeedMessage) {
         switch message {
         case .snapshot(let snapshot):

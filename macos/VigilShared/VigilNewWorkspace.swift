@@ -33,7 +33,7 @@ enum Create {
 
 extension ConversationRow {
     /// Every place it is, the best first.
-    var holdings: [Holding] { [holding] + (others ?? []) }
+    var holdings: [Holding] { [holding] + others }
 }
 
 /// A Mac a workspace may be created on, as the asking device sees it.

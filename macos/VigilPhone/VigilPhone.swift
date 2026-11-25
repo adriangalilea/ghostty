@@ -612,13 +612,6 @@ final class VigilPhone: ObservableObject {
 
     func tree() -> [Node] { nodes }
 
-    /// A made-up tree, for review only (`VigilFixture`): nothing is
-    /// followed or dialed for it.
-    func fixture(_ tree: [Node], folded: Set<String> = []) {
-        nodes = tree
-        collapsed = folded
-    }
-
     // MARK: Following: a pane on the Lock Screen
 
     /// Follows, by key (`<Mac root>/<pane>`, `Node.followKey`).
@@ -841,9 +834,7 @@ final class VigilPhone: ObservableObject {
             guard let place = directories[host.id]?.place(of: anchor) else {
                 throw CreateError.unplaced("That pane is no longer in a workspace on \(host.name).")
             }
-            guard let revision = place.workspace.layoutRevision else {
-                throw CreateError.unplaced("vigil on \(host.name) is too old to add tabs or panes from here. Update it there.")
-            }
+            let revision = place.workspace.layoutRevision
             switch birth {
             case .fork(_, let direction):
                 request = .fork(in: place.workspace.name, revision: revision, anchor: anchor, split: direction)
@@ -983,13 +974,12 @@ final class VigilPhone: ObservableObject {
     }
 
     func bury(_ anchor: String, tab: Bool, on host: Host, done: @escaping @MainActor () -> Void = {}) {
-        guard let dir = directories[host.id], let place = dir.place(of: anchor),
-              let revision = place.workspace.layoutRevision else {
+        guard let dir = directories[host.id], let place = dir.place(of: anchor) else {
             failure = .init(title: "Not closed", message: "That pane is no longer in a workspace on \(host.name).")
             return
         }
         let busy = place.tab.closingPanes(anchor, tab: tab).flatMap { dir.panes[$0]?.closingPrograms ?? [] }
-        let request = WorkspaceCommand.Request(session: place.workspace.name, revision: revision,
+        let request = WorkspaceCommand.Request(session: place.workspace.name, revision: place.workspace.layoutRevision,
                                                operation: tab ? "close_tab" : "close_pane", anchor: anchor)
         let closing = Closing(host: host, request: request, tab: tab || place.tab.closesWithPane(anchor), busy: busy, done: done)
         if busy.isEmpty { confirm(closing) } else { self.closing = closing }
@@ -999,12 +989,11 @@ final class VigilPhone: ObservableObject {
     /// lifecycle command. A stale sheet cannot reopen a different end.
     func openEnded(_ ref: PaneRef, end: PaneEnd) async {
         guard let dir = directories[ref.host.id], reachable(ref.host), dir.panes[ref.pane]?.abnormalEnd == end,
-              dir.panes[ref.pane]?.alive == false, let place = dir.place(of: ref.pane),
-              let revision = place.workspace.layoutRevision else {
+              dir.panes[ref.pane]?.alive == false, let place = dir.place(of: ref.pane) else {
             failure = .init(title: "Pane changed", message: "Check the current pane on " + ref.host.name + ".")
             return
         }
-        let request = WorkspaceCommand.Request(session: place.workspace.name, revision: revision, operation: "open_pane", anchor: ref.pane)
+        let request = WorkspaceCommand.Request(session: place.workspace.name, revision: place.workspace.layoutRevision, operation: "open_pane", anchor: ref.pane)
         do {
             let answer = try await command(request, on: ref.host.id)
             guard answer.ok else { throw CreateError.refused(answer.message) }

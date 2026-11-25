@@ -1310,7 +1310,7 @@ extension VigilWorkspaces {
         let local = newWorkspaceId()
         let me = try await moveDevice()
         let source = Registry.Workspace(name: name, label: burial.label, emoji: burial.emoji, cwd: burial.cwd, tabs: burial.tabs,
-                                        order: burial.order, pinned: burial.pinned, sidebar: burial.sidebar, buriedUntil: nil, foreground: false, layoutRevision: nil)
+                                        order: burial.order, pinned: burial.pinned, sidebar: burial.sidebar, buriedUntil: nil, foreground: false, layoutRevision: burial.layoutRevision)
         let owned = (Array(workspaces.values) + Array(graveyard.values)).reduce(into: Set<String>()) { $0.formUnion(ownedPaneIds($1)) }
         let staged = try source.arrived(as: local, from: device, mac: sent.mac, at: Date().timeIntervalSince1970,
                                         home: nil, here: NSHomeDirectory(), order: burial.order, ticket: id) { _ in

@@ -696,7 +696,7 @@ extension VigilWorkspaces {
                 }
                 guard !ends.isEmpty else { break }
                 if ends.count == owned.count {
-                    graveyardLog.info("finished workspace closed", ["workspace": name, "panes": ends.map(\.id), "cause": "program_exit", "runs": ends.map { $0.end.run ?? 0 }])
+                    graveyardLog.info("finished workspace closed", ["workspace": name, "panes": ends.map(\.id), "cause": "program_exit", "runs": ends.map { $0.end.run }])
                     finishedWaiting.subtract(owned)
                     kill(name: name)
                     break

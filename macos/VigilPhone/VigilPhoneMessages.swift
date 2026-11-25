@@ -88,9 +88,10 @@ final class VigilPhoneMessages: ObservableObject {
                 case .changes:
                     guard let changes = step.changes else { continue }
                     self.mailboxes[root] = changes.applied(to: self.mailboxes[root] ?? [:])
-                    // An older Mac tells none: a whole with no asks says it holds none.
-                    if let told = changes.asks { self.asks[root] = told } else if changes.whole { self.asks[root] = [] }
-                    if let told = changes.chats { self.chats[root] = told } else if changes.whole { self.chats[root] = [] }
+                    // Absent means unchanged: a change tells its asks or its
+                    // chats whole, or neither.
+                    if let told = changes.asks { self.asks[root] = told }
+                    if let told = changes.chats { self.chats[root] = told }
                     self.recount()
                 case .waiting:
                     self.receipts.warn("messages", "mailbox out of reach", ["mac": self.macName(root), "why": step.reason ?? ""])

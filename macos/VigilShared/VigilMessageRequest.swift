@@ -17,8 +17,8 @@ import VigilWire
 /// that Mac decides at once, Authz reachable or not (harness/README.md
 /// "Messages"); only from a person's click (`VigilChatHost.pressedByPerson`).
 /// A yes that needs the owner (a stop's) asks for owner authentication on
-/// this device first (`authenticated`). Nothing is offered on an older Mac's
-/// records. Once answered here, what came of it, in the Mac's words.
+/// this device first (`authenticated`). Once answered here, what came of it,
+/// in the Mac's words.
 struct VigilMessageRequest: View {
     let item: MessageThread.Item
     let answered: String?
@@ -49,8 +49,6 @@ struct VigilMessageRequest: View {
                         .buttonStyle(.inkProminent)
                     }
                     .focusable(false)
-                } else {
-                    Text("Its Mac's vigil is older: answer it on its card in Authz there.").inkText(.detail)
                 }
                 if let answered { Text(answered).inkText(.detail) }
             }

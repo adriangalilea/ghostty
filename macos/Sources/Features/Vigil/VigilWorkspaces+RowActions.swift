@@ -71,7 +71,7 @@ extension VigilWorkspaces {
             } catch {
                 problem = "\(mac): \(error.localizedDescription)"
             }
-            said(request.operation == "move_to" ? problem.map { Move.olderVigil($0, mac: mac) } : problem)
+            said(problem)
         }
     }
 
@@ -128,7 +128,7 @@ extension VigilWorkspaces {
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        ask(home, .closeWorkspace(home.workspace, revision: session.layoutRevision ?? ""), failing: "Not killed on \(remote.name)")
+        ask(home, .closeWorkspace(home.workspace, revision: session.layoutRevision), failing: "Not killed on \(remote.name)")
     }
 
     // MARK: Births: a new tab, a fork
@@ -338,9 +338,8 @@ extension VigilWorkspaces {
         let busy: [String]
         if let device = home.device {
             guard let dir = VigilRemote.shared.host(device)?.directory,
-                  let place = dir.place(of: anchor), place.workspace.name == home.workspace,
-                  let current = place.workspace.layoutRevision else { return }
-            revision = current
+                  let place = dir.place(of: anchor), place.workspace.name == home.workspace else { return }
+            revision = place.workspace.layoutRevision
             member = place.tab
             busy = member.closingPanes(anchor, tab: tab).flatMap { dir.panes[$0]?.closingPrograms ?? [] }
         } else {

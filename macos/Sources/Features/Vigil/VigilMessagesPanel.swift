@@ -210,9 +210,10 @@ final class VigilMessageStore: ObservableObject {
 
     private func apply(_ root: String, _ changes: Message.Changes) {
         mailboxes[root] = changes.applied(to: mailboxes[root] ?? [:])
-        // An older Mac tells none: a whole with no asks says it holds none.
-        if let told = changes.asks { asks[root] = told } else if changes.whole { asks[root] = [] }
-        if let told = changes.chats { chats[root] = told } else if changes.whole { chats[root] = [] }
+        // Absent means unchanged: a change tells its asks or its chats whole,
+        // or neither.
+        if let told = changes.asks { asks[root] = told }
+        if let told = changes.chats { chats[root] = told }
         recount()
     }
 

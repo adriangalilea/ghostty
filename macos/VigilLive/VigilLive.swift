@@ -5,9 +5,7 @@ import VigilWire
 import WidgetKit
 
 /// A Mac's agents on the Lock Screen and in the Dynamic Island, drawn by
-/// `VigilActivity`'s `AgentsGlance` (shared with the app's fixtures, which
-/// photograph every face in both appearances: `bin/vigil-ios-fixtures`).
-/// This file is the system's frame around it and nothing else.
+/// `VigilActivity`'s `AgentsGlance`. This file is the system's frame around it and nothing else.
 ///
 /// Every word beyond the leading state arrives sealed to this phone
 /// (`Agents`) and is opened here with the app's key; without it the

@@ -1824,7 +1824,7 @@ class VigilWorkspaces {
                 cwd: entry.cwd,
                 tabs: entry.tabs ?? [],
                 order: entry.order ?? 0)
-            session.layoutRevision = entry.layoutRevision ?? UUID().uuidString
+            session.layoutRevision = entry.layoutRevision
             session.layoutShape = VigilSessionControl.revision(session.tabs)
             session.pinned = entry.pinned ?? false
             session.sidebar = entry.sidebar

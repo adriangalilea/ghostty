@@ -102,13 +102,13 @@ extension VigilPhone {
             let outcome = try await command(request, on: device)
             guard outcome.ok else {
                 receipts.warn("move", "refused", fields.merging(["why": outcome.message]) { a, _ in a })
-                model.moveNotice = Move.olderVigil(outcome.message, mac: name)
+                model.moveNotice = outcome.message
                 return
             }
             receipts.info("move", "asked", fields)
         } catch {
             receipts.error("move", "not asked", fields.merging(["err": error]) { a, _ in a })
-            model.moveNotice = Move.olderVigil("\(name) did not take it: \(VigilLink.reason(error))", mac: name)
+            model.moveNotice = "\(name) did not take it: \(VigilLink.reason(error))"
             return
         }
         for await line in VigilLink.movesLines(node, device: device) {

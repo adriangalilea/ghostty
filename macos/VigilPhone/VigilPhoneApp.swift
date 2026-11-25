@@ -15,25 +15,11 @@ struct VigilPhoneApp: App {
         // First: every event from here on is kept in its record.
         Record.keep(service: "vigil-phone")
         _core = StateObject(wrappedValue: TerminalCore())
-        // A made-up tree is in place before the first frame.
-        if VigilFixture.asked == .home { VigilPhone.shared.fixture(VigilFixtureView.home, folded: VigilFixtureView.homeFolded) }
     }
 
     var body: some Scene {
         WindowGroup {
-            if let fixture = VigilFixture.asked {
-                // Review only: made-up state in the system's appearance,
-                // nothing started (no tether, no Mac).
-                VigilFixtureView(fixture: fixture)
-                    .environmentObject(core)
-            } else {
-                root
-            }
-        }
-    }
-
-    private var root: some View {
-        VigilPhoneRoot()
+            VigilPhoneRoot()
                 .environmentObject(core)
                 // A terminal app is dark; never flash light chrome between
                 // a dark pane and the tree.
@@ -54,5 +40,6 @@ struct VigilPhoneApp: App {
                     }
                     VigilPhone.shared.scene(active: phase == .active, background: phase == .background)
                 }
+        }
     }
 }

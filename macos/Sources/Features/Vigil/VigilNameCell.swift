@@ -20,7 +20,6 @@ struct VigilNameCell<Fallback: View>: View {
     @State private var editing = false
     @State private var draft = ""
     @State private var picking = false
-    @State private var hoveringFace = false
     @FocusState private var focused: Bool
 
     var body: some View {

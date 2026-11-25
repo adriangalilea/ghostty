@@ -23,8 +23,7 @@ let moveLog = Log.log.scope("move")
 /// the sheet reads changing (`changes`, vigil-agent's `MoveWatch`: a
 /// checkout, a folder arriving, a transcript). Opening it asks the source
 /// to read its panes' work now (`work-read`, said in both Macs' logs), so
-/// the sheet says as of when, not as of the last change. A source with an
-/// older vigil is said to be one, and never asked.
+/// the sheet says as of when, not as of the last change.
 ///
 /// What can be settled where is the need's own fact (`Move.Need.Kind`): a
 /// repository the target lacks is cloned there, a commit it lacks is fetched
@@ -135,12 +134,11 @@ final class MoveDialogModel: ObservableObject {
     enum Standing: Equatable { case live, away(since: String), here }
 
     /// A read asked of the source (`work-read`): answered when, changing
-    /// what; refused and why; or not asked, and why not.
+    /// what; or refused and why.
     enum Asked: Equatable {
         case asking
         case answered(at: Date, changed: Int)
         case failed(String)
-        case older
     }
 
     /// Where its facts come from, each event-driven:
@@ -476,16 +474,14 @@ final class MoveDialogModel: ObservableObject {
     }
 
     /// The source asked to read its panes' work now: only where it is heard
-    /// and every pane's facts come from a vigil that answers
-    /// (`PaneWork.answersReads`: a Mac that published none, or an older one,
-    /// is never asked); else said why not.
+    /// and every pane has published facts; else said why not.
     func askSourceNow() {
         guard let ask = sources.askSource, let question else { return }
         guard source == .live else { return }
         let works = question.panes.compactMap(\.work)
-        guard works.count == question.panes.count, works.allSatisfy(\.answersReads) else {
-            asked = .older
-            moveLog.info("move: the source runs an older vigil or published no work, not asked to read again", [
+        guard works.count == question.panes.count else {
+            asked = nil
+            moveLog.info("move: the source published no work for some pane, not asked to read again", [
                 "workspace": workspace, "mac": mac, "published": works.count, "panes": question.panes.count,
             ])
             return
@@ -509,7 +505,7 @@ final class MoveDialogModel: ObservableObject {
                         self.answers.merge(answer.works) { _, new in new }
                     case .failure(let error):
                         let said = "\(error)"
-                        self.asked = said.contains(Open.unknownOp) ? .older : .failed(said)
+                        self.asked = .failed(said)
                         moveLog.warn("move: the source did not read its work again", ["workspace": self.workspace, "mac": self.mac, "err": said])
                     }
                 }
@@ -628,7 +624,7 @@ final class MoveDialogModel: ObservableObject {
                     : " Read again there at \(Self.clock(at)); its directory does not carry that read yet, so the sheet is as of before it."
             case .asking: said += " Asking it to read them again…"
             case .failed(let why): said += " It did not read them again: \(why)"
-            case .older, nil: break
+            case nil: break
             }
         }
         // This Mac's half: followed while the watch stands, whatever the

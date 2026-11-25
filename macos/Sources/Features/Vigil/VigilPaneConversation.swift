@@ -49,7 +49,6 @@ final class VigilPaneFaces: ObservableObject {
         // A pane of this Mac no workspace or burial lists any more is gone
         // for good (ids are never reused): its choice goes with it. Another
         // Mac's are kept, that Mac's registry is not here to ask.
-        UserDefaults.standard.removeObject(forKey: "vigil.paneFaces.terminal") // PURGE(every Mac launched a build with the terminal as the default)
         let kept = Set(UserDefaults.standard.stringArray(forKey: Self.conversationsKey) ?? [])
         let workspaces = VigilWorkspaces.shared
         let listed = Set(workspaces.workspaces.values.flatMap { $0.tabs.flatMap(\.paneIds) })

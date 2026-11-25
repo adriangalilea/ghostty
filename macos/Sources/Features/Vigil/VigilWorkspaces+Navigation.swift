@@ -62,12 +62,8 @@ extension VigilWorkspaces {
             remoteCommandError(controller, "The last change to this workspace hasn't been confirmed by its Mac yet.")
             return true
         }
-        guard let revision = session.layoutRevision else {
-            remoteCommandError(controller, "vigil on that Mac is too old to edit this workspace from here. Update it and relaunch.")
-            return true
-        }
         let request = VigilSessionControl.Request(version: 1, id: UUID(), issuedAt: Date().timeIntervalSince1970,
-            session: split.name, revision: expectedRevision ?? revision,
+            session: split.name, revision: expectedRevision ?? session.layoutRevision,
             operation: operation, anchor: anchor, direction: direction)
         remoteEdits.insert(composite)
         sessionLog.info("remote command sent", [

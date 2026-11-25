@@ -377,15 +377,6 @@ extension VigilWorkspaces {
         registered(paneId)?.title
     }
 
-    func runFireAndForget(_ bin: String, _ args: [String]) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = args
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        try? p.run()
-    }
-
     /// Refresh live thumbnails for windowed workspaces (overview open path).
     /// A successful snapshot is also persisted to thumb.png so the card
     /// always has SOMETHING to show, even if a later snapshot fails (a
