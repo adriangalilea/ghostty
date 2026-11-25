@@ -115,7 +115,11 @@ struct PaneResumeReceipt {
             if let ticket = answer.scheduleID, live?.menu?.scheduled == ticket { return (answer.said, .neutral, ticket) }
             if answer.scheduleID == nil { return (answer.said, .neutral, nil) }
             return ("It no longer waits: the resume was cancelled, or the pane’s agent or conversation changed.", .neutral, nil)
-        case .refused: return ("Not done: " + answer.said, .warn, nil)
+        // Refused for a switch kept earlier, which still waits: that one
+        // is offered to cancel here.
+        case .refused:
+            let kept = answer.scheduleID.flatMap { live?.menu?.scheduled == $0 ? $0 : nil }
+            return ("Not done: " + answer.said, .warn, kept)
         case .restarting, .relayUpdated, .cancelled: return (answer.said, .neutral, nil)
         }
     }
@@ -130,7 +134,9 @@ struct PaneResumeReceipt {
         }
         if let ticket = notice(live).waiting {
             var buttons: [InkHUD.Action] = []
-            if let offerImmediate { buttons.append(InkHUD.Action("Resume now…") { offerImmediate() }) }
+            // Resume now is of what this notice sent; a refused choice
+            // offers only the cancel of the one kept before it.
+            if let offerImmediate, answer?.outcome == .armed { buttons.append(InkHUD.Action("Resume now…") { offerImmediate() }) }
             if let cancel { buttons.append(InkHUD.Action("Cancel resume") { cancel(ticket) }) }
             return .buttons(buttons)
         }
@@ -210,9 +216,10 @@ struct PaneResumeItems: View {
         case .relay: self.title
         }
         var pending = PaneResumeReceipt(row: row, title: title, intent: asked.kind)
-        if case .resume(let choice) = intent {
-            pending.offerImmediate = { confirmResume(choice) }
-            pending.cancel = { ticket in send(.cancel(ticket)) }
+        if case .resume(let choice) = intent { pending.offerImmediate = { confirmResume(choice) } }
+        switch intent {
+        case .resume, .resumeNow: pending.cancel = { ticket in send(.cancel(ticket)) }
+        case .cancel, .relay: break
         }
         let pendingID = pending.id
         receipt = pending
