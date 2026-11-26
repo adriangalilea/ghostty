@@ -101,7 +101,7 @@ struct PaneProblemsMark: View {
 
     private var tone: Color {
         if items.contains(where: { $0.writers == .both || $0.problem.kind == .twoLive }) { return .red }
-        if items.allSatisfy({ $0.writers != nil || $0.problem.kind == .restarted }) { return .secondary }
+        if items.allSatisfy({ $0.writers != nil }) { return .secondary }
         return .orange
     }
 
@@ -141,17 +141,16 @@ struct PaneProblemsMark: View {
     }
 
     private func panel(_ item: PaneProblemItem, folded: Bool) -> InkActionPanel {
-        let statusOnly = item.problem.kind == .restarted
         let title = folded && item.problem.kind == .receiver ? "\(items.count) panes can’t receive messages" : item.problem.title
-        let showReceipt = [.restartFailed, .restarting, .restarted].contains(item.problem.kind)
+        let showReceipt = [.restartFailed, .restarting].contains(item.problem.kind)
         let detail = showReceipt ? item.problem.says : folded ? "Choose a pane to resume its conversation." : item.subject.title
         let manual = manualRestart == item.operationID
         let panel = InkActionPanel(manual ? "Restart Claude manually" : title,
             detail: manual ? "Finish the turn and background work, save drafts, then quit Claude and resume it from its original project and account." : detail,
-            tone: statusOnly ? .ok : item.writers == .both || item.problem.kind == .twoLive ? .bad : .warn,
+            tone: item.writers == .both || item.problem.kind == .twoLive ? .bad : .warn,
             actions: folded ? .group("Choose pane", items.map { target in
                 InkHUD.Action(target.subject.title) { selected = target.id }
-            }, alongside: []) : actions(item), style: statusOnly ? .status : .problem)
+            }, alongside: []) : actions(item), style: .problem)
         if folded {
             return panel.affectedItems(items.map { other in
                 InkActionPanel.Item(other.subject.title, id: other.operationID,
