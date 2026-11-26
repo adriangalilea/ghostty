@@ -102,7 +102,8 @@ struct PaneResumeReceipt {
     /// choice does.
     var picking: PaneResumeFacts?
     var choose: ((AgentAccounts.Account) -> Void)?
-    var offerImmediate: (() -> Void)?
+    /// Resume now of the switch this sent, named by its ticket.
+    var offerImmediate: ((UUID) -> Void)?
     var cancel: ((UUID) -> Void)?
     /// The last state the row published of each switch since this was
     /// pressed, by ticket: the answer that names this notice's own can
@@ -145,6 +146,7 @@ struct PaneResumeReceipt {
             case .waiting: return (answer.said, .neutral, status.ticket)
             case .ending, .reopening: return (status.phase.words.capitalizedFirst + " as " + status.account + said, .neutral, nil)
             case .reopened: return ("Restarted" + said, .neutral, nil)
+            case .cancelled: return ("Cancelled: nothing was stopped.", .neutral, nil)
             case .reopenedOnAnotherLogin, .reopenedLoginUnread, .endUnknown, .notReopened:
                 return (status.phase.words.capitalizedFirst + said, .warn, nil)
             }
@@ -169,7 +171,7 @@ struct PaneResumeReceipt {
             var buttons: [InkHUD.Action] = []
             // Resume now is of what this notice sent; a refused choice
             // offers only the cancel of the one kept before it.
-            if let offerImmediate, answer?.outcome == .armed { buttons.append(InkHUD.Action("Resume now…") { offerImmediate() }) }
+            if let offerImmediate, answer?.outcome == .armed { buttons.append(InkHUD.Action("Resume now…") { offerImmediate(ticket) }) }
             if let cancel { buttons.append(InkHUD.Action("Cancel resume") { cancel(ticket) }) }
             return .buttons(buttons)
         }
@@ -222,7 +224,8 @@ struct PaneResumeItems: View {
     /// `login`: the provider's id of the login the pressed row showed, so
     /// the pane's Mac refuses a profile that holds another by then.
     private func selection(_ account: String, login: String? = nil) -> Restart.Selection {
-        Restart.Selection(instance: menu.instance, revision: menu.revision, conversation: facts.conversation, account: account, login: login)
+        Restart.Selection(instance: menu.instance, revision: menu.revision, conversation: facts.conversation, account: account, login: login,
+                          over: menu.scheduled)
     }
 
     private func confirmResume(_ choice: Restart.Selection) {
@@ -249,7 +252,15 @@ struct PaneResumeItems: View {
         case .relay: self.title
         }
         var pending = PaneResumeReceipt(row: row, title: title, intent: asked.kind)
-        if case .resume(let choice) = intent { pending.offerImmediate = { confirmResume(choice) } }
+        // Resume now from a notice is of its own switch: the broker refuses
+        // it once another, or none, waits in its place.
+        if case .resume(let choice) = intent {
+            pending.offerImmediate = { ticket in
+                var now = choice
+                now.over = ticket
+                confirmResume(now)
+            }
+        }
         switch intent {
         case .resume, .resumeNow: pending.cancel = { ticket in send(.cancel(ticket)) }
         case .cancel, .relay: break
