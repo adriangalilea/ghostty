@@ -104,19 +104,20 @@ struct PaneResumeReceipt {
     var choose: ((AgentAccounts.Account) -> Void)?
     var offerImmediate: (() -> Void)?
     var cancel: ((UUID) -> Void)?
-    /// The last state its broker published for the switch this sent: the
-    /// row drops a switch's state at the agent's next prompt, and the
-    /// notice still says how it ended.
-    var seen: Restart.Status?
+    /// The last state the row published of each switch since this was
+    /// pressed, by ticket: the answer that names this notice's own can
+    /// arrive after its states, and the row drops a switch's state at the
+    /// agent's next prompt.
+    var heard: [UUID: Restart.Status] = [:]
 
-    /// Keeps what the row publishes of this notice's switch, by its ticket.
     mutating func see(_ status: Restart.Status?) {
-        guard let status, let sent = answer?.scheduleID, status.ticket == sent, status != seen else { return }
-        seen = status
+        guard let status, heard[status.ticket] != status else { return }
+        heard[status.ticket] = status
     }
 
     /// What the notice says now: the answer, followed by what the pane's
-    /// broker says since (a resume still waiting, done, not done).
+    /// broker says since (a resume still waiting, done, not done). It
+    /// offers an act (`waiting`) only on a switch the row says waits now.
     func notice(_ live: PaneResumeLive?) -> (detail: String, tone: InkTone, waiting: UUID?) {
         guard let answer else { return ("Asking the pane’s Mac…", .neutral, nil) }
         switch answer.outcome {
@@ -128,12 +129,16 @@ struct PaneResumeReceipt {
                 resumeLog.error("switch answered without its ticket", ["row": row, "outcome": answer.outcome.rawValue])
                 return ("The pane’s Mac answered without naming the switch, so it cannot be followed: " + answer.said, .warn, nil)
             }
-            let own = live?.resume.flatMap { $0.ticket == sent ? $0 : nil } ?? seen
-            guard let status = own else {
-                // Another ticket on the row replaced it; nothing on the row
-                // yet is the row not having heard of it.
-                if live?.resume != nil { return ("Another switch replaced it.", .neutral, nil) }
-                return (answer.said, .neutral, answer.outcome == .armed ? sent : nil)
+            let now = live?.resume.flatMap { $0.ticket == sent ? $0 : nil }
+            let last = heard[sent]
+            // The row names it now; else how it ended, as last heard.
+            guard let status = now ?? last.flatMap({ $0.phase.over ? $0 : nil }) else {
+                // Heard of, not ended, and the row names another or none.
+                if last != nil {
+                    return (live?.resume != nil ? "Another switch replaced it." : "The row no longer names this switch, and its end was not seen here.", .neutral, nil)
+                }
+                // The row has not named it yet (it may still name an earlier one).
+                return (answer.said, .neutral, nil)
             }
             let said = status.said.map { ". " + $0 } ?? ""
             switch status.phase {
@@ -287,12 +292,12 @@ extension View {
                 }
             }
         }
-        // What the row says of this notice's switch is kept on the notice,
-        // whether the row or the answer arrived first.
+        // What the row says of a switch is kept on the notice from its
+        // press on, whether the row or the answer arrives first.
         .onChange(of: live?.resume, initial: true) { _, status in
             if receipt.wrappedValue?.row == row { receipt.wrappedValue?.see(status) }
         }
-        .onChange(of: receipt.wrappedValue?.answer?.scheduleID) { _, _ in
+        .onChange(of: receipt.wrappedValue?.id) { _, _ in
             if receipt.wrappedValue?.row == row { receipt.wrappedValue?.see(live?.resume) }
         }
     }
