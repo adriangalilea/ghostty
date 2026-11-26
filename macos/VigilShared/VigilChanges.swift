@@ -20,8 +20,8 @@ struct PaneGitCallFailed: Error, CustomStringConvertible {
 }
 
 /// A repository read through its pane's Mac (harness/GIT-VIEW.md): each call
-/// of `Git.Source` asked of it (`Open.git`), answered by that Mac's
-/// `Git.LocalSource`, GitKit's own value coming back, and watched by it
+/// of `Git.Source` asked of it (`Open.git`), answered by that host's own
+/// repository (`Git.open`), GitKit's own value coming back, and watched by it
 /// (`changes()`). A submodule is the same source rooted at its checkout.
 struct VigilGitSource: Git.Source {
     let git: PaneGitCall
@@ -32,8 +32,8 @@ struct VigilGitSource: Git.Source {
 
     func changes() -> AsyncStream<Void> { watch(root) }
 
-    func snapshot() async throws -> Git.Snapshot {
-        try await call(GitCall(kind: .snapshot, repo: root))
+    func frontPage() async throws -> Git.FrontPage {
+        try await call(GitCall(kind: .frontPage, repo: root))
     }
 
     func diff(_ scope: Git.ChangeScope) async throws -> Git.Diff {
