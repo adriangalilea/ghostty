@@ -72,9 +72,8 @@ enum VigilMemberCard {
                         Divider()
                         section("Lineage") {
                             if let parent = member.forkedFrom { line("forked from \(parent)") }
-                            if let parent = member.continuedFrom { line("continued from \(parent) (after /clear)") }
                             if !member.forks.isEmpty { line("forks: \(member.forks.joined(separator: " · "))") }
-                            if member.forkedFrom == nil, member.continuedFrom == nil, member.forks.isEmpty { line("none") }
+                            if member.forkedFrom == nil, member.forks.isEmpty { line("none") }
                         }
                         section("Subagents") {
                             if member.subagents.isEmpty { line("none") }
