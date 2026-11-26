@@ -442,7 +442,7 @@ extension VigilWorkspaces {
         if request.forks {
             // The fork's line is this Mac's own: built from its broker's
             // record of the anchor's conversation, never from the wire.
-            guard let source = Fork.source(pane: anchor.id, in: VigilPaths.conversations),
+            guard let held = Self.heldConversations(pane: anchor.id).first, let source = Fork.source(held.conversation),
                   let birth = Fork.birth(of: source, folder: folder) else {
                 return refused("not_forkable", "That pane holds no conversation its agent can fork.")
             }

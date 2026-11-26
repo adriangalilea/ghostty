@@ -197,32 +197,25 @@ extension VigilWorkspaces {
     /// screen holds only what happens to be painted, and a cwd basename
     /// names every $HOME pane "adrian").
     func workContext(panes: [String]) -> String {
+        // The opening ask and the latest ones of each pane's conversation,
+        // as the broker keeps them from the agents' prompt hooks: Vigil
+        // never depends on an agent vendor's private transcript schema.
+        let held = Dictionary(Self.heldConversations().map { ($0.pane.raw, $0.conversation.asks) }, uniquingKeysWith: { first, _ in first })
         var out: [String] = []
         for pane in panes.sorted() {
-            let asks = agentAsks(ofPane: pane, limit: 6)
-            guard !asks.isEmpty else { continue }
+            guard let asks = held[pane], !asks.isEmpty else { continue }
             out.append("- pane \(pane):\n  " + asks.joined(separator: "\n  "))
         }
         return out.joined(separator: "\n")
     }
 
-    /// Opening ask + latest asks for one pane. Current adapters write this
-    /// bounded cache from their stable prompt hook, so Vigil never depends on
-    /// an agent vendor's private transcript schema.
-    private func agentAsks(ofPane pane: String, limit: Int) -> [String] {
-        let dir = VigilPaths.conversations
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
-        else { return [] }
-        for entry in entries where entry.hasSuffix("--\(pane).json") {
-            guard let data = try? Data(contentsOf: dir.appendingPathComponent(entry)),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { continue }
-            if let asks = json["asks"] as? [String], !asks.isEmpty {
-                if asks.count <= limit { return asks }
-                return [asks[0]] + asks.suffix(limit - 1)
-            }
-        }
-        return []
+    /// The conversation each pane holds now or held last, by this host's
+    /// broker (`agent.last`); `pane` narrows it to one. Empty when the
+    /// broker does not answer.
+    nonisolated static func heldConversations(pane: String? = nil) -> [Identity.Last] {
+        let payload = JSONValue.object(pane.map { ["pane": .string($0)] } ?? [:])
+        guard let response = try? HarnessWire.call(RPCRequest("agent.last", payload)), response.ok else { return [] }
+        return (try? response.value.decode([Identity.Last].self)) ?? []
     }
 
     /// Emoji already chosen across workspaces, deduped: the editor's one-click
