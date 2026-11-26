@@ -157,7 +157,21 @@ extension VigilWorkspaces {
     @discardableResult
     func setPaneLabel(_ view: Ghostty.SurfaceView, _ label: String?) -> Bool {
         guard let id = view.vigilAttachId, view.vigilHost == nil, !view.vigilMirror else { return false }
-        return setCustomIdentity(key: id, label: label, emoji: customIdentity(id)?.emoji)
+        return namePane(id, label: label, emoji: customIdentity(id)?.emoji)
+    }
+
+    /// A pane of this host is named. Where an agent sits in it the name is
+    /// the agent's (the broker's `agent.name`: it goes where the agent
+    /// goes, and no name takes the person's back), and the pane keeps none
+    /// of its own; a pane no agent holds, or one whose broker does not
+    /// answer, is named as a place. Its emoji is the pane's either way.
+    @discardableResult
+    func namePane(_ id: String, label: String?, emoji: String?) -> Bool {
+        var payload: [String: JSONValue] = ["pane": .string(id)]
+        if let label, !label.isEmpty { payload["name"] = .string(label) }
+        let agent = (try? HarnessWire.call(RPCRequest("agent.name", .object(payload))))?.ok == true
+        registryLog.info("pane named", ["pane": id, "to": agent ? "its agent" : "the pane"])
+        return setCustomIdentity(key: id, label: agent ? nil : label, emoji: emoji)
     }
 
     /// Rename the TAB shown in this window, through the one identity editor

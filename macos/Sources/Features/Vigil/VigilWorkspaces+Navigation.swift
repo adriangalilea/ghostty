@@ -530,7 +530,9 @@ extension VigilWorkspaces {
                 rename(name: request.session, label: request.label ?? request.session, emoji: request.emoji)
             case .tab?, .pane?:
                 guard holds(request.anchor),
-                      setCustomIdentity(key: (request.part == .tab ? "tab:" : "") + request.anchor, label: request.label, emoji: request.emoji) else {
+                      request.part == .tab
+                        ? setCustomIdentity(key: "tab:" + request.anchor, label: request.label, emoji: request.emoji)
+                        : namePane(request.anchor, label: request.label, emoji: request.emoji) else {
                     return .failure(request, "not_found", "That pane is no longer in this workspace on its Mac.")
                 }
             }

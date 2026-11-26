@@ -1099,9 +1099,7 @@ struct VigilSidebarView: View {
                 color: .primary.opacity(0.85),
                 onRename: pane.paneId.map { id in
                     { label in
-                        VigilWorkspaces.shared.setCustomIdentity(
-                            key: id, label: label,
-                            emoji: VigilWorkspaces.shared.customIdentity(id)?.emoji)
+                        VigilWorkspaces.shared.namePane(id, label: label, emoji: VigilWorkspaces.shared.customIdentity(id)?.emoji)
                     }
                 },
                 onPickEmoji: pane.paneId.map { id in
@@ -1172,10 +1170,12 @@ struct VigilSidebarView: View {
                 if let there {
                     Button {
                         VigilWorkspaces.shared.renameRow(
-                            home, anchor: there, part: .pane, title: "Pane identity", label: pane.title, emoji: pane.emoji,
+                            home, anchor: there, part: .pane, title: pane.member == nil ? "Pane identity" : "Agent name",
+                            label: pane.title, emoji: pane.emoji,
                             context: "a terminal pane, running: \(pane.program ?? "a shell")\n"
                                 + (pane.paneId.map { VigilWorkspaces.shared.workContext(panes: [$0]) } ?? ""))
-                    } label: { Label("Rename…", systemImage: "pencil") }
+                    // Where an agent sits, the name is the agent's and goes with it.
+                    } label: { Label(pane.member == nil ? "Rename…" : "Name agent…", systemImage: "pencil") }
                     // A pane can move alone, from any Mac.
                     moveItem(home, anchor: there, part: .pane)
                 }
@@ -1323,6 +1323,13 @@ struct VigilSidebarView: View {
     @ViewBuilder
     private func paneIdentity(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         let named = pane.conversationName.flatMap { $0 == pane.title ? nil : $0 }
+        // Another agent sits where one the person named sat: said, in
+        // place of this one wearing that name.
+        if let before = pane.member?.before {
+            Text("\(before) was here").font(.system(size: 9 * scale)).foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help("\(pane.title) is here now. \(before) was here before, and keeps that name. Name this agent from its menu.")
+        }
         if let account = pane.resumeMenu?.accountLabel(current: pane.account) ?? pane.account {
             Text(account).font(.system(size: 9 * scale)).foregroundStyle(.secondary)
                 .lineLimit(1).help("Agent account: \(account)")
