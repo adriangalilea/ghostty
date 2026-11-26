@@ -1,238 +1,85 @@
-import AuthzProtocol
 import Combine
 import Ink
 import SwiftUI
-import TetherKit
 import UIKit
-import VigilLink
 import VigilWire
 
-/// Every Mac's mailbox as the person's view on the phone reads it
-/// (harness/README.md "Messages"): each paired Mac's followed over tether
-/// (`VigilLink.messages`: whole at every opening, then each change, reopened
-/// the moment the Mac may be back), as the Mac app's `VigilMessageStore`
-/// reads them through its hub. The threads, each pane's count and the names
-/// a thread is drawn with come from here; the views are the Mac's own
-/// (`VigilChat`, `VigilThreadColumn`, `MessagesMark`).
+/// Each paired host's chats as the phone draws them: one store per host
+/// (`VigilChats`, the Mac app's own), drawn by the Mac's own views
+/// (`VigilChat`, `VigilPaneChat`, `MessagesMark`).
+///
+/// Nothing carries a host's chats to the phone yet, so every host stands
+/// out of reach and says so: "can't reach this host's chats yet" is drawn
+/// apart from a host that answers and has none. What follows a host feeds
+/// its store (`VigilChats.take`), and nothing else here changes then.
 @MainActor
 final class VigilPhoneMessages: ObservableObject {
     static let shared = VigilPhoneMessages()
 
-    /// Each Mac's records by its tether root, as followed: never drawn from
-    /// directly. The views draw `index`, built once per change, off the main
-    /// thread (`VigilMessageIndex`).
-    private var mailboxes: [String: [String: Message.Record]] = [:]
-    @Published private(set) var index = VigilMessageIndex()
-    /// What the tree's rows draw of the mailboxes, apart from them: a
-    /// receipt or a reaction moves `mailboxes` and repaints the chat, never
-    /// the tree; only a changed count does.
+    /// Each paired host's chats, by its tether root.
+    @Published private(set) var hosts: [String: VigilChats] = [:]
+    /// What the tree's rows and the tab's badge draw, apart from the chats:
+    /// only a changed count repaints them.
     let marks = Marks()
 
     @MainActor
     final class Marks: ObservableObject {
-        /// Every pane's count (`MessageThreads.pending`), replaced only when it differs.
-        @Published fileprivate(set) var pending: [String: [String: MessageThreads.Pending]] = [:]
-        /// The messages waiting on the person's yes, by Mac and pane, on both
-        /// their panes (`MessageThreads.awaitingYou`), replaced only when it differs.
-        @Published fileprivate(set) var awaiting: [String: [String: Set<String>]] = [:]
+        @Published fileprivate(set) var unreadByPane: [String: [String: Int]] = [:]
+        @Published fileprivate(set) var waitingByPane: [String: [String: Set<String>]] = [:]
+        /// What the person has not read, on every host.
+        @Published fileprivate(set) var unread = 0
 
-        func pending(root: String, pane: String) -> MessageThreads.Pending? { pending[root]?[pane] }
-        func awaiting(root: String, pane: String) -> Set<String> { awaiting[root]?[pane] ?? [] }
-        /// What the person has not read, on every Mac.
-        var unread: Int { pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread } }
+        func unread(root: String, pane: String) -> Int { unreadByPane[root]?[pane] ?? 0 }
+        func waiting(root: String, pane: String) -> Set<String> { waitingByPane[root]?[pane] ?? [] }
     }
 
-    private var node: TetherNode?
-    /// Each Mac's mailbox follow, by its tether root.
-    private var following: [String: Task<Void, Never>] = [:]
-    private var receipts: VigilReceipts { VigilPhone.shared.receipts }
+    private static let notCarried = "Its chats are not sent to the phone yet."
+    private struct Failed: Error, CustomStringConvertible { let description: String }
 
     private init() {}
 
-    var threads: [MessageThread] { index.threads }
-
-    /// A pane's every thread as one: what its mode shows, holding exactly
-    /// what its row mark counts.
-    func paneThread(_ key: MessageThread.Key) -> MessageThread? { index.pane(key) }
-
-    // MARK: Following (VigilPhone says when the node is up and which Macs there are)
-
-    func attach(node: TetherNode) {
-        guard self.node == nil else { return }
-        self.node = node
-    }
-
-    /// The paired Macs now: each one's mailbox followed, a Mac gone taken out.
+    /// The paired hosts now: each one's chats held, a host gone taken out.
     func macs(_ roots: Set<String>) {
-        for (root, task) in following where !roots.contains(root) {
-            task.cancel()
-            following[root] = nil
+        var next = hosts.filter { roots.contains($0.key) }
+        for root in roots where next[root] == nil {
+            let chats = VigilChats(host: VigilChatHost(
+                page: { _, _, _ in throw Failed(description: Self.notCarried) },
+                post: { _ in throw Failed(description: Self.notCarried) },
+                act: { _ in throw Failed(description: Self.notCarried) },
+                press: { _, _ in throw Failed(description: Self.notCarried) },
+                open: { pane in Self.open(root: root, pane: pane) },
+                mention: { _, _ in throw Failed(description: Self.notCarried) }))
+            chats.unreachable(Self.notCarried)
+            chats.changed = { [weak self] in self?.remark() }
+            next[root] = chats
         }
-        mailboxes = mailboxes.filter { roots.contains($0.key) }
-        for root in roots { follow(root) }
-        recount()
-    }
-
-    /// Tether keeps the follow open and opens it again when the Mac may be
-    /// back; out of reach, what it held is shown as it was. Only the node
-    /// closing ends it: the Mac is followed afresh at the next word of the
-    /// paired Macs.
-    private func follow(_ root: String) {
-        guard following[root] == nil, let node else { return }
-        let steps = VigilLink.messages(node, device: root)
-        following[root] = Task { [weak self] in
-            for await step in steps {
-                guard let self, !Task.isCancelled else { return }
-                switch step.step {
-                case .open: self.receipts.info("messages", "mailbox followed", ["mac": self.macName(root)])
-                case .changes:
-                    guard let changes = step.changes else { continue }
-                    self.mailboxes[root] = changes.applied(to: self.mailboxes[root] ?? [:])
-                    // Absent means unchanged: a change tells its asks or its
-                    // chats whole, or neither.
-                    if let told = changes.asks { self.asks[root] = told }
-                    if let told = changes.chats { self.chats[root] = told }
-                    self.recount()
-                case .waiting:
-                    self.receipts.warn("messages", "mailbox out of reach", ["mac": self.macName(root), "why": step.reason ?? ""])
-                }
-            }
-            guard !Task.isCancelled, let self else { return }
-            self.receipts.warn("messages", "mailbox follow ended", ["mac": self.macName(root)])
-            self.following[root] = nil
+        if Set(next.keys) != Set(hosts.keys) {
+            hosts = next
+            remark()
         }
     }
 
-    /// The questions each Mac asks about its panes now (`PaneAsk`), by root.
-    @Published private(set) var asks: [String: [PaneAsk]] = [:]
-    /// The group chats each Mac keeps (`Chat`), by root.
-    @Published private(set) var chats: [String: [Chat]] = [:]
+    func chats(_ root: String) -> VigilChats? { hosts[root] }
 
-    /// One build of the index at a time, off the main thread; changes that
-    /// arrive meanwhile are folded into the next one.
-    private var building = false
-    private var stale = false
-
-    private func recount() {
-        stale = true
-        guard !building else { return }
-        building = true
-        stale = false
-        let mailboxes = mailboxes, asks = asks, chats = chats
-        Task.detached(priority: .userInitiated) {
-            let next = VigilMessageIndex(mailboxes, asks: asks, chats: chats)
-            await MainActor.run { VigilPhoneMessages.shared.publish(next) }
-        }
+    private func remark() {
+        let unreadByPane = hosts.mapValues(\.marks.unread), waitingByPane = hosts.mapValues(\.marks.waiting)
+        let unread = hosts.values.reduce(0) { $0 + $1.unread }
+        if unreadByPane != marks.unreadByPane { marks.unreadByPane = unreadByPane }
+        if waitingByPane != marks.waitingByPane { marks.waitingByPane = waitingByPane }
+        if unread != marks.unread { marks.unread = unread }
     }
 
-    private func publish(_ next: VigilMessageIndex) {
-        building = false
-        if next != index {
-            // Drawn in one step, never animated row by row.
-            var quiet = Transaction()
-            quiet.disablesAnimations = true
-            withTransaction(quiet) {
-                VigilActivityWatches.shared.update(next.traffic)
-                index = next
-                if next.pending != marks.pending { marks.pending = next.pending }
-                if next.awaiting != marks.awaiting { marks.awaiting = next.awaiting }
-            }
-        }
-        if stale { recount() }
-    }
-
-    private func macName(_ root: String) -> String {
-        VigilPhone.shared.hosts.first { $0.id == root }?.name ?? "a Mac"
-    }
-
-    // MARK: The host the views ask
-
-    /// The phone is no Mac: every pane is another Mac's, named with it, and
-    /// every message and act goes to that Mac over tether.
-    var host: VigilChatHost {
-        VigilChatHost(
-            here: nil, macName: UIDevice.current.name,
-            name: { root, pane in Self.pane(root: root, pane: pane) },
-            post: { message, root in try await Self.post(message, root: root) },
-            act: { act, root in try await Self.act(act, root: root) },
-            open: { root, pane in Self.open(root: root, pane: pane) },
-            // On the phone the thread on screen in an active scene (the
-            // view's own `front`) is in the person's hand: the screen locks
-            // when nobody holds it.
-            handAfter: { _ in true },
-            mention: { call, root in try await Self.mention(call, root: root) },
-            asks: { key in VigilPhoneMessages.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] },
-            chat: { root, id in VigilPhoneMessages.shared.chats[root]?.first { $0.id == id } }, activity: index.traffic.rows)
-    }
-
-    /// An ask about the files a message names, of the Mac they are on.
-    private static func mention(_ call: MentionCall, root: String) async throws -> Data {
-        do {
-            return try await VigilLink.call(linked(), device: root, .mention(call))
-        } catch {
-            shared.receipts.warn("messages", "mention not answered", ["mac": String(root.prefix(10)), "ask": call.kind.rawValue, "err": VigilLink.reason(error)])
-            throw Failed(description: VigilLink.reason(error))
-        }
-    }
-
-    private struct Failed: Error, CustomStringConvertible { let description: String }
-
-    private static func linked() throws -> TetherNode {
-        guard let node = shared.node else { throw WireError.refused("vigil is not connected to tether yet") }
-        return node
-    }
-
-    /// The person's message, to the mailbox of the pane's Mac: its hub takes
-    /// it as the person's on this phone's admission (harness/README.md
-    /// "Messages"). What that Mac refused is said.
-    private static func post(_ message: Message, root: String) async throws {
-        let output: Data
-        do { output = try await VigilLink.call(linked(), device: root, .message(message)) } catch {
-            throw Failed(description: VigilLink.reason(error))
-        }
-        let standing = try JSONDecoder().decode(Message.Standing.self, from: output)
-        shared.receipts.info("messages", "posted", ["id": message.id, "pane": message.to.pane, "state": standing.state.kind.rawValue])
-        if case .refused(let why) = standing.state { throw Failed(description: "refused: \(why)") }
-    }
-
-    private static func act(_ act: Message.Act, root: String) async throws -> Message.Acted {
-        // A question about a pane, refused on its card through this phone's
-        // endpoint (its yes is given on the card in Authz): those are
-        // Authz's alone. A message's answer goes to its Mac, which decides
-        // it (harness/README.md "Messages"), Authz reachable or not.
-        if act.kind == .askRefuse || act.kind == .askOpen, let id = act.id {
-            guard act.kind == .askRefuse else { throw Failed(description: "it is allowed on its card in Authz") }
-            if let why = await VigilAuthz.shared.answer(device: root, request: id, .action("deny", feedback: nil)) {
-                throw Failed(description: why)
-            }
-            return Message.Acted(records: [], said: "Refused in Authz.")
-        }
-        let output: Data
-        do { output = try await VigilLink.call(linked(), device: root, .messageAct(act)) } catch {
-            throw Failed(description: VigilLink.reason(error))
-        }
-        let acted = try JSONDecoder().decode(Message.Acted.self, from: output)
-        if act.kind != .read { shared.receipts.info("messages", "acted", ["act": act.kind.rawValue, "id": act.id ?? "", "said": acted.said]) }
-        return acted
-    }
-
-    /// A pane of the Mac `root` as its row names it, with its Mac: what a
-    /// thread and a watch call it.
-    static func pane(root: String, pane: String) -> VigilChatPane {
+    /// A pane of the host `root` as its row names it: what a watch calls it.
+    static func title(root: String, pane: String) -> String {
         let phone = VigilPhone.shared
         let mac = phone.hosts.first { $0.id == root }?.name ?? "a Mac"
-        let face = phone.directories[root]?.place(of: pane)?.workspace.emoji
-        guard let node = phone.node(for: PaneRef(host: .init(id: root, name: mac), pane: pane, title: "")) else {
-            return VigilChatPane.of(conversation: nil, title: pane, face: face, mac: mac)
-        }
-        // The member its glance carries: its name and tint, one look everywhere.
-        let member = node.glance?.member.map { (name: $0.name, face: String?.none, tint: $0.tint) }
         let place = phone.directories[root]?.place(of: pane)
         let alias = place?.pane.label ?? place.flatMap { $0.tab.members.count == 1 ? $0.tab.label : nil }
-        return VigilChatPane.of(alias: alias ?? node.glance?.member?.alias, member: member, conversation: node.glance?.title, title: node.title, face: face, mac: mac)
+        let node = phone.node(for: PaneRef(host: .init(id: root, name: mac), pane: pane, title: ""))
+        return alias ?? node?.glance?.member?.alias ?? node?.glance?.title ?? node?.glance?.member?.name ?? node?.title ?? pane
     }
 
-    /// Go to a pane from a message or a watch: the pane screen, over whatever shows.
+    /// Go to a pane from a chat or a watch: the pane screen, over whatever shows.
     static func open(root: String, pane: String, from scope: String = "messages") {
         let phone = VigilPhone.shared
         let mac = phone.hosts.first { $0.id == root }?.name ?? ""
@@ -245,46 +92,89 @@ final class VigilPhoneMessages: ObservableObject {
     }
 }
 
-/// Every thread of every Mac: the Messages tab.
+/// Every paired host's chats: the Messages tab. One host: its chats. More:
+/// each host with how it stands, its chats a press away.
 struct PhoneMessagesScreen: View {
     @ObservedObject private var store = VigilPhoneMessages.shared
-    @State private var chosen: String?
+    @ObservedObject private var phone = VigilPhone.shared
 
     var body: some View {
-        VigilChat(list: store.index.list, host: store.host, chosen: $chosen)
-            .navigationTitle("Messages")
-            .toolbarTitleDisplayMode(.inline)
+        let hosts = phone.hosts.filter { store.hosts[$0.id] != nil }
+        Group {
+            if hosts.count == 1, let chats = store.hosts[hosts[0].id] {
+                PhoneHostChats(chats: chats)
+            } else if hosts.isEmpty {
+                Text("No host is paired with this phone").inkText(.detail)
+            } else {
+                List(hosts, id: \.id) { host in
+                    if let chats = store.hosts[host.id] {
+                        NavigationLink {
+                            PhoneHostChats(chats: chats).navigationTitle(host.name).toolbarTitleDisplayMode(.inline)
+                        } label: {
+                            PhoneHostRow(name: host.name, chats: chats)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Messages")
+        .toolbarTitleDisplayMode(.inline)
     }
 }
 
-/// One pane's every thread, the pane screen's Messages mode.
-struct PaneMessages: View {
-    let key: MessageThread.Key
-    @ObservedObject private var store = VigilPhoneMessages.shared
+private struct PhoneHostChats: View {
+    @ObservedObject var chats: VigilChats
+    @State private var chosen: String?
+
+    var body: some View { VigilChat(chats: chats, chosen: $chosen) }
+}
+
+/// A host in the list of hosts: its name, and whether its chats are
+/// reached, none, or how many are unread.
+private struct PhoneHostRow: View {
+    let name: String
+    @ObservedObject var chats: VigilChats
 
     var body: some View {
-        // What its row mark counts, so reading it here clears the mark. The
-        // pane screen's bar names the pane, so the column draws no head.
-        let thread = store.paneThread(key)
-        let people = VigilChatPeople(threads: thread.map { [$0] } ?? [], host: store.host)
-        InkChat.Column {
-            VigilThreadConversation(key: key, thread: thread, people: people, host: store.host)
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name).font(.headline)
+            switch chats.reach {
+            case .unreachable(let why): Text("Can't reach this host's chats yet. \(why)").inkText(.detail)
+            case .waiting: Text("Reaching its chats…").inkText(.detail)
+            case .reached:
+                Text(chats.rows.isEmpty ? "You have no chats" : "\(chats.rows.count) chats, \(chats.unread) unread").inkText(.detail)
+            }
         }
     }
 }
 
-/// A row's envelope: its pane's messages, or a folded row's panes'.
+/// A pane's agent's chat, the pane screen's Messages mode. The pane
+/// screen's bar names the pane; the column says which chat it shows.
+struct PaneMessages: View {
+    let root: String
+    let pane: String
+    @ObservedObject private var store = VigilPhoneMessages.shared
+
+    var body: some View {
+        if let chats = store.hosts[root] {
+            VigilPaneChat(pane: pane, chats: chats, waiting: chats.marks.waiting(pane: pane))
+        } else {
+            Text("That host is not paired with this phone").inkText(.detail)
+        }
+    }
+}
+
+/// A row's marks for its pane's chats, or a folded row's panes'.
 struct PhoneMessagesMark: View {
     let refs: [PaneRef]
     let sizes: PaneMarkSizes
     @ObservedObject private var marks = VigilPhoneMessages.shared.marks
 
     var body: some View {
-        // What waits on your yes first, each message once across the folded
+        // What waits on your answer first, each once across the folded
         // panes; then what you have not read.
         WaitingMark(
-            messages: refs.reduce(into: Set<String>()) { $0.formUnion(marks.awaiting(root: $1.host.id, pane: $1.pane)) }, sizes: sizes)
-        VigilTrafficDot(panes: refs.map { $0.host.id + "/" + $0.pane })
-        MessagesMark(pending: refs.compactMap { marks.pending(root: $0.host.id, pane: $0.pane) }, sizes: sizes)
+            messages: refs.reduce(into: Set<String>()) { $0.formUnion(marks.waiting(root: $1.host.id, pane: $1.pane)) }, sizes: sizes)
+        MessagesMark(unread: refs.reduce(0) { $0 + marks.unread(root: $1.host.id, pane: $1.pane) }, sizes: sizes)
     }
 }

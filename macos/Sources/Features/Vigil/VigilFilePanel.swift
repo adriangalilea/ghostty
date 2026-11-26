@@ -49,14 +49,10 @@ enum VigilFilePanel {
     }
 
     private static func page(_ file: VigilMentionedFile) -> some View {
-        let here = VigilMessageStore.shared.here
+        let host = VigilMessageStore.shared.chats.host
         let path = file.path
         return VigilFilePage(
-            file: file,
-            read: {
-                try JSONDecoder().decode(
-                    DocumentText.self, from: await VigilMessageStore.mention(.read(path), root: file.root, here: here))
-            },
-            reveal: file.root == here ? { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } : nil)
+            file: file, read: host.read(file),
+            reveal: host.reveals(file.root) ? { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } : nil)
     }
 }

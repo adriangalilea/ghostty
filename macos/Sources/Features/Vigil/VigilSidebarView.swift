@@ -118,7 +118,7 @@ struct VigilSidebarView: View {
 
     /// Messages for you that you have not read, over every Mac: the count
     /// the switch's Messages wears.
-    private var unread: Int { messages.pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread } }
+    private var unread: Int { messages.unread.values.reduce(0, +) }
 
     /// The bar's two sections, one switch at its top.
     private var sections: some View {
@@ -140,7 +140,7 @@ struct VigilSidebarView: View {
         VStack(spacing: 0) {
             sections
             if model.section == .messages {
-                VigilSidebarThreads(model: model)
+                VigilSidebarChats(model: model)
                     .frame(maxHeight: .infinity, alignment: .top)
             } else {
                 workspaces
@@ -531,8 +531,9 @@ struct VigilSidebarView: View {
                         .lineLimit(1)
                         .layoutPriority(-1)
                 }
-                // What waits on your yes on that Mac, each message once.
-                WaitingMark(messages: (mac.device ?? messages.here).map { messages.awaiting(root: $0) } ?? [], sizes: marks)
+                // What waits on your answer on this Mac, each once; another
+                // Mac's chats are not followed from here.
+                WaitingMark(messages: mac.device == nil ? messages.everyWaiting : [], sizes: marks)
                 // Its power on the rail, in the header's own size; away, what
                 // it last sent, dimmed with the rest of it. None from a
                 // reading that stopped or does not read.
@@ -1065,8 +1066,7 @@ struct VigilSidebarView: View {
                     case .changes: VigilChangesPanel.window(pane: paneId, title: pane.title)
                     case .documents: VigilDocumentsPanel.window(pane: paneId, title: pane.title)
                     case .messages:
-                        VigilMessagesPanel.window(thread: VigilMessageStore.shared.key(paneId: pane.paneId, id: pane.id, conversation: pane.conversation)
-                            .flatMap(VigilMessagesPanel.thread(of:))?.id)
+                        VigilMessagesPanel.window(chat: VigilMessageStore.shared.chats.chat(forPane: paneId)?.raw)
                     case .watches: VigilWatchesPanel.window()
                     case .file(let file): VigilFilePanel.window(file)
                     }
@@ -1193,15 +1193,11 @@ struct VigilSidebarView: View {
                         VigilDocumentsPanel.show(pane: pane.paneId ?? pane.id, title: pane.title, in: model.hostController)
                     } label: { Label("Documents", systemImage: "doc.text") }
                 }
-                // Its thread: what agents and you said to its agent and what
-                // it said back, beside it (another Mac's pane too). Where an
-                // agent holds a conversation, or messages already wait.
-                if let end = messages.activityKey(paneId: pane.paneId, id: pane.id) {
-                    VigilWatchPaneActivity(pane: end)
-                }
-                if pane.conversation != nil || messages.pending(paneId: pane.paneId, id: pane.id) != nil {
+                // Its agent's chat, beside it: a pane of this Mac where an
+                // agent holds a conversation.
+                if pane.conversation != nil, pane.paneId != nil {
                     Button {
-                        VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, in: model.hostController)
+                        VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, in: model.hostController)
                     } label: { Label("Messages", systemImage: "envelope") }
                 }
                 // The watches whose verdict reaches it, live and ended.
@@ -1432,23 +1428,16 @@ struct VigilSidebarView: View {
     private func paneMarks(_ pane: VigilWorkspaces.SidebarPane) -> some View {
         HStack(spacing: marks.gap) {
 
-            // Messages waiting on your yes, to it or from it: a press opens
-            // its thread on the first of them, where each is answered on its
-            // message.
-            let waiting = messages.awaiting(paneId: pane.paneId, id: pane.id)
+            // What waits on your answer in its agent's chats: a press opens
+            // the chat that waits beside it, on the first post that does.
+            let waiting = messages.waiting(pane: pane.paneId)
             WaitingMark(messages: waiting, sizes: marks) {
-                VigilMessagesPanel.show(
-                    paneId: pane.paneId, id: pane.id, conversation: pane.conversation, waiting: waiting, in: model.hostController)
+                VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, waiting: waiting, in: model.hostController)
             }
-            // Messages for it that wait on its agent, or that you have not
-            // read: a press opens its thread in the bar's Messages.
-            if let end = messages.activityKey(paneId: pane.paneId, id: pane.id) {
-                VigilTrafficDot(panes: [end])
-            }
-            if let pending = messages.pending(paneId: pane.paneId, id: pane.id) {
-                MessagesMark(pending: [pending], sizes: marks) {
-                    VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, conversation: pane.conversation, unread: true, in: model.hostController)
-                }
+            // What you have not read of its agent's chat with you: a press
+            // opens it beside the pane.
+            MessagesMark(unread: messages.unread(pane: pane.paneId), sizes: marks) {
+                VigilMessagesPanel.show(paneId: pane.paneId, id: pane.id, in: model.hostController)
             }
             // Watches whose verdict will reach it, in the care tone when
             // one is broken: a press opens them beside it.
@@ -1510,9 +1499,8 @@ struct VigilSidebarView: View {
         GearsMark(backgrounds: panes.compactMap(\.background), sizes: marks)
 
         WaitingMark(
-            messages: panes.reduce(into: Set<String>()) { $0.formUnion(messages.awaiting(paneId: $1.paneId, id: $1.id)) }, sizes: marks)
-        VigilTrafficDot(panes: panes.compactMap { messages.activityKey(paneId: $0.paneId, id: $0.id) })
-        MessagesMark(pending: panes.compactMap { messages.pending(paneId: $0.paneId, id: $0.id) }, sizes: marks)
+            messages: panes.reduce(into: Set<String>()) { $0.formUnion(messages.waiting(pane: $1.paneId)) }, sizes: marks)
+        MessagesMark(unread: panes.reduce(0) { $0 + messages.unread(pane: $1.paneId) }, sizes: marks)
         WatchMark(watches: panes.flatMap { watches.watches(paneId: $0.paneId, id: $0.id) }, sizes: marks)
         PaneProblemsMark(items: panes.flatMap { problemItems($0, folded: true) }, sizes: marks)
         lookerGlyphs(panes.flatMap(\.lookers))

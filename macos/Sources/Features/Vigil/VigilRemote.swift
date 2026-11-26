@@ -351,7 +351,6 @@ final class VigilRemote: ObservableObject {
         }
         hosts.removeAll { !continuing.contains($0.device) }
         arrivals = arrivals.filter { Self.split($0.key).map { continuing.contains($0.device) } ?? false }
-        VigilMessageStore.shared.macs(continuing)
         VigilWatchStore.shared.macs(continuing)
         for peer in peers {
             if let index = hosts.firstIndex(where: { $0.device == peer.id }) {
@@ -363,7 +362,6 @@ final class VigilRemote: ObservableObject {
             followMachine(peer.id)
             followMoves(peer.id)
         }
-        VigilMessageStore.shared.macs(wanted)
         VigilWatchStore.shared.macs(wanted)
         remoteLog.info("macs", ["macs": peers.map(\.name)])
         NotificationCenter.default.post(name: VigilWorkspaces.stateDidChange, object: nil)

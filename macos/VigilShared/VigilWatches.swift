@@ -247,7 +247,7 @@ struct VigilWatchFacts: View {
             }
             for (d, delivery) in run.deliveries.enumerated() {
                 let message: String = switch delivery.how {
-                case .message: "posted to \(delivery.to)'s mailbox" + (delivery.message.map { " as \($0.prefix(8))" } ?? "")
+                case .post: "posted to \(delivery.to)'s agent" + (delivery.post.map { " as \($0.prefix(8))" } ?? "")
                 case .typed: "typed into \(delivery.to)" + (delivery.typed == true ? ", receipted" : "") + (delivery.why.map { " (\($0))" } ?? "")
                 case .told: "told you through Authz"
                 case .notDelivered: "not delivered to \(delivery.to): \(delivery.why ?? "")"

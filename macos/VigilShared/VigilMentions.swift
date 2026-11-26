@@ -77,7 +77,7 @@ final class VigilMentions {
     private var asking: [String: Task<Found?, Never>] = [:]
 
     static func key(_ id: String, _ words: String, _ place: MentionPlace) -> String {
-        "\(id)|\(Message.digest(of: words))|\(place.root)|\(place.pane ?? "")|\(place.folder ?? "")"
+        "\(id)|\(words.hashValue)|\(place.root)|\(place.pane ?? "")|\(place.folder ?? "")"
     }
 
     func cached(_ key: String) -> Found? { found[key] }

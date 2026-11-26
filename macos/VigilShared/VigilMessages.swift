@@ -13,950 +13,649 @@ import VigilWire
     import UIKit
 #endif
 
-/// The person's threads with agents (harness/README.md "Messages"), drawn
-/// with Ink's chat family and nothing of its own: the whole window (every
-/// thread of every Mac, `VigilChat`) and one pane's thread as a column
-/// beside it (`VigilThreadColumn`). What the threads hold is worked out by
-/// `MessageThreads` from each Mac's mailbox; where a message goes, what an
-/// act does and where "go to" leads are the host's (`VigilChatHost`).
-
-/// vigil's message, named where AuthzUI's own `Message` is in scope too
-/// (`VigilMessageRequest`); the module's name is an enum's too, so it cannot
-/// qualify it.
-typealias VigilMessage = Message
-
-/// The threads and counts every view reads, worked out once per change of
-/// the mailboxes, off the main thread, by the store that follows them (the
-/// Mac's `VigilMessageStore`, the phone's): no view computes them. Each view
-/// once rebuilt every thread of every Mac at every render, and every record
-/// that changed was a render: a read of 220 drained the count one by one.
-struct VigilMessageIndex: Equatable, Sendable {
-    var threads: [MessageThread] = []
-    var list: [VigilListedThread] = []
-    var conversations: [MessageThread] { list.map(\.thread) }
-    /// Each pane's every thread as one, by "root/pane" (`MessageThreads.panes`).
-    var panes: [String: MessageThread] = [:]
-    var pending: [String: [String: MessageThreads.Pending]] = [:]
-    var awaiting: [String: [String: Set<String>]] = [:]
-    var forYou: [MessageThreads.ForYou] = []
-    var traffic = MessageThreads.Traffic()
-
-    init() {}
-    init(_ mailboxes: [String: [String: Message.Record]], asks: [String: [PaneAsk]], chats: [String: [Chat]] = [:]) {
-        threads = MessageThreads.threads(mailboxes)
-        var conversations = MessageThreads.conversations(mailboxes)
-        // A group with nothing said yet is listed too: one that waits for the
-        // person's yes first of all, an active one where it was made among
-        // the others' newest messages.
-        var groups: [String: Chat] = [:]
-        for (root, held) in chats {
-            for chat in held { groups[root + "/" + MessageThread.chatPane(chat.id)] = chat }
-        }
-        let listed = Set(conversations.filter { $0.chat != nil }.map { $0.key.root + "/" + $0.key.pane })
-        for (root, held) in chats {
-            for chat in held.sorted(by: { $0.made < $1.made }) where !listed.contains(root + "/" + MessageThread.chatPane(chat.id)) {
-                let empty = MessageThread(key: .init(root: root, pane: MessageThread.chatPane(chat.id), conversation: nil), items: [])
-                if chat.allowed {
-                    conversations.insert(empty, at: conversations.firstIndex { $0.last < chat.made } ?? conversations.endIndex)
-                } else {
-                    conversations.insert(empty, at: 0)
-                }
-            }
-        }
-        traffic = MessageThreads.Traffic(mailboxes, conversations: conversations)
-        list = conversations.map { VigilListedThread($0, group: groups[$0.key.root + "/" + $0.key.pane]) }
-        panes = MessageThreads.panes(threads)
-        forYou = MessageThreads.forYou(conversations)
-        pending = MessageThreads.pending(forYou: forYou)
-        var awaiting = MessageThreads.awaitingYou(mailboxes)
-        // A pane's hand counts what vigil asks about it too.
-        for (root, list) in asks {
-            for ask in list {
-                for pane in ask.panes { awaiting[root, default: [:]][pane, default: []].insert(ask.id) }
-            }
-        }
-        self.awaiting = awaiting
-        for (root, groups) in chats {
-            for group in groups where group.request != nil {
-                for member in group.members { self.awaiting[root, default: [:]][member.pane, default: []].insert(group.id) }
-            }
-        }
-    }
-
-    /// A pane's every thread as one, keyed by `key` (the conversation it holds).
-    func pane(_ key: MessageThread.Key) -> MessageThread? {
-        guard var thread = panes["\(key.root)/\(key.pane)"] else { return nil }
-        thread.key = key
-        return thread
-    }
-}
-
-/// The mailbox supplies everything in a list row except its live pane names.
-/// Opening the list should never build a conversation's bubbles for its preview.
-struct VigilListedThread: Equatable, Sendable {
-    let thread: MessageThread
-    let speakers: [MessageThread.Item]
-    let people: [String]
-    let from: String?
-    let line: String?
-    let at: Date?
-    let unread: Int
-    let waits: Bool
-    let delivery: InkChat.Delivery?
-    /// The group it is, as its Mac keeps it (`Chat`); nil for a pane's thread.
-    let group: Chat?
-
-    /// Waits for the person's yes: an agent's group they have not answered.
-    var asksYou: Bool { group?.request != nil }
-
-    init(_ thread: MessageThread, group: Chat? = nil) {
-        self.thread = thread
-        self.group = group
-        var seen: Set<String> = [Message.you]
-        var speakers: [MessageThread.Item] = []
-        var people: [String] = []
-        for item in thread.items {
-            let sender = VigilChatPeople.key(of: item)
-            if seen.insert(sender).inserted {
-                speakers.append(item)
-                people.append(sender)
-            }
-        }
-        self.speakers = speakers
-        // A group's picture is its members' faces (the person is never one),
-        // said or silent: an empty group's row has a face too.
-        self.people = group.map { group in
-            group.members.prefix(3).map { VigilChatPeople.key(root: thread.key.root, pane: $0.pane) }
-        } ?? people
-        let last = thread.items.last
-        from = last.map(VigilChatPeople.key(of:))
-        // A group with nothing said yet says how it stands: active, since it
-        // was made, or waiting for the person's yes.
-        let standing = group.flatMap { group -> String? in
-            guard last == nil else { return nil }
-            return group.request != nil ? "Waiting for your yes · nothing said yet" : "Active · nothing said yet"
-        }
-        line = last.map { InkChat.line(of: VigilThreadWords.words($0)) } ?? standing
-        at = last.map { Date(timeIntervalSince1970: $0.record.message.sent) } ?? group.map { Date(timeIntervalSince1970: $0.made) }
-        unread = thread.unread
-        waits = group?.request != nil
-            || thread.items.contains { !$0.record.message.to.isPerson && $0.latest.state.kind == .awaitingApproval }
-        delivery = last.flatMap {
-            $0.record.message.from.kind == .person && !$0.record.message.to.isPerson ? VigilThreadWords.delivery($0.latest.state) : nil
-        }
-    }
-
-    func summary(title: String) -> InkChat.Summary {
-        InkChat.Summary(thread.id, title: title, people: people, from: from, line: line, at: at,
-                        unread: unread, waits: waits, delivery: delivery)
-    }
-}
-
-/// A pane as a thread names it: its agent's name and face in every bubble
-/// and every thread's head.
-struct VigilChatPane: Equatable, Sendable {
-    /// What it is called: its member's name, else its agent's conversation,
-    /// else its row's name.
-    var title: String
-    /// Its face: its pane's or workspace's emoji, else its member's.
-    var face: String?
-    /// Its member's tint, minted once and kept (`Member.tint`): the same
-    /// colour on every surface.
-    var tint: String?
-    /// Its Mac's name, when it is not this one.
-    var mac: String?
-    /// The agent program it holds ("claude", "codex"), from its conversation;
-    /// nil: none known (a shell, a command).
-    var program: String? = nil
-
-    var said: String { mac.map { "\(title) on \($0)" } ?? title }
-
-    /// The one rule every surface names a pane's agent by (CHATS.md, decided
-    /// 2026-11-19: one look per agent everywhere): the member the pane holds,
-    /// as its Mac's broker stated it (`Members.look`: its name, never a
-    /// prompt's first words, and its tint), else the conversation's name
-    /// from the pane's glance, else its row's name (`Directory.titles`); its
-    /// pane's or workspace's emoji, else its member's face; its Mac when it
-    /// is not this one.
-    static func of(
-        alias: String? = nil, member: (name: String?, face: String?, tint: String?)? = nil, conversation: String?, title: String, face: String?,
-        mac: String?, program: String? = nil
-    ) -> VigilChatPane {
-        let emoji = face.flatMap { $0.isEmpty ? nil : $0 }
-        return VigilChatPane(
-            title: alias ?? conversation ?? member?.name ?? title, face: emoji ?? member?.face, tint: member?.tint, mac: mac, program: program)
-    }
-}
-
-/// What a host that cannot do something says.
-enum VigilChatError: Error, CustomStringConvertible {
-    case notHere
-    var description: String { "group chats are written in from a Mac's Messages for now" }
-}
+/// The person's chats with agents, drawn with Ink's chat family: the list
+/// of every chat of a host (`VigilChatList`), one chat a page at a time with
+/// its composer (`VigilChatView`), the two side by side (`VigilChat`) and a
+/// pane's chat as a column beside it (`VigilPaneChat`).
+///
+/// Nothing here works out what a chat holds. The host that keeps the chats
+/// sends its list as rows it computed (`Messages.Row`: the last post, what
+/// is unread, what waits for the person, every member named) and each chat
+/// a page at a time (`Messages.Page`); `VigilChats` holds what it was sent
+/// and the views draw it.
 
 /// What the views ask of the app that holds them.
 struct VigilChatHost {
-    /// This Mac's tether root: a record of another Mac is acted on there.
-    var here: String?
-    /// This Mac's own name, said as the person's sender.
-    var macName: String
-    /// A pane of the Mac `root`, as its rows name it.
-    var name: @MainActor (_ root: String, _ pane: String) -> VigilChatPane
-    /// A message posted to the mailbox of the Mac `root`.
-    var post: @Sendable (_ message: Message, _ root: String) async throws -> Void
-    /// The person's act on a record of the Mac `root`.
-    var act: @Sendable (_ act: Message.Act, _ root: String) async throws -> Message.Acted
-    /// Go to the pane `pane` of the Mac `root`.
-    var open: @MainActor (_ root: String, _ pane: String) -> Void
+    /// The id of the host whose chats these are, as its posts name it
+    /// (`Messages.Post.writtenIn`); nil until it is known.
+    var hostID: String?
+    /// A page of a chat's posts: the `limit` newest below `before`.
+    var page: @Sendable (_ chat: ChatID, _ before: Int?, _ limit: Int) async throws -> Messages.Page
+    /// The person's post.
+    var post: @Sendable (_ say: Messages.Say) async throws -> Messages.Standing
+    /// The person's act on what is there.
+    var act: @Sendable (_ what: Messages.Act.What) async throws -> Messages.Acted
+    /// The person's press on a question about a pane (`PaneAsk`): refuse
+    /// it, or open its card in Authz.
+    var press: @Sendable (_ ask: String, _ open: Bool) async throws -> Messages.Acted
+    /// Go to a pane of that host.
+    var open: @MainActor (_ pane: String) -> Void = { _ in }
     /// Whether a person's hand was on this device after the moment (unix
-    /// seconds), or within the minute before: the app's seen rule
-    /// (`VigilWorkspaces.personActed(after:)`). Read needs it.
-    var handAfter: @MainActor (_ moment: Double) -> Bool
-    /// One ask about the files a message names, of the Mac `root` they are
-    /// on (`Open.mention`): which are files there, and one read.
+    /// seconds), or within the minute before: read needs it.
+    var handAfter: @MainActor (_ moment: Double) -> Bool = { _ in true }
+    /// One ask about the files a post names, of the host `root` they are on
+    /// (`Open.mention`): which are files there, and one read.
     var mention: @Sendable (_ call: MentionCall, _ root: String) async throws -> Data
-    /// A file a message names, shown where the host shows files, beside the
-    /// pane of the thread it was pressed in (`key`). Nil: the conversation
-    /// pushes its page itself (the phone).
-    var openFile: (@MainActor (_ file: VigilMentionedFile, _ key: MessageThread.Key) -> Void)? = nil
+    /// A file a post names, shown where the app shows files, beside `pane`
+    /// when the chat was open beside one. Nil: the chat pushes its page
+    /// itself (the phone).
+    var openFile: (@MainActor (_ file: VigilMentionedFile, _ pane: String?) -> Void)? = nil
     /// Whether the press being handled now is a person's: on the Mac, a
     /// hardware click (no posted event, no accessibility action), which an
-    /// answer on a request needs, as Authz's own input guard does
-    /// (authz.space SECURITY-REVIEW.md). Read inside the button's action.
+    /// answer on a request needs. Read inside the button's action.
     var pressedByPerson: @MainActor () -> Bool = { true }
-    /// The questions vigil asks the person about the pane a thread is with
-    /// (`PaneAsk`), as its Mac holds them now: drawn in the thread above the
-    /// composer, answered there on their card.
-    var asks: @MainActor (_ key: MessageThread.Key) -> [PaneAsk] = { _ in [] }
-    /// A group chat of the Mac `root`, as it keeps it (`Chat`).
-    var chat: @MainActor (_ root: String, _ id: String) -> Chat? = { _, _ in nil }
-    /// The person's post in a group chat of the Mac `root` (`chat.post`).
-    var postInChat: @Sendable (_ chat: String, _ body: String, _ replyTo: String?, _ root: String) async throws -> Void = { _, _, _, _ in
-        throw VigilChatError.notHere
-    }
 
-    var activity: [MessageThreads.Activity] = []
-    var groupPanes: [String: String] = [:]
-    var createGroup: (@Sendable (String, [String]) async throws -> Chat)?
-
-    /// Whether a folder on the Mac `root` can be shown here: revealed in
+    /// Whether a folder on the host `root` can be shown here: revealed in
     /// this Mac's Finder, so only this Mac's own.
     func reveals(_ root: String) -> Bool {
         #if os(macOS)
-            root == here
+            root == hostID
         #else
             false
         #endif
     }
 
-    /// A named file's text from its Mac.
+    /// A named file's text from its host.
     func read(_ file: VigilMentionedFile) -> @Sendable () async throws -> DocumentText {
         let mention = mention
         return { try JSONDecoder().decode(DocumentText.self, from: await mention(.read(file.path), file.root)) }
     }
 }
 
-/// The Messages list (CHATS.md, decided 2026-11-19): every conversation
-/// once, and a picker at its foot, All or one agent; opened from somewhere
-/// specific it lands filtered there. `only` is its host's, so whoever opens
-/// it (a pane's hand, envelope or menu on the Mac) says which agent. What
-/// the Mac's window, its bar and the phone each list.
-struct VigilThreadList: View {
-    let list: [VigilListedThread]
-    let people: VigilChatPeople
-    @Binding var selection: String?
-    @Binding var only: String?
-
-    @State private var activity = false
-    @State private var creating = false
-
-    /// The agent a pane's end names, by Mac and pane.
-    static func end(_ key: MessageThread.Key) -> String { "\(key.root)/\(key.pane)" }
-
-    var body: some View {
-        let host = people.host
-        let ends = Set(list.flatMap { listed -> [String] in
-            let thread = listed.thread
-            if let id = thread.chat, let group = host.chat(thread.key.root, id) {
-                return group.members.map { thread.key.root + "/" + $0.pane }
-            }
-            return ([thread.key] + [thread.with].compactMap { $0 }).map(Self.end)
-        }).sorted()
-        let shown = list.filter { row in
-            guard let only else { return true }
-            let thread = row.thread
-            if let id = thread.chat, let group = host.chat(thread.key.root, id) {
-                return group.members.contains { thread.key.root + "/" + $0.pane == only }
-            }
-            return Self.end(thread.key) == only || thread.with.map(Self.end) == only
-        }
-        let pending = shown.filter(\.asksYou)
-        VStack(spacing: 0) {
-            HStack {
-                Picker("View", selection: $activity) {
-                    Text("Threads").tag(false)
-                    Text("Activity").tag(true)
-                }.pickerStyle(.segmented).labelsHidden()
-                if host.createGroup != nil {
-                    Button { creating = true } label: { Image(systemName: "person.2.badge.plus") }
-                        .accessibilityLabel("New Group").help("New Group")
-                }
-            }.padding(.inkGap)
-            if activity {
-                VigilActivityList(rows: host.activity, only: only, people: people)
-            } else {
-                // A group waiting for the person's yes is answered on its row:
-                // what it is, who proposed it with whom, Refuse and Allow.
-                ForEach(pending, id: \.thread.id) { row in
-                    if let group = row.group {
-                        VigilGroupAsk(group: group, root: row.thread.key.root, title: people.title(of: row.thread), faces: row.people,
-                                      people: people) {
-                            selection = row.thread.id
-                        }
-                    }
-                }
-                InkConversations(
-                    shown.filter { row in !pending.contains { $0.thread.id == row.thread.id } }
-                        .map { $0.summary(title: people.title(of: $0.thread)) },
-                    selection: $selection, people: people.all, me: Message.you, picture: { people.picture($0) },
-                    empty: { if pending.isEmpty { Text("No conversations").inkText(.detail) } })
-            }
-            if ends.count > 1 {
-                InkSelect(
-                    "Show", selection: $only,
-                    options: [InkSelectOption(String?.none, "All")]
-                        + ends.map { end in InkSelectOption(Optional(end), people.title(ofEnd: end)) },
-                    prompt: "All")
-                .padding(.inkGap)
-            }
-        }
-        .sheet(isPresented: $creating) { VigilNewMessageGroup(host: host) }
-
-    }
-}
-
-/// An agent's group waiting for the person's yes, as its row in the list:
-/// its name, who proposed it with whom, and the request with Refuse and
-/// Allow (`VigilChatRequest`), answered here as in the group's thread.
-/// Pressing its name opens the group.
-struct VigilGroupAsk: View {
-    let group: Chat
-    let root: String
-    let title: String
-    /// Its members' keys among `people`, as the list's rows draw them.
-    let faces: [String]
-    let people: VigilChatPeople
-    let open: () -> Void
-    @State private var answered: String?
-    private var host: VigilChatHost { people.host }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Button(action: open) {
-                HStack(alignment: .center, spacing: 8) {
-                    // Its members' faces laid over one another, two at most, as a row's are.
-                    HStack(spacing: -12) {
-                        ForEach(faces.prefix(2), id: \.self) { key in
-                            if let person = people.all.first(where: { $0.id == key }) {
-                                InkChat.Face(person) { people.picture(person) }.frame(width: 30, height: 30)
-                            }
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title).font(.headline).lineLimit(1)
-                        Text(proposal).inkText(.detail).lineLimit(2)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            VigilChatRequest(chat: group, answered: answered) { answer($0) }
-        }
-        .padding(.inkGap)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal, 6)
+/// One host's chats as the views draw them: its list, the questions it asks
+/// about its panes, and a page of each chat a view has open. Fed by whoever
+/// follows the host (`take`, `asked`, `unreachable`), which is the app's;
+/// the same store on the Mac and on the phone.
+@MainActor
+final class VigilChats: ObservableObject {
+    /// Whether the host's chats can be read at all: apart from a host that
+    /// answers and has none.
+    enum Reach: Equatable {
+        /// Nothing heard yet.
+        case waiting
+        case reached
+        /// Why its chats cannot be read now, in words for the person.
+        case unreachable(String)
     }
 
-    /// Who proposed it and who else is in it, as their panes are named.
-    private var proposal: String {
-        let others = group.members.filter { $0.pane != group.madeBy }.map { host.name(root, $0.pane).said }
-        let with = ListFormatter.localizedString(byJoining: others)
-        guard let maker = group.madeBy else { return "Proposed by a command, with \(with)" }
-        return "\(host.name(root, maker).said) proposed it with \(with)"
+    @Published private(set) var reach: Reach = .waiting
+    /// The list, a chat waiting for the person's yes first, then the most
+    /// recently written in.
+    @Published private(set) var rows: [Messages.Row] = []
+    @Published private(set) var asks: [PaneAsk] = []
+    /// The page of each chat a view shows now.
+    @Published private(set) var pages: [ChatID: Messages.Page] = [:]
+    /// Why a shown chat's page could not be read.
+    @Published private(set) var failures: [ChatID: String] = [:]
+    /// What rows of panes wear, apart from the list: a post or a read
+    /// redraws the list, and a pane's row only when its count changed.
+    let marks = Marks()
+    var host: VigilChatHost
+    /// The events of a step, after its rows were taken: what an app notifies from.
+    var heard: (@MainActor ([Event]) -> Void)?
+    /// The list or the questions changed: what an app counts its badges from.
+    var changed: (@MainActor () -> Void)?
+
+    @MainActor
+    final class Marks: ObservableObject {
+        /// Per pane of the host, the posts the person has not read in its
+        /// agent's chats with them alone.
+        @Published fileprivate(set) var unread: [String: Int] = [:]
+        /// Per pane, what waits on the person there, by id: a chat with a
+        /// delivery waiting for their yes, a chat proposed and not answered,
+        /// a question about the pane. Ids, so a fold of rows counts each once.
+        @Published fileprivate(set) var waiting: [String: Set<String>] = [:]
+
+        var everyWaiting: Set<String> { waiting.values.reduce(into: Set<String>()) { $0.formUnion($1) } }
+        /// A row's pane: nil for a row that is no pane of this host.
+        func waiting(pane: String?) -> Set<String> { pane.flatMap { waiting[$0] } ?? [] }
+        func unread(pane: String?) -> Int { pane.flatMap { unread[$0] } ?? 0 }
     }
 
-    private func answer(_ act: Message.Act) {
-        // Checked in the press's own turn: a program driving the app answers nothing.
-        guard host.pressedByPerson() else {
-            answered = "Not answered: only a click of yours answers it here."
+    private static let pageSize = 60
+    /// How many views show each chat: its page is kept while any does.
+    private var shown: [ChatID: Int] = [:]
+    /// How many of its newest posts each shown chat's page holds.
+    private var depth: [ChatID: Int] = [:]
+    private var loading: Set<ChatID> = []
+    private var stale: Set<ChatID> = []
+
+    init(host: VigilChatHost) { self.host = host }
+
+    // MARK: What the follower heard
+
+    func take(_ step: Messages.Step) {
+        if reach != .reached { reach = .reached }
+        switch step {
+        case .whole(let whole):
+            place(whole)
+            // Everything may have changed while nothing was followed.
+            for chat in shown.keys { reload(chat) }
+        case .events(let events, let changed):
+            var byID = Dictionary(rows.map { ($0.id, $0) }) { first, _ in first }
+            for row in changed { byID[row.id] = row }
+            place(Array(byID.values))
+            var touched: Set<ChatID> = []
+            var unplaced = false
+            for event in events {
+                guard case .messages(let change) = event.change else { continue }
+                if let chat = Messages.chat(of: change, post: { self.chat(holding: $0) }) {
+                    touched.insert(chat)
+                } else if case .note = change {
+                    continue
+                } else {
+                    unplaced = true
+                }
+            }
+            for chat in touched where shown[chat] != nil { reload(chat) }
+            // A change of a post no page holds yet: a page being read now
+            // may predate it.
+            if unplaced { stale.formUnion(loading) }
+            heard?(events)
+        }
+    }
+
+    func asked(_ asks: [PaneAsk]) {
+        guard asks != self.asks else { return }
+        self.asks = asks
+        remark()
+    }
+
+    func unreachable(_ why: String) {
+        let next = Reach.unreachable(why)
+        if reach != next { reach = next }
+    }
+
+    /// The host's own id, read off any chat it originates.
+    var hostID: String? { rows.first?.summary.chat.origin.raw }
+
+    private func place(_ next: [Messages.Row]) {
+        let ordered = next
+            .filter { $0.summary.chat.consent != .refused }
+            .sorted { one, other in
+                let asked = (one.summary.chat.asksYou, other.summary.chat.asksYou)
+                if asked.0 != asked.1 { return asked.0 }
+                return one.summary.activity > other.summary.activity
+            }
+        if ordered != rows { rows = ordered }
+        if host.hostID == nil { host.hostID = hostID }
+        remark()
+    }
+
+    private func remark() {
+        var unread: [String: Int] = [:]
+        var waiting: [String: Set<String>] = [:]
+        for row in rows {
+            let chat = row.summary.chat
+            let present = row.members.filter { chat.present.contains($0.member) }
+            if present.count == 1, let pane = present[0].pane, row.summary.unread > 0 { unread[pane, default: 0] += row.summary.unread }
+            if row.summary.awaitingYou > 0 || chat.asksYou {
+                for pane in present.compactMap(\.pane) { waiting[pane, default: []].insert(chat.id.raw) }
+            }
+        }
+        for ask in asks {
+            for pane in ask.panes { waiting[pane, default: []].insert(ask.id) }
+        }
+        if unread != marks.unread { marks.unread = unread }
+        if waiting != marks.waiting { marks.waiting = waiting }
+        changed?()
+    }
+
+    /// The posts the person has not read, in every chat.
+    var unread: Int { rows.reduce(0) { $0 + $1.summary.unread } }
+    /// What waits on the person, each once.
+    var waiting: Set<String> {
+        Set(rows.filter { $0.summary.awaitingYou > 0 || $0.summary.chat.asksYou }.map(\.id.raw)).union(asks.map(\.id))
+    }
+
+    // MARK: A pane's chats
+
+    /// The chats the agent in `pane` is in now, as the list orders them.
+    func chats(withPane pane: String) -> [Messages.Row] {
+        rows.filter { row in row.members.contains { $0.pane == pane && row.summary.chat.present.contains($0.member) } }
+    }
+
+    /// The agent in `pane`, as any chat it is in names it.
+    func agent(inPane pane: String) -> Messages.Named? {
+        for row in rows {
+            if let named = row.members.first(where: { $0.pane == pane }) { return named }
+        }
+        return nil
+    }
+
+    /// The chat a pane's panel opens on: one in `waiting` when it was opened
+    /// from what waits there, else its agent's latest chat with the person
+    /// alone, else its latest of any.
+    func chat(forPane pane: String, waiting: Set<String> = []) -> ChatID? {
+        let with = chats(withPane: pane)
+        return (with.first { waiting.contains($0.id.raw) }
+            ?? with.first { $0.summary.chat.present.filter { $0 != .you }.count == 1 }
+            ?? with.first)?.id
+    }
+
+    // MARK: Pages
+
+    /// A view shows `chat`: its page is read and kept current until `hide`.
+    func show(_ chat: ChatID) {
+        shown[chat, default: 0] += 1
+        if shown[chat] == 1 { reload(chat) }
+    }
+
+    func hide(_ chat: ChatID) {
+        guard let count = shown[chat] else { return }
+        if count > 1 {
+            shown[chat] = count - 1
+        } else {
+            shown[chat] = nil
+            depth[chat] = nil
+            pages[chat] = nil
+            failures[chat] = nil
+        }
+    }
+
+    /// The page reaches a screen further back.
+    func earlier(_ chat: ChatID) {
+        depth[chat] = (depth[chat] ?? Self.pageSize) + Self.pageSize
+        reload(chat)
+    }
+
+    private func chat(holding post: PostID) -> ChatID? {
+        pages.first { $0.value.posts.contains { $0.post.id == post } }?.key
+    }
+
+    /// One read of a chat's page at a time; a change that arrives meanwhile
+    /// is one more read after it, never one per change.
+    private func reload(_ chat: ChatID) {
+        guard !loading.contains(chat) else {
+            stale.insert(chat)
             return
         }
-        let run = host.act, root = root
+        loading.insert(chat)
+        let want = depth[chat] ?? Self.pageSize
+        let read = host.page
         Task {
-            do { answered = try await run(act, root).said } catch { answered = "Not answered: \(error)" }
-        }
-    }
-}
-
-/// Observation on this device only. The cursor advances when a person sees traffic.
-@MainActor final class VigilActivityWatches: ObservableObject {
-    static let shared = VigilActivityWatches()
-    private let defaults: UserDefaults
-    private let key = "vigil.messages.watchedPanes"
-    private var state: MessageThreads.Watches
-    private var traffic = MessageThreads.Traffic()
-    @Published private(set) var dots: Set<String> = []
-    @Published private(set) var watched: Set<String> = []
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        state = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(MessageThreads.Watches.self, from: $0) } ?? .init()
-        watched = Set(state.cursors.keys)
-    }
-
-    func update(_ traffic: MessageThreads.Traffic) {
-        self.traffic = traffic
-        let before = state
-        state.receive(traffic)
-        publish(since: before)
-    }
-
-    func toggle(_ pane: String) {
-        let before = state
-        state.toggle(pane, in: traffic)
-        publish(since: before)
-    }
-
-    func seen(_ pane: String, at time: Double, id: String) {
-        guard dots.contains(pane) else { return }
-        let before = state
-        state.see(pane, at: time, id: id)
-        publish(since: before)
-    }
-
-    func seen(_ thread: MessageThread) {
-        guard !dots.isEmpty else { return }
-        // A pane can speak in many chats. Only clear the latest posts this thread shows.
-        let visible = Set(thread.items.map { $0.root + "/" + ($0.record.message.post ?? $0.id) })
-        for pane in dots {
-            guard let newest = traffic.latest[pane] else { continue }
-            for id in newest.ids.intersection(visible) { seen(pane, at: newest.at, id: id) }
-        }
-    }
-
-    private func publish(since before: MessageThreads.Watches) {
-        if state != before {
-            defaults.set(try? JSONEncoder().encode(state), forKey: key)
-            let keys = Set(state.cursors.keys)
-            if watched != keys { watched = keys }
-        }
-        let changed = state.dots(in: traffic)
-        if changed != dots { dots = changed }
-    }
-}
-
-struct VigilTrafficDot: View {
-    let panes: [String]
-    @ObservedObject private var watches = VigilActivityWatches.shared
-    var body: some View {
-        if !watches.dots.isDisjoint(with: panes) {
-            Circle().fill(.secondary).frame(width: 5, height: 5)
-                .accessibilityLabel("New watched activity").help("New watched activity")
-        }
-    }
-}
-
-struct VigilWatchPaneActivity: View {
-    let pane: String
-    @ObservedObject private var watches = VigilActivityWatches.shared
-    var body: some View {
-        Button { watches.toggle(pane) } label: {
-            Label(!watches.watched.contains(pane) ? "Watch activity" : "Stop watching activity", systemImage: "eye")
-        }
-    }
-}
-
-private struct VigilActivityList: View {
-    let rows: [MessageThreads.Activity]
-    let only: String?
-    let people: VigilChatPeople
-    #if os(macOS)
-    @Environment(\.controlActiveState) private var active
-    private var front: Bool { active == .key }
-    #else
-    @Environment(\.scenePhase) private var phase
-    private var front: Bool { phase == .active }
-    #endif
-
-    var body: some View {
-        let shown = only.map { pane in rows.filter { $0.panes.contains(pane) } } ?? rows
-        List(shown) { row in
-            let sender = people.name(VigilChatPeople.key(row.from, root: row.senderRoot))
-            let to = row.recipients.map { people.title(ofEnd: $0) }.joined(separator: ", ")
-            let group = row.chat.flatMap { people.host.chat(row.root, $0)?.name }
-            VStack(alignment: .leading) {
-                HStack {
-                    Text(sender + " → " + (to.isEmpty ? (group ?? "You") : to)).lineLimit(2)
-                    Spacer()
-                    Text(Date(timeIntervalSince1970: row.sent), style: .time).font(.caption)
-                }
-                if let group, !to.isEmpty { Text(group).font(.caption).foregroundStyle(.secondary) }
-                Text(InkChat.line(of: row.words)).lineLimit(1).foregroundStyle(.secondary)
-            }
-            .contextMenu {
-                ForEach(row.panes.sorted(), id: \.self) { pane in
-                    Menu(people.title(ofEnd: pane)) { VigilWatchPaneActivity(pane: pane) }
-                }
-            }
-            .onAppear { mark(row) }
-            .onChange(of: front) { mark(row) }
-        }
-        .overlay { if shown.isEmpty { Text("No activity").foregroundStyle(.secondary) } }
-    }
-
-    private func mark(_ row: MessageThreads.Activity) {
-        guard front else { return }
-        for end in row.panes where only == nil || only == end {
-            VigilActivityWatches.shared.seen(end, at: row.arrived, id: row.id)
-        }
-    }
-}
-
-private struct VigilNewMessageGroup: View {
-    let host: VigilChatHost
-    @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var selected: Set<String> = []
-    @State private var failure: String?
-    @State private var creating = false
-
-    var body: some View {
-        VStack(alignment: .leading) {
-            Text("New Group").font(.headline)
-            TextField("Group name", text: $name)
-            List(host.groupPanes.keys.sorted { (host.groupPanes[$0] ?? "", $0) < (host.groupPanes[$1] ?? "", $1) }, id: \.self) { pane in
-                Toggle(host.groupPanes[pane] ?? pane, isOn: Binding(
-                    get: { selected.contains(pane) },
-                    set: { if $0 { selected.insert(pane) } else { selected.remove(pane) } }))
-            }
-            if let failure { Text(failure).foregroundStyle(.red) }
-            HStack {
-                Button("Cancel") { dismiss() }
-                Spacer()
-                Button("Create") {
-                    guard host.pressedByPerson(), let create = host.createGroup else {
-                        failure = "Press Create directly to make this group."
-                        return
+            do {
+                // The host hands 200 posts a read at most.
+                var page = try await read(chat, nil, min(want, 200))
+                while page.posts.count < want, let before = page.before {
+                    let older = try await read(chat, before, min(want - page.posts.count, 200))
+                    guard !older.posts.isEmpty else { break }
+                    page.posts = older.posts + page.posts
+                    page.before = older.before
+                    for named in older.members where !page.members.contains(where: { $0.member == named.member }) {
+                        page.members.append(named)
                     }
-                    creating = true
-                    Task {
-                        do { _ = try await create(name, selected.sorted()); dismiss() }
-                        catch { failure = String(describing: error); creating = false }
-                    }
-                }.disabled(creating || !Chat.validName(name) || !(2...32).contains(selected.count))
-            }
-        }.padding().frame(minWidth: 280, minHeight: 320)
-    }
-}
-
-/// Every thread, and the one chosen beside the list.
-struct VigilChat: View {
-    let list: [VigilListedThread]
-    let host: VigilChatHost
-    @Binding var chosen: String?
-    /// Whose conversations the list shows: opened from nothing in
-    /// particular, all.
-    @State private var only: String?
-
-    var body: some View {
-        let thread = list.first { $0.thread.id == chosen }?.thread
-        let people = VigilChatPeople(list: list, host: host)
-        InkChat(
-            title: thread.map { people.title(of: $0) },
-            detail: thread.map { VigilThreadWords.detail($0, people: people) },
-            open: thread != nil
-        ) {
-            VigilThreadList(list: list, people: people, selection: $chosen, only: $only)
-        } conversation: {
-            if let thread {
-                VigilThreadConversation(key: thread.key, thread: thread, people: people, host: host)
-                    .id(thread.id)
-            }
-        } tools: {
-            if let thread {
-                Button {
-                    host.open(thread.key.root, thread.key.pane)
-                } label: {
-                    Image(systemName: "arrow.up.forward.square")
                 }
-                .buttonStyle(.inkTool)
-                .inkTip("go to its pane")
+                if shown[chat] != nil {
+                    if pages[chat] != page { pages[chat] = page }
+                    if failures[chat] != nil { failures[chat] = nil }
+                }
+            } catch {
+                if shown[chat] != nil { failures[chat] = "\(error)" }
             }
-        }
-        .onBack { chosen = nil }
-    }
-}
-
-/// One pane's thread as a column: the aside beside the pane. A pane with no
-/// message yet shows an empty conversation and its composer.
-struct VigilThreadColumn: View {
-    let key: MessageThread.Key
-    let thread: MessageThread?
-    let host: VigilChatHost
-    /// The message it opens on (`VigilMessageStore.focus`): a pressed hand's.
-    var focus: String? = nil
-
-    var body: some View {
-        let people = VigilChatPeople(threads: thread.map { [$0] } ?? [], host: host)
-        InkChat.Column(title: people.title(of: key), detail: thread.map { VigilThreadWords.detail($0, people: people) }) {
-            VigilThreadConversation(key: key, thread: thread, people: people, host: host, focus: focus)
+            loading.remove(chat)
+            if stale.remove(chat) != nil, shown[chat] != nil { reload(chat) }
         }
     }
 }
 
-/// A sender as a thread draws it, in the shape of the identity model's member
-/// (`/tmp/identity/MODEL.md`: one kind for a person, an agent, a subagent, a
-/// device, a watch and the system, each with a name, a face, a handle and a
-/// kind). Every sender is drawn through it; today it is filled from what the
-/// mailbox and the pane's rows know (`VigilChatPane.of`), and the identity
-/// build changes only what fills it.
-struct VigilChatMember: Equatable {
-    enum Kind: Equatable { case person, agent, subagent, device, watch, system, tool }
-
-    /// The key a message names it by among the thread's people.
-    var key: String
-    var name: String
-    /// What its name is shortened to where room is short.
-    var short: String?
-    /// Its face, an emoji, where it wears one; else its kind's mark.
-    var face: String?
-    /// What a mention types ("@notice-design-1281"); none known yet.
-    var handle: String?
-    var kind: Kind
-    /// The program behind an agent ("claude", "codex"): its mark where it wears no face.
-    var program: String?
-    /// How it stands to another member, said after its name ("subagent of @x").
-    var relation: String?
-    /// Its own colour, minted once and kept (`Member.tint`); nil: Ink's by order.
-    var tint: String?
-
-    /// The pane's agent or command, named by the pane's rows.
-    static func pane(_ key: String, _ pane: VigilChatPane, kind: Kind, program: String?) -> VigilChatMember {
-        VigilChatMember(
-            key: key, name: pane.said, short: pane.title, face: pane.face, kind: kind, program: program ?? pane.program, tint: pane.tint)
-    }
-
-    /// What kind of member it is, as the badge on its face says it (CHATS.md,
-    /// decided 2026-11-19: every agent has one look): Claude, Codex, a watch,
-    /// a command. Nil for the person and anything with no badge of its own.
-    var badge: (symbol: String, color: Color)? {
-        switch kind {
-        case .agent, .subagent:
-            switch program {
-            case "claude": ("asterisk", Color(red: 0.85, green: 0.47, blue: 0.34))
-            case "codex": ("chevron.left.forwardslash.chevron.right", Color(red: 0.06, green: 0.64, blue: 0.50))
-            default: ("terminal", .gray)
-            }
-        case .watch: ("binoculars", .indigo)
-        case .tool: ("terminal", .gray)
-        case .person, .system, .device: nil
-        }
-    }
-
-    /// The member as Ink draws a sender, in its own colour.
-    var person: InkChat.Person {
-        InkChat.Person(
-            key, name: name, short: short, handle: handle, symbol: symbol, tint: tint.flatMap(InkTint.init), relation: relation)
-    }
-
-    /// Its mark where it wears no face: a person has none (their initial), an
-    /// agent its program's, else the terminal it runs in (never a generic sparkle).
-    private var symbol: String? {
-        switch kind {
-        case .person: nil
-        case .watch: "binoculars"
-        case .system: "gearshape"
-        case .device: "laptopcomputer"
-        case .tool: "terminal"
-        case .agent, .subagent:
-            switch program {
-            case "claude": "asterisk"
-            case "codex": "chevron.left.forwardslash.chevron.right"
-            default: "terminal"
-            }
-        }
-    }
+extension Messages.Chat {
+    /// Proposed by an agent or a command, waiting for the person's one yes.
+    var asksYou: Bool { if case .asked = consent { true } else { false } }
 }
 
-/// Who speaks in threads: the person, each pane's agent or command, each
-/// watch and feed, as members.
+extension Messages.Summary {
+    /// When it was last written in, or made.
+    var activity: Double { last?.at ?? chat.made }
+}
+
+/// Who a chat's views draw: the person and every member the host named.
 struct VigilChatPeople {
+    static let you = MemberID.you.raw
+
     let all: [InkChat.Person]
-    let host: VigilChatHost
-    private let members: [String: VigilChatMember]
+    private let named: [String: Messages.Named]
 
-    @MainActor init(threads: [MessageThread], host: VigilChatHost) {
-        self.init(speakers: threads.map { ($0.key, $0.items) }, host: host)
-    }
-
-    @MainActor init(list: [VigilListedThread], host: VigilChatHost) {
-        self.init(speakers: list.map { ($0.thread.key, $0.speakers) }, host: host,
-                  members: list.flatMap { row in (row.group?.members ?? []).map { (row.thread.key.root, $0) } })
-    }
-
-    @MainActor private init(speakers: [(MessageThread.Key, [MessageThread.Item])], host: VigilChatHost,
-                            members groups: [(root: String, member: Chat.Member)] = []) {
-        self.host = host
-        var members: [String: VigilChatMember] = [
-            Message.you: VigilChatMember(key: Message.you, name: "You", kind: .person)
-        ]
-        // Every group's members, said or silent: a group's row draws their faces.
-        for (root, member) in groups {
-            let key = Self.key(root: root, pane: member.pane)
-            if members[key] == nil { members[key] = .pane(key, host.name(root, member.pane), kind: .agent, program: member.agent) }
+    /// `also`: members a post or a row names that the host listed nowhere
+    /// (a writer no longer known): drawn by their id, so every sender is
+    /// among the people.
+    init(_ members: [Messages.Named], also: [MemberID] = []) {
+        var named: [String: Messages.Named] = [:]
+        for member in members where named[member.member.raw] == nil { named[member.member.raw] = member }
+        var people: [String: InkChat.Person] = [Self.you: InkChat.Person(Self.you, name: "You")]
+        for (key, member) in named {
+            people[key] = InkChat.Person(
+                key, name: member.name, handle: member.handle, symbol: Self.symbol(member.kind), tint: member.tint.flatMap(InkTint.init))
         }
-        for (thread, items) in speakers {
-            let own = Self.key(root: thread.root, pane: thread.pane)
-            for item in items {
-                let from = item.record.message.from
-                let key = Self.key(of: item)
-                guard members[key] == nil else { continue }
-                switch from.kind {
-                case .person: break
-                case .agent, .tool:
-                    let kind: VigilChatMember.Kind = from.kind == .agent ? .agent : .tool
-                    members[key] = .pane(
-                        key, from.pane.map { host.name(item.senderRoot, $0) } ?? VigilChatPane.of(conversation: nil, title: from.agent ?? "a command", face: nil, mac: nil),
-                        kind: kind, program: from.agent)
-                case .watch: members[key] = VigilChatMember(key: key, name: "watch \(from.watch ?? "")", kind: .watch)
-                case .feed: members[key] = VigilChatMember(key: key, name: "feed \(from.watch ?? "")", kind: .watch)
-                }
-            }
-            if members[own] == nil {
-                members[own] = .pane(own, host.name(thread.root, thread.pane), kind: .agent, program: nil)
-            }
+        for member in also where people[member.raw] == nil {
+            people[member.raw] = InkChat.Person(member.raw, name: member.raw, symbol: "questionmark")
         }
-        all = members.values.map(\.person).sorted { $0.id < $1.id }
-        self.members = members
+        all = people.values.sorted { $0.id < $1.id }
+        self.named = named
     }
 
-    /// A sender's face: their pane's workspace emoji where it wears one, with
-    /// its kind's badge at its corner (Claude, Codex, a watch, a command), so
-    /// two agents of one workspace are told apart; else Ink's own (the
-    /// agent's mark, the person's initial). Its colour is the member's tint,
-    /// which Ink draws around it.
+    init(rows: [Messages.Row]) {
+        self.init(rows.flatMap(\.members), also: rows.compactMap(\.summary.last?.by))
+    }
+
+    init(page: Messages.Page) {
+        self.init(page.members, also: page.posts.map(\.post.by) + page.chat.members.map(\.member))
+    }
+
+    func name(_ key: String) -> String { key == Self.you ? "You" : named[key]?.name ?? key }
+    func name(_ member: MemberID) -> String { name(member.raw) }
+    /// The pane a member runs in on the host now.
+    func pane(_ member: MemberID) -> String? { named[member.raw]?.pane }
+
+    /// What a chat is called: its own name with its face and how many are
+    /// in it, else whoever is in it besides the person.
+    func title(_ chat: Messages.Chat) -> String {
+        if let name = chat.name {
+            let face: String = if case .emoji(let emoji)? = chat.face { emoji } else { "👥" }
+            return "\(face) \(name) · \(chat.present.count)"
+        }
+        let others = chat.present.filter { $0 != .you }.map(name)
+        switch others.count {
+        case 0: return "Only you"
+        case 2: return "\(others[0]) ↔ \(others[1])"
+        default: return ListFormatter.localizedString(byJoining: others)
+        }
+    }
+
+    /// The mark of a member's kind where it wears no face.
+    private static func symbol(_ kind: String?) -> String {
+        switch kind {
+        case "claude": "asterisk"
+        case "codex": "chevron.left.forwardslash.chevron.right"
+        case "watch": "binoculars"
+        default: "terminal"
+        }
+    }
+
+    private static func badge(_ kind: String?) -> Color {
+        switch kind {
+        case "claude": Color(red: 0.85, green: 0.47, blue: 0.34)
+        case "codex": Color(red: 0.06, green: 0.64, blue: 0.50)
+        case "watch": .indigo
+        default: .gray
+        }
+    }
+
+    /// A member's face: the emoji the host says it wears, with its kind's
+    /// badge at its corner (Claude, Codex, a watch, a command), so two
+    /// agents wearing one emoji are told apart; else Ink's own (its kind's
+    /// mark, the person's initial).
     @ViewBuilder func picture(_ person: InkChat.Person) -> some View {
-        if let member = members[person.id], let face = member.face {
+        if let member = named[person.id], let face = member.face, !face.isEmpty {
             GeometryReader { g in
                 let side = min(g.size.width, g.size.height)
                 Text(face)
                     .font(.system(size: (side * 0.62).rounded()))
                     .frame(width: g.size.width, height: g.size.height)
                     .overlay(alignment: .bottomTrailing) {
-                        if let badge = member.badge {
-                            Image(systemName: badge.symbol)
-                                .font(.system(size: (side * 0.22).rounded(), weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: side * 0.42, height: side * 0.42)
-                                .background(badge.color, in: Circle())
-                                .overlay(Circle().stroke(.background, lineWidth: 1.5))
-                                .accessibilityLabel(member.program ?? "\(member.kind)")
-                        }
+                        Image(systemName: Self.symbol(member.kind))
+                            .font(.system(size: (side * 0.22).rounded(), weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: side * 0.42, height: side * 0.42)
+                            .background(Self.badge(member.kind), in: Circle())
+                            .overlay(Circle().stroke(.background, lineWidth: 1.5))
+                            .accessibilityLabel(member.kind ?? "member")
                     }
             }
         }
     }
-
-    static func key(root: String, pane: String) -> String { "pane:\(root)/\(pane)" }
-
-    /// The sender's key among the people.
-    static func key(of item: MessageThread.Item) -> String {
-        key(item.record.message.from, root: item.senderRoot)
-    }
-
-    static func key(_ from: Message.Sender, root: String) -> String {
-        switch from.kind {
-        case .person: return Message.you
-        case .agent, .tool: return from.pane.map { key(root: root, pane: $0) } ?? "\(from.kind.rawValue):\(from.agent ?? "")"
-        case .watch, .feed: return "\(from.kind.rawValue):\(from.watch ?? "")"
-        }
-    }
-
-    @MainActor func title(of key: MessageThread.Key) -> String { host.name(key.root, key.pane).said }
-    /// A thread's name: its pane's, or both ends' for a conversation between
-    /// two agents, listed once.
-    @MainActor func title(of thread: MessageThread) -> String {
-        // A group says it is one: its face (people when it has none), its
-        // name and how many are in it, you among them.
-        if let id = thread.chat {
-            let chat = host.chat(thread.key.root, id)
-            return "\(chat?.face ?? "👥") \(chat?.name ?? "a group") · \((chat?.members.count ?? 0) + 1)"
-        }
-        return thread.with.map { "\(title(of: thread.key)) ↔ \(title(of: $0))" } ?? title(of: thread.key)
-    }
-    /// An end of the list's picker (`VigilThreadList.end`, "root/pane") by name.
-    @MainActor func title(ofEnd end: String) -> String {
-        guard let slash = end.firstIndex(of: "/") else { return end }
-        return host.name(String(end[..<slash]), String(end[end.index(after: slash)...])).said
-    }
-
-    func name(_ key: String) -> String { members[key]?.name ?? key }
 }
 
-/// A record as Ink's message, in vigil's words.
-enum VigilThreadWords {
-    /// Mailbox changes arrive as snapshots. Most append a row or change one
-    /// delivery state. Keep the previous rendering inputs for this conversation.
-    @MainActor final class Projection {
-        private var items: [MessageThread.Item] = []
-        private var rendered: [InkChat.Message] = []
-        private var people: [InkChat.Person] = []
+/// Every chat of a host, as its rows say. A host whose chats cannot be read
+/// says so and why, apart from one that answers and has none.
+struct VigilChatList: View {
+    @ObservedObject var chats: VigilChats
+    /// The chosen chat's id.
+    @Binding var selection: String?
 
-        func messages(_ thread: MessageThread?, people current: VigilChatPeople) -> [InkChat.Message] {
-            let next = thread?.items ?? []
-            let samePeople = people == current.all
-            var places: [MessageThread.Key: String] = [:]
-            if rendered.count > next.count { rendered.removeLast(rendered.count - next.count) }
-            for (index, item) in next.enumerated() {
-                let end = VigilThreadWords.otherEnd(of: item, from: thread?.key)
-                let place: String
-                if let known = places[end] {
-                    place = known
-                } else {
-                    place = current.host.name(end.root, end.pane).said
-                    places[end] = place
+    var body: some View {
+        let people = VigilChatPeople(rows: chats.rows)
+        VStack(spacing: 0) {
+            if case .unreachable(let why) = chats.reach {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("Can't reach this host's chats yet", systemImage: "antenna.radiowaves.left.and.right.slash").font(.headline)
+                    Text(why).inkText(.detail)
                 }
-                if index < rendered.count, items[index] == item, rendered[index].place == place,
-                   samePeople || item.record.reactions.isEmpty { continue }
-                let row = VigilThreadWords.message(item, place: place, people: current)
-                if index < rendered.count { rendered[index] = row } else { rendered.append(row) }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.inkGap)
             }
-            items = next
-            people = current.all
-            return rendered
+            InkConversations(
+                chats.rows.map { Self.summary($0, people: people) },
+                selection: $selection, people: people.all, me: VigilChatPeople.you, picture: { people.picture($0) },
+                empty: {
+                    switch chats.reach {
+                    case .reached: Text("You have no chats").inkText(.detail)
+                    case .waiting: Text("Reaching this host's chats…").inkText(.detail)
+                    case .unreachable: EmptyView()
+                    }
+                })
         }
     }
 
-    /// Where “go to” leads from this thread's pane. Conversations in the
-    /// same pane share a display name.
-    private static func otherEnd(of item: MessageThread.Item, from key: MessageThread.Key?) -> MessageThread.Key {
-        let message = item.record.message
-        if let pane = message.from.pane, item.senderRoot != key?.root || pane != key?.pane {
-            return .init(root: item.senderRoot, pane: pane, conversation: nil)
-        }
-        return .init(root: item.root, pane: message.to.pane, conversation: nil)
-    }
-
-    @MainActor private static func message(_ item: MessageThread.Item, place: String, people: VigilChatPeople) -> InkChat.Message {
-        let record = item.record, message = record.message
-        // One bubble per message: its corrections are its edits (`MessageThreads`
-        // folds them), so it says its newest words, stands as they stand, and
-        // its "edited" opens the words before.
-        let removed = item.record.removed != nil || record.state.kind == .withdrawn
-        return InkChat.Message(
-            record.id, from: VigilChatPeople.key(of: item), at: Date(timeIntervalSince1970: message.sent), words(item),
-            answers: message.replyTo,
-            reactions: InkChat.Reaction.counted(record.reactions.map { .init($0.emoji, by: $0.by) }, me: Message.you, name: people.name),
-            delivery: message.to.isPerson ? nil : delivery(item.latest.state), edited: !removed && item.edited,
-            earlier: removed ? [] : item.earlier, place: place)
-    }
-
-    /// Its words now, or what became of them when the person removed it.
-    static func words(_ item: MessageThread.Item) -> String {
-        let record = item.record
-        if record.state.kind == .withdrawn { return "*Removed before any agent had it.*" }
-        if record.removed != nil {
-            return item.every.contains { $0.record.state.kind.reachedAgent }
-                ? "*Removed here. The agent already has it.*" : "*Removed.*"
-        }
-        return item.words
-    }
-
-    /// How it stands on its way, as Ink marks it; nil where it has no way
-    /// to go any more because the person took it back.
-    static func delivery(_ state: Message.State) -> InkChat.Delivery? {
-        switch state {
-        case .accepted: .accepted
-        case .awaitingApproval: .awaitsApproval
-        case .awaitingAgent: .awaitsAgent
-        case .handed: .handed
-        case .recorded: .recorded
-        case .refused: .refused
-        case .expired: .expired
-        case .unknown: .unknown
-        case .withdrawn, .forYou: nil
-        }
-    }
-
-    /// The thread's head: who is in it, and why the person's own wait when
-    /// they do (delivery switched off for that agent program, no agent in
-    /// the pane), in the mailbox's own words.
-    @MainActor static func detail(_ thread: MessageThread, people: VigilChatPeople) -> String {
-        let waiting = thread.items.flatMap(\.every).last { $0.record.waits }.map { $0.record.state.words }
-        let others = Set(thread.items.map { VigilChatPeople.key(of: $0) }).subtracting([Message.you]).map(people.name).sorted()
-        let who = ListFormatter.localizedString(byJoining: others + ["you"])
-        return waiting.map { "Yours is \($0)" } ?? who
+    static func summary(_ row: Messages.Row, people: VigilChatPeople) -> InkChat.Summary {
+        let summary = row.summary, chat = summary.chat
+        let standing = chat.asksYou ? "Waiting for your yes" : "Nothing said yet"
+        return InkChat.Summary(
+            chat.id.raw, title: people.title(chat), people: chat.present.filter { $0 != .you }.prefix(3).map(\.raw),
+            from: summary.last?.by.raw, line: summary.last.map { InkChat.line(of: $0.words) } ?? standing,
+            at: Date(timeIntervalSince1970: summary.activity), unread: summary.unread,
+            waits: summary.awaitingYou > 0 || chat.asksYou)
     }
 }
 
-/// A thread's messages and the composer under them: the draft, what is
-/// answered and what is edited are held here; every act goes to the Mac
-/// whose mailbox holds the record.
-struct VigilThreadConversation: View {
-    let key: MessageThread.Key
-    let thread: MessageThread?
-    let people: VigilChatPeople
-    let host: VigilChatHost
-    /// The message it opens on, scrolled to and marked while it waits on the
-    /// person (InkConversation's `focus`); nil, its newest.
-    var focus: String? = nil
+/// Every chat, and the one chosen beside the list.
+struct VigilChat: View {
+    @ObservedObject var chats: VigilChats
+    @Binding var chosen: String?
 
-    @State private var projection = VigilThreadWords.Projection()
+    var body: some View {
+        let row = chats.rows.first { $0.id.raw == chosen }
+        let people = VigilChatPeople(rows: chats.rows)
+        InkChat(
+            title: row.map { people.title($0.summary.chat) },
+            detail: row.map { Self.detail($0.summary.chat, people: people) },
+            open: row != nil
+        ) {
+            VigilChatList(chats: chats, selection: $chosen)
+        } conversation: {
+            if let row {
+                VigilChatView(chat: row.id, chats: chats).id(row.id)
+            }
+        }
+        .onBack { chosen = nil }
+    }
+
+    /// Who is in it, the person last.
+    static func detail(_ chat: Messages.Chat, people: VigilChatPeople) -> String {
+        ListFormatter.localizedString(byJoining: chat.present.filter { $0 != .you }.map(people.name) + ["you"])
+    }
+}
+
+/// A pane's chat as a column beside it. It opens on one chat (its agent's
+/// latest with the person, or the one that waits when it was opened from
+/// what waits), says which chat that is, and stays on it: a post in another
+/// chat never moves the column or what is being written. Another of the
+/// agent's chats is the person's to choose. A pane whose agent is in no
+/// chat shows a composer, and what is written there starts one.
+struct VigilPaneChat: View {
+    let pane: String
+    @ObservedObject var chats: VigilChats
+    /// What the hand that opened it counted (`VigilChats.Marks.waiting`).
+    var waiting: Set<String> = []
+    /// The chat it was opened for, when it was opened for one.
+    var initial: ChatID? = nil
+    /// What stands above the column: where its pane is, on the Mac.
+    var head: AnyView? = nil
+
+    @State private var bound: ChatID?
+    @State private var draft = ""
+    @State private var failure: String?
+
+    var body: some View {
+        let with = chats.chats(withPane: pane)
+        let people = VigilChatPeople(rows: chats.rows)
+        let row = bound.flatMap { id in chats.rows.first { $0.id == id } }
+        let agent = chats.agent(inPane: pane)?.name
+        InkChat.Column(
+            title: row.map { people.title($0.summary.chat) } ?? agent ?? "This pane",
+            detail: bound.map { "Chat \($0.raw.prefix(8))" + (with.count > 1 ? " · one of \(with.count) with this agent" : "") }
+        ) {
+            if let head { head }
+            if let bound {
+                VigilChatView(chat: bound, chats: chats, pane: pane, onWaiting: waiting.contains(bound.raw)).id(bound)
+            } else {
+                InkConversation([], people: people.all, me: VigilChatPeople.you, empty: {
+                    switch chats.reach {
+                    case .reached: Text("No chat with this pane's agent yet. What you write starts one.").inkText(.detail)
+                    case .waiting: Text("Reaching this host's chats…").inkText(.detail)
+                    case .unreachable(let why): Text("Can't reach this host's chats yet: \(why)").inkText(.detail)
+                    }
+                })
+                InkComposer(text: $draft, prompt: "Message \(agent ?? "this pane's agent")", blocked: failure, cancel: { failure = nil }) { start($0) }
+            }
+        } tools: {
+            if with.count > 1 {
+                Menu {
+                    ForEach(with) { other in
+                        Button {
+                            bound = other.id
+                        } label: {
+                            Label(people.title(other.summary.chat), systemImage: other.id == bound ? "checkmark" : "bubble.left")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .inkTip("this agent's other chats")
+            }
+        }
+        // Chosen once, when the pane's chats are first known: what arrives
+        // later in another chat changes the list and the row marks only.
+        .onChange(of: with.map(\.id), initial: true) {
+            if bound == nil { bound = initial ?? chats.chat(forPane: pane, waiting: waiting) }
+        }
+    }
+
+    /// The first words to an agent in no chat: its host puts them in a chat
+    /// of the two, and the column stays on that one.
+    private func start(_ words: String) {
+        if let why = Messages.Post.problem(words) {
+            failure = why
+            return
+        }
+        let post = chats.host.post, pane = pane
+        draft = ""
+        failure = nil
+        Task {
+            do { bound = try await post(Messages.Say(to: [pane], words: words)).post.chat } catch {
+                draft = words
+                failure = "Not sent: \(error)"
+            }
+        }
+    }
+}
+
+/// One chat: a page of its posts and the composer under them. The composer
+/// writes in this chat and no other (`chat`, fixed for the view's life), so
+/// what is being written is never sent somewhere else because another chat
+/// became the newest. Each post wears how it stands on its way to each
+/// agent, and a delivery waiting for the person's yes is answered on its
+/// post.
+struct VigilChatView: View {
+    let chat: ChatID
+    @ObservedObject var chats: VigilChats
+    /// The pane it stands beside, when it does: where a file it names opens.
+    var pane: String? = nil
+    /// Opened from what waits: it opens on the first post that does.
+    var onWaiting = false
+
     @State private var draft = ""
     @State private var replying: String?
     @State private var editing: String?
     @State private var failure: String?
-    /// The ids a read is on its way for: asked once.
-    @State private var marking: Set<String> = []
-    /// A file a message names, pushed as its page where the host has no
-    /// place of its own for files.
+    /// What each answer given here came to, in the host's words, by what
+    /// was answered (a delivery, the chat, a pane's question).
+    @State private var answered: [String: String] = [:]
+    /// The position a read is on its way for: asked once.
+    @State private var marking = 0
     @State private var opened: VigilMentionedFile?
     #if os(macOS)
         @Environment(\.controlActiveState) private var active
-        /// In front: its window is the key one.
         private var front: Bool { active == .key }
     #else
         @Environment(\.scenePhase) private var phase
         private var front: Bool { phase == .active }
     #endif
 
-    private var items: [MessageThread.Item] { thread?.items ?? [] }
-    /// The newest message a standing yes let through: where its revoke is.
-    private var newestByStandingYes: String? { items.last { $0.record.byStandingYes }?.id }
+    private var host: VigilChatHost { chats.host }
+    private var page: Messages.Page? { chats.pages[chat] }
 
     var body: some View {
-        let messages = projection.messages(thread, people: people)
-        // Each row finds its record by id once, never by a walk of the thread.
-        let byID = Dictionary(items.map { ($0.id, $0) }) { first, _ in first }
-        let revokable = newestByStandingYes
-        InkConversation(
-            messages, people: people.all, me: Message.you, unread: thread?.firstUnread, focus: focus, acts: acts(messages)
-        ) { message in
-            let item = byID[message.id]
-            // A request sits on the message it is about (CHATS.md, decided
-            // 2026-11-19), with what came of an answer given here.
-            let asks = item.map { $0.record.awaitsYou || answered[$0.id] != nil } ?? false
-            let revokes = !asks && item?.id == revokable
+        let page = page
+        let posts = page?.posts ?? []
+        let people = page.map(VigilChatPeople.init(page:)) ?? VigilChatPeople([])
+        let messages = posts.map { Self.message($0, people: people) }
+        let byID = Dictionary(posts.map { ($0.post.id.raw, $0) }) { first, _ in first }
+        // Its revoke stands under the newest post a standing yes let through.
+        let revocable = posts.last { $0.standing != nil }?.post.id
+        let read = page?.read ?? 0
+        let unread = posts.first { ($0.post.position ?? 0) > read && $0.post.by != .you }?.post.id.raw
+        let focus = onWaiting ? posts.first { $0.requests != nil }?.post.id.raw : nil
+        if page?.before != nil {
+            Button("Earlier posts") { chats.earlier(chat) }.buttonStyle(.ink).padding(.vertical, 4)
+        }
+        InkConversation(messages, people: people.all, me: VigilChatPeople.you, unread: unread, focus: focus, acts: acts(byID, people)) { message in
+            let standing = byID[message.id]
+            let notes = standing.map { Self.notes($0, people: people) } ?? []
+            let requests = (standing?.requests ?? [:]).sorted { $0.key.raw < $1.key.raw }
+            let said = standing.map { one in one.deliveries.compactMap { answered[Self.key(one.post.id, $0.to)] } } ?? []
+            let revokes = standing?.post.id == revocable
+            let under = !notes.isEmpty || !requests.isEmpty || !said.isEmpty || revokes
             VStack(alignment: .leading, spacing: 6) {
-                VigilMessageWords(id: message.id, words: message.words, place: item?.mentionPlace, host: host, open: open)
-                    // Something stands under the words: the foot (its time) takes
-                    // a row of its own under it, never over its buttons.
-                    .transformEnvironment(\.inkTailRoom) { if asks || revokes { $0 = nil } }
-                if let item, asks {
-                    VigilMessageRequest(item: item, answered: answered[item.id]) { answer($0, on: item.id) }
-                } else if let item, revokes {
-                    VigilStandingYes(item: item) { answer($0, on: item.id) }
+                VigilMessageWords(
+                    id: message.id, words: message.words,
+                    place: standing.flatMap { $0.post.mentionPlace(pane: people.pane($0.post.by)) }, host: host, open: open)
+                    // Something stands under the words: the foot (its time)
+                    // takes a row of its own under it, never over its buttons.
+                    .transformEnvironment(\.inkTailRoom) { if under { $0 = nil } }
+                if let standing {
+                    ForEach(requests, id: \.key) { entry in
+                        let member = entry.key
+                        VigilDeliveryRequest(
+                            to: people.name(member), request: entry.value,
+                            since: standing.deliveries.first { $0.to == member }?.since,
+                            answered: answered[Self.key(standing.post.id, member)]
+                        ) { decision, authenticated in
+                            answer(.answer(post: standing.post.id, to: member, decision, authenticated: authenticated), on: Self.key(standing.post.id, member),
+                                   authenticate: authenticated)
+                        }
+                    }
+                    if requests.isEmpty {
+                        ForEach(said, id: \.self) { Text($0).inkText(.detail) }
+                    }
+                    ForEach(notes, id: \.self) { Text($0).inkText(.detail) }
+                    if revokes, let yes = standing.standing?.min(by: { $0.key.raw < $1.key.raw }) {
+                        VigilStandingYes(until: yes.value) {
+                            answer(.revoke(post: standing.post.id, to: yes.key), on: Self.key(standing.post.id, yes.key), authenticate: false)
+                        }
+                    }
                 }
             }
         } picture: {
@@ -964,34 +663,36 @@ struct VigilThreadConversation: View {
         } change: { before, after in
             DiffView(old: before, new: after).diffLineNumbers(.hidden)
         } empty: {
-            Text("Nothing said here yet. What you write goes to this pane's agent as yours.").inkText(.detail)
+            if let why = chats.failures[chat] {
+                Text("This chat could not be read: \(why)").inkText(.detail)
+            } else if page == nil {
+                Text("Reading this chat…").inkText(.detail)
+            } else {
+                Text("Nothing said here yet.").inkText(.detail)
+            }
         }
-        // Read is asked when what is unread changes, when the window comes to
-        // the front, and when a hand moves over the thread: each an event,
-        // and the hand itself is the host's seen rule.
-        .onChange(of: thread?.unreadIDs, initial: true) { markRead() }
-        .onChange(of: thread?.items.last?.id, initial: true) {
-            if front, let thread { VigilActivityWatches.shared.seen(thread) }
-        }
-        .onChange(of: front) {
-            if front, let thread { VigilActivityWatches.shared.seen(thread) }
-            markRead()
-        }
+        .onAppear { chats.show(chat) }
+        .onDisappear { chats.hide(chat) }
+        // Read is asked when a post arrives, when the window comes to the
+        // front, and when a hand moves over the chat: each an event, and
+        // the hand itself is the host's seen rule.
+        .onChange(of: posts.last?.post.id, initial: true) { markRead() }
+        .onChange(of: front) { markRead() }
         #if os(macOS)
         .onHover { if $0 { markRead() } }
         #endif
-        // What a group asks the person, answered here: an agent's group
-        // waiting for its one yes, or its agents waiting to go on after the
-        // loop guard stopped them.
-        if let id = MessageThread(key: key, items: []).chat, let chat = host.chat(key.root, id), chat.request != nil {
-            VigilChatRequest(chat: chat, answered: answered[chat.id]) { answer($0, on: chat.id) }
+        // A chat an agent proposed, waiting for the person's one yes.
+        if let page, let request = page.request {
+            VigilChatRequest(request: request, answered: answered[chat.raw]) { decision, authenticated in
+                answer(.answerChat(chat, decision, authenticated: authenticated), on: chat.raw, authenticate: authenticated)
+            }
         }
-        // What vigil asks about this pane, answered here on its card.
-        ForEach(host.asks(key)) { ask in
-            VigilPaneAskRequest(ask: ask, answered: answered[ask.id]) { answer($0, on: ask.id) }
+        // What the host asks about the pane of the one agent this chat is with.
+        ForEach(asks(page, people)) { ask in
+            VigilPaneAskRequest(ask: ask, answered: answered[ask.id]) { open in press(ask.id, open: open) }
         }
         InkComposer(
-            text: $draft, prompt: "Message \(thread.map { people.title(of: $0) } ?? people.title(of: key))",
+            text: $draft, prompt: "Message \(page.map { people.title($0.chat) } ?? "this chat")",
             replying: replying.flatMap { id in messages.first { $0.id == id } }.map { InkChat.Answered($0, people: people.all) },
             editing: editing != nil, blocked: failure, cancel: { cancel() }
         ) { words in
@@ -1006,8 +707,72 @@ struct VigilThreadConversation: View {
         #endif
     }
 
-    /// A file a message names, pressed: the host's place for files, else a
-    /// page pushed here. A folder is revealed in Finder (only this Mac's are links).
+    private static func key(_ post: PostID, _ member: MemberID) -> String { "\(post.raw)/\(member.raw)" }
+
+    // MARK: A post as Ink draws it
+
+    private static func message(_ standing: Messages.Standing, people: VigilChatPeople) -> InkChat.Message {
+        let post = standing.post
+        let removed = post.removed != nil
+        return InkChat.Message(
+            post.id.raw, from: post.by.raw, at: Date(timeIntervalSince1970: post.at), words(standing),
+            answers: post.replyTo?.raw,
+            reactions: InkChat.Reaction.counted(
+                (standing.reactions ?? []).map { .init($0.emoji, by: $0.by.raw) }, me: VigilChatPeople.you, name: people.name),
+            delivery: removed ? nil : delivery(standing.deliveries), edited: !removed && !post.edits.isEmpty,
+            earlier: removed ? [] : post.edits.map { $0.content.map(\.words).joined(separator: "\n\n") })
+    }
+
+    /// Its words now, or what became of them once it was removed.
+    private static func words(_ standing: Messages.Standing) -> String {
+        guard standing.post.removed != nil else { return standing.post.words }
+        let reached = standing.deliveries.contains { $0.stage.mayHaveReachedAgent && $0.ending?.outcome != .withdrawn }
+        return reached ? "*Removed here. An agent already has it.*" : "*Removed.*"
+    }
+
+    /// How a post stands on its way, as one mark: the least far of its
+    /// deliveries, so a post waiting anywhere says it waits.
+    private static func delivery(_ deliveries: [Messages.Delivery]) -> InkChat.Delivery? {
+        let marks: [InkChat.Delivery] = deliveries.compactMap { delivery in
+            if let ending = delivery.ending {
+                switch ending.outcome {
+                case .entered: return .recorded
+                case .refused: return .refused
+                case .expired: return .expired
+                case .unknown: return .unknown
+                case .withdrawn: return nil
+                }
+            }
+            switch delivery.stage {
+            case .waitingForPerson: return .awaitsApproval
+            case .waitingForAgent: return .awaitsAgent
+            case .handed: return .handed
+            }
+        }
+        let order: [InkChat.Delivery] = [.awaitsApproval, .awaitsAgent, .refused, .expired, .unknown, .handed, .recorded]
+        return order.first(where: marks.contains)
+    }
+
+    /// Why each delivery stands where it does, when its host said: to whom,
+    /// then the host's words.
+    private static func notes(_ standing: Messages.Standing, people: VigilChatPeople) -> [String] {
+        standing.deliveries.flatMap { delivery -> [String] in
+            let said = [delivery.ending?.said ?? delivery.said].compactMap { $0 } + (standing.consider?[delivery.to] ?? [])
+            return said.map { "\(people.name(delivery.to)): \($0)" }
+        }
+    }
+
+    private func asks(_ page: Messages.Page?, _ people: VigilChatPeople) -> [PaneAsk] {
+        guard let page else { return [] }
+        let others = page.chat.present.filter { $0 != .you }
+        guard others.count == 1, let pane = people.pane(others[0]) else { return [] }
+        return chats.asks.filter { $0.panes.contains(pane) }
+    }
+
+    // MARK: Acts
+
+    /// A file a post names, pressed: the app's place for files, else a page
+    /// pushed here. A folder is revealed in Finder (only this Mac's are links).
     private func open(_ file: VigilMentionedFile) {
         #if os(macOS)
             if file.folder {
@@ -1016,13 +781,13 @@ struct VigilThreadConversation: View {
             }
         #endif
         if let openFile = host.openFile {
-            openFile(file, key)
+            openFile(file, pane)
         } else {
             opened = file
         }
     }
 
-    private func acts(_ messages: [InkChat.Message]) -> InkChat.Acts {
+    private func acts(_ byID: [String: Messages.Standing], _ people: VigilChatPeople) -> InkChat.Acts {
         InkChat.Acts(
             reply: { message in
                 editing = nil
@@ -1030,38 +795,21 @@ struct VigilThreadConversation: View {
             },
             react: { message, emoji in
                 let given = message.reactions.contains { $0.emoji == emoji && $0.mine }
-                act(.react(message.id, emoji, on: !given), on: message.id)
+                act(.react(PostID(message.id), emoji: emoji, on: !given))
             },
             edit: { message in
-                // The mailbox's own rule: a recorded one is corrected. An edit
-                // is always of the message itself, whatever corrected it before.
-                guard let item = item(message.id), item.record.editable else { return }
+                // The person corrects their own, while it stands.
+                guard let post = byID[message.id]?.post, post.by == .you, post.removed == nil else { return }
                 replying = nil
                 editing = message.id
-                draft = item.words
+                draft = post.words
             },
-            // The message and every correction of it: none of its words stays
-            // on its way once the person removed it.
-            remove: { message in
-                for one in item(message.id)?.every ?? [] where one.record.removed == nil {
-                    act(.remove(one.id), on: one.id)
-                }
-            },
-            copy: { message in VigilPasteboard.copy(item(message.id)?.words ?? message.words) },
+            remove: { message in act(.remove(PostID(message.id))) },
+            copy: { message in VigilPasteboard.copy(byID[message.id]?.post.words ?? message.words) },
             open: { message in
-                guard let item = items.first(where: { $0.id == message.id }) else { return }
-                let message = item.record.message
-                if let pane = message.from.pane, (item.senderRoot, pane) != (key.root, key.pane) {
-                    host.open(item.senderRoot, pane)
-                } else {
-                    host.open(item.root, message.to.pane)
-                }
+                guard let pane = byID[message.id].flatMap({ people.pane($0.post.by) }) else { return }
+                host.open(pane)
             })
-    }
-
-    private func item(_ id: String) -> MessageThread.Item? { items.first { $0.id == id } }
-    private func root(of id: String) -> String {
-        items.flatMap(\.every).first { $0.id == id }?.root ?? key.root
     }
 
     private func cancel() {
@@ -1072,101 +820,97 @@ struct VigilThreadConversation: View {
     }
 
     private func send(_ words: String) {
-        if let editing {
-            act(.edit(editing, body: words), on: editing)
-            cancel()
-            return
-        }
-        // In a group: one post, which its Mac gives every agent in it.
-        if let chat = MessageThread(key: key, items: []).chat {
-            let postInChat = host.postInChat, root = key.root, replyTo = replying
-            cancel()
-            Task {
-                do { try await postInChat(chat, words, replyTo, root) } catch { failure = "Not sent: \(error)" }
-            }
-            return
-        }
-        let message = Message(
-            from: .init(kind: .person, mac: host.macName),
-            to: .init(pane: key.pane, conversation: key.conversation, root: key.root == host.here ? nil : key.root),
-            body: words, sent: Date().timeIntervalSince1970, replyTo: replying)
-        if let why = message.invalid() {
+        if let why = Messages.Post.problem(words) {
             failure = why
             return
         }
-        let post = host.post, root = key.root
+        if let editing {
+            cancel()
+            act(.edit(PostID(editing), words: words))
+            return
+        }
+        let say = Messages.Say(chat: chat, words: words, replyTo: replying.map(PostID.init))
+        let post = host.post
         cancel()
         Task {
-            do { try await post(message, root) } catch { failure = "Not sent: \(error)" }
+            do { _ = try await post(say) } catch {
+                // Never lost: what was not sent is back in the composer.
+                if draft.isEmpty { draft = words }
+                failure = "Not sent: \(error)"
+            }
         }
     }
 
-    private func act(_ act: Message.Act, on id: String) {
-        let run = host.act, root = root(of: id)
+    private func act(_ what: Messages.Act.What) {
+        let run = host.act
         Task {
-            do { _ = try await run(act, root) } catch { failure = "\(error)" }
+            do { _ = try await run(what) } catch { failure = "\(error)" }
         }
     }
 
-    /// What the answer given here on each message came to, in the Mac's own
-    /// words (`Message.Acted.said`): shown on the message, never discarded.
-    @State private var answered: [String: String] = [:]
-
-    /// The person's answer on a message waiting for their yes, or their
-    /// revoke of the standing yes that let one through.
-    private func answer(_ act: Message.Act, on id: String) {
+    /// The person's answer on what waits for them here, or their revoke of
+    /// a standing yes: what came of it is said where it was pressed.
+    private func answer(_ what: Messages.Act.What, on key: String, authenticate: Bool) {
         // Checked in the press's own turn, where its event is the one being
         // handled: a program driving the app answers nothing.
         guard host.pressedByPerson() else {
-            answered[id] = "Not answered: only a click of yours answers it here."
+            answered[key] = "Not answered: only a click of yours answers it here."
             return
         }
-        let run = host.act, root = root(of: id)
+        let run = host.act
         Task {
             do {
                 // A yes that needs the owner: owner authentication on this
                 // device, before it is sent.
-                if act.authenticated == true {
-                    let context = LAContext()
-                    _ = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "allow a stop")
+                if authenticate {
+                    _ = try await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "allow a stop")
                 }
-                let acted = try await run(act, root)
-                answered[id] = acted.said
+                answered[key] = try await run(what).said
             } catch {
-                answered[id] = "Not answered: " + ((error as? LAError)?.localizedDescription ?? "\(error)")
+                answered[key] = "Not answered: " + ((error as? LAError)?.localizedDescription ?? "\(error)")
             }
         }
     }
 
-    /// What a person had in front of them is read: while the thread is in
-    /// front, its pane's unread messages that a hand on this device followed
-    /// (`toMarkRead`, the host's seen rule), marked on the Mac that holds
-    /// each. The view merely existing reads nothing.
+    private func press(_ ask: String, open: Bool) {
+        guard host.pressedByPerson() else {
+            answered[ask] = "Not answered: only a click of yours answers it here."
+            return
+        }
+        let run = host.press
+        Task {
+            do { answered[ask] = try await run(ask, open).said } catch { answered[ask] = "Not answered: \(error)" }
+        }
+    }
+
+    /// What a person had in front of them is read: while the chat is in
+    /// front and a hand on this device followed its first unread post (the
+    /// app's seen rule), the person's read mark moves to the newest post
+    /// shown. The view merely existing reads nothing.
     private func markRead() {
-        guard front, let thread else { return }
-        let due = thread.toMarkRead(handAfter: host.handAfter).filter { !marking.contains($0.id) }
-        guard !due.isEmpty else { return }
-        marking.formUnion(due.map(\.id))
-        let run = host.act
-        for (root, items) in Dictionary(grouping: due, by: \.root) {
-            let ids = items.map(\.id)
-            Task {
-                do { _ = try await run(.read(ids), root) } catch { marking.subtract(ids) }
-            }
+        guard front, let page, let newest = page.posts.last?.post.position, newest > page.read, newest > marking,
+              let first = page.posts.first(where: { ($0.post.position ?? 0) > page.read && $0.post.by != .you }),
+              host.handAfter(first.post.at)
+        else { return }
+        marking = newest
+        let run = host.act, chat = chat
+        Task {
+            do { _ = try await run(.read(chat, through: newest)) } catch { marking = 0 }
         }
     }
 }
 
-/// A question vigil asks about the thread's pane (`PaneAsk`: a close, a line
-/// typed or a key pressed into it from elsewhere), drawn where the person
-/// is: what it would do, the exact line when there is one, how long it
-/// waits, then its answers on its card. Refuse answers it through Authz;
+/// A question the host asks about a pane (`PaneAsk`: a close, a line typed
+/// or a key pressed into it from elsewhere), drawn in the chat with that
+/// pane's agent: what it would do, the exact line when there is one, how
+/// long it has waited, then its answers. Refuse answers it through Authz;
 /// its yes needs the owner, so Allow in Authz… opens its card in Authz on
 /// this Mac (on the phone, it is allowed on its card in Authz).
 struct VigilPaneAskRequest: View {
     let ask: PaneAsk
     let answered: String?
-    let act: (Message.Act) -> Void
+    /// Refuse (false), or open its card in Authz (true).
+    let press: (_ open: Bool) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1181,14 +925,14 @@ struct VigilPaneAskRequest: View {
                 Text(shell).font(.system(.body, design: .monospaced)).textSelection(.enabled)
             }
             if ask.authzOnly == true {
-                // Asked by another app than vigil's broker (`vigil drive`):
-                // its card in Authz is where it is answered.
+                // Asked by another app than the host's broker: its card in
+                // Authz is where it is answered.
                 Text("Answer it on its card in Authz.").inkText(.detail)
             } else {
                 HStack(spacing: 8) {
-                    Button("Refuse") { act(.askRefuse(ask.id)) }.buttonStyle(.ink)
+                    Button("Refuse") { press(false) }.buttonStyle(.ink)
                     #if os(macOS)
-                        Button("Allow in Authz…") { act(.askOpen(ask.id)) }.buttonStyle(.ink)
+                        Button("Allow in Authz…") { press(true) }.buttonStyle(.ink)
                     #else
                         Text("It is allowed on its card in Authz, once this device is unlocked.").inkText(.detail)
                     #endif

@@ -7,289 +7,161 @@ import UserNotifications
 import VigilHarness
 import VigilWire
 
-/// Every Mac's mailbox as the person's view reads it (harness/README.md
-/// "Messages"): this Mac's and each paired Mac's, each followed through
-/// this Mac's hub (`Local.messages`: whole at every opening, then each
-/// change, never polled). The threads, each pane's pending count and the
-/// names a thread is drawn with are worked out from it here, once, for the
-/// window, the asides and the sidebar's row marks.
+/// This Mac's chats as the person's views read them: followed through this
+/// Mac's hub (`Local.messages`: the list whole at every opening, then each
+/// event with the rows it changed, never polled) into the store every view
+/// draws from (`VigilChats`). Nothing is worked out here: the list, the
+/// counts and every member's name are the host's.
+///
+/// Another Mac's chats are not followed: nothing carries them between hosts
+/// yet, and its hub says so.
 @MainActor
 final class VigilMessageStore: ObservableObject {
     static let shared = VigilMessageStore()
 
-    /// Each Mac's records by its tether root, as followed: never drawn from
-    /// directly. What the views draw is `index`, built from it once per
-    /// change (however many records a change carries) and off the main thread.
-    private var mailboxes: [String: [String: Message.Record]] = [:]
-
-    typealias Index = VigilMessageIndex
-    @Published private(set) var index = Index()
-    /// This Mac's tether root, said by the hub when this Mac's mailbox opens.
-    @Published private(set) var here: String? {
-        didSet { if marks.here != here { marks.here = here } }
-    }
-    /// What the sidebar's rows draw of the mailboxes, apart from them: a
-    /// history note, a receipt or a read moves `mailboxes` and repaints the
-    /// window, never the sidebar; only a changed count does (the sidebar's
-    /// revision rule, CLAUDE.md "Descriptor lifetime and file observations").
-    let marks = Marks()
-
-    @MainActor
-    final class Marks: ObservableObject {
-        /// Every pane's count (`MessageThreads.pending`), replaced only when it differs.
-        @Published fileprivate(set) var pending: [String: [String: MessageThreads.Pending]] = [:]
-        /// The messages waiting on the person's yes, by Mac and pane, on both
-        /// their panes (`MessageThreads.awaitingYou`), replaced only when it differs.
-        @Published fileprivate(set) var awaiting: [String: [String: Set<String>]] = [:]
-        @Published fileprivate(set) var here: String?
-
-        /// The count a pane row wears: `paneId` for this Mac's, the composite
-        /// row id (`device/pane`) for another's.
-        func activityKey(paneId: String?, id: String) -> String? {
-            if let paneId { return here.map { $0 + "/" + paneId } }
-            return VigilRemote.split(id).map { $0.0 + "/" + $0.1 }
-        }
-
-        func pending(paneId: String?, id: String) -> MessageThreads.Pending? {
-            if let paneId { return here.flatMap { pending[$0]?[paneId] } }
-            guard let (device, pane) = VigilRemote.split(id) else { return nil }
-            return pending[device]?[pane]
-        }
-
-        /// The messages waiting on the person a pane row's mark counts, by id:
-        /// a fold of rows is the union of theirs.
-        func awaiting(paneId: String?, id: String) -> Set<String> {
-            if let paneId { return here.flatMap { awaiting[$0]?[paneId] } ?? [] }
-            guard let (device, pane) = VigilRemote.split(id) else { return [] }
-            return awaiting[device]?[pane] ?? []
-        }
-
-        /// Every message waiting on the person on one Mac: its header's mark.
-        func awaiting(root: String) -> Set<String> {
-            (awaiting[root] ?? [:]).values.reduce(into: Set<String>()) { $0.formUnion($1) }
-        }
-    }
-    /// What each pane is called, by `root/pane` (`VigilChatPane`), and where
-    /// its row is (the workspace row and the pane id a sidebar click takes).
+    let chats: VigilChats
+    /// What the sidebar's rows draw of the chats, apart from them.
+    var marks: VigilChats.Marks { chats.marks }
+    /// This Mac's tether root, said by the hub when the follow opens.
+    @Published private(set) var here: String?
+    /// What each pane is called, by `root/pane`, and where its row is (the
+    /// workspace row and the pane id a sidebar click takes): the sidebar's
+    /// own names, for what is not a chat (a watch's pane, "go to").
     @Published private(set) var panes: [String: Named] = [:]
 
     struct Named: Equatable {
-        var pane: VigilChatPane
+        var title: String
+        /// Its Mac's name, when it is not this one.
+        var mac: String?
         var workspace: String
         var navigation: String
+
+        var said: String { mac.map { "\(title) on \($0)" } ?? title }
     }
 
     private nonisolated static let hub = Local.Client(socket: VigilPaths.hub)
-    /// The mailboxes followed, by device (nil key: this Mac's, as "").
-    private var following: [String: Task<Void, Never>] = [:]
+    private var following: Task<Void, Never>?
     /// The sidebar's rows as its model last built them (`rows(_:)`).
     private var lastRows: [VigilWorkspaces.SidebarWorkspaceRow] = []
 
-    private init() {}
-
-    var threads: [MessageThread] { index.threads }
-    /// Every conversation listed once (`MessageThreads.conversations`): what
-    /// the Messages list draws.
-    var conversations: [MessageThread] { index.conversations }
-    var pendingTotal: Int { marks.pending.values.flatMap(\.values).reduce(0) { $0 + $1.unread } }
-
-    /// A pane's every thread as one: what its aside shows, holding exactly
-    /// what its row mark counts.
-    func paneThread(_ key: MessageThread.Key) -> MessageThread? { index.pane(key) }
-
-    /// The message a press on a pane's waiting hand asked to be shown, by
-    /// Mac and pane (`MessageThread.firstAwaitingYou`).
-    @Published private(set) var asked: [String: String] = [:]
-
-    func show(_ message: String?, on key: MessageThread.Key) { asked["\(key.root)/\(key.pane)"] = message }
-
-    /// What a pane's thread opens on: the message asked for, while it still
-    /// waits on the person; answered, nothing is marked.
-    func focus(_ key: MessageThread.Key) -> String? {
-        guard let id = asked["\(key.root)/\(key.pane)"] else { return nil }
-        return paneThread(key)?.items.first { $0.id == id && $0.record.awaitsYou }?.id
-    }
-
-    /// A thread's key for a pane row: its Mac, the pane, the conversation it holds.
-    func key(paneId: String?, id: String, conversation: String?) -> MessageThread.Key? {
-        if let paneId { return here.map { MessageThread.Key(root: $0, pane: paneId, conversation: conversation) } }
-        guard let (device, pane) = VigilRemote.split(id) else { return nil }
-        return MessageThread.Key(root: device, pane: pane, conversation: conversation)
-    }
-
-    // MARK: Following (VigilRemote says when the hub answers and which Macs there are)
-
-    /// The hub answers: this Mac's mailbox is followed (again, after a hub
-    /// that went away).
-    func hubAnswers() { follow(device: nil) }
-
-    /// The paired Macs now: each one's mailbox followed, a Mac gone taken out.
-    func macs(_ devices: Set<String>) {
-        for (key, task) in following where !key.isEmpty && !devices.contains(key) {
-            task.cancel()
-            following[key] = nil
+    private init() {
+        chats = VigilChats(host: VigilChatHost(
+            page: { chat, before, limit in try await Self.page(chat, before: before, limit: limit) },
+            post: { say in try await Self.post(say) },
+            act: { what in try await Self.act(what) },
+            press: { ask, open in try await Self.press(ask, open: open) },
+            open: { pane in VigilMessageStore.shared.open(pane: pane, in: VigilMessageStore.viewport) },
+            // The app's own seen rule: a hand on this Mac after it arrived.
+            handAfter: { VigilWorkspaces.personActed(after: Date(timeIntervalSince1970: $0)) },
+            mention: { call, root in try await Self.mention(call, root: root) },
+            openFile: { file, pane in
+                if let pane { VigilFilePanel.show(file, beside: pane) } else { VigilFilePanel.window(file) }
+            },
+            pressedByPerson: { Self.pressedByPerson() }))
+        chats.changed = { [weak self] in self?.recount() }
+        chats.heard = { [weak self] events in
+            guard let self else { return }
+            VigilMessageAlerts.shared.heard(events, rows: self.chats.rows)
         }
-        mailboxes = mailboxes.filter { $0.key == here || devices.contains($0.key) }
-        for device in devices { follow(device: device) }
-        recount()
     }
 
-    /// Every follow ended with the hub (VigilRemote's stream ended): each is
-    /// followed again when the hub answers.
+    // MARK: Following (VigilRemote says when the hub answers)
+
+    /// The hub answers: this Mac's chats are followed (again, after a hub
+    /// that went away).
+    func hubAnswers() { follow() }
+
+    /// The follow ended with the hub (VigilRemote's stream ended): it is
+    /// followed again when the hub answers. What was held stays drawn.
     func hubGone() {
-        for task in following.values { task.cancel() }
-        following.removeAll()
-        mailboxWatch?.cancel()
-        mailboxWatch = nil
+        following?.cancel()
+        following = nil
+        brokerWatch?.cancel()
+        brokerWatch = nil
+        chats.unreachable("This Mac's vigil-agent is not answering.")
     }
 
     /// A follow that ends while the hub stands is followed again by itself,
     /// on an event and never on a clock: at once when it had delivered (it
-    /// fell behind its backlog, or a path dropped), else at the next change
-    /// of this Mac's mailbox folder (the broker writes every message there)
-    /// for this Mac's, and at the next word of the paired Macs for
-    /// another's (whose follow tether itself keeps open). One that never
+    /// fell behind its backlog, or the broker restarted), else at the next
+    /// change of the folder the broker's socket is in. One that never
     /// delivers is never dialed in a loop.
-    private func follow(device: String?) {
-        let key = device ?? ""
-        guard following[key] == nil else { return }
-        let steps = Self.hub.messageSteps(device: device)
-        following[key] = Task { [weak self] in
-            var root = device
+    private func follow() {
+        guard following == nil else { return }
+        let steps = Self.hub.messageSteps(device: nil)
+        following = Task { [weak self] in
             var delivered = false
             for await step in steps {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, let self else { return }
                 switch step.step {
                 case .open:
-                    root = step.root
-                    if device == nil {
-                        self?.here = step.root
-                        self?.rename()
-                    }
-                    messagesLog.info("mailbox followed", ["device": String((step.root ?? "?").prefix(10)), "here": device == nil])
-                case .changes:
-                    guard let root, let changes = step.changes else { continue }
+                    self.here = step.root
+                    self.rename()
+                    messagesLog.info("chats followed", ["host": String((step.root ?? "?").prefix(10))])
+                case .said:
+                    guard let said = step.said else { continue }
                     delivered = true
-                    self?.apply(root, changes)
-                // Out of reach: what it held is shown as it was.
-                case .waiting: messagesLog.info("mailbox out of reach", ["device": String(key.prefix(10)), "why": step.reason ?? ""])
+                    self.chats.take(said)
+                case .asks:
+                    self.chats.asked(step.asks ?? [])
+                case .waiting:
+                    self.chats.unreachable(step.reason ?? "its hub gave no reason")
+                    messagesLog.info("chats out of reach", ["why": step.reason ?? ""])
                 }
             }
             guard let self, !Task.isCancelled else { return }
-            self.following[key] = nil
-            messagesLog.warn("mailbox follow ended", ["device": String(key.prefix(10)), "next": delivered ? "followed again" : "waits for a change"])
-            if delivered {
-                self.follow(device: device)
-            } else if device == nil {
-                self.awaitMailbox()
-            }
+            self.following = nil
+            messagesLog.warn("chats follow ended", ["next": delivered ? "followed again" : "waits for the broker"])
+            if delivered { self.follow() } else { self.awaitBroker() }
         }
     }
 
-    /// This Mac's mailbox folder, watched while its follow waits.
-    private var mailboxWatch: DispatchSourceFileSystemObject?
-    private func awaitMailbox() {
-        guard mailboxWatch == nil else { return }
-        let folder = VigilPaths.agent.appendingPathComponent("mailbox").path
-        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    /// The broker's folder, watched while the follow waits for a broker.
+    private var brokerWatch: DispatchSourceFileSystemObject?
+    private func awaitBroker() {
+        guard brokerWatch == nil else { return }
+        let folder = VigilPaths.agent.path
         let fd = Darwin.open(folder, O_EVTONLY)
-        guard fd >= 0 else { return messagesLog.error("mailbox folder not watched; this Mac's messages follow again when the hub does", ["path": folder]) }
+        guard fd >= 0 else { return messagesLog.error("broker folder not watched; chats follow again when the hub does", ["path": folder]) }
         let watch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
         watch.setEventHandler {
             MainActor.assumeIsolated {
                 let store = VigilMessageStore.shared
-                store.mailboxWatch?.cancel()
-                store.mailboxWatch = nil
-                store.follow(device: nil)
+                store.brokerWatch?.cancel()
+                store.brokerWatch = nil
+                store.follow()
             }
         }
         watch.setCancelHandler { close(fd) }
-        mailboxWatch = watch
+        brokerWatch = watch
         watch.resume()
     }
 
-    private func apply(_ root: String, _ changes: Message.Changes) {
-        mailboxes[root] = changes.applied(to: mailboxes[root] ?? [:])
-        // Absent means unchanged: a change tells its asks or its chats whole,
-        // or neither.
-        if let told = changes.asks { asks[root] = told }
-        if let told = changes.chats { chats[root] = told }
-        recount()
-    }
+    // MARK: Counts (the menu bar and the Dock)
 
-    /// The questions each Mac asks about its panes now (`PaneAsk`), by root.
-    @Published private(set) var asks: [String: [PaneAsk]] = [:]
-    /// The group chats each Mac keeps (`Chat`), by root.
-    @Published private(set) var chats: [String: [Chat]] = [:]
-
-    /// One build of the index at a time, off the main thread; changes that
-    /// arrive meanwhile are folded into the next one, so a burst of them is
-    /// one or two builds, never one per record.
-    private var building = false
-    private var stale = false
-
-    private func recount() {
-        stale = true
-        guard !building else { return }
-        building = true
-        stale = false
-        let mailboxes = mailboxes, asks = asks, chats = chats
-        let records = mailboxes.values.reduce(0) { $0 + $1.count }
-        Task.detached(priority: .userInitiated) {
-            let start = ContinuousClock.now
-            let next = Index(mailboxes, asks: asks, chats: chats)
-            let took = ContinuousClock.now - start
-            await MainActor.run { VigilMessageStore.shared.publish(next, took: took, records: records) }
-        }
-    }
-
-    private func publish(_ next: Index, took: Duration, records: Int) {
-        building = false
-        // Every build said, with what it cost: the receipt that a change is
-        // one build (`mise run log 'index built'`).
-        messagesLog.info("index built", ["records": records, "ms": (took / .milliseconds(1)).rounded()])
-        if next != index {
-            // Drawn in one step, never animated row by row.
-            var quiet = Transaction()
-            quiet.disablesAnimations = true
-            withTransaction(quiet) {
-                VigilActivityWatches.shared.update(next.traffic)
-                index = next
-                if next.pending != marks.pending { marks.pending = next.pending }
-                if next.awaiting != marks.awaiting { marks.awaiting = next.awaiting }
-            }
-            VigilMessageAlerts.shared.due(next.forYou, names: host)
-            let waits = next.awaiting.values.flatMap(\.values).reduce(into: Set<String>()) { $0.formUnion($1) }
-            let unread = Set(next.forYou.map(\.item.id))
-            if unread.count != unreadCount || waits.count != waitingCount {
-                unreadCount = unread.count
-                waitingCount = waits.count
-                NotificationCenter.default.post(name: Self.forYouDidChange, object: nil)
-            }
-        }
-        if stale { recount() }
-    }
-
-    /// The messages agents addressed to the person that they have not read
-    /// (`MessageThreads.forYou`): the menu bar's ✉.
+    /// The posts the person has not read, in every chat: the menu bar's ✉.
     private(set) var unreadCount = 0
-    /// The messages waiting on the person's yes, each once
-    /// (`MessageThreads.awaitingYou`): the menu bar's hand, as every row's
-    /// `WaitingMark`.
+    /// What waits on the person's answer, each once: the menu bar's hand,
+    /// as every row's `WaitingMark`.
     private(set) var waitingCount = 0
-    /// What needs the person in Messages, each once: the two together, the
-    /// Dock's one number (an awaited message is never one addressed to them).
+    /// What needs the person in Messages: the Dock's one number.
     var forYouCount: Int { unreadCount + waitingCount }
     /// `unreadCount` or `waitingCount` changed.
     static let forYouDidChange = Notification.Name("vigilMessagesForYouDidChange")
 
-    // MARK: Names (from the sidebar's own rows: the one naming rule)
+    private func recount() {
+        let unread = chats.unread, waiting = chats.waiting.count
+        guard unread != unreadCount || waiting != waitingCount else { return }
+        unreadCount = unread
+        waitingCount = waiting
+        NotificationCenter.default.post(name: Self.forYouDidChange, object: nil)
+    }
+
+    // MARK: Names (from the sidebar's own rows)
 
     /// The sidebar's rows, each time its model built new ones
     /// (`VigilSidebarModel.refresh`): names come from them, never from a
-    /// snapshot of their own. Messages built one of its own at every change
-    /// of a pane's state, a fifth of the main thread's work measured on the
-    /// M4 (740 of 3,441 ms over 40 s).
+    /// snapshot of their own.
     func rows(_ rows: [VigilWorkspaces.SidebarWorkspaceRow]) {
         guard rows != lastRows else { return }
         lastRows = rows
@@ -311,58 +183,14 @@ final class VigilMessageStore: ObservableObject {
                     (key, navigation) = ("\(here)/\(paneId)", paneId)
                 }
                 next[key] = Named(
-                    pane: VigilChatPane.of(
-                        alias: pane.messageAlias ?? pane.member?.alias,
-                        member: Self.member(pane.member), conversation: pane.conversationName, title: pane.title,
-                        face: row.emoji, mac: remote == nil ? nil : row.host?.name, program: pane.conversationRef?.agent),
-                    workspace: row.id, navigation: navigation)
+                    title: pane.messageAlias ?? pane.member?.alias ?? pane.conversationName ?? pane.member?.name ?? pane.title,
+                    mac: remote == nil ? nil : row.host?.name, workspace: row.id, navigation: navigation)
             }
         }
         if next != panes { panes = next }
     }
 
-    /// The member a pane holds, as its glance carries it (`MemberGlance`:
-    /// its name and minted tint, the broker's one look of it).
-    private static func member(_ glance: MemberGlance?) -> (name: String?, face: String?, tint: String?)? {
-        glance.map { ($0.name, nil, $0.tint) }
-    }
-
-    // MARK: The host the views ask
-
-    var host: VigilChatHost {
-        let here = here, panes = panes
-        let local = here.map { root in panes.filter { $0.key.hasPrefix(root + "/") } } ?? [:]
-        return VigilChatHost(
-            here: here, macName: Host.current().localizedName ?? "this Mac",
-            name: { root, pane in
-                panes["\(root)/\(pane)"]?.pane
-                    ?? VigilChatPane.of(
-                        conversation: nil, title: pane, face: nil,
-                        mac: root == here ? nil : VigilRemote.shared.hosts.first { $0.device == root }?.name ?? "another Mac")
-            },
-            post: { message, root in try await Self.post(message, root: root, here: here) },
-            act: { act, root in try await Self.act(act, root: root, here: here) },
-            open: { root, pane in VigilMessageStore.shared.open(root: root, pane: pane, in: VigilMessageStore.viewport) },
-            // The app's own seen rule: a hand on this Mac after it arrived.
-            handAfter: { VigilWorkspaces.personActed(after: Date(timeIntervalSince1970: $0)) },
-            mention: { call, root in try await Self.mention(call, root: root, here: here) },
-            openFile: { file, key in
-                VigilFilePanel.show(file, beside: key.root == here ? key.pane : "\(key.root)/\(key.pane)")
-            },
-            pressedByPerson: { Self.pressedByPerson() },
-            asks: { key in VigilMessageStore.shared.asks[key.root]?.filter { $0.panes.contains(key.pane) } ?? [] },
-            chat: { root, id in VigilMessageStore.shared.chats[root]?.first { $0.id == id } },
-            postInChat: { chat, body, replyTo, root in try await Self.postInChat(chat, body: body, replyTo: replyTo, root: root, here: here) },
-            activity: index.traffic.rows, groupPanes: Dictionary(uniqueKeysWithValues: local.values.map { ($0.navigation, $0.pane.title) }),
-            createGroup: { name, panes in
-                try await Task.detached {
-                    let reply = try HarnessWire.call(RPCRequest("chat.new", .object([
-                        "name": .string(name), "panes": .array(panes.map(JSONValue.string))])))
-                    guard reply.ok else { throw Failed(description: reply.refusal) }
-                    return try reply.value.decode(Chat.self)
-                }.value
-            })
-    }
+    // MARK: What the views ask of this Mac
 
     /// Whether the event being handled is a person's click: a mouse button
     /// event no process posted (a hardware click carries poster 0, as Authz's
@@ -384,155 +212,154 @@ final class VigilMessageStore: ObservableObject {
         return true
     }
 
-    /// An ask about the files a message names, of the Mac they are on: this
-    /// Mac's hub for its own (`Local.here`), another Mac's through it.
-    nonisolated static func mention(_ call: MentionCall, root: String, here: String?) async throws -> Data {
+    private struct Failed: Error, CustomStringConvertible { let description: String }
+
+    /// One call to this Mac's broker, which takes the app as the person's
+    /// (its trusted peer, so nothing asks): what it answered, or what it
+    /// refused, said.
+    private nonisolated static func call<Answer: Decodable>(_ method: String, _ payload: JSONValue, as: Answer.Type) async throws -> Answer {
         try await Task.detached {
-            do {
-                return root == here ? try hub.here(.mention(call)) : try hub.call(device: root, .mention(call))
-            } catch {
-                messagesLog.warn("mention not answered", ["mac": String(root.prefix(10)), "ask": call.kind.rawValue, "err": "\(error)"])
+            let response = try HarnessWire.call(RPCRequest(method, payload))
+            guard response.ok else { throw Failed(description: response.refusal) }
+            return try response.value.decode(Answer.self)
+        }.value
+    }
+
+    private nonisolated static func page(_ chat: ChatID, before: Int?, limit: Int) async throws -> Messages.Page {
+        var payload: [String: JSONValue] = ["chat": .string(chat.raw), "limit": .number(Double(limit))]
+        if let before { payload["before"] = .number(Double(before)) }
+        return try await call("chat.read", .object(payload), as: Messages.Page.self)
+    }
+
+    private nonisolated static func post(_ say: Messages.Say) async throws -> Messages.Standing {
+        let standing = try await call("chat.post", try .from(say), as: Messages.Standing.self)
+        messagesLog.info("posted", ["post": String(standing.post.id.raw.prefix(8)), "chat": String(standing.post.chat.raw.prefix(8))])
+        return standing
+    }
+
+    private nonisolated static func act(_ what: Messages.Act.What) async throws -> Messages.Acted {
+        let acted = try await call("chat.act", try .from(Messages.Act(what)), as: Messages.Acted.self)
+        if case .read = what {} else { messagesLog.info("acted", ["said": acted.said]) }
+        return acted
+    }
+
+    private nonisolated static func press(_ ask: String, open: Bool) async throws -> Messages.Acted {
+        try await call("ask.press", .object(["id": .string(ask), "open": .bool(open)]), as: Messages.Acted.self)
+    }
+
+    /// An ask about the files a post names, of the host they are on: this
+    /// Mac's hub for its own. Another host's are not asked: its chats are
+    /// not here either.
+    nonisolated static func mention(_ call: MentionCall, root: String) async throws -> Data {
+        let own = await MainActor.run { shared.chats.hostID }
+        guard root == own else { throw Failed(description: "that file is on another host, which is not asked from here yet") }
+        return try await Task.detached {
+            do { return try hub.here(.mention(call)) } catch {
+                messagesLog.warn("mention not answered", ["ask": call.kind.rawValue, "err": "\(error)"])
                 throw Failed(description: "\(error)")
             }
         }.value
     }
 
-    private struct Failed: Error, CustomStringConvertible { let description: String }
-
-    /// The person's message, to the mailbox of the pane's Mac: this Mac's
-    /// broker (the app is its trusted peer, so nothing asks), another Mac's
-    /// through the hub. What that Mac refused is said.
-    private nonisolated static func post(_ message: Message, root: String, here: String?) async throws {
-        let standing: Message.Standing = try await Task.detached {
-            if root == here {
-                let response = try HarnessWire.call(RPCRequest("message.post", .from(message)))
-                guard let standing = try? response.value.decode(Message.Standing.self) else { throw Failed(description: response.refusal) }
-                return standing
-            }
-            return try JSONDecoder().decode(Message.Standing.self, from: hub.call(device: root, .message(message)))
-        }.value
-        messagesLog.info("posted", ["id": message.id, "pane": message.to.pane, "state": standing.state.kind.rawValue])
-        if case .refused(let why) = standing.state { throw Failed(description: "refused: \(why)") }
-    }
-
-    /// The person's post in a group this Mac keeps (`chat.post`, from the app
-    /// alone): its broker gives every agent in it a message.
-    private nonisolated static func postInChat(_ chat: String, body: String, replyTo: String?, root: String, here: String?) async throws {
-        guard root == here else { throw Failed(description: "a group on another Mac is written in from that Mac for now") }
-        try await Task.detached {
-            var payload: [String: JSONValue] = ["chat": .string(chat), "body": .string(body)]
-            if let replyTo { payload["replyTo"] = .string(replyTo) }
-            let response = try HarnessWire.call(RPCRequest("chat.post", .object(payload)))
-            guard response.ok else { throw Failed(description: response.refusal) }
-        }.value
-        messagesLog.info("posted in a group", ["chat": String(chat.prefix(8))])
-    }
-
-    private nonisolated static func act(_ act: Message.Act, root: String, here: String?) async throws -> Message.Acted {
-        let acted: Message.Acted = try await Task.detached {
-            if root == here {
-                let response = try HarnessWire.call(RPCRequest("message.act", .from(act)))
-                guard response.ok else { throw Failed(description: response.refusal) }
-                return try response.value.decode(Message.Acted.self)
-            }
-            return try hub.act(device: root, act)
-        }.value
-        if act.kind != .read { messagesLog.info("acted", ["act": act.kind.rawValue, "id": act.id ?? "", "said": acted.said]) }
-        return acted
-    }
-
-    /// The window a message's act lands in: the key one, else the last main
+    /// The window a chat's act lands in: the key one, else the last main
     /// one, else any shown.
     static var viewport: TerminalController? {
         (NSApp.keyWindow?.windowController as? TerminalController) ?? TerminalController.lastMain
             ?? TerminalController.all.first { $0.window?.isVisible == true }
     }
 
-    /// Go to a pane from a message: this Mac's by its workspace, another
+    /// Go to a pane of this Mac, by its workspace.
+    func open(pane: String, in controller: TerminalController?) {
+        guard let workspace = VigilWorkspaces.shared.owner(ofPane: pane) else {
+            return messagesLog.warn("go to: no workspace holds that pane now", ["pane": pane])
+        }
+        VigilWorkspaces.shared.activatePane(name: workspace, paneId: pane, in: controller)
+        controller?.window?.makeKeyAndOrderFront(nil)
+        messagesLog.info("went to a pane", ["pane": pane])
+    }
+
+    /// Go to a pane of the Mac `root`: this Mac's by its workspace, another
     /// Mac's as its sidebar row would (a mirror of its tab).
     func open(root: String, pane: String, in controller: TerminalController?) {
-        if root == here {
-            guard let workspace = VigilWorkspaces.shared.owner(ofPane: pane) else {
-                return messagesLog.warn("go to: no workspace holds that pane now", ["pane": pane])
-            }
-            VigilWorkspaces.shared.activatePane(name: workspace, paneId: pane, in: controller)
-        } else {
-            guard let named = panes["\(root)/\(pane)"] else {
-                return messagesLog.warn("go to: that Mac's directory lists no such pane", ["pane": pane])
-            }
-            VigilWorkspaces.shared.activatePane(name: named.workspace, paneId: named.navigation, in: controller)
+        if root == here { return open(pane: pane, in: controller) }
+        guard let named = panes["\(root)/\(pane)"] else {
+            return messagesLog.warn("go to: that Mac's directory lists no such pane", ["pane": pane])
         }
+        VigilWorkspaces.shared.activatePane(name: named.workspace, paneId: named.navigation, in: controller)
         controller?.window?.makeKeyAndOrderFront(nil)
-        messagesLog.info("went to a pane", ["pane": pane, "here": root == here])
+        messagesLog.info("went to a pane", ["pane": pane, "here": false])
     }
 }
 
 /// Messages is a section of the main window: the left bar's Messages lists
-/// every thread (`VigilSidebarThreads`), and a thread chosen there opens in
-/// the window's right bar beside its pane, which takes the viewport. The
-/// Messages window is a thread popped out of the right bar, nothing more.
+/// every chat (`VigilSidebarChats`). A chat with one agent opens in the
+/// window's right bar beside that agent's pane, which takes the viewport;
+/// any other chat opens in the Messages window, which is also a chat popped
+/// out of the right bar.
 @MainActor
 enum VigilMessagesPanel {
     private static var shown: NSWindow?
-    /// The thread the window shows, held for the window's life.
+    /// The chat the window shows, held for the window's life.
     private static let chosen = Chosen()
 
     final class Chosen: ObservableObject {
         @Published var id: String?
     }
 
-    /// Messages in the window in front, on `thread` when one is named: the
-    /// menu bar's Messages…, a message's notification. With no terminal
-    /// window to hold it, the thread pops out.
-    static func section(thread: String?) {
+    /// Messages in the window in front, on `chat` when one is named: the
+    /// menu bar's Messages…, a post's notification. With no terminal window
+    /// to hold it, the chat pops out.
+    static func section(chat: String?) {
         NSApp.activate()
         guard let controller = VigilMessageStore.viewport else {
-            messagesLog.info("messages: no terminal window; popped out", ["thread": thread ?? ""])
-            return window(thread: thread)
+            messagesLog.info("messages: no terminal window; popped out", ["chat": chat ?? ""])
+            return window(chat: chat)
         }
-        VigilBars.shared.showMessages(thread: thread, in: controller)
+        VigilBars.shared.showMessages(chat: chat, in: controller)
     }
 
-    /// A thread chosen in `controller`'s bar: its pane goes in the window
-    /// (as a press on its row does), its thread in the right bar beside it.
-    static func open(thread id: String, in controller: TerminalController) {
+    /// A chat chosen in `controller`'s bar. With one agent, whose pane is on
+    /// this Mac: the pane goes in the window (as a press on its row does)
+    /// and the chat in the right bar beside it. Any other: the Messages
+    /// window.
+    static func open(chat id: String, in controller: TerminalController) {
         let store = VigilMessageStore.shared
-        // The list is of conversations, each listed once: its first end's
-        // pane goes in the window.
-        guard let thread = store.conversations.first(where: { $0.id == id }) else {
-            return messagesLog.warn("messages: that thread is gone", ["thread": id])
+        guard let row = store.chats.rows.first(where: { $0.id.raw == id }) else {
+            return messagesLog.warn("messages: that chat is gone", ["chat": id])
         }
-        // A group is no pane's: it opens in the Messages window.
-        if thread.chat != nil { return window(thread: id) }
-        let key = thread.key
-        store.open(root: key.root, pane: key.pane, in: controller)
-        // A mount builds its tree in this turn; a mirror of another Mac's tab
-        // may take the next: the aside is asked once the pane is there.
-        DispatchQueue.main.async { aside(key: key, in: controller) }
+        let chat = row.summary.chat
+        let others = row.members.filter { chat.present.contains($0.member) }
+        guard others.count == 1, let pane = others[0].pane else { return window(chat: id) }
+        store.open(pane: pane, in: controller)
+        // A mount builds its tree in this turn: the aside is asked once the
+        // pane is there.
+        DispatchQueue.main.async {
+            if !aside(pane: pane, chat: row.id, in: controller) { window(chat: id) }
+        }
     }
 
-    /// The pane's thread in `controller`'s right bar, when the pane is on
-    /// screen there; nil when it is not.
+    /// The pane's chat in `controller`'s right bar, when the pane is on
+    /// screen there; false when it is not.
     @discardableResult
-    private static func aside(key: MessageThread.Key, in controller: TerminalController) -> Bool {
+    private static func aside(pane: String, chat: ChatID?, waiting: Set<String> = [], in controller: TerminalController) -> Bool {
         let store = VigilMessageStore.shared
-        let pane = key.root == store.here ? key.pane : VigilRemote.compositeId(key.root, key.pane)
         guard VigilBars.shared.panesOnScreen(in: controller).contains(pane) else {
-            messagesLog.warn("messages: its pane is not on screen here; the thread stays in the list", ["pane": pane])
+            messagesLog.warn("messages: its pane is not on screen here", ["pane": pane])
             return false
         }
         VigilBars.shared.showAside(
             VigilBars.Aside(
-                pane: pane, kind: .messages, title: store.host.name(key.root, key.pane).title,
-                view: AnyView(VigilMessagesAside(key: key, sidebar: VigilBars.shared.sidebarModel(of: controller))),
-                popOut: { window(thread: thread(of: key)?.id) }))
+                pane: pane, kind: .messages, title: store.chats.agent(inPane: pane)?.name ?? "Messages",
+                view: AnyView(VigilMessagesAside(
+                    pane: pane, chat: chat, waiting: waiting, sidebar: VigilBars.shared.sidebarModel(of: controller))),
+                popOut: { window(chat: (chat ?? store.chats.chat(forPane: pane))?.raw) }))
         messagesLog.info("messages opened", ["pane": pane, "where": "right bar"])
         return true
     }
 
-    /// The thread popped out into a window of its own, on `thread`.
-    static func window(thread: String?) {
-        if let thread { chosen.id = thread }
+    /// A chat popped out into a window of its own, on `chat`.
+    static func window(chat: String?) {
+        if let chat { chosen.id = chat }
         if let shown {
             shown.makeKeyAndOrderFront(nil)
             return
@@ -552,174 +379,134 @@ enum VigilMessagesPanel {
     }
 
     /// A pane row's waiting hand, its envelope or its menu's Messages: the
-    /// pane in the window and its thread beside it, the bar's Messages
-    /// filtered to that pane's agent (opened from somewhere specific, it
-    /// lands there), its conversation chosen in the list. `waiting`: the
-    /// messages a pressed hand counts; the thread opens on the first of them
-    /// that still waits on the person, scrolled to and marked, instead of at
-    /// its end. `id`: the row's pane id, a local daemon id or
-    /// `<tether root>/id` for another Mac's.
-    static func show(
-        paneId: String?, id: String, conversation: String?, waiting: Set<String> = [], unread: Bool = false, in controller: TerminalController?
-    ) {
-        let store = VigilMessageStore.shared
-        if let group = store.index.list.first(where: { $0.thread.chat.map(waiting.contains) == true }) {
-            return window(thread: group.thread.id)
+    /// pane in the window and its agent's chat beside it. `waiting`: what a
+    /// pressed hand counts; the column opens on the chat that waits, at the
+    /// first post that does. `paneId`: a pane of this Mac; another Mac's
+    /// pane has no chat here.
+    static func show(paneId: String?, id: String, waiting: Set<String> = [], in controller: TerminalController?) {
+        guard let paneId else {
+            return messagesLog.warn("messages: another Mac's chats are not reached from here yet", ["pane": id])
         }
-
-        guard let key = store.key(paneId: paneId, id: id, conversation: conversation) else {
-            return messagesLog.warn("messages: this Mac's mailbox has not answered yet", ["pane": id])
-        }
-        if unread, let first = store.index.forYou.first(where: { $0.item.root == key.root && $0.item.record.message.to.pane == key.pane }),
-           first.item.record.message.chat != nil { return window(thread: first.thread) }
         guard let controller else { return messagesLog.warn("messages: no window to show them in", ["pane": id]) }
-        let focus = store.paneThread(key)?.firstAwaitingYou(among: waiting)
-        store.show(focus, on: key)
-        // Typed in parts: as one expression it outlasts the type checker.
-        let end: String = VigilThreadList.end(key)
-        let listing: String? = Self.conversation(of: key)?.id
-        VigilBars.shared.showMessages(showing: end, listing: listing, in: controller)
-        store.open(root: key.root, pane: key.pane, in: controller)
-        DispatchQueue.main.async { aside(key: key, in: controller) }
-        messagesLog.info("messages opened from a pane", ["pane": id, "on": focus.map { String($0.prefix(8)) } ?? "its end"])
-    }
-
-    /// The conversation the list draws for a pane: one of its two ends, the
-    /// conversation it holds first.
-    static func conversation(of key: MessageThread.Key) -> MessageThread? {
-        let ends = VigilMessageStore.shared.conversations.filter { thread in
-            [thread.key, thread.with].compactMap { $0 }.contains { $0.root == key.root && $0.pane == key.pane }
-        }
-        return ends.first { [$0.key, $0.with].compactMap { $0 }.contains(key) } ?? ends.first
-    }
-
-    /// The pane's thread: the conversation it holds, else the pane's newest.
-    static func thread(of key: MessageThread.Key) -> MessageThread? {
-        let threads = VigilMessageStore.shared.threads
-        return threads.first { $0.key == key } ?? threads.first { $0.key.root == key.root && $0.key.pane == key.pane }
+        VigilMessageStore.shared.open(pane: paneId, in: controller)
+        DispatchQueue.main.async { aside(pane: paneId, chat: nil, waiting: waiting, in: controller) }
+        messagesLog.info("messages opened from a pane", ["pane": id, "waiting": waiting.count])
     }
 }
 
-/// A macOS notification for each message an agent addresses to the person
-/// while Vigil is not the front app: one per message, only for one that
-/// arrived after this app started (a mailbox opened at launch is history,
-/// not news), never for the person's own. Pressed, it opens that message's
-/// thread; read anywhere, it is taken away. What is due is the threads' own
-/// rule (`MessageThreads.forYou`), handed in by the store at every change.
+/// A macOS notification for each post addressed to the person while Vigil
+/// is not the front app: a post in a chat of theirs with one agent, or one
+/// that mentions them anywhere. Only for one posted while this app runs
+/// (what was said before is history, not news), never for the person's own.
+/// Pressed, it opens that chat; read anywhere, it is taken away.
 @MainActor
 final class VigilMessageAlerts {
     static let shared = VigilMessageAlerts()
-    /// The thread a notification opens, in its user info.
-    static let threadKey = "vigil.message.thread"
+    /// The chat a notification opens, in its user info.
+    static let chatKey = "vigil.message.chat"
 
-    private let started = Date().timeIntervalSince1970
-    /// Every message already weighed: each is notified once at most.
-    private var weighed: Set<String> = []
-    /// The messages due at the last change: one no longer due was read.
-    private var due: Set<String> = []
+    /// The posts notified and still delivered, by chat, with their position.
+    private var delivered: [ChatID: [(position: Int, post: PostID)]] = [:]
 
-    func due(_ now: [MessageThreads.ForYou], names: VigilChatHost) {
-        let ids = Set(now.map(\.item.id))
-        let read = due.subtracting(ids)
-        if !read.isEmpty {
-            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: read.map(Self.identifier))
-        }
-        due = ids
-        let front = NSApp.isActive
-        for one in now where weighed.insert(one.item.id).inserted {
-            guard one.item.record.arrived >= started, !front else { continue }
-            post(one, names: names)
+    func heard(_ events: [Event], rows: [Messages.Row]) {
+        for event in events {
+            guard case .messages(let change) = event.change else { continue }
+            switch change {
+            case .posted(let post):
+                guard post.by != .you, !NSApp.isActive, let row = rows.first(where: { $0.id == post.chat }) else { continue }
+                let chat = row.summary.chat
+                guard chat.present.contains(.you), chat.present.count == 2 || post.mentions.contains(.you) else { continue }
+                notify(post, in: row)
+            case .read(let mark):
+                let read = (delivered[mark.chat] ?? []).filter { $0.position <= mark.through }
+                guard !read.isEmpty else { continue }
+                delivered[mark.chat]?.removeAll { $0.position <= mark.through }
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: read.map { Self.identifier($0.post) })
+            default: continue
+            }
         }
     }
 
-    private static func identifier(_ message: String) -> String { "vigil.message.\(message)" }
+    private static func identifier(_ post: PostID) -> String { "vigil.post.\(post.raw)" }
 
-    private func post(_ one: MessageThreads.ForYou, names: VigilChatHost) {
-        let message = one.item.record.message
-        let pane = names.name(one.item.senderRoot, message.from.pane ?? message.to.pane)
+    private func notify(_ post: Messages.Post, in row: Messages.Row) {
+        let writer = row.members.first { $0.member == post.by }
         let content = UNMutableNotificationContent()
-        content.title = [pane.face, pane.said].compactMap { $0 }.joined(separator: " ")
-        content.body = one.item.words
-        // Loud only as its urgency says (`Message.Urgency.rings`): an urgent
-        // message to the person rings; every other one is listed quietly.
-        let rings = message.declared.rings(mentionsPerson: true)
+        content.title = [writer?.face, writer?.name ?? "A member"].compactMap { $0 }.joined(separator: " ")
+        if let name = row.summary.chat.name { content.subtitle = name }
+        content.body = post.words
+        // Loud only as its urgency says: an urgent post to the person rings;
+        // every other one is listed quietly.
+        let rings = post.urgency == .urgent || post.urgency == .stop
         content.sound = rings ? .default : nil
         content.interruptionLevel = rings ? .timeSensitive : .passive
-        content.threadIdentifier = one.thread
-        content.userInfo = [Self.threadKey: one.thread]
-        let request = UNNotificationRequest(identifier: Self.identifier(one.item.id), content: content, trigger: nil)
+        content.threadIdentifier = post.chat.raw
+        content.userInfo = [Self.chatKey: post.chat.raw]
+        let request = UNNotificationRequest(identifier: Self.identifier(post.id), content: content, trigger: nil)
+        if let position = post.position { delivered[post.chat, default: []].append((position, post.id)) }
         let center = UNUserNotificationCenter.current()
-        let id = one.item.id
+        let id = post.id.raw
         center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             guard granted else {
-                return messagesLog.warn("message not notified", ["id": id, "why": error.map { "\($0)" } ?? "notifications are not allowed"])
+                return messagesLog.warn("post not notified", ["id": id, "why": error.map { "\($0)" } ?? "notifications are not allowed"])
             }
             center.add(request) { error in
-                if let error { messagesLog.warn("message not notified", ["id": id, "why": "\(error)"]) }
-                else { messagesLog.info("message notified", ["id": id]) }
+                if let error { messagesLog.warn("post not notified", ["id": id, "why": "\(error)"]) }
+                else { messagesLog.info("post notified", ["id": id]) }
             }
         }
     }
 
-    /// A press on one of ours: its thread, in the window in front's Messages.
+    /// A press on one of ours: its chat, in the window in front's Messages.
     /// False for any other notification.
     nonisolated static func open(_ response: UNNotificationResponse) -> Bool {
-        guard let thread = response.notification.request.content.userInfo[threadKey] as? String else { return false }
+        guard let chat = response.notification.request.content.userInfo[chatKey] as? String else { return false }
         if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
             Task { @MainActor in
                 NSApp.activate()
-                VigilMessagesPanel.section(thread: thread)
+                VigilMessagesPanel.section(chat: chat)
             }
         }
         return true
     }
 
     nonisolated static func ours(_ notification: UNNotification) -> Bool {
-        notification.request.content.userInfo[threadKey] != nil
+        notification.request.content.userInfo[chatKey] != nil
     }
 }
 
 private struct VigilMessagesWindow: View {
     @ObservedObject var chosen: VigilMessagesPanel.Chosen
-    @ObservedObject private var store = VigilMessageStore.shared
 
     var body: some View {
-        VigilChat(list: store.index.list, host: store.host, chosen: $chosen.id)
+        VigilChat(chats: VigilMessageStore.shared.chats, chosen: $chosen.id)
     }
 }
 
 private struct VigilMessagesAside: View {
-    let key: MessageThread.Key
+    let pane: String
+    let chat: ChatID?
+    let waiting: Set<String>
     /// The bar of the window it stands in: its head goes there.
     let sidebar: VigilSidebarModel?
-    @ObservedObject private var store = VigilMessageStore.shared
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let sidebar { VigilThreadPlace(key: key, sidebar: sidebar, here: store.here) }
-            // The pane's every thread: what its row mark counts, so opening
-            // it is what clears the mark.
-            VigilThreadColumn(key: key, thread: store.paneThread(key), host: store.host, focus: store.focus(key))
-        }
+        VigilPaneChat(
+            pane: pane, chats: VigilMessageStore.shared.chats, waiting: waiting, initial: chat,
+            head: sidebar.map { AnyView(VigilChatPlace(pane: pane, sidebar: $0)) })
     }
 }
 
-/// A thread's head: where its pane is, each step a press away (its Mac when
-/// it is another, its workspace, its tab where the tree shows one, the pane).
-/// A press shows that row in the window's bar and goes there as a press on
-/// the row does.
-private struct VigilThreadPlace: View {
-    let key: MessageThread.Key
+/// A pane's chat's head: where its pane is, each step a press away (its
+/// workspace, its tab where the tree shows one, the pane). A press shows
+/// that row in the window's bar and goes there as a press on the row does.
+private struct VigilChatPlace: View {
+    let pane: String
     @ObservedObject var sidebar: VigilSidebarModel
-    let here: String?
 
     var body: some View {
         HStack(spacing: 4) {
-            if let place = sidebar.place(of: key, here: here) {
-                if let host = place.row.host {
-                    step(host.name, symbol: "laptopcomputer", tip: "Show \(host.name) in the bar") { sidebar.go(to: .mac, of: place) }
-                    Image(systemName: "chevron.compact.right").inkForeground(.faint)
-                }
+            if let place = sidebar.place(ofPane: pane) {
                 step(place.row.label, face: place.row.emoji, symbol: "square.grid.2x2", tip: "Go to the workspace \(place.row.label)") {
                     sidebar.go(to: .workspace, of: place)
                 }
@@ -757,17 +544,14 @@ private struct VigilThreadPlace: View {
     }
 }
 
-/// The left bar's Messages: every thread of every Mac, as the chat list
-/// draws it. Choosing one opens it in this window (`VigilSidebarModel.choose`).
-struct VigilSidebarThreads: View {
+/// The left bar's Messages: every chat of this Mac, as the chat list draws
+/// it. Choosing one opens it in this window (`VigilSidebarModel.choose`).
+struct VigilSidebarChats: View {
     @ObservedObject var model: VigilSidebarModel
-    @ObservedObject private var store = VigilMessageStore.shared
 
     var body: some View {
-        let list = store.index.list
-        let people = VigilChatPeople(list: list, host: store.host)
-        VigilThreadList(
-            list: list, people: people, selection: Binding(get: { model.thread }, set: { model.choose(thread: $0) }),
-            only: $model.showing)
+        VigilChatList(
+            chats: VigilMessageStore.shared.chats,
+            selection: Binding(get: { model.chat }, set: { model.choose(chat: $0) }))
     }
 }

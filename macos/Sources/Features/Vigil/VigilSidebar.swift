@@ -231,68 +231,51 @@ final class VigilSidebarModel: ObservableObject {
     /// switching one window's bar never moves another's.
     enum Section: String { case workspaces, messages }
     @Published var section: Section = .workspaces
-    /// The thread chosen in Messages (`MessageThread.id`): open in this
-    /// window's right bar, its pane in the viewport.
-    @Published private(set) var thread: String?
-    /// Whose conversations the list shows: one agent's end
-    /// (`VigilThreadList.end`), or all. Opened from a pane it is that pane's
-    /// agent; opened from the menu bar or a notification, all.
-    @Published var showing: String?
+    /// The chat chosen in Messages (`ChatID.raw`).
+    @Published private(set) var chat: String?
 
-    /// A thread chosen in the list without opening it: the pane that asked
-    /// put itself and its thread in the window already.
-    func list(thread: String?) { self.thread = thread }
-
-    /// Choosing a thread opens it: its pane in this window, its thread
-    /// beside it (`VigilMessagesPanel.open`).
-    func choose(thread: String?) {
-        self.thread = thread
-        guard let thread else { return }
+    /// Choosing a chat opens it: beside its agent's pane in this window, or
+    /// in the Messages window (`VigilMessagesPanel.open`).
+    func choose(chat: String?) {
+        self.chat = chat
+        guard let chat else { return }
         guard let controller = hostController else {
-            return messagesLog.warn("thread chosen in a bar with no window", ["thread": thread])
+            return messagesLog.warn("chat chosen in a bar with no window", ["chat": chat])
         }
-        VigilMessagesPanel.open(thread: thread, in: controller)
+        VigilMessagesPanel.open(chat: chat, in: controller)
     }
 
-    /// Where a thread's pane sits in this bar's tree.
+    /// Where a pane sits in this bar's tree.
     struct Place {
         let row: VigilWorkspaces.SidebarWorkspaceRow
         let tab: VigilWorkspaces.SidebarTab
         let pane: VigilWorkspaces.SidebarPane
-        /// The Mac it is on, when it is not this one: its tether root.
-        var device: String? { row.host == nil ? nil : VigilRemote.split(row.id)?.device }
         /// Its tab is a row of its own (a workspace of one unnamed tab has none).
         var tabShown: Bool { row.soleTab == nil }
         var paneRow: String { "\(tab.id)#\(pane.id)" }
     }
 
-    /// `key`'s pane among the rows: this Mac's by its daemon id, another's
-    /// by its row id (`<tether root>/<pane>`).
-    func place(of key: MessageThread.Key, here: String?) -> Place? {
-        let remote = key.root == here ? nil : VigilRemote.compositeId(key.root, key.pane)
+    /// A pane of this Mac among the rows, by its daemon id.
+    func place(ofPane id: String) -> Place? {
         for row in rows {
             for tab in row.tabs {
-                if let pane = tab.panes.first(where: { remote == nil ? $0.paneId == key.pane : $0.id == remote }) {
-                    return Place(row: row, tab: tab, pane: pane)
-                }
+                if let pane = tab.panes.first(where: { $0.paneId == id }) { return Place(row: row, tab: tab, pane: pane) }
             }
         }
         return nil
     }
 
-    enum Level { case mac, workspace, tab, pane }
+    enum Level { case workspace, tab, pane }
 
-    /// A thread's header pressed: the bar shows the workspaces with the
-    /// place unfolded, and the window goes there as a press on that row does
-    /// (a Mac is shown, never entered).
+    /// A pane's chat's header pressed: the bar shows the workspaces with
+    /// the place unfolded, and the window goes there as a press on that row
+    /// does.
     func go(to level: Level, of place: Place) {
         section = .workspaces
-        VigilSidebarCollapse.shared.hosts.remove(place.device ?? VigilSidebarCollapse.here)
-        if level != .mac { collapsedSessions.remove(place.row.id) }
+        VigilSidebarCollapse.shared.hosts.remove(VigilSidebarCollapse.here)
+        collapsedSessions.remove(place.row.id)
         if level == .pane { collapsedTabs.remove(place.tab.id) }
         switch level {
-        case .mac:
-            selection = place.row.id
         case .workspace:
             activate(.init(id: place.row.id, kind: .session(place.row.id)))
         case .tab:
@@ -300,7 +283,7 @@ final class VigilSidebarModel: ObservableObject {
         case .pane:
             activate(.init(id: place.paneRow, kind: .pane(name: place.row.id, paneId: place.pane.navigationId)))
         }
-        messagesLog.info("thread head pressed", ["to": "\(level)", "pane": place.pane.id])
+        messagesLog.info("chat head pressed", ["to": "\(level)", "pane": place.pane.id])
     }
 
     /// Where you are: its own instant channel (see ActiveChain).

@@ -355,26 +355,14 @@ final class VigilBars {
         return controller.terminalViewContainer?.subviews.compactMap { $0 as? VigilSidebarHost }.first?.model
     }
 
-    /// A window's bar shown on its Messages section, on `thread` when one
-    /// is named (choosing it opens it: its pane here, its thread beside).
-    /// The bar's Messages on every conversation (the menu bar's Messages…, a
-    /// notification), on `thread` when one is named, which opens it.
-    func showMessages(thread: String?, in controller: TerminalController) {
+    /// A window's bar shown on its Messages section (the menu bar's
+    /// Messages…, a notification), on `chat` when one is named, which opens
+    /// it.
+    func showMessages(chat: String?, in controller: TerminalController) {
         guard let model = messagesBar(in: controller) else { return }
-        model.showing = nil
-        if let thread { model.choose(thread: thread) }
+        if let chat { model.choose(chat: chat) }
         controller.window?.makeKeyAndOrderFront(nil)
-        messagesLog.info("messages opened", ["where": "sidebar", "thread": thread ?? ""])
-    }
-
-    /// The bar's Messages as a pane opens it: filtered to that pane's agent
-    /// (`showing`, `VigilThreadList.end`), `listing` chosen in the list; the
-    /// caller puts the pane and its thread in the window.
-    func showMessages(showing end: String, listing thread: String?, in controller: TerminalController) {
-        guard let model = messagesBar(in: controller) else { return }
-        model.showing = end
-        model.list(thread: thread)
-        controller.window?.makeKeyAndOrderFront(nil)
+        messagesLog.info("messages opened", ["where": "sidebar", "chat": chat ?? ""])
     }
 
     private func messagesBar(in controller: TerminalController) -> VigilSidebarModel? {

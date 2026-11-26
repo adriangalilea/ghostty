@@ -115,7 +115,7 @@ final class VigilPhoneWatches: ObservableObject {
         VigilWatchHost(
             here: nil,
             mac: { [weak self] root in self?.macName(root) ?? "a Mac" },
-            pane: { root, pane in VigilPhoneMessages.pane(root: root, pane: pane).title },
+            pane: { root, pane in VigilPhoneMessages.title(root: root, pane: pane) },
             open: { root, pane in
                 left()
                 VigilPhoneMessages.open(root: root, pane: pane, from: "watches")

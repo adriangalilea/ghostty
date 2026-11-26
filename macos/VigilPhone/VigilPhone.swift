@@ -297,7 +297,6 @@ final class VigilPhone: ObservableObject {
             await intents.run { [weak self] answer in await self?.heard(answer) }
         }
         receipts.info("tether", "node up", ["root": String(node.root().prefix(10))])
-        VigilPhoneMessages.shared.attach(node: node)
         VigilPhoneWatches.shared.attach(node: node)
         VigilAgents.begin()
         readPeers()

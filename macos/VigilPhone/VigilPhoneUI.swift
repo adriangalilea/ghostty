@@ -1528,9 +1528,8 @@ struct PaneScreen: View {
                 }, local: false)
                 .id(current)
             case .messages:
-                // Its thread with the person and other agents, on the
-                // pane's Mac; the conversation it holds now keys it.
-                PaneMessages(key: .init(root: current.host.id, pane: current.pane, conversation: node?.glance?.conversation))
+                // Its agent's chat, as the pane's host keeps it.
+                PaneMessages(root: current.host.id, pane: current.pane)
                     .id(current)
             case .terminal:
                 terminal

@@ -334,17 +334,14 @@ struct EndedMark: View {
 }
 
 
-/// Messages for the pane that you have not read, or that you wrote and wait
-/// to be handed to its agent (`MessageThreads.Pending`): an envelope and how
-/// many, blue while any is unread, quiet while only yours wait. Several: a
-/// folded row's panes, summed. `press`, on one pane's, opens its thread.
-/// Nothing while there is none.
+/// Posts you have not read in the pane's agent's chats with you alone
+/// (`VigilChats.Marks.unread`): an envelope and how many. Several panes: a
+/// folded row's, summed by whoever draws it. `press`, on one pane's, opens
+/// its chat. Nothing while there is none.
 struct MessagesMark: View {
-    let pending: [MessageThreads.Pending]
+    let unread: Int
     let sizes: PaneMarkSizes
     var press: (() -> Void)?
-
-    private var unread: Int { pending.reduce(0) { $0 + $1.unread } }
 
     var body: some View {
         if unread > 0 {
@@ -366,18 +363,18 @@ struct MessagesMark: View {
     }
 
     private var said: String {
-        (unread == 1 ? "1 unread message for you" : "\(unread) unread messages for you")
-            + (press == nil ? "" : "\nPress to open its thread.")
+        (unread == 1 ? "1 unread post for you" : "\(unread) unread posts for you")
+            + (press == nil ? "" : "\nPress to open its chat.")
     }
 }
 
-/// Messages waiting on your yes (CHATS.md, decided 2026-11-19: "Waiting for
-/// your approval is one mark, defined once and drawn the same everywhere,
-/// rolling up as the state dots do"): a raised hand in the care tone and how
-/// many, by the messages' ids (`MessageThreads.awaitingYou`), so a fold of
-/// rows (a tab, a workspace, a Mac) counts each message once however many
-/// of its panes it holds. `press` opens where it is answered. Nothing while
-/// none waits.
+/// What waits on your answer: one mark, defined once and drawn the same
+/// everywhere, rolling up as the state dots do. A raised hand in the care
+/// tone and how many, by id (`VigilChats.Marks.waiting`: a chat with a
+/// delivery waiting for your yes, a chat proposed to you, a question about
+/// a pane), so a fold of rows (a tab, a workspace, a host) counts each once
+/// however many of its panes it holds. `press` opens where it is answered.
+/// Nothing while none waits.
 struct WaitingMark: View {
     let messages: Set<String>
     let sizes: PaneMarkSizes
@@ -385,7 +382,7 @@ struct WaitingMark: View {
 
     var body: some View {
         if !messages.isEmpty {
-            let said = messages.count == 1 ? "1 message waits for your yes" : "\(messages.count) messages wait for your yes"
+            let said = messages.count == 1 ? "1 thing waits for your answer" : "\(messages.count) things wait for your answer"
             let mark = HStack(spacing: 1) {
                 Image(systemName: "hand.raised.fill").font(sizes.symbol)
                 Text("\(messages.count)").font(sizes.count)

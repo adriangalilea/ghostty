@@ -117,7 +117,7 @@ final class VigilWatchStore: ObservableObject {
         return VigilWatchHost(
             here: here,
             mac: { root in VigilRemote.shared.hosts.first { $0.device == root }?.name ?? "another Mac" },
-            pane: { root, pane in VigilMessageStore.shared.panes["\(root)/\(pane)"]?.pane.said ?? pane },
+            pane: { root, pane in VigilMessageStore.shared.panes["\(root)/\(pane)"]?.said ?? pane },
             open: { root, pane in VigilMessageStore.shared.open(root: root, pane: pane, in: VigilMessageStore.viewport) })
     }
 }
