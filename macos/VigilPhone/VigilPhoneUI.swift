@@ -357,7 +357,7 @@ struct TreeNodeView: View {
     private func resumeFacts(_ node: VigilPhone.Node) -> PaneResumeFacts? {
         guard let pane = node.pane, let glance = node.glance, let menu = glance.resumeMenu, let ref = glance.reference else { return nil }
         return PaneResumeFacts(menu: menu, agent: ref.agent, conversation: ref.id, account: glance.account,
-                               block: glance.accountBlock, restart: glance.restart, resume: glance.resume,
+                               block: glance.accountBlock,
                                accounts: .init(mac: pane.host.id, agent: ref.agent))
     }
 

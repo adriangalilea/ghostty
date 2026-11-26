@@ -15,17 +15,12 @@ struct PaneResumeFacts {
     /// The account the agent runs on now.
     let account: String?
     let block: AccountBlock?
-    let restart: Restart.Note?
-    let resume: Restart.Status?
     /// Where its Mac's accounts are read.
     let accounts: VigilAccountFacts.Key
 
     /// The router the person knows the accounts by.
     var router: String { agent == "codex" ? "cx" : "c" }
     var agentName: String { Restart.agentName(agent) }
-
-    /// What the notice reads live, from the same row.
-    var live: PaneResumeLive { PaneResumeLive(menu: menu, restart: restart, resume: resume, agent: agent) }
 
     /// The heading over the one-press switch: why no turn can run.
     func blockTitle(_ block: AccountBlock) -> String {
@@ -80,19 +75,15 @@ private extension String {
 
 struct PaneResumeLive {
     var menu: PaneGlance.ResumeMenu?
-    var restart: Restart.Note?
     /// The pane's switch as its broker publishes it (`Restart.Status`).
     var resume: Restart.Status?
-    var agent: String
 
     init(_ glance: PaneGlance) {
-        self.init(menu: glance.resumeMenu, restart: glance.restart, resume: glance.resume, agent: glance.agent)
+        self.init(menu: glance.resumeMenu, resume: glance.resume)
     }
-    init(menu: PaneGlance.ResumeMenu?, restart: Restart.Note?, resume: Restart.Status?, agent: String) {
+    init(menu: PaneGlance.ResumeMenu?, resume: Restart.Status?) {
         self.menu = menu
-        self.restart = restart
         self.resume = resume
-        self.agent = agent
     }
 }
 
@@ -113,17 +104,36 @@ struct PaneResumeReceipt {
     var choose: ((AgentAccounts.Account) -> Void)?
     var offerImmediate: (() -> Void)?
     var cancel: ((UUID) -> Void)?
+    /// The last state its broker published for the switch this sent: the
+    /// row drops a switch's state at the agent's next prompt, and the
+    /// notice still says how it ended.
+    var seen: Restart.Status?
+
+    /// Keeps what the row publishes of this notice's switch, by its ticket.
+    mutating func see(_ status: Restart.Status?) {
+        guard let status, let sent = answer?.scheduleID, status.ticket == sent, status != seen else { return }
+        seen = status
+    }
 
     /// What the notice says now: the answer, followed by what the pane's
     /// broker says since (a resume still waiting, done, not done).
     func notice(_ live: PaneResumeLive?) -> (detail: String, tone: InkTone, waiting: UUID?) {
         guard let answer else { return ("Asking the pane’s Mac…", .neutral, nil) }
+        switch answer.outcome {
         // The switch this notice sent, as its broker publishes it (one state
         // for the panel, the phone and `vigil pane resume`), followed by its
-        // ticket to its end.
-        if let sent = answer.scheduleID, answer.outcome == .armed || answer.outcome == .restarting {
-            guard let status = live?.resume, status.ticket == sent else {
-                return ("It no longer stands: another switch replaced it, or the pane’s agent or conversation changed.", .neutral, nil)
+        // ticket to its end. Every armed or restarting answer carries one.
+        case .armed, .restarting:
+            guard let sent = answer.scheduleID else {
+                resumeLog.error("switch answered without its ticket", ["row": row, "outcome": answer.outcome.rawValue])
+                return ("The pane’s Mac answered without naming the switch, so it cannot be followed: " + answer.said, .warn, nil)
+            }
+            let own = live?.resume.flatMap { $0.ticket == sent ? $0 : nil } ?? seen
+            guard let status = own else {
+                // Another ticket on the row replaced it; nothing on the row
+                // yet is the row not having heard of it.
+                if live?.resume != nil { return ("Another switch replaced it.", .neutral, nil) }
+                return (answer.said, .neutral, answer.outcome == .armed ? sent : nil)
             }
             let said = status.said.map { ". " + $0 } ?? ""
             switch status.phase {
@@ -133,28 +143,12 @@ struct PaneResumeReceipt {
             case .reopenedOnAnotherLogin, .reopenedLoginUnread, .endUnknown, .notReopened:
                 return (status.phase.words.capitalizedFirst + said, .warn, nil)
             }
-        }
-        // What became of a restart since this was sent: the broker's word.
-        if let note = live?.restart, note.at >= sentAt.timeIntervalSince1970 - 1,
-           answer.outcome == .armed || answer.outcome == .restarting {
-            switch note.state {
-            case .ran: return ("Restarted. " + note.said, .neutral, nil)
-            case .notRun: return ("Not restarted: " + note.said, .warn, nil)
-            case .ending: return (note.said, .neutral, nil)
-            case .armed: break
-            }
-        }
-        switch answer.outcome {
-        case .armed:
-            if let ticket = answer.scheduleID, live?.menu?.scheduled == ticket { return (answer.said, .neutral, ticket) }
-            if answer.scheduleID == nil { return (answer.said, .neutral, nil) }
-            return ("It no longer waits: the resume was cancelled, or the pane’s agent or conversation changed.", .neutral, nil)
         // Refused for a switch kept earlier, which still waits: that one
         // is offered to cancel here.
         case .refused:
             let kept = answer.scheduleID.flatMap { live?.menu?.scheduled == $0 ? $0 : nil }
             return ("Not done: " + answer.said, .warn, kept)
-        case .restarting, .relayUpdated, .cancelled: return (answer.said, .neutral, nil)
+        case .relayUpdated, .cancelled: return (answer.said, .neutral, nil)
         }
     }
 
@@ -292,6 +286,14 @@ extension View {
                                    actions: result.actions(live) { receipt.wrappedValue = nil })
                 }
             }
+        }
+        // What the row says of this notice's switch is kept on the notice,
+        // whether the row or the answer arrived first.
+        .onChange(of: live?.resume, initial: true) { _, status in
+            if receipt.wrappedValue?.row == row { receipt.wrappedValue?.see(status) }
+        }
+        .onChange(of: receipt.wrappedValue?.answer?.scheduleID) { _, _ in
+            if receipt.wrappedValue?.row == row { receipt.wrappedValue?.see(live?.resume) }
         }
     }
 }
