@@ -491,9 +491,22 @@ final class VigilRemote: ObservableObject {
         case .directory: if let directory = step.directory { apply(device, directory) }
         // The panes that moved, onto the directory held (it is whole: a
         // follower always gets a whole document first).
+        // Only the panes named are projected and compared: a pane's screen
+        // receipt moves several times a second, and projecting a whole
+        // directory for each was the cost of following a busy host.
         case .changes:
-            guard let changes = step.changes, let held = host(device)?.directory else { return }
-            apply(device, held.applying(changes))
+            guard let changes = step.changes, let index = hosts.firstIndex(where: { $0.device == device }),
+                  var dir = hosts[index].directory else { return }
+            _ = receivedDirectories[device]?.take(changes)
+            var moved = hosts[index].error != nil
+            for (pane, facts) in changes.panes {
+                let projected = facts.projected
+                if dir.panes[pane] != projected {
+                    dir.panes[pane] = projected
+                    moved = true
+                }
+            }
+            if moved { landed(index, dir) }
         case .withheld:
             guard let i = hosts.firstIndex(where: { $0.device == device }) else { return }
             hosts[i].withheld = true
@@ -549,9 +562,16 @@ final class VigilRemote: ObservableObject {
     private func apply(_ device: String, _ received: Directory) {
         guard let index = hosts.firstIndex(where: { $0.device == device }) else { return }
         receivedDirectories[device] = received
-        let wasAway = hosts[index].error != nil
         let dir = received.projected
         guard hosts[index].directory != dir || hosts[index].error != nil else { return }
+        landed(index, dir)
+    }
+
+    /// `dir` is what a host's rows draw from now, and differs from what
+    /// they drew (or the host was away).
+    private func landed(_ index: Int, _ dir: Directory) {
+        let device = hosts[index].device
+        let wasAway = hosts[index].error != nil
         // A glance that did not travel or did not read: said once per
         // reason; the row names its pane without it.
         for (pane, facts) in dir.panes where facts.glanceError != hosts[index].directory?.panes[pane]?.glanceError {

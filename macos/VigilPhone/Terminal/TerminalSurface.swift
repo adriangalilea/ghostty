@@ -262,7 +262,7 @@ final class TerminalSurface: UIView, ObservableObject {
     }
 
     /// The content receipt: FNV-1a of the viewport's plain text, hex,
-    /// comparable to the daemon's `screen` in `vigild dir`.
+    /// comparable to the daemon's `screen` in the host's directory.
     var screenHash: String {
         guard let surface else { return "" }
         return String(ghostty_surface_vigil_screen_hash(surface), radix: 16)

@@ -32,7 +32,7 @@ final class VigilFacts: @unchecked Sendable {
         var leases: [Lease] = []
         /// Panes whose pidfile names a daemon that no longer runs: one
         /// killed outright writes nothing and removes nothing, so its exit
-        /// is watched for (as `vigild dir --watch` does) and said here. A
+        /// is watched for (as the host's directory does) and said here. A
         /// trigger to look, never the verdict: whether a daemon holds a
         /// pane is its lock's to say.
         var gone: Set<String> = []

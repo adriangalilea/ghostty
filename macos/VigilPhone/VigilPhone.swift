@@ -105,7 +105,7 @@ final class VigilPhone: ObservableObject {
         didSet {
             // A screen hash alone (a working pane repaints several times a
             // second) changes no row: the tree is rebuilt only for what rows draw.
-            if Self.rows(oldValue) != Self.rows(directories) { rebuildTree() }
+            if !rowsUnmoved, Self.rows(oldValue) != Self.rows(directories) { rebuildTree() }
             checkScreens()
             let waiting = directoryWaiters
             directoryWaiters = []
@@ -113,6 +113,9 @@ final class VigilPhone: ObservableObject {
         }
     }
     private var directoryWaiters: [Waiter] = []
+    /// Set around a write of `directories` known to move nothing a row
+    /// draws (a change of screen receipts alone), which is then not compared.
+    private var rowsUnmoved = false
 
     /// Returns when the next directory arrives, or after `seconds` (a link
     /// to a pane born a moment ago waits for the document that lists it).
@@ -446,9 +449,18 @@ final class VigilPhone: ObservableObject {
                 case .directory, .changes:
                     // The panes that moved apply onto the directory held (a
                     // follower always gets a whole document first).
-                    guard let dir = step.directory
-                        ?? step.changes.flatMap({ changes in self.directories[host.id].map { $0.applying(changes) } })
-                    else { continue }
+                    // Only the panes a change names are compared: when
+                    // nothing a row draws moved, no directory is compared whole.
+                    var screensOnly = false
+                    let dir: Directory
+                    if let whole = step.directory {
+                        dir = whole
+                    } else if let changes = step.changes, var held = self.directories[host.id] {
+                        screensOnly = !held.take(changes)
+                        dir = held
+                    } else {
+                        continue
+                    }
                     if self.directories[host.id] == nil {
                         self.receipts.info("dir", "first directory", [
                             "mac": host.name, "host": dir.host, "workspaces": dir.workspaces.count, "panes": dir.panes.count,
@@ -463,7 +475,9 @@ final class VigilPhone: ObservableObject {
                             "mac": host.name, "pane": pane, "err": facts.glanceError ?? "",
                         ])
                     }
+                    self.rowsUnmoved = screensOnly
                     self.directories[host.id] = dir
+                    self.rowsUnmoved = false
                     self.keepSoon(host.id)
                 case .withheld:
                     let why = step.reason ?? "Waiting for approval"

@@ -209,7 +209,7 @@ extension VigilWorkspaces {
     }
 
     /// What this Mac knows of one of its panes, in the directory's own shape
-    /// (`Directory.Facts`, what `vigild dir` would print for it), so the
+    /// (`Directory.Facts`, what the host's directory says of it), so the
     /// sidebar names its rows by the very rule the phone and a remote
     /// sidebar apply to the same pane (`Directory.titles`). The three files
     /// that need decoding are decoded by the caller (which says when one
