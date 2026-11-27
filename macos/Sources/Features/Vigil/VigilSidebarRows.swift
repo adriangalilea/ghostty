@@ -576,7 +576,15 @@ final class SidebarBuilder: @unchecked Sendable {
             }
             // An away Mac's workspaces by what last mattered; a live one's in
             // its own order.
-            for session in host.away ? dir.byLastActivity : dir.ordered {
+            let sessions = host.away ? dir.byLastActivity : dir.ordered
+            // A Mac is listed for being paired, whatever it holds: with no
+            // workspace its header stands over one line saying so.
+            if sessions.isEmpty {
+                rows.append(.init(
+                    id: VigilRemote.compositeId(host.device, ""), emoji: nil, label: "no workspaces",
+                    stateTag: host.away ? "away" : "remote", attention: .none, states: [], tabs: [], host: host.header))
+            }
+            for session in sessions {
                 let composite = VigilRemote.compositeId(host.device, session.name)
                 let tabTitles = Directory.titles(ofTabs: session.tabs ?? [], home: dir.home)
                 var tabs: [VigilWorkspaces.SidebarTab] = []
