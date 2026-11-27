@@ -38,6 +38,9 @@ struct VigilChatHost {
     /// The person's press on a question about a pane (`PaneAsk`): refuse
     /// it, or open its card in Authz.
     var press: @Sendable (_ ask: String, _ open: Bool) async throws -> Messages.Acted
+    /// The person's answer to a question its host holds itself
+    /// (`PaneAsk.local`), given here.
+    var pressHere: @Sendable (_ ask: String, _ pressed: PaneAsk.Pressed) async throws -> Messages.Acted
     /// Go to a pane of that host.
     var open: @MainActor (_ pane: String) -> Void = { _ in }
     /// Whether a person's hand was on this device after the moment (unix
@@ -689,7 +692,9 @@ struct VigilChatView: View {
         }
         // What the host asks about the pane of the one agent this chat is with.
         ForEach(asks(page, people)) { ask in
-            VigilPaneAskRequest(ask: ask, answered: answered[ask.id]) { open in press(ask.id, open: open) }
+            VigilPaneAskRequest(
+                ask: ask, answered: answered[ask.id], press: { open in press(ask.id, open: open) },
+                here: { allow in pressHere(ask, allow: allow) })
         }
         InkComposer(
             text: $draft, prompt: "Message \(page.map { people.title($0.chat) } ?? "this chat")",
@@ -883,6 +888,27 @@ struct VigilChatView: View {
         }
     }
 
+    /// The person's answer to a question the host holds itself: a yes that
+    /// needs the owner is sent only after this device authenticated them.
+    private func pressHere(_ ask: PaneAsk, allow: Bool) {
+        guard host.pressedByPerson() else {
+            answered[ask.id] = "Not answered: only a click of yours answers it here."
+            return
+        }
+        let run = host.pressHere
+        Task {
+            do {
+                let authenticate = allow && ask.owner == true
+                if authenticate {
+                    _ = try await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "allow what \(ask.asker) asks")
+                }
+                answered[ask.id] = try await run(ask.id, PaneAsk.Pressed(allow: allow, authenticated: authenticate)).said
+            } catch {
+                answered[ask.id] = "Not answered: " + ((error as? LAError)?.localizedDescription ?? "\(error)")
+            }
+        }
+    }
+
     /// What a person had in front of them is read: while the chat is in
     /// front and a hand on this device followed its first unread post (the
     /// app's seen rule), the person's read mark moves to the newest post
@@ -911,6 +937,8 @@ struct VigilPaneAskRequest: View {
     let answered: String?
     /// Refuse (false), or open its card in Authz (true).
     let press: (_ open: Bool) -> Void
+    /// For a question its host holds itself: allow (true) or refuse.
+    let here: (_ allow: Bool) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -924,7 +952,16 @@ struct VigilPaneAskRequest: View {
             if let shell = ask.shell {
                 Text(shell).font(.system(.body, design: .monospaced)).textSelection(.enabled)
             }
-            if ask.authzOnly == true {
+            if ask.local == true {
+                // Held by the host itself, with no card anywhere else.
+                Text("Authz could not be reached, so this is answered here" + (ask.owner == true ? ", after you authenticate." : "."))
+                    .inkText(.detail)
+                HStack(spacing: 8) {
+                    Button("Refuse") { here(false) }.buttonStyle(.ink)
+                    Button(ask.yes ?? "Allow") { here(true) }.buttonStyle(.ink)
+                }
+                .focusable(false)
+            } else if ask.authzOnly == true {
                 // Asked by another app than the host's broker: its card in
                 // Authz is where it is answered.
                 Text("Answer it on its card in Authz.").inkText(.detail)

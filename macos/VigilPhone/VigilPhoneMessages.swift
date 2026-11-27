@@ -47,6 +47,7 @@ final class VigilPhoneMessages: ObservableObject {
                 post: { _ in throw Failed(description: Self.notCarried) },
                 act: { _ in throw Failed(description: Self.notCarried) },
                 press: { _, _ in throw Failed(description: Self.notCarried) },
+                pressHere: { _, _ in throw Failed(description: Self.notCarried) },
                 open: { pane in Self.open(root: root, pane: pane) },
                 mention: { _, _ in throw Failed(description: Self.notCarried) }))
             chats.unreachable(Self.notCarried)

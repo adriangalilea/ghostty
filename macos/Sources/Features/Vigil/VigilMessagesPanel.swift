@@ -50,6 +50,11 @@ final class VigilMessageStore: ObservableObject {
             post: { say in try await Self.post(say) },
             act: { what in try await Self.act(what) },
             press: { ask, open in try await Self.press(ask, open: open) },
+            pressHere: { ask, pressed in
+                try await Self.call(
+                    "ask.press", .object(["id": .string(ask), "allow": .bool(pressed.allow), "authenticated": .bool(pressed.authenticated)]),
+                    as: Messages.Acted.self)
+            },
             open: { pane in VigilMessageStore.shared.open(pane: pane, in: VigilMessageStore.viewport) },
             // The app's own seen rule: a hand on this Mac after it arrived.
             handAfter: { VigilWorkspaces.personActed(after: Date(timeIntervalSince1970: $0)) },
