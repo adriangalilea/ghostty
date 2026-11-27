@@ -1,7 +1,7 @@
 import Foundation
 import GhosttyKit
 import Log
-import TetherKit
+import TetherObjects
 import VigilActivity
 import VigilLink
 import VigilWire
@@ -291,8 +291,7 @@ final class VigilPhone: ObservableObject {
         self.node = node
         unlinked = nil
         let receipts = receipts
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let intents = VigilIntents(node: node, kept: support.appendingPathComponent("tether/vigil-intents-kept.json")) { what, facts in
+        let intents = VigilIntents(objects: node.objects) { what, facts in
             Task { @MainActor in receipts.info("intent", what, facts) }
         }
         self.intents = intents
