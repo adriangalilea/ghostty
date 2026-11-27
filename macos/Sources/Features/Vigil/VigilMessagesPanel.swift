@@ -13,8 +13,8 @@ import VigilWire
 /// draws from (`VigilChats`). Nothing is worked out here: the list, the
 /// counts and every member's name are the host's.
 ///
-/// Another Mac's chats are not followed: nothing carries them between hosts
-/// yet, and its hub says so.
+/// Every paired Mac's chats are in that one list: this Mac's broker follows
+/// them and says their rows beside its own.
 @MainActor
 final class VigilMessageStore: ObservableObject {
     static let shared = VigilMessageStore()
