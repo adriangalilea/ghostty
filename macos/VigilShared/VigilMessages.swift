@@ -3,6 +3,7 @@ import Foundation
 import GitViews
 import Ink
 import LocalAuthentication
+import OwnerAuthentication
 import MarkdownText
 import SwiftUI
 import VigilWire
@@ -939,6 +940,7 @@ struct VigilPaneAskRequest: View {
     let press: (_ open: Bool) -> Void
     /// For a question its host holds itself: allow (true) or refuse.
     let here: (_ allow: Bool) -> Void
+    @State private var methods = OwnerAuthentication.Methods.Live()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -954,11 +956,17 @@ struct VigilPaneAskRequest: View {
             }
             if ask.local == true {
                 // Held by the host itself, with no card anywhere else.
-                Text("Authz could not be reached, so this is answered here" + (ask.owner == true ? ", after you authenticate." : "."))
+                Text("Authz could not be reached, so this is answered here"
+                    + (ask.owner == true ? ", with \(OwnerAuthentication.Methods.phrase(methods.methods.sentence))." : "."))
                     .inkText(.detail)
                 HStack(spacing: 8) {
                     Button("Refuse") { here(false) }.buttonStyle(.ink)
-                    Button(ask.yes ?? "Allow") { here(true) }.buttonStyle(.ink)
+                    if ask.owner == true {
+                        // The glyph of what this device offers says the press asks who presses.
+                        OwnerAuthenticationButton(ask.yes ?? "Allow", context: nil) { here(true) }
+                    } else {
+                        Button(ask.yes ?? "Allow") { here(true) }.buttonStyle(.ink)
+                    }
                 }
                 .focusable(false)
             } else if ask.authzOnly == true {

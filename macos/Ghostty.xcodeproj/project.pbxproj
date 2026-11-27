@@ -32,6 +32,8 @@
 		0DAA111100000000000000D3 /* Listen in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000D2 /* Listen */; };
 		0DAA111100000000000000D5 /* Say in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000D4 /* Say */; };
 		0DAA111100000000000000C3 /* Ink in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000C2 /* Ink */; };
+		0DAA11110000000000AA0A01 /* OwnerAuthentication in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AA0A00 /* OwnerAuthentication */; };
+		0DAA11110000000000AA0A03 /* OwnerAuthentication in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AA0A02 /* OwnerAuthentication */; };
 		0DAA111100000000000000C5 /* Keymap in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000C4 /* Keymap */; };
 		0DAA11110000000000000F11 /* Folders in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000000F10 /* Folders */; };
 		A53D0C8E2B53B0EA00305CE6 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */; };
@@ -284,6 +286,7 @@
 				0DAA111100000000000000D3 /* Listen in Frameworks */,
 				0DAA111100000000000000D5 /* Say in Frameworks */,
 				0DAA111100000000000000C3 /* Ink in Frameworks */,
+				0DAA11110000000000AA0A01 /* OwnerAuthentication in Frameworks */,
 				0DAA111100000000000000C5 /* Keymap in Frameworks */,
 				0DAA11110000000000000F11 /* Folders in Frameworks */,
 				0DAA111100000000000002C9 /* Log in Frameworks */,
@@ -314,6 +317,7 @@
 				0DAA1111000000000000E053 /* VigilActivity in Frameworks */,
 				0DAA1111000000000000E061 /* MarkdownText in Frameworks */,
 				0DAA1111000000000000E071 /* Ink in Frameworks */,
+				0DAA11110000000000AA0A03 /* OwnerAuthentication in Frameworks */,
 				0DAA1111000000000000E081 /* GitKit in Frameworks */,
 				0DAA1111000000000000E091 /* GitViews in Frameworks */,
 				0DAA1111000000000000E0B3 /* MarkdownEditing in Frameworks */,
@@ -521,6 +525,7 @@
 				0DAA111100000000000000D2 /* Listen */,
 				0DAA111100000000000000D4 /* Say */,
 				0DAA111100000000000000C2 /* Ink */,
+				0DAA11110000000000AA0A00 /* OwnerAuthentication */,
 				0DAA111100000000000000C4 /* Keymap */,
 				0DAA11110000000000000F10 /* Folders */,
 				0DAA111100000000000002C8 /* Log */,
@@ -568,6 +573,7 @@
 				0DAA1111000000000000E051 /* VigilActivity */,
 				0DAA1111000000000000E060 /* MarkdownText */,
 				0DAA1111000000000000E070 /* Ink */,
+				0DAA11110000000000AA0A02 /* OwnerAuthentication */,
 				0DAA1111000000000000E080 /* GitKit */,
 				0DAA1111000000000000E090 /* GitViews */,
 				0DAA1111000000000000E0B2 /* MarkdownEditing */,
@@ -2020,6 +2026,8 @@
 		0DAA1111000000000000E134 /* MarkdownText */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = MarkdownText; };
 		0DAA1111000000000000E060 /* MarkdownText */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = MarkdownText; };
 		0DAA1111000000000000E070 /* Ink */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = Ink; };
+		0DAA11110000000000AA0A00 /* OwnerAuthentication */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = OwnerAuthentication; };
+		0DAA11110000000000AA0A02 /* OwnerAuthentication */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = OwnerAuthentication; };
 		0DAA1111000000000000E080 /* GitKit */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitKit; };
 		0DAA1111000000000000E090 /* GitViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitViews; };
 		0DAA1111000000000000E082 /* GitKit */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitKit; };
