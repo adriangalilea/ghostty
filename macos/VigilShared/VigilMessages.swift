@@ -180,8 +180,12 @@ final class VigilChats: ObservableObject {
         if reach != next { reach = next }
     }
 
-    /// The host's own id, read off any chat it originates.
-    var hostID: String? { rows.first?.summary.chat.origin.raw }
+    /// The host that answered said its own id (`Local.MessageStep.host`).
+    func opened(host id: String?) {
+        if let id, host.hostID != id { host.hostID = id }
+    }
+
+    var hostID: String? { host.hostID }
 
     private func place(_ next: [Messages.Row]) {
         let ordered = next
@@ -192,7 +196,6 @@ final class VigilChats: ObservableObject {
                 return one.summary.activity > other.summary.activity
             }
         if ordered != rows { rows = ordered }
-        if host.hostID == nil { host.hostID = hostID }
         remark()
     }
 

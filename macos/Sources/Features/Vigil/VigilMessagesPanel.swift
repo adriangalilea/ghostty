@@ -101,6 +101,7 @@ final class VigilMessageStore: ObservableObject {
                 switch step.step {
                 case .open:
                     self.here = step.root
+                    self.chats.opened(host: step.host)
                     self.rename()
                     messagesLog.info("chats followed", ["host": String((step.root ?? "?").prefix(10))])
                 case .said:
