@@ -56,7 +56,8 @@ final class VigilMessageStore: ObservableObject {
             openFile: { file, pane in
                 if let pane { VigilFilePanel.show(file, beside: pane) } else { VigilFilePanel.window(file) }
             },
-            pressedByPerson: { Self.pressedByPerson() }))
+            pressedByPerson: { Self.pressedByPerson() },
+            dismiss: { kept in try await Self.dismiss(kept) }))
         chats.changed = { [weak self] in self?.recount() }
         chats.heard = { [weak self] events in
             guard let self else { return }
@@ -104,6 +105,8 @@ final class VigilMessageStore: ObservableObject {
                     self.chats.take(said)
                 case .asks:
                     self.chats.asked(step.asks ?? [])
+                case .notices:
+                    self.chats.kept(step.notices ?? [])
                 case .waiting:
                     self.chats.unreachable(step.reason ?? "its hub gave no reason")
                     messagesLog.info("chats out of reach", ["why": step.reason ?? ""])
@@ -251,6 +254,17 @@ final class VigilMessageStore: ObservableObject {
             guard response.ok else { throw Failed(description: "Not answered: " + response.refusal) }
             messagesLog.info("answered", ["request": press.shown.request, "answer": press.answer.id, "owner": press.ownerAuthenticated])
             return "Answered."
+        }.value
+    }
+
+    /// The person dismissed a notice this Mac's broker kept while Authz was
+    /// away (`asks.dismiss`): its surface holds it no more.
+    nonisolated static func dismiss(_ kept: Asks.Kept) async throws {
+        try await Task.detached {
+            let response = try HarnessWire.call(
+                RPCRequest(Asks.method("dismiss"), .object(["source": .string(kept.source), "id": .string(kept.id)])))
+            guard response.ok else { throw Failed(description: "Not dismissed: " + response.refusal) }
+            messagesLog.info("kept notice dismissed", ["source": kept.source, "id": kept.id])
         }.value
     }
 

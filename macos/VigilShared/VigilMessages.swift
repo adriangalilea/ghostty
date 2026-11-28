@@ -52,6 +52,10 @@ struct VigilChatHost {
     /// hardware click (no posted event, no accessibility action), which an
     /// answer on a request needs. Read inside the button's action.
     var pressedByPerson: @MainActor () -> Bool = { true }
+    /// The person dismissed a notice the host kept while Authz was away
+    /// (`Asks.Kept`). Nil: the notices are not drawn (the phone, whose
+    /// notices are Authz's).
+    var dismiss: (@Sendable (_ kept: Asks.Kept) async throws -> Void)? = nil
 
     /// Whether a folder on the host `root` can be shown here: revealed in
     /// this Mac's Finder, so only this Mac's own.
@@ -92,6 +96,8 @@ final class VigilChats: ObservableObject {
     @Published private(set) var rows: [Messages.Row] = []
     /// The questions the host asks about its panes, on its own surface.
     @Published private(set) var asks: [Asks.Standing] = []
+    /// What the host told the person while Authz was away, on its own surface.
+    @Published private(set) var notices: [Asks.Kept] = []
     /// The page of each chat a view shows now.
     @Published private(set) var pages: [ChatID: Messages.Page] = [:]
     /// Why a shown chat's page could not be read.
@@ -168,6 +174,11 @@ final class VigilChats: ObservableObject {
         guard asks != self.asks else { return }
         self.asks = asks
         remark()
+    }
+
+    func kept(_ notices: [Asks.Kept]) {
+        guard notices != self.notices else { return }
+        self.notices = notices
     }
 
     func unreachable(_ why: String) {
@@ -435,6 +446,9 @@ struct VigilChatList: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.inkGap)
+            }
+            if let dismiss = chats.host.dismiss {
+                ForEach(chats.notices, id: \.key) { kept in VigilKeptNotice(kept: kept, chats: chats, dismiss: dismiss) }
             }
             InkConversations(
                 chats.rows.map { Self.summary($0, people: people) },
