@@ -56,10 +56,12 @@ struct VigilAsk: View {
         .padding(.top, 2)
     }
 
-    /// A press the owner authenticated for is the person's; any other must
-    /// be a click of theirs, read in the press's own turn.
+    /// A press the owner authenticated for, or a finger on Touch ID (the
+    /// answer's reach, `Authz.QuietTouchID`), is the person's; any other
+    /// must be a click of theirs, read in the press's own turn.
     private func give(_ given: Attention.Answer, shown: Authz.Binding, owner: Bool) async throws {
-        guard owner || pressedByPerson() else {
+        let touchID = if case .channel(let channel)? = given.reach { channel.name == "Touch ID" } else { false }
+        guard owner || touchID || pressedByPerson() else {
             throw Refused(description: "Not answered: only a click of yours answers it here.")
         }
         said = try await answer(Asks.Press(answer: given, shown: shown, ownerAuthenticated: owner))
