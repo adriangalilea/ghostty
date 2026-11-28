@@ -49,12 +49,7 @@ final class VigilMessageStore: ObservableObject {
             page: { chat, before, limit in try await Self.page(chat, before: before, limit: limit) },
             post: { say in try await Self.post(say) },
             act: { what in try await Self.act(what) },
-            press: { ask, open in try await Self.press(ask, open: open) },
-            pressHere: { ask, pressed in
-                try await Self.call(
-                    "ask.press", .object(["id": .string(ask), "allow": .bool(pressed.allow), "authenticated": .bool(pressed.authenticated)]),
-                    as: Messages.Acted.self)
-            },
+            answer: { press in try await Self.answer(press) },
             open: { pane in VigilMessageStore.shared.open(pane: pane, in: VigilMessageStore.viewport) },
             // The app's own seen rule: a hand on this Mac after it arrived.
             handAfter: { VigilWorkspaces.personActed(after: Date(timeIntervalSince1970: $0)) },
@@ -249,8 +244,15 @@ final class VigilMessageStore: ObservableObject {
         return acted
     }
 
-    private nonisolated static func press(_ ask: String, open: Bool) async throws -> Messages.Acted {
-        try await call("ask.press", .object(["id": .string(ask), "open": .bool(open)]), as: Messages.Acted.self)
+    /// The person's answer to a question this Mac's broker holds on the
+    /// app's surface (`asks.answer`): taken, or why not.
+    nonisolated static func answer(_ press: Asks.Press) async throws -> String {
+        try await Task.detached {
+            let response = try HarnessWire.call(RPCRequest(Asks.method("answer"), try .from(press)))
+            guard response.ok else { throw Failed(description: "Not answered: " + response.refusal) }
+            messagesLog.info("answered", ["request": press.shown.request, "answer": press.answer.id, "owner": press.ownerAuthenticated])
+            return "Answered."
+        }.value
     }
 
     /// An ask about the files a post names, of the host they are on: this

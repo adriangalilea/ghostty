@@ -34,6 +34,14 @@
 		0DAA111100000000000000C3 /* Ink in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000C2 /* Ink */; };
 		0DAA11110000000000AA0A01 /* OwnerAuthentication in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AA0A00 /* OwnerAuthentication */; };
 		0DAA11110000000000AA0A03 /* OwnerAuthentication in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AA0A02 /* OwnerAuthentication */; };
+		0DAA11110000000000AC0011 /* AuthzContract in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AC0010 /* AuthzContract */; };
+		0DAA11110000000000AC0013 /* AuthzContractViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AC0012 /* AuthzContractViews */; };
+		0DAA11110000000000AC0015 /* Attentions in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AC0014 /* Attentions */; };
+		0DAA11110000000000AC0017 /* AttentionViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AC0016 /* AttentionViews */; };
+		0DAA11110000000000AC0021 /* AuthzContract in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AC0020 /* AuthzContract */; };
+		0DAA11110000000000AC0023 /* AuthzContractViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AC0022 /* AuthzContractViews */; };
+		0DAA11110000000000AC0025 /* Attentions in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AC0024 /* Attentions */; };
+		0DAA11110000000000AC0027 /* AttentionViews in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000AC0026 /* AttentionViews */; };
 		0DAA111100000000000000C5 /* Keymap in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA111100000000000000C4 /* Keymap */; };
 		0DAA11110000000000000F11 /* Folders in Frameworks */ = {isa = PBXBuildFile; productRef = 0DAA11110000000000000F10 /* Folders */; };
 		A53D0C8E2B53B0EA00305CE6 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */; };
@@ -287,6 +295,10 @@
 				0DAA111100000000000000D5 /* Say in Frameworks */,
 				0DAA111100000000000000C3 /* Ink in Frameworks */,
 				0DAA11110000000000AA0A01 /* OwnerAuthentication in Frameworks */,
+				0DAA11110000000000AC0011 /* AuthzContract in Frameworks */,
+				0DAA11110000000000AC0013 /* AuthzContractViews in Frameworks */,
+				0DAA11110000000000AC0015 /* Attentions in Frameworks */,
+				0DAA11110000000000AC0017 /* AttentionViews in Frameworks */,
 				0DAA111100000000000000C5 /* Keymap in Frameworks */,
 				0DAA11110000000000000F11 /* Folders in Frameworks */,
 				0DAA111100000000000002C9 /* Log in Frameworks */,
@@ -318,6 +330,10 @@
 				0DAA1111000000000000E061 /* MarkdownText in Frameworks */,
 				0DAA1111000000000000E071 /* Ink in Frameworks */,
 				0DAA11110000000000AA0A03 /* OwnerAuthentication in Frameworks */,
+				0DAA11110000000000AC0021 /* AuthzContract in Frameworks */,
+				0DAA11110000000000AC0023 /* AuthzContractViews in Frameworks */,
+				0DAA11110000000000AC0025 /* Attentions in Frameworks */,
+				0DAA11110000000000AC0027 /* AttentionViews in Frameworks */,
 				0DAA1111000000000000E081 /* GitKit in Frameworks */,
 				0DAA1111000000000000E091 /* GitViews in Frameworks */,
 				0DAA1111000000000000E0B3 /* MarkdownEditing in Frameworks */,
@@ -526,6 +542,10 @@
 				0DAA111100000000000000D4 /* Say */,
 				0DAA111100000000000000C2 /* Ink */,
 				0DAA11110000000000AA0A00 /* OwnerAuthentication */,
+				0DAA11110000000000AC0010 /* AuthzContract */,
+				0DAA11110000000000AC0012 /* AuthzContractViews */,
+				0DAA11110000000000AC0014 /* Attentions */,
+				0DAA11110000000000AC0016 /* AttentionViews */,
 				0DAA111100000000000000C4 /* Keymap */,
 				0DAA11110000000000000F10 /* Folders */,
 				0DAA111100000000000002C8 /* Log */,
@@ -574,6 +594,10 @@
 				0DAA1111000000000000E060 /* MarkdownText */,
 				0DAA1111000000000000E070 /* Ink */,
 				0DAA11110000000000AA0A02 /* OwnerAuthentication */,
+				0DAA11110000000000AC0020 /* AuthzContract */,
+				0DAA11110000000000AC0022 /* AuthzContractViews */,
+				0DAA11110000000000AC0024 /* Attentions */,
+				0DAA11110000000000AC0026 /* AttentionViews */,
 				0DAA1111000000000000E080 /* GitKit */,
 				0DAA1111000000000000E090 /* GitViews */,
 				0DAA1111000000000000E0B2 /* MarkdownEditing */,
@@ -696,6 +720,7 @@
 			mainGroup = A5B30528299BEAAA0047F10C;
 			packageReferences = (
 				0DAA111100000000000002A1 /* XCLocalSwiftPackageReference "authz.space" */,
+				0DAA11110000000000AC0001 /* XCLocalSwiftPackageReference "contract" */,
 				0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */,
 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				0DAA111100000000000000A1 /* XCRemoteSwiftPackageReference "swift-senses" */,
@@ -1907,6 +1932,7 @@
 /* Begin XCLocalSwiftPackageReference section */
 		0DAA111100000000000002A1 /* XCLocalSwiftPackageReference "authz.space" */ = {isa = XCLocalSwiftPackageReference; relativePath = "../../../authz.space"; };
 		0DAA111100000000000001A1 /* XCLocalSwiftPackageReference harness */ = {isa = XCLocalSwiftPackageReference; relativePath = "../../harness"; };
+		0DAA11110000000000AC0001 /* XCLocalSwiftPackageReference "contract" */ = {isa = XCLocalSwiftPackageReference; relativePath = "../../../authz.space/contract"; };
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -2028,6 +2054,14 @@
 		0DAA1111000000000000E070 /* Ink */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = Ink; };
 		0DAA11110000000000AA0A00 /* OwnerAuthentication */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = OwnerAuthentication; };
 		0DAA11110000000000AA0A02 /* OwnerAuthentication */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = OwnerAuthentication; };
+		0DAA11110000000000AC0010 /* AuthzContract */ = {isa = XCSwiftPackageProductDependency; package = 0DAA11110000000000AC0001 /* XCLocalSwiftPackageReference "contract" */; productName = AuthzContract; };
+		0DAA11110000000000AC0012 /* AuthzContractViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA11110000000000AC0001 /* XCLocalSwiftPackageReference "contract" */; productName = AuthzContractViews; };
+		0DAA11110000000000AC0014 /* Attentions */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = Attentions; };
+		0DAA11110000000000AC0016 /* AttentionViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = AttentionViews; };
+		0DAA11110000000000AC0020 /* AuthzContract */ = {isa = XCSwiftPackageProductDependency; package = 0DAA11110000000000AC0001 /* XCLocalSwiftPackageReference "contract" */; productName = AuthzContract; };
+		0DAA11110000000000AC0022 /* AuthzContractViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA11110000000000AC0001 /* XCLocalSwiftPackageReference "contract" */; productName = AuthzContractViews; };
+		0DAA11110000000000AC0024 /* Attentions */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = Attentions; };
+		0DAA11110000000000AC0026 /* AttentionViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = AttentionViews; };
 		0DAA1111000000000000E080 /* GitKit */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitKit; };
 		0DAA1111000000000000E090 /* GitViews */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitViews; };
 		0DAA1111000000000000E082 /* GitKit */ = {isa = XCSwiftPackageProductDependency; package = 0DAA111100000000000000C1 /* XCLocalSwiftPackageReference "swift-utils" */; productName = GitKit; };

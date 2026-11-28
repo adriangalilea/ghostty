@@ -186,14 +186,12 @@ enum VigilPaneConversation {
                 conversationLog.info("reply sent", ["pane": row, "bytes": text.utf8.count, "how": said.words])
                 return said.words
             },
-            // This Mac's pane: its request answered in place through its
-            // broker, which holds the card (`answer.own`, the path Messages
-            // takes; anything above a plain yes opens Authz's own card).
-            // Another Mac's request is that Mac's broker's card: answered
-            // at its terminal until that path crosses the wire.
+            // This Mac's pane: its prompt's ask answered in place through its
+            // broker, which holds it on the app's surface. Another Mac's is
+            // answered at its terminal until that path crosses the wire.
             authz: device == nil ? ConversationAuthz(
                 read: { request in await Self.read(request) },
-                answer: { request, decision in await Self.answer(request, decision) },
+                answer: { press in try await VigilMessageStore.answer(press) },
                 pressedByPerson: { VigilMessageStore.pressedByPerson() }) : nil,
             log: ConversationLog(
                 info: { Log.log.scope($0).info($1, $2) },
@@ -203,39 +201,28 @@ enum VigilPaneConversation {
             here: "this Mac")
     }
 
-    /// A request of this Mac's panes as its broker published it to Authz,
-    /// while it waits there (nil: gone, or the broker does not hold it).
-    private nonisolated static func read(_ request: String) async -> AskRequest? {
-        await Task.detached {
-            do {
-                let response = try HarnessWire.call(RPCRequest("request.read", .object(["request": .string(request)])))
-                guard response.ok else {
-                    conversationLog.info("request not read", ["request": String(request.prefix(8)), "why": response.refusal])
-                    return nil
-                }
-                return try response.value.decode(AskRequest.self)
-            } catch {
-                conversationLog.warn("request not read", ["request": String(request.prefix(8)), "err": error])
+    /// A pane prompt's ask on the app's surface, as this Mac's broker holds
+    /// it (`asks.follow`, held by `VigilMessageStore`): the feed may name the
+    /// request a moment before the ask arrives, so it is awaited for up to
+    /// two seconds (nil: asked at the pane alone, answered, or gone).
+    @MainActor private static func read(_ request: String) async -> Asks.Standing? {
+        let chats = VigilMessageStore.shared.chats
+        if let held = chats.asks.first(where: { $0.id == request }) { return held }
+        let arrives = chats.$asks.compactMap { $0.first { $0.id == request } }.first().values
+        return await withTaskGroup(of: Asks.Standing?.self) { group in
+            group.addTask { @MainActor in
+                for await standing in arrives { return standing }
                 return nil
             }
-        }.value
-    }
-
-    /// A person's answer on it, given to its card by the broker.
-    private nonisolated static func answer(_ request: String, _ decision: Decision) async -> ConversationAuthz.Answered {
-        await Task.detached {
-            do {
-                let response = try HarnessWire.call(RPCRequest(
-                    "request.answer", .object(["request": .string(request), "answer": try .from(decision)])))
-                guard response.ok else { return .refused(response.refusal) }
-                let said = (try? response.value.decode(String.self)) ?? "answered"
-                conversationLog.info("request answered here", ["request": String(request.prefix(8)), "said": said])
-                return said == "opened" ? .opened("It needs more than a plain yes: its card is open in Authz.") : .taken
-            } catch {
-                conversationLog.warn("request not answered", ["request": String(request.prefix(8)), "err": error])
-                return .refused("vigil-agent could not be reached (\(error))")
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return nil
             }
-        }.value
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            if first == nil { conversationLog.info("request has no ask here", ["request": String(request.prefix(8))]) }
+            return first
+        }
     }
 
     /// The pane's feed through the hub, dialed again when the hub's stream

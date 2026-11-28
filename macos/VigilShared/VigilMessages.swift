@@ -1,9 +1,6 @@
-import AuthzProtocol
 import Foundation
 import GitViews
 import Ink
-import LocalAuthentication
-import OwnerAuthentication
 import MarkdownText
 import SwiftUI
 import VigilWire
@@ -36,12 +33,9 @@ struct VigilChatHost {
     var post: @Sendable (_ say: Messages.Say) async throws -> Messages.Standing
     /// The person's act on what is there.
     var act: @Sendable (_ what: Messages.Act.What) async throws -> Messages.Acted
-    /// The person's press on a question about a pane (`PaneAsk`): refuse
-    /// it, or open its card in Authz.
-    var press: @Sendable (_ ask: String, _ open: Bool) async throws -> Messages.Acted
-    /// The person's answer to a question its host holds itself
-    /// (`PaneAsk.local`), given here.
-    var pressHere: @Sendable (_ ask: String, _ pressed: PaneAsk.Pressed) async throws -> Messages.Acted
+    /// The person's answer to a question the host asks about a pane, which
+    /// its own surface holds (`Asks.Standing`): what came of it, in its words.
+    var answer: @Sendable (_ press: Asks.Press) async throws -> String
     /// Go to a pane of that host.
     var open: @MainActor (_ pane: String) -> Void = { _ in }
     /// Whether a person's hand was on this device after the moment (unix
@@ -96,7 +90,8 @@ final class VigilChats: ObservableObject {
     /// The list, a chat waiting for the person's yes first, then the most
     /// recently written in.
     @Published private(set) var rows: [Messages.Row] = []
-    @Published private(set) var asks: [PaneAsk] = []
+    /// The questions the host asks about its panes, on its own surface.
+    @Published private(set) var asks: [Asks.Standing] = []
     /// The page of each chat a view shows now.
     @Published private(set) var pages: [ChatID: Messages.Page] = [:]
     /// Why a shown chat's page could not be read.
@@ -169,7 +164,7 @@ final class VigilChats: ObservableObject {
         }
     }
 
-    func asked(_ asks: [PaneAsk]) {
+    func asked(_ asks: [Asks.Standing]) {
         guard asks != self.asks else { return }
         self.asks = asks
         remark()
@@ -645,14 +640,15 @@ struct VigilChatView: View {
                 if let standing {
                     ForEach(requests, id: \.key) { entry in
                         let member = entry.key
-                        VigilDeliveryRequest(
-                            to: people.name(member), request: entry.value,
-                            since: standing.deliveries.first { $0.to == member }?.since,
-                            answered: answered[Self.key(standing.post.id, member)]
-                        ) { decision, authenticated in
-                            answer(.answer(post: standing.post.id, to: member, decision, authenticated: authenticated), on: Self.key(standing.post.id, member),
-                                   authenticate: authenticated)
-                        }
+                        let key = Self.key(standing.post.id, member)
+                        VigilAsk(
+                            standing: entry.value, heading: "To \(people.name(member)): waiting for you",
+                            since: standing.deliveries.first { $0.to == member }?.since, answered: answered[key],
+                            answer: { press in
+                                try await acted(
+                                    .answer(post: standing.post.id, to: member, press.answer, shown: press.shown, authenticated: press.ownerAuthenticated),
+                                    on: key)
+                            }, pressedByPerson: host.pressedByPerson)
                     }
                     if requests.isEmpty {
                         ForEach(said, id: \.self) { Text($0).inkText(.detail) }
@@ -660,7 +656,7 @@ struct VigilChatView: View {
                     ForEach(notes, id: \.self) { Text($0).inkText(.detail) }
                     if revokes, let yes = standing.standing?.min(by: { $0.key.raw < $1.key.raw }) {
                         VigilStandingYes(until: yes.value) {
-                            answer(.revoke(post: standing.post.id, to: yes.key), on: Self.key(standing.post.id, yes.key), authenticate: false)
+                            revoke(.revoke(post: standing.post.id, to: yes.key), on: Self.key(standing.post.id, yes.key))
                         }
                     }
                 }
@@ -690,15 +686,19 @@ struct VigilChatView: View {
         #endif
         // A chat an agent proposed, waiting for the person's one yes.
         if let page, let request = page.request {
-            VigilChatRequest(request: request, answered: answered[chat.raw]) { decision, authenticated in
-                answer(.answerChat(chat, decision, authenticated: authenticated), on: chat.raw, authenticate: authenticated)
-            }
+            VigilAsk(
+                standing: request, heading: "Waiting for you", answered: answered[chat.raw],
+                answer: { press in
+                    try await acted(.answerChat(chat, press.answer, shown: press.shown, authenticated: press.ownerAuthenticated), on: chat.raw)
+                }, pressedByPerson: host.pressedByPerson
+            )
+            .padding(8)
         }
         // What the host asks about the pane of the one agent this chat is with.
         ForEach(asks(page, people)) { ask in
-            VigilPaneAskRequest(
-                ask: ask, answered: answered[ask.id], press: { open in press(ask.id, open: open) },
-                here: { allow in pressHere(ask, allow: allow) })
+            let run = host.answer
+            VigilAsk(standing: ask, answer: { press in try await run(press) }, pressedByPerson: host.pressedByPerson)
+                .padding(8)
         }
         InkComposer(
             text: $draft, prompt: "Message \(page.map { people.title($0.chat) } ?? "this chat")",
@@ -771,7 +771,7 @@ struct VigilChatView: View {
         }
     }
 
-    private func asks(_ page: Messages.Page?, _ people: VigilChatPeople) -> [PaneAsk] {
+    private func asks(_ page: Messages.Page?, _ people: VigilChatPeople) -> [Asks.Standing] {
         guard let page else { return [] }
         let others = page.chat.present.filter { $0 != .you }
         guard others.count == 1, let pane = people.pane(others[0]) else { return [] }
@@ -857,59 +857,25 @@ struct VigilChatView: View {
         }
     }
 
-    /// The person's answer on what waits for them here, or their revoke of
-    /// a standing yes: what came of it is said where it was pressed.
-    private func answer(_ what: Messages.Act.What, on key: String, authenticate: Bool) {
-        // Checked in the press's own turn, where its event is the one being
-        // handled: a program driving the app answers nothing.
+    /// The person's answer on what waits for them here (`VigilAsk` checked
+    /// it was theirs): what came of it, kept to be said where it was pressed.
+    private func acted(_ what: Messages.Act.What, on key: String) async throws -> String {
+        let said = try await host.act(what).said
+        answered[key] = said
+        return said
+    }
+
+    /// The person ends a lasting answer: what came of it is said where it
+    /// was pressed. Checked in the press's own turn: a program driving the
+    /// app ends nothing.
+    private func revoke(_ what: Messages.Act.What, on key: String) {
         guard host.pressedByPerson() else {
-            answered[key] = "Not answered: only a click of yours answers it here."
+            answered[key] = "Not ended: only a click of yours ends it here."
             return
         }
         let run = host.act
         Task {
-            do {
-                // A yes that needs the owner: owner authentication on this
-                // device, before it is sent.
-                if authenticate {
-                    _ = try await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "allow a stop")
-                }
-                answered[key] = try await run(what).said
-            } catch {
-                answered[key] = "Not answered: " + ((error as? LAError)?.localizedDescription ?? "\(error)")
-            }
-        }
-    }
-
-    private func press(_ ask: String, open: Bool) {
-        guard host.pressedByPerson() else {
-            answered[ask] = "Not answered: only a click of yours answers it here."
-            return
-        }
-        let run = host.press
-        Task {
-            do { answered[ask] = try await run(ask, open).said } catch { answered[ask] = "Not answered: \(error)" }
-        }
-    }
-
-    /// The person's answer to a question the host holds itself: a yes that
-    /// needs the owner is sent only after this device authenticated them.
-    private func pressHere(_ ask: PaneAsk, allow: Bool) {
-        guard host.pressedByPerson() else {
-            answered[ask.id] = "Not answered: only a click of yours answers it here."
-            return
-        }
-        let run = host.pressHere
-        Task {
-            do {
-                let authenticate = allow && ask.owner == true
-                if authenticate {
-                    _ = try await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "allow what \(ask.asker) asks")
-                }
-                answered[ask.id] = try await run(ask.id, PaneAsk.Pressed(allow: allow, authenticated: authenticate)).said
-            } catch {
-                answered[ask.id] = "Not answered: " + ((error as? LAError)?.localizedDescription ?? "\(error)")
-            }
+            do { answered[key] = try await run(what).said } catch { answered[key] = "Not ended: \(error)" }
         }
     }
 
@@ -927,69 +893,6 @@ struct VigilChatView: View {
         Task {
             do { _ = try await run(.read(chat, through: newest)) } catch { marking = 0 }
         }
-    }
-}
-
-/// A question the host asks about a pane (`PaneAsk`: a close, a line typed
-/// or a key pressed into it from elsewhere), drawn in the chat with that
-/// pane's agent: what it would do, the exact line when there is one, how
-/// long it has waited, then its answers. Refuse answers it through Authz;
-/// its yes needs the owner, so Allow in Authz… opens its card in Authz on
-/// this Mac (on the phone, it is allowed on its card in Authz).
-struct VigilPaneAskRequest: View {
-    let ask: PaneAsk
-    let answered: String?
-    /// Refuse (false), or open its card in Authz (true).
-    let press: (_ open: Bool) -> Void
-    /// For a question its host holds itself: allow (true) or refuse.
-    let here: (_ allow: Bool) -> Void
-    @State private var methods = OwnerAuthentication.Methods.Live()
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 4) {
-                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-                (Text("\(ask.asker) asks · ") + Text(Date(timeIntervalSince1970: ask.since), format: .relative(presentation: .named)))
-                    .inkText(.detail)
-            }
-            Text(ask.title).font(.headline)
-            Text(ask.gist + ". " + ask.says).inkText(.detail)
-            if let shell = ask.shell {
-                Text(shell).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-            }
-            if ask.local == true {
-                // Held by the host itself, with no card anywhere else.
-                Text("Authz could not be reached, so this is answered here"
-                    + (ask.owner == true ? ", with \(OwnerAuthentication.Methods.phrase(methods.methods.sentence))." : "."))
-                    .inkText(.detail)
-                HStack(spacing: 8) {
-                    Button("Refuse") { here(false) }.buttonStyle(.ink)
-                    if ask.owner == true {
-                        // The glyph of what this device offers says the press asks who presses.
-                        OwnerAuthenticationButton(ask.yes ?? "Allow", context: nil) { here(true) }
-                    } else {
-                        Button(ask.yes ?? "Allow") { here(true) }.buttonStyle(.ink)
-                    }
-                }
-                .focusable(false)
-            } else if ask.authzOnly == true {
-                // Asked by another app than the host's broker: its card in
-                // Authz is where it is answered.
-                Text("Answer it on its card in Authz.").inkText(.detail)
-            } else {
-                HStack(spacing: 8) {
-                    Button("Refuse") { press(false) }.buttonStyle(.ink)
-                    #if os(macOS)
-                        Button("Allow in Authz…") { press(true) }.buttonStyle(.ink)
-                    #else
-                        Text("It is allowed on its card in Authz, once this device is unlocked.").inkText(.detail)
-                    #endif
-                }
-                .focusable(false)
-            }
-            if let answered { Text(answered).inkText(.detail) }
-        }
-        .padding(8)
     }
 }
 

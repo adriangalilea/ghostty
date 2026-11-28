@@ -42,21 +42,14 @@ struct ConversationSource {
     let here: String
 }
 
-/// A standing request read from its authz home and answered there.
+/// The ask a pane's prompt stands as on its host's own surface
+/// (`Asks.Standing`), read from that host and answered there.
 struct ConversationAuthz {
-    /// What came of an answer given here.
-    enum Answered: Equatable {
-        /// Its home took it.
-        case taken
-        /// It needs more than a plain yes (the owner, a standing yes): its
-        /// card is open in Authz instead, in these words.
-        case opened(String)
-        /// Not answered, and why.
-        case refused(String)
-    }
-    /// The request by id (nil: not found, gone, or not readable now).
-    let read: @Sendable (String) async -> AskRequest?
-    let answer: @Sendable (String, Decision) async -> Answered
+    /// The ask by its request id (nil: not on the host's surface: answered,
+    /// gone, asked only at the pane, or not readable now).
+    let read: @Sendable (String) async -> Asks.Standing?
+    /// The person's answer; what came of it, in the host's words.
+    let answer: @Sendable (Asks.Press) async throws -> String
     /// Whether the press being handled now is a person's (on the Mac a
     /// hardware click, as Authz's own input guard and Messages require),
     /// read in the button's own turn: a program driving the app answers nothing.
@@ -138,96 +131,52 @@ final class Conversation: ObservableObject {
 
     // MARK: The request standing
 
-    /// How the standing request is answered from here, read from its authz
-    /// home (the feed names it by id only): its yes and no, its questions'
-    /// options, or the terminal.
+    /// How the standing request is answered from here, read from its host
+    /// (the feed names it by id only): as its ask, or at the terminal.
     enum Offer: Equatable {
-        /// Still being read from its home.
+        /// Still being read from its host.
         case reading
-        case consent(allow: String, allowLabel: String, deny: String, denyLabel: String)
-        /// Questions whose every answer is one of their options.
-        case choices([Ask])
+        /// Its ask on the host's surface, drawn here (`VigilAsk`).
+        case ask(Asks.Standing)
         /// Nothing this screen can answer: the terminal can.
         case terminal
     }
 
-    /// One question of a questionnaire, as its options answer it.
-    struct Ask: Equatable {
-        let id: String
-        let title: String
-        let multiple: Bool
-        let choices: [Choice]
-    }
-
     /// The standing request's id and how it is answered here.
     @Published private(set) var offer: (request: String, offer: Offer)?
-    /// An answer on its way to the request's home.
-    @Published private(set) var answering = false
-    /// Why the last answer was not taken.
-    @Published private(set) var answerError: String?
 
-    /// The live state named a request (or none): read it from its home.
+    /// The live state named a request (or none): read it from its host.
     private func readOffer() {
         guard let id = live?.request?.id else {
             offer = nil
-            answerError = nil
-            answerNote = nil
             return
         }
         guard offer?.request != id else { return }
-        // Nothing here reaches its authz home: the terminal answers it.
+        // Nothing here reaches its host: the terminal answers it.
         guard let authz = source.authz else {
             offer = (id, .terminal)
             return
         }
         offer = (id, .reading)
-        answerError = nil
-        answerNote = nil
         Task {
-            let request = await authz.read(id)
+            let standing = await authz.read(id)
             guard live?.request?.id == id else { return }
-            let next = request.map(Self.offer) ?? .terminal
-            offer = (id, next)
-            source.log.info("feed", "request read", ["pane": pane, "request": String(id.prefix(8)), "offer": "\(next)"])
+            offer = (id, standing.map(Offer.ask) ?? .terminal)
+            source.log.info("feed", "request read", ["pane": pane, "request": String(id.prefix(8)), "drawn": standing != nil])
         }
     }
 
-    private static func offer(_ request: AskRequest) -> Offer {
-        if case .buttons(let quick) = Answering(request) {
-            return .consent(allow: quick.allow, allowLabel: quick.allowLabel, deny: quick.deny, denyLabel: quick.denyLabel)
-        }
-        let asks = request.questions.map { Ask(id: $0.id, title: $0.title, multiple: $0.kind == .multipleChoice, choices: $0.choices) }
-        if request.kind == .question, !asks.isEmpty,
-           request.questions.allSatisfy({ ($0.kind == .singleChoice || $0.kind == .multipleChoice) && !$0.choices.isEmpty }) {
-            return .choices(asks)
-        }
-        return .terminal
+    /// The person's answer to the standing request's ask, sent to its host.
+    func answer(_ press: Asks.Press) async throws -> String {
+        guard let authz = source.authz else { throw Unreachable() }
+        let said = try await authz.answer(press)
+        source.log.info("feed", "answered", ["pane": pane, "request": String(press.shown.request.prefix(8)), "answer": press.answer.id])
+        return said
     }
 
-    /// Answers the standing request through authz, as its card would.
-    func answer(_ decision: Decision) {
-        guard let request = offer?.request, !answering, let authz = source.authz else { return }
-        // In the press's own turn, where its event is the one being handled.
-        guard authz.pressedByPerson() else {
-            answerError = "only a click of yours answers it here"
-            source.log.warn("feed", "answer refused: not a person's press", ["pane": pane, "request": String(request.prefix(8))])
-            return
-        }
-        answering = true
-        answerError = nil
-        answerNote = nil
-        Task {
-            switch await authz.answer(request, decision) {
-            case .taken: break
-            case .opened(let words): answerNote = words
-            case .refused(let why): answerError = why
-            }
-            answering = false
-        }
-    }
+    private struct Unreachable: Error, CustomStringConvertible { var description: String { "its host is not reached from here" } }
 
-    /// Where an answer went instead of being taken here (its card opened in Authz).
-    @Published private(set) var answerNote: String?
+    var pressedByPerson: @MainActor () -> Bool { source.authz?.pressedByPerson ?? { false } }
 
     /// Follows the pane's feed until `stop`.
     func start() {
@@ -730,7 +679,7 @@ private struct EntryRow: View {
         case .tool(let call):
             let pending = conversation.pending(call, turn: entry.turn)
             // A question answered by buttons here shows its options once: as them.
-            let buttons = if pending == .waiting, case .choices? = conversation.offer?.offer { true } else { false }
+            let buttons = if pending == .waiting, case .ask? = conversation.offer?.offer { true } else { false }
             // A launch returns at once; the row follows the work it started.
             let task = call.task.flatMap { id in conversation.live?.background?.first { $0.id == id } }
             ToolRow(call: call, pending: pending, task: task, options: !buttons) {
@@ -1390,100 +1339,31 @@ extension EnvironmentValues {
     @Entry var showTerminal: @MainActor () -> Void = {}
 }
 
-/// How the standing request is answered from this screen, through authz by
-/// its id (as the Lock Screen and the HUD answer it): its no and its yes,
-/// its questions' options, or the terminal. Never a key typed into a dialog.
+/// How the standing request is answered from this screen: its ask as its
+/// host's surface holds it (`VigilAsk`, attention's card by Authz's
+/// convention), or the terminal. Never a key typed into a dialog.
 private struct AnswerBar: View {
     @ObservedObject var conversation: Conversation
     @Environment(\.showTerminal) private var showTerminal
-    /// A questionnaire's picks so far, by question id.
-    @State private var picks: [String: [String]] = [:]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            switch conversation.offer?.offer {
-            case .reading?, nil:
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Reading the request…").font(.footnote).foregroundStyle(.secondary)
-                }
-            case .consent(let allow, let allowLabel, let deny, let denyLabel)?:
-                HStack(spacing: 8) {
-                    Spacer(minLength: 0)
-                    Button(denyLabel) { conversation.answer(.action(deny, feedback: nil)) }.buttonStyle(.ink)
-                    Button(allowLabel) { conversation.answer(.action(allow, feedback: nil)) }.buttonStyle(.inkProminent)
-                }
-                .tint(Hue.yes)
-            case .choices(let asks)?:
-                choices(asks)
-            case .terminal?:
-                HStack {
-                    Spacer(minLength: 0)
-                    Button { showTerminal() } label: { Label("Answer in the terminal", systemImage: "terminal") }
-                        .buttonStyle(.ink)
-                }
+        switch conversation.offer?.offer {
+        case .reading?, nil:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Reading the request…").font(.footnote).foregroundStyle(.secondary)
             }
-            if conversation.answering {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Answering…").font(.footnote).foregroundStyle(.secondary)
-                }
-            } else if let why = conversation.answerError {
-                Label("Not answered: \(why)", systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(Hue.care)
-            } else if let note = conversation.answerNote {
-                Label(note, systemImage: "arrow.up.forward.app").font(.footnote).foregroundStyle(.secondary)
-            }
-        }
-        .disabled(conversation.answering)
-    }
-
-    /// A lone one-of-n question answers on its tap (Authz's card rule);
-    /// anything more is picked, then sent.
-    @ViewBuilder private func choices(_ asks: [Conversation.Ask]) -> some View {
-        let lone = asks.count == 1 && !asks[0].multiple
-        ForEach(asks, id: \.id) { ask in
-            VStack(alignment: .leading, spacing: 6) {
-                if asks.count > 1 { Text(ask.title).font(.footnote.weight(.semibold)) }
-                ForEach(ask.choices) { choice in
-                    let picked = picks[ask.id, default: []].contains(choice.id)
-                    Button {
-                        if lone { return send([ask.id: [choice.id]]) }
-                        var now = ask.multiple ? picks[ask.id, default: []] : []
-                        if picked { now.removeAll { $0 == choice.id } } else { now.append(choice.id) }
-                        picks[ask.id] = now
-                    } label: {
-                        HStack(spacing: 8) {
-                            if !lone {
-                                Image(systemName: picked ? "checkmark.circle.fill" : (ask.multiple ? "square" : "circle"))
-                            }
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(choice.label)
-                                if let description = choice.description {
-                                    Text(description).font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    // Authz's answer chip: a label of any height on its wash.
-                    .buttonStyle(AnswerButtonStyle(tint: nil, focused: picked))
-                }
-            }
-        }
-        if !lone {
+        case .ask(let standing)?:
+            VigilAsk(
+                standing: standing, answer: { press in try await conversation.answer(press) },
+                pressedByPerson: conversation.pressedByPerson)
+        case .terminal?:
             HStack {
                 Spacer(minLength: 0)
-                Button("Send") { send(picks) }
-                    .buttonStyle(.inkProminent)
-                    .tint(Hue.yes)
-                    .disabled(asks.contains { picks[$0.id, default: []].isEmpty })
+                Button { showTerminal() } label: { Label("Answer in the terminal", systemImage: "terminal") }
+                    .buttonStyle(.ink)
             }
         }
-    }
-
-    private func send(_ answers: [String: [String]]) {
-        conversation.answer(.answers(answers.mapValues { .choices($0, other: nil) }))
     }
 }
 
