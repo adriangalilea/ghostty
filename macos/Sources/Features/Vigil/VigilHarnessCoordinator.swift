@@ -10,8 +10,8 @@ import VigilWire
 ///   pane's state and the one service the host asks the person through;
 /// - reports the screen: the focused pane and the panes on screen here, to
 ///   this Mac's broker and, for another Mac's panes, to that Mac's hub
-///   (`Asks.Showing`), which the broker keeps for Authz's presence once
-///   Authz takes it;
+///   (`Asks.Showing`), from which the broker tells Authz which asks are
+///   about panes in front of the person;
 /// - "Go there": a request's `vigil://pane/<id>` link lands on the pane,
 ///   here or on the other Mac whose directory lists it.
 @MainActor
