@@ -1,3 +1,5 @@
+import AttentionViews
+import Attentions
 import Foundation
 import Ink
 import Log
@@ -50,14 +52,14 @@ enum VigilWatchList {
     /// in the care tone; then what watches; then what vigil ended because
     /// it could never fire again, each saying why (`WatchRecord.dead`);
     /// then what else ended this week.
-    static func sections(_ items: [VigilWatchItem]) -> [InkNotice.Section<VigilWatchItem>] {
+    static func sections(_ items: [VigilWatchItem]) -> [Attention.ListSection<VigilWatchItem>] {
         let broken = items.filter(\.record.isBroken), live = items.filter { !$0.record.isBroken && $0.record.live }
         let ended = items.filter { !$0.record.isBroken && !$0.record.live }
         return [
-            InkNotice.Section("Broken", tone: .warn, broken),
-            InkNotice.Section("Watching", live),
-            InkNotice.Section("Dead: could never fire again", ended.filter { $0.record.dead != nil }),
-            InkNotice.Section("Ended this week", ended.filter { $0.record.dead == nil }),
+            Attention.ListSection("Broken", tone: .warn, broken),
+            Attention.ListSection("Watching", live),
+            Attention.ListSection("Dead: could never fire again", ended.filter { $0.record.dead != nil }),
+            Attention.ListSection("Ended this week", ended.filter { $0.record.dead == nil }),
         ].filter { !$0.items.isEmpty }
     }
 
@@ -83,7 +85,7 @@ enum VigilWatchList {
         return drawn(a) == drawn(b)
     }
 
-    static func tone(_ record: WatchRecord) -> InkTone {
+    static func tone(_ record: WatchRecord) -> Attention.Tone {
         if record.isBroken { return .warn }
         switch record.state.kind {
         case .waiting, .delivering: return .info
@@ -99,7 +101,7 @@ struct VigilWatches: View {
     let host: VigilWatchHost
 
     var body: some View {
-        InkNotices(VigilWatchList.sections(VigilWatchList.items(boards)), unread: { $0.record.isBroken }) { item in
+        Attention.List(VigilWatchList.sections(VigilWatchList.items(boards)), unread: { $0.record.isBroken }) { item in
             VigilWatchRow(item: item, host: host)
         } empty: {
             Text("No watch on any Mac. `vigil watch` arms one.").foregroundStyle(.secondary)
@@ -115,8 +117,8 @@ struct VigilPaneWatches: View {
     let host: VigilWatchHost
 
     var body: some View {
-        InkNotices(VigilWatchList.sections(VigilWatchList.reaching(boards, root: root, pane: pane)), separation: .lines,
-                   unread: { $0.record.isBroken }) { item in
+        Attention.List(VigilWatchList.sections(VigilWatchList.reaching(boards, root: root, pane: pane)), separation: .lines,
+                       unread: { $0.record.isBroken }) { item in
             VigilWatchRow(item: item, host: host)
         } empty: {
             Text("No watch reaches this pane.").foregroundStyle(.secondary)
@@ -133,11 +135,12 @@ struct VigilWatchRow: View {
     private var record: WatchRecord { item.record }
 
     var body: some View {
-        InkNotice(
-            line, from: from, at: Date(timeIntervalSince1970: when), detail: detail,
-            mark: record.feed ? "dot.radiowaves.up.forward" : "binoculars", tone: VigilWatchList.tone(record),
-            unread: record.isBroken
-        ) {
+        Attention.Card(
+            Attention.Notice(
+                line, from: from, at: Date(timeIntervalSince1970: when), detail: detail, tone: VigilWatchList.tone(record),
+                mark: .symbol(record.feed ? "dot.radiowaves.up.forward" : "binoculars"), unread: record.isBroken)
+        )
+        .content {
             if record.isBroken {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(record.broken, id: \.self) { broken in
@@ -148,7 +151,8 @@ struct VigilWatchRow: View {
             } else if let dead = record.dead {
                 Label(dead, systemImage: "xmark.circle").foregroundStyle(.secondary)
             }
-        } opened: {
+        }
+        .opened {
             VigilWatchFacts(item: item, host: host)
         }
         .menu {

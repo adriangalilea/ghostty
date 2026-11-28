@@ -1,3 +1,5 @@
+import AttentionViews
+import Attentions
 import Ink
 import SwiftUI
 import VigilWire
@@ -59,7 +61,7 @@ struct PaneProblemItem: Identifiable {
     struct Receipt {
         let id = UUID()
         var note: Restart.Note?
-        var status: InkNotice.ActionFeedback
+        var status: Attention.Notice.Feedback
         var sending = true
     }
     private var receipts: [String: Receipt] = [:]
@@ -118,7 +120,7 @@ struct PaneProblemsMark: View {
             .buttonStyle(.plain)
             .accessibilityLabel("\(items.count) pane problems")
             .help(items.map { $0.problem.title }.joined(separator: "\n"))
-            .inkActionPopover(isPresented: $showing) {
+            .inkPopover(isPresented: $showing) {
                 let current = items.first(where: { $0.id == selected }) ?? first
                 VStack(alignment: .leading, spacing: 0) {
                     if items.count > 1 && (!grouped || selected != nil) {
@@ -140,20 +142,26 @@ struct PaneProblemsMark: View {
         }
     }
 
-    private func panel(_ item: PaneProblemItem, folded: Bool) -> InkActionPanel {
+    private func panel(_ item: PaneProblemItem, folded: Bool) -> Attention.Card {
         let title = folded && item.problem.kind == .receiver ? "\(items.count) panes can’t receive messages" : item.problem.title
         let showReceipt = [.restartFailed, .restarting].contains(item.problem.kind)
         let detail = showReceipt ? item.problem.says : folded ? "Choose a pane to resume its conversation." : item.subject.title
         let manual = manualRestart == item.operationID
-        let panel = InkActionPanel(manual ? "Restart Claude manually" : title,
-            detail: manual ? "Finish the turn and background work, save drafts, then quit Claude and resume it from its original project and account." : detail,
-            tone: item.writers == .both || item.problem.kind == .twoLive ? .bad : .warn,
-            actions: folded ? .group("Choose pane", items.map { target in
-                InkHUD.Action(target.subject.title) { selected = target.id }
-            }, alongside: []) : actions(item), style: .problem)
+        let offered = folded
+            ? Offered(group: ("Choose pane", items.map { target in NoticeAct(target.subject.title, id: target.id) { selected = target.id } }))
+            : actions(item)
+        let panel = Attention.Card(
+            Attention.Notice(
+                manual ? "Restart Claude manually" : title,
+                detail: manual ? "Finish the turn and background work, save drafts, then quit Claude and resume it from its original project and account." : detail,
+                tone: item.writers == .both || item.problem.kind == .twoLive ? .bad : .warn, unread: false,
+                actions: offered.acts.map(\.action),
+                group: offered.group.map { Attention.Notice.Group($0.0, $0.1.map(\.action)) },
+                feedback: offered.feedback.map { Attention.Notice.Feedback($0.0.state, $0.0.text, actions: $0.1.map(\.action)) }),
+            acts: offered.every)
         if folded {
-            return panel.affectedItems(items.map { other in
-                InkActionPanel.Item(other.subject.title, id: other.operationID,
+            return panel.affected(items.map { other in
+                Attention.Card.Affected(other.subject.title, id: other.operationID,
                     status: feedback.receipt(other)?.status.text ?? other.subject.note?.said ?? other.subject.state?.rawValue.capitalized ?? "Unknown") {
                     switch other.subject.face {
                     case .emoji(let emoji): Text(emoji)
@@ -177,47 +185,56 @@ struct PaneProblemsMark: View {
         return items.allSatisfy { $0.problem.kind == first.problem.kind && $0.problem.needsManualResume && $0.subject.note == nil }
     }
 
-    private func actions(_ item: PaneProblemItem) -> InkActionPanel.Actions {
-        var alongside: [InkHUD.Action] = []
+    /// What a problem's notice offers: its own actions, a group of choices,
+    /// or how work a press began stands with what stands meanwhile.
+    private struct Offered {
+        var acts: [NoticeAct] = []
+        var group: (String, [NoticeAct])?
+        var feedback: (Attention.Notice.Feedback, [NoticeAct])?
+        var every: [NoticeAct] { acts + (group?.1 ?? []) + (feedback?.1 ?? []) }
+    }
+
+    private func actions(_ item: PaneProblemItem) -> Offered {
+        var alongside: [NoticeAct] = []
         if let act = item.act, let label = item.button {
-            alongside.append(.init(label) { showing = false; act() })
+            alongside.append(NoticeAct(label) { showing = false; act() })
         } else if let visit = item.visit {
-            alongside.append(.init(items.count > 1 ? "Open " + item.subject.title : "Open pane", symbol: "arrow.up.forward") { showing = false; visit() })
+            alongside.append(NoticeAct(items.count > 1 ? "Open " + item.subject.title : "Open pane", symbol: "arrow.up.forward") { showing = false; visit() })
         }
         if let r = feedback.receipt(item) {
-            let done: [InkHUD.Action] = r.sending ? [] : [.init("Done") { feedback.forget(item.operationID) }]
-            return .feedback(r.status, actions: done + alongside)
+            let done = r.sending ? [] : [NoticeAct("Done") { feedback.forget(item.operationID) }]
+            return Offered(feedback: (r.status, done + alongside))
         }
         if let note = item.subject.note, item.problem.needsManualResume || item.problem.kind == .restartScheduled {
             switch note.state {
             case .armed:
-                let cancel: [InkHUD.Action] = if let id = note.scheduleID, item.requestRestart != nil {
-                    [.init("Cancel restart") { feedback.perform(.cancel(id), for: item, progress: "Cancelling restart…") }]
-                } else { [] }
-                return .feedback(.waiting(note.said), actions: cancel + alongside)
-            case .ending: return .feedback(.working(note.said), actions: alongside)
+                let cancel = if let id = note.scheduleID, item.requestRestart != nil {
+                    [NoticeAct("Cancel restart") { feedback.perform(.cancel(id), for: item, progress: "Cancelling restart…") }]
+                } else { [NoticeAct]() }
+                return Offered(feedback: (.waiting(note.said), cancel + alongside))
+            case .ending: return Offered(feedback: (.working(note.said), alongside))
             case .notRun, .ran: break
             }
         }
         if item.problem.kind == .outdated, manualRestart != item.operationID {
             if let id = item.problem.relayRetry, item.requestRestart != nil {
-                return .buttons([.init("Restart relay") {
+                return Offered(acts: [NoticeAct("Restart relay") {
                     feedback.perform(.relay(id), for: item, progress: "Restarting relay…")
                 }] + alongside)
             }
-            return .buttons([.init("Restart manually…") { manualRestart = item.operationID }] + alongside)
+            return Offered(acts: [NoticeAct("Restart manually…") { manualRestart = item.operationID }] + alongside)
         }
         if item.problem.needsManualResume, let command = item.subject.conversation?.manualResumeCommand {
             if copied == item.operationID {
-                return .feedback(.succeeded("Command copied. After quitting, run it in the original project folder with the same account."), actions: alongside)
+                return Offered(feedback: (.succeeded("Command copied. After quitting, run it in the original project folder with the same account."), alongside))
             }
-            let copy = InkHUD.Action("Copy resume command", symbol: "doc.on.doc") {
+            let copy = NoticeAct("Copy resume command", symbol: "doc.on.doc") {
                 VigilPasteboard.copy(command)
                 copied = item.operationID
             }
-            return .buttons([copy] + alongside)
+            return Offered(acts: [copy] + alongside)
         }
-        return .buttons(alongside)
+        return Offered(acts: alongside)
     }
 }
 

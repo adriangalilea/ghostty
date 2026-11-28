@@ -1,3 +1,5 @@
+import AttentionViews
+import Attentions
 import Ink
 import SwiftUI
 import VigilWire
@@ -119,7 +121,7 @@ struct PaneResumeReceipt {
     /// What the notice says now: the answer, followed by what the pane's
     /// broker says since (a resume still waiting, done, not done). It
     /// offers an act (`waiting`) only on a switch the row says waits now.
-    func notice(_ live: PaneResumeLive?) -> (detail: String, tone: InkTone, waiting: UUID?) {
+    func notice(_ live: PaneResumeLive?) -> (detail: String, tone: Attention.Tone, waiting: UUID?) {
         guard let answer else { return ("Asking the pane’s Mac…", .neutral, nil) }
         switch answer.outcome {
         // The switch this notice sent, as its broker publishes it (one state
@@ -160,20 +162,20 @@ struct PaneResumeReceipt {
     }
 
     @MainActor
-    func actions(_ live: PaneResumeLive?, dismiss: @escaping () -> Void) -> InkActionPanel.Actions {
+    func actions(_ live: PaneResumeLive?, dismiss: @escaping () -> Void) -> [NoticeAct] {
         if let command = answer?.manualCommand {
-            return .buttons([InkHUD.Action("Copy resume command") {
+            return [NoticeAct("Copy resume command") {
                 VigilPasteboard.copy(command)
                 dismiss()
-            }])
+            }]
         }
         if let ticket = notice(live).waiting {
-            var buttons: [InkHUD.Action] = []
+            var acts: [NoticeAct] = []
             // Resume now is of what this notice sent; a refused choice
             // offers only the cancel of the one kept before it.
-            if let offerImmediate, answer?.outcome == .armed { buttons.append(InkHUD.Action("Resume now…") { offerImmediate(ticket) }) }
-            if let cancel { buttons.append(InkHUD.Action("Cancel resume") { cancel(ticket) }) }
-            return .buttons(buttons)
+            if let offerImmediate, answer?.outcome == .armed { acts.append(NoticeAct("Resume now…") { offerImmediate(ticket) }) }
+            if let cancel { acts.append(NoticeAct("Cancel resume") { cancel(ticket) }) }
+            return acts
         }
         return []
     }
@@ -284,22 +286,32 @@ extension View {
     /// what became of what was sent, followed live from the row (`live`)
     /// until it is done, refused or cancelled.
     func paneResumeFeedback(row: String, receipt: Binding<PaneResumeReceipt?>, live: PaneResumeLive?) -> some View {
-        inkActionPopover(isPresented: Binding(get: { receipt.wrappedValue?.row == row }, set: { shown in
+        inkPopover(isPresented: Binding(get: { receipt.wrappedValue?.row == row }, set: { shown in
             if !shown, receipt.wrappedValue?.row == row { receipt.wrappedValue = nil }
         })) {
             if let result = receipt.wrappedValue {
                 if let facts = result.picking, let choose = result.choose {
                     AccountPicker(facts: facts, choose: choose)
                 } else if let confirm = result.confirm {
-                    InkActionPanel(result.title, detail: "This ends the current turn and stops any running tool or background task.",
-                                   tone: .warn, actions: .buttons([
-                                       InkHUD.Action("Resume now") { confirm() },
-                                       InkHUD.Action("Cancel") { receipt.wrappedValue = nil }
-                                   ]))
+                    // A question: its card, Cancel the way out.
+                    Attention.PromptCard(
+                        Attention.Prompt(
+                            id: result.id.uuidString, result.title,
+                            consequence: "This ends the current turn and stops any running tool or background task.", tone: .warn,
+                            answers: [
+                                Attention.Action("Cancel", id: "cancel", role: .cancel),
+                                Attention.Action("Resume now", id: "resume", role: .destructive),
+                            ])
+                    ) { answer in
+                        if answer == "resume" { confirm() } else { receipt.wrappedValue = nil }
+                    }
+                    .padding(.inkGap)
                 } else {
                     let notice = result.notice(live)
-                    InkActionPanel(result.title, detail: notice.detail, tone: notice.tone,
-                                   actions: result.actions(live) { receipt.wrappedValue = nil })
+                    let acts = result.actions(live) { receipt.wrappedValue = nil }
+                    Attention.Card(
+                        Attention.Notice(result.title, detail: notice.detail, tone: notice.tone, unread: false, actions: acts.map(\.action)),
+                        acts: acts)
                 }
             }
         }
