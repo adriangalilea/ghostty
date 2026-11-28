@@ -55,7 +55,7 @@ import VigilWire
     /// An answer given under a question's notification (Allow, Deny, a typed
     /// reply): answered by the runtime; what happened is a receipt (an answer
     /// that failed becomes a notification saying so).
-    func answer(_ target: (id: String, home: String), _ decision: Decision, shown: String) async {
+    func answer(_ target: (id: String, home: String), _ decision: AskAnswer, shown: String) async {
         switch await runtime.answer(target, decision) {
         case .answered:
             VigilPhone.shared.receipts.info(
