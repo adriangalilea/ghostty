@@ -291,8 +291,9 @@ enum FollowMark {
 }
 
 /// What was closed on any Mac and still waits out its grace, as on the
-/// Mac's sidebar: tap a row to bring it back where it was, swipe it away
-/// to let it die now. The countdown runs on its own (no timer of ours).
+/// Mac's sidebar: tap a row to bring it back where it was, End Now in its
+/// long-press menu to let it die now. The countdown runs on its own (no
+/// timer of ours).
 struct BurialTray: View {
     @EnvironmentObject private var model: VigilPhone
     var body: some View {
@@ -320,9 +321,10 @@ struct BurialTray: View {
                 }
                 .padding(.vertical, 4)
                 .contentShape(Rectangle())
-                // Swiped away = ended now, the way a notification is cleared.
-                .swipeToDismiss { model.settle(burial, undo: false) }
                 .onTapGesture { model.settle(burial, undo: true) }
+                .contextMenu {
+                    Button("End Now", systemImage: "xmark", role: .destructive) { model.settle(burial, undo: false) }
+                }
                 .disabled(burial.conflict)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityHint("Brings it back where it was")
