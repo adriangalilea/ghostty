@@ -1,19 +1,21 @@
 #if os(macOS)
 import AppKit
 import AskKit
+import AuthzContract
 import SwiftUI
 import VigilWire
 
 /// Where a pane's questions go, said in the sidebar's footer: to Authz, or
-/// staying at the pane (with vigil's own chime), and why. A view of Authz's
-/// own switches and of the broker's standing with authzd, never a copy:
-/// the switches are Authz's to change, so its one act opens Authz.
+/// asked by the Vigil app itself while Authz is away, and why. A view of
+/// Authz's own switches and of its health as the broker last read it,
+/// never a copy: the switches are Authz's to change, so its one act opens
+/// Authz.
 @MainActor
 final class VigilAsks: ObservableObject {
     static let shared = VigilAsks()
 
     /// The broker's word (`agent/authz`), re-read when that folder changes.
-    @Published private(set) var standing: AuthzStanding? = AuthzStanding.read()
+    @Published private(set) var standing: Authz.Health? = AuthzStanding.read()
     private var watch: DispatchSourceFileSystemObject?
 
     private init() {
@@ -48,18 +50,15 @@ final class VigilAsks: ObservableObject {
             return ("Questions stay in the pane · vigil off in Authz", false, "vigil is switched off in Authz's Apps.")
         }
         switch standing {
-        case .allowed:
+        case .ready?:
             return ("Questions go to Authz", true, "A pane's questions are asked in Authz wherever you are, unless the pane is on screen.")
-        case .pending:
-            return ("Allow vigil in Authz", false, "Authz is asking whether vigil may ask; until then questions stay in the pane.")
-        case .refused:
-            return ("Questions stay in the pane · refused in Authz", false, "Authz › Settings › Apps can let vigil ask again.")
-        case .unreachable:
-            return ("Questions stay in the pane · Authz not running", false, "authzd does not answer; open Authz to start it.")
-        case .unsigned:
-            return ("Questions stay in the pane · unsigned build", false, "Authz never takes an unsigned vigil-agent.")
+        case .unavailable(let why)?:
+            return ("Questions are asked in Vigil · Authz away", false, "Authz does not take them now (\(why)): Vigil asks them in the pane's thread.")
+        case .incompatible(let theirs, let ours)?:
+            return ("Questions are asked in Vigil · Authz is another version", false,
+                    "This Mac's Authz speaks contract \(theirs), vigil \(ours): Vigil asks them in the pane's thread.")
         case nil:
-            return ("Questions stay in the pane · broker not started", false, "vigil-agent has not reported to Authz yet.")
+            return ("Questions are asked in Vigil · broker not started", false, "vigil-agent has not read Authz yet.")
         }
     }
 
