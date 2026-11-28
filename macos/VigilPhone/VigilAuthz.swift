@@ -72,53 +72,6 @@ import VigilWire
         }
     }
 
-    /// The authz home that answers `device`'s requests, while it lets vigil
-    /// answer there.
-    private func home(of device: String) -> String? {
-        runtime.macs.first(where: { $0.id == device }).flatMap { mac -> String? in
-            if case .answering(let home, _) = mac.state { home } else { nil }
-        }
-    }
-
-    /// Request `id` of `device` as its home holds it, while it waits (nil:
-    /// settled, gone, or that home not read here within seconds).
-    func request(device: String, id: String) async -> AskRequest? {
-        guard let home = home(of: device),
-              case .waiting(let snapshot)? = await runtime.readStanding((id, home), within: .seconds(5))
-        else { return nil }
-        return snapshot.request
-    }
-
-    /// An answer given in the app (a conversation's buttons): nil once its
-    /// home took it, else why not, in the words the screen shows.
-    func answer(device: String, request: String, _ decision: Decision) async -> String? {
-        guard let home = home(of: device) else { return "Its Mac does not let vigil answer yet." }
-        let fields: LogFields = ["request": String(request.prefix(8)), "action": decision.action ?? "answers"]
-        switch await runtime.answer((request, home), decision) {
-        case .answered:
-            VigilPhone.shared.receipts.info("authz", "answered here", fields)
-            return nil
-        case .alreadySettled, .gone:
-            VigilPhone.shared.receipts.info("authz", "no longer waits", fields)
-            return nil
-        case .failed(let why):
-            VigilPhone.shared.receipts.error("authz", "not answered here", fields.merging(["why": why]) { a, _ in a })
-            return why
-        }
-    }
-
-    /// Allow or Deny inside a followed session's Live Activity: the question
-    /// names its Mac, whose authz home answers it (`AnswerIntent`).
-    func answer(device: String, request: String, action: String, shown: String) async {
-        await runtime.start()
-        guard let home = home(of: device) else {
-            return VigilPhone.shared.receipts.warn("authz", "not answered: its mac does not let vigil answer", [
-                "request": String(request.prefix(8)),
-            ])
-        }
-        await answer((request, home), .action(action, feedback: nil), shown: shown)
-    }
-
     /// A tapped question: the pane that asks, once its home's view is current.
     func open(_ target: (id: String, home: String)) async {
         await runtime.start()
@@ -152,9 +105,11 @@ final class VigilAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().setNotificationCategories(
             RequestNotification.categories.union(TurnNotification.categories))
-        // A Live Activity's Allow/Deny runs here, in the app's process.
-        AnswerIntent.answer = { device, request, action, shown in
-            await VigilAuthz.shared.answer(device: device, request: request, action: action, shown: shown)
+        // A Live Activity's Allow/Deny runs here, in the app's process: the
+        // ask its Mac's surface holds, answered there through its hub.
+        AnswerIntent.answer = { device, request, action, _ in
+            await VigilAuthz.shared.runtime.start()
+            await VigilPhone.shared.answerFromActivity(device: device, request: request, action: action)
         }
         OpenPaneIntent.open = { pane, keyboard in VigilPhone.shared.openPane(pane, keyboard: keyboard) }
         return true

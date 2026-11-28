@@ -3,8 +3,8 @@ import VigilLink
 import VigilWire
 
 /// The phone's side of a conversation (`VigilShared/VigilConversation.swift`):
-/// the pane's Mac reached over tether, requests answered through this
-/// phone's authz endpoint, receipts in the app's record; and the host that
+/// the pane's Mac reached over tether, its prompts answered on that Mac's
+/// surface through its hub, receipts in the app's record; and the host that
 /// gives the screen what only the phone knows (its Mac's directory, the
 /// keyboard, the terminal's ground, an activity's Reply).
 extension Conversation {
@@ -32,11 +32,11 @@ extension Conversation {
             earlier: { request in try await phone.feedEarlier(ref, request) },
             press: { key in try await phone.press(key, in: ref) },
             say: { text in try await phone.say(text, to: ref) },
+            // The prompt's ask as its Mac's surface holds it, answered there
+            // as the Mac's own app answers it.
             authz: ConversationAuthz(
-                read: { id in await VigilAuthz.shared.request(device: device, id: id) },
-                answer: { id, decision in
-                    await VigilAuthz.shared.answer(device: device, request: id, decision).map { .refused($0) } ?? .taken
-                }),
+                follow: { request in phone.ask(request, in: ref) },
+                answer: { press in try await phone.answer(press, in: ref) }),
             log: ConversationLog(
                 info: { receipts.info($0, $1, $2) }, warn: { receipts.warn($0, $1, $2) }, error: { receipts.error($0, $1, $2) }),
             reason: { VigilLink.reason($0) },

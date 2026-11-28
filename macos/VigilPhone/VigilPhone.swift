@@ -1,3 +1,4 @@
+import Attentions
 import Foundation
 import GhosttyKit
 import Log
@@ -1327,6 +1328,69 @@ final class VigilPhone: ObservableObject {
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// The ask of `request` as the pane's Mac's surface holds it, now and at
+    /// each change (nil: not there, or the Mac out of reach).
+    func ask(_ request: String, in ref: PaneRef) -> AsyncStream<Asks.Standing?> {
+        guard let node else { return AsyncStream { $0.yield(nil); $0.finish() } }
+        let lists = VigilLink.asks(node, device: ref.host.id, pane: ref.pane)
+        return AsyncStream { continuation in
+            let task = Task {
+                var last: Asks.Standing??
+                for await list in lists {
+                    let held = list.first { $0.id == request }
+                    guard last != .some(held) else { continue }
+                    last = .some(held)
+                    continuation.yield(held)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// The person's answer to a pane's ask, taken by its Mac as its own
+    /// app's press is; that Mac's words for what came of it.
+    func answer(_ press: Asks.Press, in ref: PaneRef) async throws -> String {
+        let said = try await VigilLink.answer(linked(), device: ref.host.id, press)
+        receipts.info("feed", "answered", ["mac": ref.host.name, "pane": ref.pane, "request": String(press.shown.request.prefix(8)),
+                                          "answer": press.answer.id])
+        return said
+    }
+
+    /// Allow or Deny on a question in a Mac's Live Activity (`AnswerIntent`):
+    /// the ask as that Mac's surface holds it now (read within seconds),
+    /// answered there with the answer the button names. One no longer there
+    /// is said, never guessed.
+    func answerFromActivity(device: String, request: String, action: String) async {
+        guard let node else {
+            return receipts.warn("activity", "not answered: vigil is not connected to tether yet", ["request": String(request.prefix(8))])
+        }
+        let lists = VigilLink.asks(node, device: device, pane: nil)
+        let found = await withTaskGroup(of: Asks.Standing?.self) { group in
+            group.addTask {
+                for await list in lists { if let held = list.first(where: { $0.id == request }) { return held } }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(5))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+        let fields: LogFields = ["request": String(request.prefix(8)), "answer": action]
+        guard let standing = found, let prompt = standing.ask.request.asks.first, let shown = standing.bindings[prompt.id] else {
+            return receipts.info("activity", "no longer waits on its Mac", fields)
+        }
+        do {
+            let said = try await VigilLink.answer(node, device: device, Asks.Press(answer: Attention.Answer(action), shown: shown, ownerAuthenticated: false))
+            receipts.info("activity", "answered", fields.merging(["said": said]) { a, _ in a })
+        } catch {
+            receipts.error("activity", "not answered", fields.merging(["why": VigilLink.reason(error)]) { a, _ in a })
         }
     }
 
