@@ -953,7 +953,7 @@ final class VigilPhone: ObservableObject {
 
     // MARK: Closing: a pane or a tab, on its Mac
 
-    /// A close waiting for your yes: something runs there (`Facts.busy`,
+    /// A close waiting for your answer: something runs there (`Facts.busy`,
     /// the Mac's one close rule), and closing kills it.
     struct Closing: Identifiable {
         let id = UUID()

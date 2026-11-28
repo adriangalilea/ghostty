@@ -7,7 +7,7 @@ import SwiftUI
 import VigilWire
 
 /// An ask the host holds on its own surface (`Asks.Standing`: a delivery
-/// waiting for the person's yes, a chat an agent proposed, a question about
+/// waiting for the person's answer, a chat an agent proposed, a question about
 /// a pane), drawn where it is about (inside the post's bubble, above the
 /// chat's composer, in the pane's thread) by Authz's own view of an ask
 /// (`Authz.AskView`: each answer taken as its terms say, the owner's
@@ -71,7 +71,7 @@ struct VigilAsk: View {
 /// The lasting answer that let a post through to a member, said under the
 /// chat's newest such post with a way to end it (`Act.revoke`): the two
 /// members' next posts to each other wait for the person again.
-struct VigilStandingYes: View {
+struct VigilLastingAnswer: View {
     /// When it runs out, unix seconds; 0: it stands until ended.
     let until: Double
     let revoke: () -> Void

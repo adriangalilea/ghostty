@@ -1470,7 +1470,7 @@ struct VigilSidebarView: View {
     }
 
     /// A move of the row's workspace being decided or done, its destination's
-    /// word for how it stands ("mbp-m4: Waiting for your yes in Authz").
+    /// word for how it stands ("mbp-m4: Waiting for your answer in Authz").
     @ViewBuilder
     private func movingMark(_ moving: String?) -> some View {
         if let moving {

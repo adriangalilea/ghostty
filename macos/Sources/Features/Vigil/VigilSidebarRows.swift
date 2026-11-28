@@ -130,7 +130,7 @@ extension VigilWorkspaces {
         /// workspaces are `device/name`.
         var host: HostHeader?
         /// A move of it being decided or done ("mbp-m4: Waiting for your
-        /// yes in Authz"), from the destination's ticket (`moveNote`).
+        /// answer in Authz"), from the destination's ticket (`moveNote`).
         var moving: String?
 
         /// A Mac's header: its name, and how it stands when that is not

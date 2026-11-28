@@ -388,7 +388,7 @@ struct MessagesMark: View {
 /// What waits on your answer: one mark, defined once and drawn the same
 /// everywhere, rolling up as the state dots do. A raised hand in the care
 /// tone and how many, by id (`VigilChats.Marks.waiting`: a chat with a
-/// delivery waiting for your yes, a chat proposed to you, a question about
+/// delivery waiting for your answer, a chat proposed to you, a question about
 /// a pane), so a fold of rows (a tab, a workspace, a host) counts each once
 /// however many of its panes it holds. `press` opens where it is answered.
 /// Nothing while none waits.

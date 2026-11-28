@@ -86,10 +86,10 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         mainMenu.insertItem(holder, at: max(0, mainMenu.items.count - 1))
     }
 
-    /// The eye opens when sessions want you, a message waits on your yes or
+    /// The eye opens when sessions want you, a message waits on your answer or
     /// an agent's message to you is unread: filled symbol + the count of
     /// each, one mark per meaning as every row draws them (`3`, a hand with
-    /// the messages waiting on your yes, `✉2` unread). The eye is a TEMPLATE
+    /// the messages waiting on your answer, `✉2` unread). The eye is a TEMPLATE
     /// so the menu bar tints it for light/dark and the open-menu highlight;
     /// the hand is drawn in the label colour at draw time for the same reason.
     private func updateBadge() {
@@ -121,7 +121,7 @@ class VigilStatusItem: NSObject, NSMenuDelegate {
         button.attributedTitle = title
         let said = [
             count > 0 ? "\(count) need you" : nil,
-            waiting > 0 ? (waiting == 1 ? "1 message waits for your yes" : "\(waiting) messages wait for your yes") : nil,
+            waiting > 0 ? (waiting == 1 ? "1 message waits for your answer" : "\(waiting) messages wait for your answer") : nil,
             unread > 0 ? "\(unread) unread messages for you" : nil,
         ].compactMap { $0 }
         button.setAccessibilityLabel(said.isEmpty ? "vigil" : "vigil, " + said.joined(separator: ", "))

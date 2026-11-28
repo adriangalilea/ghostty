@@ -7,8 +7,8 @@ import VigilWire
 /// which takes it at once and publishes its ticket (`moveTickets`, served as
 /// `Open.moves`). It then reads its own sheet fresh, and only once every
 /// check has answered does it raise the person's card in Authz, whoever
-/// asked: every move from one Mac to another is a verified yes. The yes runs
-/// the move (`moveHere`); a no, no answer or a sheet that changed ends the
+/// asked: every move from one Mac to another is a verified answer. Its Move
+/// runs the move (`moveHere`); a refusal, no answer or a sheet that changed ends the
 /// ticket with why. The source asks nothing of its own: it releases.
 extension VigilWorkspaces {
     /// `move_to`: taken or refused now, decided and done after.
@@ -56,7 +56,7 @@ extension VigilWorkspaces {
     }
 
     /// This Mac's own read of what it lacks, every check answered, then the
-    /// card; the yes runs the move.
+    /// card; its Move runs the move.
     private func decideMove(_ request: VigilSessionControl.Request, asker: Move.Asker, what: String) async {
         let id = request.id
         guard let device = request.from, let host = VigilRemote.shared.host(device),
@@ -151,7 +151,7 @@ extension VigilWorkspaces {
 
     /// At launch, after the handoffs (`loadIncomingMoves`): the tickets last
     /// published. One still being decided was lost with the app that decided
-    /// it (its card's answer has no one to run it), and one whose yes came
+    /// it (its card's answer has no one to run it), and one whose Move came
     /// moved only if its handoff was saved: each said as it stands, never
     /// resumed unasked.
     func loadMoveTickets() {

@@ -87,7 +87,7 @@ final class VigilChats: ObservableObject {
     }
 
     @Published private(set) var reach: Reach = .waiting
-    /// The list, a chat waiting for the person's yes first, then the most
+    /// The list, a chat waiting for the person's answer first, then the most
     /// recently written in.
     @Published private(set) var rows: [Messages.Row] = []
     /// The questions the host asks about its panes, on its own surface.
@@ -111,7 +111,7 @@ final class VigilChats: ObservableObject {
         /// agent's chats with them alone.
         @Published fileprivate(set) var unread: [String: Int] = [:]
         /// Per pane, what waits on the person there, by id: a chat with a
-        /// delivery waiting for their yes, a chat proposed and not answered,
+        /// delivery waiting for their answer, a chat proposed and not answered,
         /// a question about the pane. Ids, so a fold of rows counts each once.
         @Published fileprivate(set) var waiting: [String: Set<String>] = [:]
 
@@ -312,7 +312,7 @@ final class VigilChats: ObservableObject {
 }
 
 extension Messages.Chat {
-    /// Proposed by an agent or a command, waiting for the person's one yes.
+    /// Proposed by an agent or a command, waiting for the person's one answer.
     var asksYou: Bool { if case .asked = consent { true } else { false } }
 }
 
@@ -451,7 +451,7 @@ struct VigilChatList: View {
 
     static func summary(_ row: Messages.Row, people: VigilChatPeople) -> InkChat.Summary {
         let summary = row.summary, chat = summary.chat
-        let standing = chat.asksYou ? "Waiting for your yes" : "Nothing said yet"
+        let standing = chat.asksYou ? "Waiting for your answer" : "Nothing said yet"
         return InkChat.Summary(
             chat.id.raw, title: people.title(chat), people: chat.present.filter { $0 != .you }.prefix(3).map(\.raw),
             from: summary.last?.by.raw, line: summary.last.map { InkChat.line(of: $0.words) } ?? standing,
@@ -578,7 +578,7 @@ struct VigilPaneChat: View {
 /// writes in this chat and no other (`chat`, fixed for the view's life), so
 /// what is being written is never sent somewhere else because another chat
 /// became the newest. Each post wears how it stands on its way to each
-/// agent, and a delivery waiting for the person's yes is answered on its
+/// agent, and a delivery waiting for the person's answer is answered on its
 /// post.
 struct VigilChatView: View {
     let chat: ChatID
@@ -615,7 +615,7 @@ struct VigilChatView: View {
         let people = page.map(VigilChatPeople.init(page:)) ?? VigilChatPeople([])
         let messages = posts.map { Self.message($0, people: people) }
         let byID = Dictionary(posts.map { ($0.post.id.raw, $0) }) { first, _ in first }
-        // Its revoke stands under the newest post a standing yes let through.
+        // Its revoke stands under the newest post a lasting answer let through.
         let revocable = posts.last { $0.standing != nil }?.post.id
         let read = page?.read ?? 0
         let unread = posts.first { ($0.post.position ?? 0) > read && $0.post.by != .you }?.post.id.raw
@@ -654,9 +654,9 @@ struct VigilChatView: View {
                         ForEach(said, id: \.self) { Text($0).inkText(.detail) }
                     }
                     ForEach(notes, id: \.self) { Text($0).inkText(.detail) }
-                    if revokes, let yes = standing.standing?.min(by: { $0.key.raw < $1.key.raw }) {
-                        VigilStandingYes(until: yes.value) {
-                            revoke(.revoke(post: standing.post.id, to: yes.key), on: Self.key(standing.post.id, yes.key))
+                    if revokes, let lasting = standing.standing?.min(by: { $0.key.raw < $1.key.raw }) {
+                        VigilLastingAnswer(until: lasting.value) {
+                            revoke(.revoke(post: standing.post.id, to: lasting.key), on: Self.key(standing.post.id, lasting.key))
                         }
                     }
                 }
@@ -684,7 +684,7 @@ struct VigilChatView: View {
         #if os(macOS)
         .onHover { if $0 { markRead() } }
         #endif
-        // A chat an agent proposed, waiting for the person's one yes.
+        // A chat an agent proposed, waiting for the person's one answer.
         if let page, let request = page.request {
             VigilAsk(
                 standing: request, heading: "Waiting for you", answered: answered[chat.raw],
