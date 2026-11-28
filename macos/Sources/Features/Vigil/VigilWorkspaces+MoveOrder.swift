@@ -91,18 +91,34 @@ extension VigilWorkspaces {
                 try Local.Client(socket: VigilPaths.hub).moveConsent(card)
             }.value
         } catch { return endMove(id, .unanswered, "this Mac's vigil-agent did not ask (\(error))") }
+        let use: UUID
         switch verdict {
         case .refused: return endMove(id, .refused, nil)
         case .unanswered(let why): return endMove(id, .unanswered, why)
-        case .allowed: break
+        case .allowed(let allowed): use = allowed
         }
-        guard stage(id, .moving) else { return }
+        guard stage(id, .moving) else {
+            Self.tellMoveEnded(use, failed: "the move was replaced before it ran")
+            return
+        }
         let reply = await moveHere(request)
+        // What the answer let happen, told to Authz through the hub that holds it.
+        Self.tellMoveEnded(use, failed: reply.ok ? nil : reply.message)
         guard reply.ok else { return endMove(id, .failed, reply.message) }
         moveTickets[id]?.stage = .moved
         moveTickets[id]?.arrival = reply.session
         moveTickets[id]?.since = Date().timeIntervalSince1970
         publishMoveTickets()
+    }
+
+    /// How a move an answer allowed ended, told to this Mac's hub off the
+    /// main thread; a hub that cannot be told leaves the use unknown, logged.
+    private static func tellMoveEnded(_ use: UUID, failed: String?) {
+        Task.detached(priority: .utility) {
+            do { try Local.Client(socket: VigilPaths.hub).moveEnded(Move.Ended(use: use, failed: failed)) } catch {
+                lifecycleLog.warn("move: its end not told to Authz", ["err": error])
+            }
+        }
     }
 
     private static func macName(_ device: String?) -> String {
