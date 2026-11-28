@@ -1,6 +1,6 @@
 import AppKit
 import AskKit
-import AuthzClient
+import enum AuthzClient.Record
 import Listen
 import Say
 import SwiftUI

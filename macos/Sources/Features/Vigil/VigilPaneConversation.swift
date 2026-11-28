@@ -1,5 +1,4 @@
 import AppKit
-import AuthzProtocol
 import Log
 import SwiftUI
 import VigilHarness

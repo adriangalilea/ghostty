@@ -1,19 +1,17 @@
 #if os(macOS)
 import AppKit
 import AskKit
-import AuthzProtocol
 import Foundation
 import VigilHarness
 import VigilWire
 
-/// Vigil's side of authorization, now that asks are Authz.app's (its own
-/// daemon, authzd, holds requests, keys and receipts; Authz.app presents
-/// them). Vigil keeps three things:
-/// - the broker (`vigil-agent`), the one writer of every pane's state and
-///   the requester that publishes a blocked pane's question to authzd;
-/// - the screen's CONTEXT for that requester: the focused pane and the
-///   panes on screen, so a question whose pane is in front of the human is
-///   answered at the pane and never floated over it (authzd's rule);
+/// What the Vigil app does for the broker and for Authz:
+/// - starts the broker (`vigil-agent ensure`), the one writer of every
+///   pane's state and the one service the host asks the person through;
+/// - reports the screen: the focused pane and the panes on screen here, to
+///   this Mac's broker and, for another Mac's panes, to that Mac's hub
+///   (`Asks.Showing`), which the broker keeps for Authz's presence once
+///   Authz takes it;
 /// - "Go there": a request's `vigil://pane/<id>` link lands on the pane,
 ///   here or on the other Mac whose directory lists it.
 @MainActor
@@ -23,7 +21,7 @@ final class VigilHarnessCoordinator {
 
     private var started = false
     private var starters: [Process] = []
-    private var reported: RequesterContext?
+    private var reported: Asks.Showing?
     private var renewal: Timer?
 
     /// Once, at launch: the broker, the context's chokepoints, the link.
@@ -34,8 +32,8 @@ final class VigilHarnessCoordinator {
         // Read a turn later: a window posts these as it starts to change (a
         // close, a resign before the cover lands); the turn after is the fact.
         VigilWorkspaces.onPresenceInputs { VigilHarnessCoordinator.shared.scheduleReport() }
-        // A context lives 90 s at authzd. Renewed while this app runs, so a
-        // closed app's context lapses on its own (nobody else renews it).
+        // A report lapses 90 s after it is made. Renewed while this app runs,
+        // so a closed app's report lapses on its own (nobody else renews it).
         renewal = Timer.scheduledTimer(withTimeInterval: 45, repeats: true) { _ in
             MainActor.assumeIsolated { VigilHarnessCoordinator.shared.report(renew: true) }
         }
@@ -93,8 +91,8 @@ final class VigilHarnessCoordinator {
     func report(renew: Bool = false) {
         var homes = screen()
         let mine = homes.removeValue(forKey: "") ?? Open.Screen(focused: nil, visible: [], expiresAt: 0)
-        if renew || reported?.focusedContext != mine.focused || reported?.visibleContexts != mine.visible {
-            let context = RequesterContext(focusedContext: mine.focused, visibleContexts: mine.visible, expiresAt: mine.expiresAt)
+        if renew || reported?.focused != mine.focused || reported?.visible != mine.visible {
+            let context = Asks.Showing(focused: mine.focused, visible: mine.visible, expires: mine.expiresAt)
             reported = context
             // The broker's socket is local and quick; never on the main thread.
             DispatchQueue.global(qos: .utility).async {
@@ -122,22 +120,17 @@ final class VigilHarnessCoordinator {
 
     // MARK: summon
 
-    /// Whether Authz.app will ask about this pane's blocker here, so the
-    /// summon's own `waiting` cue stays silent (one cue per moment). Authz
-    /// asks when its switch is on, vigil's requester is not switched off
-    /// there, and the pane is not on screen (on screen, it is answered at
-    /// the pane and the cue is vigil's). The keys are the suite's shared
-    /// vocabulary (AskSettings) and Authz's per-app switch.
+    /// Whether Authz carries this pane's blocker, so the summon's own
+    /// `waiting` cue stays silent (one cue per moment): Authz is ready as
+    /// the broker last read its health (`AuthzStanding`; away, or vigil
+    /// switched off in Authz › Apps, the Vigil app holds the ask and the cue
+    /// is vigil's), and the pane is not on screen (on screen, it is answered
+    /// at the pane). Authz is not yet told which panes are on screen, so it
+    /// may card one in front of the person too.
     func carries(pane: String) -> Bool {
-        guard let authz = UserDefaults(suiteName: "space.authz.app") else { return false }
-        let asking = authz.object(forKey: AskSettings.enabledKey) as? Bool ?? true
-        // AuthzAsk's AskLane.quietKey: requesters switched off in Authz.
-        let quiet = Set(authz.stringArray(forKey: "authz.quietRequesters") ?? [])
-        return asking && !quiet.contains(Self.requester) && !VigilWorkspaces.shared.paneOnAnyScreen(pane)
+        guard case .ready? = AuthzStanding.read() else { return false }
+        return !VigilWorkspaces.shared.paneOnAnyScreen(pane)
     }
-
-    /// The broker's requester name at authzd: its signing identifier.
-    static let requester = "dev.vigil.harness.broker"
 
     // MARK: Go there
 

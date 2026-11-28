@@ -1,5 +1,4 @@
-import AuthzGlance
-import AuthzProtocol
+import enum AuthzGlance.Hue
 import GitViews
 import Ink
 import Log

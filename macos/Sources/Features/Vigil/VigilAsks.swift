@@ -1,15 +1,13 @@
 #if os(macOS)
 import AppKit
-import AskKit
 import AuthzContract
 import SwiftUI
 import VigilWire
 
 /// Where a pane's questions go, said in the sidebar's footer: to Authz, or
-/// asked by the Vigil app itself while Authz is away, and why. A view of
-/// Authz's own switches and of its health as the broker last read it,
-/// never a copy: the switches are Authz's to change, so its one act opens
-/// Authz.
+/// asked by the Vigil app itself while Authz is away, and why: Authz's
+/// health as the broker last read it (its "switched off in Authz › Apps"
+/// included). Its one act opens Authz, where those switches are.
 @MainActor
 final class VigilAsks: ObservableObject {
     static let shared = VigilAsks()
@@ -42,13 +40,9 @@ final class VigilAsks: ObservableObject {
         guard authz != nil else {
             return ("Questions stay in the pane", false, "Authz is not installed: questions are answered at the pane.")
         }
-        let defaults = UserDefaults(suiteName: Self.bundle)
-        if defaults?.object(forKey: AskSettings.enabledKey) as? Bool == false {
-            return ("Questions stay in the pane · off in Authz", false, "Asks are switched off in Authz's menu.")
-        }
-        if (defaults?.stringArray(forKey: "authz.quietRequesters") ?? []).contains(VigilHarnessCoordinator.requester) {
-            return ("Questions stay in the pane · vigil off in Authz", false, "vigil is switched off in Authz's Apps.")
-        }
+        // Whether the person switched vigil off in Authz › Apps is in Authz's
+        // own health (unavailable, with why); nothing of Authz's preferences
+        // is read here.
         switch standing {
         case .ready?:
             return ("Questions go to Authz", true, "A pane's questions are asked in Authz wherever you are, unless the pane is on screen.")

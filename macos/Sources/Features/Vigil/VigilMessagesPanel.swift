@@ -1,5 +1,4 @@
 import AppKit
-import AuthzProtocol
 import Combine
 import Ink
 import SwiftUI

@@ -1,4 +1,3 @@
-import AuthzProtocol
 import AuthzEndpoint
 import AuthzGlance
 import AuthzUI
@@ -1879,7 +1878,7 @@ struct SettingsView: View {
                             if let row = mac.enrollment, row.action == .pair {
                                 Button("Pair") { authz.pair(mac) }.buttonStyle(.borderedProminent)
                             } else if let row = mac.enrollment, row.action != nil,
-                                      let url = DeviceSettingsLink.url(root: mac.id) {
+                                      let url = VigilWire.devicesLink(root: mac.id) {
                                 Link("Open in Authz Devices", destination: url)
                             } else if mac.enrollment?.isPending == true || mac.state == .pairing {
                                 ProgressView()
