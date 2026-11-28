@@ -189,7 +189,7 @@ enum VigilPaneConversation {
             // broker, which holds it on the app's surface. Another Mac's is
             // answered at its terminal until that path crosses the wire.
             authz: device == nil ? ConversationAuthz(
-                read: { request in await Self.read(request) },
+                follow: { request in Self.follow(request) },
                 answer: { press in try await VigilMessageStore.answer(press) },
                 pressedByPerson: { VigilMessageStore.pressedByPerson() }) : nil,
             log: ConversationLog(
@@ -201,26 +201,17 @@ enum VigilPaneConversation {
     }
 
     /// A pane prompt's ask on the app's surface, as this Mac's broker holds
-    /// it (`asks.follow`, held by `VigilMessageStore`): the feed may name the
-    /// request a moment before the ask arrives, so it is awaited for up to
-    /// two seconds (nil: asked at the pane alone, answered, or gone).
-    @MainActor private static func read(_ request: String) async -> Asks.Standing? {
-        let chats = VigilMessageStore.shared.chats
-        if let held = chats.asks.first(where: { $0.id == request }) { return held }
-        let arrives = chats.$asks.compactMap { $0.first { $0.id == request } }.first().values
-        return await withTaskGroup(of: Asks.Standing?.self) { group in
-            group.addTask { @MainActor in
-                for await standing in arrives { return standing }
-                return nil
+    /// it (`asks.follow`, held by `VigilMessageStore`), now and at each
+    /// change: the feed may name the request a moment before the ask
+    /// arrives, and it leaves when answered or gone.
+    @MainActor private static func follow(_ request: String) -> AsyncStream<Asks.Standing?> {
+        let held = VigilMessageStore.shared.chats.$asks.map { $0.first { $0.id == request } }.removeDuplicates().values
+        return AsyncStream { continuation in
+            let task = Task { @MainActor in
+                for await standing in held { continuation.yield(standing) }
+                continuation.finish()
             }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(2))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            if first == nil { conversationLog.info("request has no ask here", ["request": String(request.prefix(8))]) }
-            return first
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 

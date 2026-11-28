@@ -44,9 +44,10 @@ struct ConversationSource {
 /// The ask a pane's prompt stands as on its host's own surface
 /// (`Asks.Standing`), read from that host and answered there.
 struct ConversationAuthz {
-    /// The ask by its request id (nil: not on the host's surface: answered,
-    /// gone, asked only at the pane, or not readable now).
-    let read: @Sendable (String) async -> Asks.Standing?
+    /// The ask by its request id as its host's surface holds it, now and at
+    /// each change (nil: not there: not yet, answered, gone, asked only at
+    /// the pane, or not readable now).
+    let follow: @MainActor (String) -> AsyncStream<Asks.Standing?>
     /// The person's answer; what came of it, in the host's words.
     let answer: @Sendable (Asks.Press) async throws -> String
     /// Whether the press being handled now is a person's (on the Mac a
@@ -144,24 +145,37 @@ final class Conversation: ObservableObject {
     /// The standing request's id and how it is answered here.
     @Published private(set) var offer: (request: String, offer: Offer)?
 
-    /// The live state named a request (or none): read it from its host.
+    private var offerTask: Task<Void, Never>?
+
+    /// The live state named a request (or none): followed on its host for
+    /// as long as it stands, so its ask is drawn the moment the host holds
+    /// it and the terminal offered while it does not.
     private func readOffer() {
         guard let id = live?.request?.id else {
+            offerTask?.cancel()
+            offerTask = nil
             offer = nil
             return
         }
         guard offer?.request != id else { return }
+        offerTask?.cancel()
         // Nothing here reaches its host: the terminal answers it.
         guard let authz = source.authz else {
+            offerTask = nil
             offer = (id, .terminal)
             return
         }
         offer = (id, .reading)
-        Task {
-            let standing = await authz.read(id)
-            guard live?.request?.id == id else { return }
-            offer = (id, standing.map(Offer.ask) ?? .terminal)
-            source.log.info("feed", "request read", ["pane": pane, "request": String(id.prefix(8)), "drawn": standing != nil])
+        let held = authz.follow(id)
+        offerTask = Task { [weak self] in
+            for await standing in held {
+                guard let self, live?.request?.id == id else { return }
+                let next = standing.map(Offer.ask) ?? .terminal
+                if case .ask = offer?.offer, case .ask = next {} else {
+                    source.log.info("feed", "request read", ["pane": pane, "request": String(id.prefix(8)), "drawn": standing != nil])
+                }
+                offer = (id, next)
+            }
         }
     }
 
